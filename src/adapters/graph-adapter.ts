@@ -1,0 +1,221 @@
+/**
+ * lcm-graph-extra — Neo4j Graph Search Adapter
+ *
+ * Bridges lcm-graph-extra with graph-memory-pro's compiled module exports.
+ * Dynamically imports from graph-memory-pro/dist/index.js.
+ * Uses Recaller.recall(), searchNodes, upsertNode/upsertEdge.
+ *
+ * 连接管理：使用全局 Neo4jConnectionPool 复用 driver，防止连接泄漏。
+ */
+
+import { createHash } from 'node:crypto';
+import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
+import type { Neo4jConfig } from '../types.js';
+import { ConflictLogger } from '../async/conflict-logger.js';
+import { acquireDriver, releaseDriver } from './connection-pool.js';
+
+export interface GraphAdapterConfig {
+  enabled: boolean;
+  searchLimit: number;
+}
+
+const GM_PRO_PATH = process.env.GM_PRO_PATH || '/home/wljmmx/.openclaw/extensions/graph-memory-pro';
+
+/** Map node label to result type */
+function inferType(label: string): RetrievalType {
+  const u = label.toUpperCase();
+  if (['SKILL','CONCEPT','CAPABILITY','METHOD','TOOL'].includes(u)) return 'definition';
+  if (['RELATION','EDGE'].includes(u)) return 'relation';
+  return 'raw';
+}
+
+function mapEntityType(raw: string): string {
+  const t = (raw || 'CONCEPT').toUpperCase();
+  if (['SKILL','CAPABILITY','METHOD','TOOL','BEST_PRACTICE','CONCEPT','KNOWLEDGE'].includes(t)) return 'SKILL';
+  if (['EVENT','BUG','ERROR','ISSUE','PROBLEM'].includes(t)) return 'EVENT';
+  return 'TASK';
+}
+
+function mapEdgeType(raw: string): string {
+  const t = raw.toUpperCase();
+  if (['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH'].includes(t)) return t;
+  if (['RELATED_TO','REFERENCES','USES'].includes(t)) return 'USED_SKILL';
+  if (['FIXES','RESOLVES','SOLVES'].includes(t)) return 'SOLVED_BY';
+  if (['DEPENDS_ON','NEEDS','PREREQUISITE'].includes(t)) return 'REQUIRES';
+  if (['REPLACES','SUPERSEDES','UPDATES'].includes(t)) return 'PATCHES';
+  if (['CONFLICTS','INCOMPATIBLE'].includes(t)) return 'CONFLICTS_WITH';
+  return 'USED_SKILL';
+}
+
+function makeNodeId(name: string, typeName: string): string {
+  return `${typeName.toLowerCase()}-${createHash('sha256').update(`${typeName}:${name}`).digest('hex').slice(0, 12)}`;
+}
+
+type GmModule = Record<string, any>;
+
+export class GraphAdapter {
+  public conflictLogger = new ConflictLogger();
+  private mod: GmModule | null = null;
+  private driver: any = null;
+  private config: GraphAdapterConfig;
+  private neo4jConfig: Neo4jConfig;
+  /** 是否已获取池连接（确保 release 时只释放一次） */
+  private poolAcquired = false;
+
+  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig) {
+    this.neo4jConfig = neo4jConfig;
+    this.config = config;
+  }
+
+  async connect(): Promise<boolean> {
+    try {
+      const mod = await import(`${GM_PRO_PATH}/dist/index.js`);
+      this.mod = mod;
+      this.driver = mod.getDriver?.() ?? null;
+      if (!this.driver) {
+        // graph-memory-pro 尚未初始化驱动 → 从连接池获取
+        this.driver = await acquireDriver(this.neo4jConfig);
+        this.poolAcquired = true;
+      }
+      return true;
+    } catch (err) {
+      console.error(`[lcm-graph-extra] connect error: ${err}`);
+      return false;
+    }
+  }
+
+  async search(query: string, limit?: number): Promise<RetrievalResult[]> {
+    if (!this.config.enabled) return [];
+    const m = this.mod ?? await this.connect().then(() => this.mod);
+    if (!m) return [];
+    const rl = limit ?? this.config.searchLimit;
+    try {
+      const nodes = await m.searchNodes(this.driver, query, rl);
+      return (nodes ?? []).map((n: any) => {
+        const name = n.name ?? n.properties?.name ?? '';
+        const label = n.type ?? n.labels?.[0] ?? 'TASK';
+        const desc = n.description ?? n.properties?.description ?? '';
+        const content = n.content ?? n.properties?.content ?? '';
+        const ppr = n.pagerank ?? n.properties?.pagerank ?? 0.5;
+        return {
+          id: createHash('sha256').update(`g:${n.id ?? name}`).digest('hex').slice(0, 16),
+          content: `[${label}] ${name}${desc ? '\n' + desc : ''}${content ? '\n' + String(content).slice(0, 500) : ''}`,
+          source: 'graph' as RetrievalSource,
+          type: inferType(label),
+          score: (n.score ?? Number(ppr)) as number,
+          metadata: { nodeId: n.id, nodeType: label, name, updatedAt: n.updatedAt ?? n.properties?.updatedAt ?? 0 },
+        };
+      });
+    } catch (err) { console.error(`[lcm-graph-extra] search error: ${err}`); return []; }
+  }
+
+  async searchExperience(query: string, limit?: number): Promise<RetrievalResult[]> {
+    if (!this.config.enabled) return [];
+    const m2 = this.mod ?? await this.connect().then(() => this.mod);
+    if (!m2) return [];
+    const rl = limit ?? this.config.searchLimit;
+    try {
+      const nodes = await m2.searchNodes(this.driver, query, rl * 3);
+      const events = (nodes ?? []).filter((n: any) => (n.type ?? n.labels?.[0]) === 'EVENT');
+      const out: RetrievalResult[] = [];
+      for (const evt of events.slice(0, rl)) {
+        const name = evt.name ?? evt.properties?.name ?? '';
+        const desc = evt.description ?? evt.properties?.description ?? '';
+        const edges = await this.mod!.getEdgesForNodes(this.driver, [evt.id]);
+        const sols = (edges ?? []).filter((e: any) => e.type === 'SOLVED_BY');
+        let text = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
+        for (const s of sols) text += `\n- ${s.targetName ?? 'Unknown'}`;
+        out.push({
+          id: createHash('sha256').update(`exp:${evt.id ?? name}`).digest('hex').slice(0, 16),
+          content: text, source: 'graph' as RetrievalSource,
+          type: 'definition' as RetrievalType,
+          score: 0.8 + Math.random() * 0.15,
+          metadata: { experience: true, problemName: name, solutionCount: sols.length, updatedAt: evt.updatedAt ?? evt.properties?.updatedAt ?? 0 },
+        });
+      }
+      return out;
+    } catch { return []; }
+  }
+
+  async upsertEntities(
+    entities: Array<{ name: string; type: string; description: string; content: string }>,
+    relations: Array<{ from: string; to: string; type: string; instruction?: string }>,
+  ): Promise<{ upserted: number; conflicts: number }> {
+    const m3 = this.mod ?? await this.connect().then(() => this.mod);
+    if (!m3) return { upserted: 0, conflicts: 0 };
+    let cc = 0, uc = 0;
+    const now = Date.now();
+    try {
+      for (const e of entities) {
+        if (!e.name?.trim()) continue;
+        const t = mapEntityType(e.type), nid = makeNodeId(e.name, t);
+        const existing = await this.mod!.findById(this.driver, nid);
+        if (existing) {
+          const ec = existing.properties?.content ?? '';
+          if (ec.trim() !== (e.content ?? '').trim()) {
+            this.conflictLogger.resolve(e.name.trim(), t,
+              { updatedAt: existing.properties?.updatedAt ?? 0, validatedCount: existing.properties?.validatedCount ?? 0, content: ec },
+              { updatedAt: now, validatedCount: 1, content: e.content ?? '' });
+            cc++;
+          }
+        }
+        await this.mod!.upsertNode(this.driver, {
+          id: nid, type: t, name: e.name.trim(),
+          description: (e.description ?? '').slice(0, 500),
+          content: (e.content ?? '').slice(0, 2000),
+          status: 'active', pagerank: 0.5,
+          validatedCount: existing ? (existing.properties?.validatedCount ?? 0) + 1 : 1,
+          createdAt: existing ? (existing.properties?.createdAt ?? now) : now, updatedAt: now,
+        });
+        uc++;
+      }
+      for (const rel of relations) {
+        if (!rel.from?.trim() || !rel.to?.trim()) continue;
+        const mt = mapEdgeType(rel.type);
+        await this.mod!.upsertEdge(this.driver, {
+          id: makeNodeId(rel.from + '-' + rel.to, mt), type: mt,
+          fromId: makeNodeId(rel.from, 'TASK'), toId: makeNodeId(rel.to, 'TASK'),
+          instruction: (rel.instruction ?? '').slice(0, 500),
+          condition: '', weight: 1.0, createdAt: now, updatedAt: now,
+        });
+      }
+    } catch (err) { console.error(`[lcm-graph-extra] upsert error: ${err}`); }
+    return { upserted: uc, conflicts: cc };
+  }
+
+  async processFeedback(): Promise<{ processed: number; updatedNodes: number }> {
+    return { processed: 0, updatedNodes: 0 };
+  }
+
+  
+  /**
+   * Run raw Cypher query (for experience storage layer).
+   */
+  async query<T = Record<string, unknown>>(cypher: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]> {
+    if (!this.driver) return [];
+    const session = this.driver.session();
+    try {
+      const result = await session.run(cypher, params ?? {});
+      return result.records.map((r: any) => r.toObject() as Record<string, unknown>);
+    } finally {
+      await session.close();
+    }
+  }
+
+async health(): Promise<boolean> {
+    try {
+      if (this.driver) { await this.driver.verifyConnectivity(); return true; }
+      return await this.connect();
+    } catch { return false; }
+  }
+
+  async close(): Promise<void> {
+    // 从连接池释放（非 graph-memory-pro 管理的 driver）
+    if (this.driver && this.poolAcquired) {
+      await releaseDriver(this.neo4jConfig);
+      this.poolAcquired = false;
+    }
+    this.driver = null;
+    this.mod = null;
+  }
+}

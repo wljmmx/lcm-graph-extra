@@ -1,0 +1,125 @@
+/**
+ * Circuit breaker — 生产加固: 熔断、重试、健康探测
+ *
+ * 用于包装对 lossless-claw / qmd / Neo4j 的调用。
+ * 在连续失败 N 次后自动降级，一段时间后尝试恢复。
+ */
+
+type Subsystem = "lcm" | "qmd" | "neo4j";
+
+interface CircuitState {
+  failures: number;
+  lastFailureAt: number | null;
+  halfOpenAt: number | null;
+  open: boolean;
+}
+
+const state = new Map<Subsystem, CircuitState>();
+
+const CONFIG = {
+  threshold: 3,          // N 次失败后熔断
+  cooldownMs: 30_000,    // 30 秒后尝试半开
+  halfOpenTimeoutMs: 5_000, // 半开超时
+};
+
+function getState(name: Subsystem): CircuitState {
+  if (!state.has(name)) {
+    state.set(name, { failures: 0, lastFailureAt: null, halfOpenAt: null, open: false });
+  }
+  return state.get(name)!;
+}
+
+/**
+ * 检查子系统是否可用。
+ */
+export function isAvailable(name: Subsystem): boolean {
+  const s = getState(name);
+  if (!s.open) return true;
+
+  // 检查 cooldown 是否已过 → 转为半开
+  if (s.halfOpenAt && Date.now() >= s.halfOpenAt) {
+    s.open = false;
+    s.halfOpenAt = null;
+    return true;
+  }
+
+  // 如果 cooldown 已到但没有 halfOpenAt，设置 halfOpen 窗口
+  if (s.lastFailureAt && Date.now() - s.lastFailureAt >= CONFIG.cooldownMs && !s.halfOpenAt) {
+    s.halfOpenAt = Date.now() + CONFIG.halfOpenTimeoutMs;
+    s.open = false;
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * 记录调用成功（重置失败计数）。
+ */
+export function recordSuccess(name: Subsystem): void {
+  const s = getState(name);
+  s.failures = 0;
+  s.open = false;
+  s.halfOpenAt = null;
+  s.lastFailureAt = null;
+}
+
+/**
+ * 记录调用失败（如果达到阈值则熔断）。
+ */
+export function recordFailure(name: Subsystem): void {
+  const s = getState(name);
+  s.failures++;
+  s.lastFailureAt = Date.now();
+
+  if (s.failures >= CONFIG.threshold) {
+    s.open = true;
+    s.halfOpenAt = Date.now() + CONFIG.cooldownMs;
+  }
+}
+
+/**
+ * 熔断包装: 自动重试 + 熔断保护。
+ * 如果子系统已熔断，直接抛出（不浪费调用）。
+ */
+export async function withCircuitBreaker<T>(
+  name: Subsystem,
+  label: string,
+  fn: () => Promise<T>,
+  retries: number = 1,
+): Promise<T> {
+  if (!isAvailable(name)) {
+    const s = getState(name);
+    const retryAfter = s.halfOpenAt ? Math.max(0, s.halfOpenAt - Date.now()) : CONFIG.cooldownMs;
+    throw new Error(`${label}: circuit breaker OPEN (retry in ${Math.ceil(retryAfter / 1000)}s)`);
+  }
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) {
+      // Backoff: 1s, 2s, 4s...
+      const delay = 1000 * Math.pow(2, attempt - 1);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    try {
+      const result = await fn();
+      recordSuccess(name);
+      return result;
+    } catch (err) {
+      lastError = err;
+      recordFailure(name);
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * 获取所有子系统健康状态快照。
+ */
+export function getHealthSnapshot(): Record<string, { available: boolean; failures: number }> {
+  const snap: Record<string, { available: boolean; failures: number }> = {};
+  for (const [name, s] of state) {
+    snap[name] = { available: isAvailable(name), failures: s.failures };
+  }
+  return snap;
+}

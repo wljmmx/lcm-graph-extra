@@ -1,0 +1,353 @@
+/**
+ * QmdClient — unified search client for QMD (MCP REST优先, CLI降级)
+ *
+ * Priority: MCP HTTP → CLI (child_process) → throw
+ * Auto-recovery: 降级后定期 ping MCP, 恢复后自动切回
+ */
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface QmdSearchResult {
+  docid: string;
+  file: string;
+  title: string;
+  score: number;
+  snippet: string;
+  line: number;
+  context: string | null;
+}
+
+export interface SubSearch {
+  type: "lex" | "vec" | "hyde";
+  query: string;
+}
+
+export interface SearchParams {
+  searches: SubSearch[];
+  limit?: number;
+  minScore?: number;
+  collections?: string[];
+  intent?: string;
+  rerank?: boolean;
+}
+
+export interface QmdClientOptions {
+  mcpBaseUrl?: string;
+  mcpTimeout?: number;
+  cliTimeout?: number;
+  pingInterval?: number;
+}
+
+// ---------------------------------------------------------------------------
+// MCP response shape (from POST /query)
+// ---------------------------------------------------------------------------
+
+interface McpQueryResponse {
+  results?: Array<{
+    docid?: string;
+    file?: string;
+    title?: string;
+    score?: number;
+    snippet?: string;
+    line?: number;
+    context?: string | null;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// Defaults
+// ---------------------------------------------------------------------------
+
+const DEFAULTS = {
+  mcpBaseUrl: "http://127.0.0.1:8082",
+  mcpTimeout: 5000,
+  cliTimeout: 30_000,
+  pingInterval: 30_000,
+};
+
+// ---------------------------------------------------------------------------
+// QmdClient
+// ---------------------------------------------------------------------------
+
+export class QmdClient {
+  private readonly mcpBaseUrl: string;
+  private readonly mcpTimeout: number;
+  private readonly cliTimeout: number;
+  private readonly pingInterval: number;
+
+  /** null = undetermined, true = MCP可用, false = MCP不可用 */
+  private mcpAvailable: boolean | null = null;
+  /** 并发锁：保护 mcpAvailable 状态读写 */
+  private mcpLock: Promise<void> = Promise.resolve();
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(opts: QmdClientOptions = {}) {
+    this.mcpBaseUrl = opts.mcpBaseUrl ?? DEFAULTS.mcpBaseUrl;
+    this.mcpTimeout = opts.mcpTimeout ?? DEFAULTS.mcpTimeout;
+    this.cliTimeout = opts.cliTimeout ?? DEFAULTS.cliTimeout;
+    this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
+  }
+
+  /**
+   * 并发安全的 mcpAvailable 状态更新锁。
+   * 保证多个 async 操作不会同时写入状态。
+   */
+  private async withMcpLock(fn: () => Promise<void>): Promise<void> {
+    const prev = this.mcpLock;
+    this.mcpLock = new Promise<void>((resolve) => {
+      prev.then(() => fn().then(resolve, resolve));
+    });
+    await this.mcpLock;
+  }
+
+  // ===================== public API =======================================
+
+  /**
+   * Hybrid search — MCP REST first, falls back to CLI on failure.
+   * Results are normalised to QmdSearchResult[] regardless of source.
+   */
+  async query(params: SearchParams): Promise<QmdSearchResult[]> {
+    if (this.mcpAvailable !== false) {
+      try {
+        const results = await this.queryViaMcp(params);
+        await this.withMcpLock(async () => { this.mcpAvailable = true; });
+        this.clearRecovery();
+        return results;
+      } catch (err) {
+        await this.withMcpLock(async () => { this.mcpAvailable = false; });
+        this.scheduleRecovery();
+        console.warn("[qmd-client] MCP query failed, falling back to CLI:", (err as Error).message);
+      }
+    }
+
+    return this.queryViaCli(params);
+  }
+
+  /**
+   * Retrieve a single document by path or docid.
+   */
+  async get(file: string): Promise<string | null> {
+    if (this.mcpAvailable !== false) {
+      try {
+        const body = {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "get", arguments: { file } },
+        };
+        const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(this.mcpTimeout),
+        });
+        if (resp.ok) {
+          const data: any = await resp.json();
+          const text = data?.result?.content?.[0]?.resource?.text
+            ?? data?.result?.content?.[0]?.text;
+          if (typeof text === "string") return text;
+        }
+      } catch {
+        this.mcpAvailable = false;
+        this.scheduleRecovery();
+      }
+    }
+
+    try {
+      const { stdout } = await execFileAsync("qmd", ["get", file], {
+        timeout: this.cliTimeout,
+      });
+      return stdout || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Batch retrieve multiple documents.
+   */
+  async multiGet(pattern: string): Promise<string[]> {
+    if (this.mcpAvailable !== false) {
+      try {
+        const body = {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "multi_get", arguments: { pattern } },
+        };
+        const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(this.mcpTimeout),
+        });
+        if (resp.ok) {
+          const data: any = await resp.json();
+          const items = data?.result?.content ?? [];
+          return items
+            .filter((c: any) => c.type === "resource")
+            .map((c: any) => c.resource?.text ?? "");
+        }
+      } catch {
+        this.mcpAvailable = false;
+        this.scheduleRecovery();
+      }
+    }
+
+    try {
+      const { stdout } = await execFileAsync(
+        "qmd", ["multi-get", pattern, "--format", "json"],
+        { timeout: this.cliTimeout },
+      );
+      const parsed = JSON.parse(stdout);
+      return Array.isArray(parsed) ? parsed.map((d: any) => d.body ?? "") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Quick health check against qmd MCP.
+   */
+  async ping(): Promise<boolean> {
+    try {
+      const resp = await fetch(`${this.mcpBaseUrl}/health`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  // ===================== internal — MCP path ==============================
+
+  private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
+    const body: Record<string, unknown> = {
+      searches: params.searches,
+      limit: params.limit ?? 10,
+      minScore: params.minScore ?? 0,
+      rerank: params.rerank ?? true,
+    };
+    if (params.collections) body.collections = params.collections;
+    if (params.intent) body.intent = params.intent;
+
+    const resp = await fetch(`${this.mcpBaseUrl}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.mcpTimeout),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`MCP HTTP ${resp.status}`);
+    }
+
+    const data = await resp.json() as McpQueryResponse;
+    const raw = data.results ?? [];
+    return raw.map((r) => ({
+      docid: r.docid ?? "",
+      file: r.file ?? "",
+      title: r.title ?? "",
+      score: r.score ?? 0,
+      snippet: r.snippet ?? "",
+      line: r.line ?? 0,
+      context: r.context ?? null,
+    }));
+  }
+
+  // ===================== internal — CLI path ==============================
+
+  private async queryViaCli(params: SearchParams): Promise<QmdSearchResult[]> {
+    const { cmd, args } = this.buildCliCommand(params);
+    const { stdout } = await execFileAsync(cmd, args, {
+      timeout: this.cliTimeout,
+    });
+
+    const parsed: unknown[] = JSON.parse(stdout);
+    if (!Array.isArray(parsed)) {
+      throw new Error("CLI output is not a JSON array");
+    }
+
+    return parsed.map((r: any) => ({
+      docid: r.docid ?? r.id ?? "",
+      file: r.file ?? "",
+      title: r.title ?? "",
+      score: r.score ?? 0,
+      snippet: r.snippet ?? "",
+      line: r.line ?? 0,
+      context: r.context ?? null,
+    }));
+  }
+
+  /** Build the appropriate CLI command based on search params. */
+  private buildCliCommand(params: SearchParams): { cmd: string; args: string[] } {
+    const n = String(params.limit ?? 10);
+    const hasLex = params.searches.some((s) => s.type === "lex");
+    const hasVec = params.searches.some((s) => s.type === "vec");
+    const hasHyde = params.searches.some((s) => s.type === "hyde");
+    const withRerank = params.rerank ?? true;
+
+    // Pure lex -> qmd search
+    if (hasLex && !hasVec && !hasHyde) {
+      const query = params.searches.find((s) => s.type === "lex")!.query;
+      const args = ["search", query, "-n", n, "--format", "json"];
+      if (!withRerank) args.push("--no-rerank");
+      return { cmd: "qmd", args };
+    }
+
+    // Pure vec -> qmd vsearch
+    if (hasVec && !hasLex && !hasHyde) {
+      const query = params.searches.find((s) => s.type === "vec")!.query;
+      return { cmd: "qmd", args: ["vsearch", query, "-n", n, "--format", "json"] };
+    }
+
+    // Mixed -> build typed query document
+    const lines: string[] = [];
+    if (params.intent) {
+      lines.push(`intent: ${params.intent}`);
+    }
+    for (const s of params.searches) {
+      lines.push(`${s.type}: ${s.query}`);
+    }
+
+    const queryStr = lines.join("\\n");
+    const args = ["query", queryStr, "-n", n, "--format", "json"];
+    if (!withRerank) args.push("--no-rerank");
+    return { cmd: "qmd", args };
+  }
+
+  // ===================== recovery =========================================
+
+  private scheduleRecovery(): void {
+    if (this.recoveryTimer) return;
+    this.recoveryTimer = setTimeout(async () => {
+      try {
+        const ok = await this.ping();
+        if (ok) {
+          this.mcpAvailable = true;
+          this.clearRecovery();
+          console.info("[qmd-client] MCP recovered, switching back");
+        } else {
+          this.scheduleRecovery(); // retry
+        }
+      } catch {
+        this.scheduleRecovery();
+      }
+    }, this.pingInterval);
+  }
+
+  private clearRecovery(): void {
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+  }
+}
