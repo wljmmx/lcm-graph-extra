@@ -43,6 +43,7 @@ export interface QmdClientOptions {
   mcpTimeout?: number;
   cliTimeout?: number;
   pingInterval?: number;
+  cliFallbackSearchType?: 'search' | 'vsearch';
 }
 
 // ---------------------------------------------------------------------------

@@ -51,17 +51,20 @@ export async function onTurnComplete(instance: PluginInstance): Promise<void> {
       const taskId = (instance.context as any).taskId;
       const raw = extractRawExperience(trigger, message, sessionId, taskId);
 
-      // 写入 Neo4j EXPERIENCE PENDING 节点
+      // 写入 Neo4j EXPERIENCE PENDING 节点 (reuse singleton from index.ts)
       try {
-        const { ExperienceStorage } = await import('../experience');
-        const { GraphAdapter } = await import('../adapters/graph-adapter');
-        const adapter = new GraphAdapter(
-          { uri: 'bolt://192.168.50.89:7687', user: 'neo4j', password: 'pro-gm-2.1.0' },
-          { enabled: true, searchLimit: 5 },
-        );
-        const storage = new ExperienceStorage(adapter);
-        await storage.saveRaw(raw);
-        extractedCount++;
+        const expMod = await import('../experience');
+        // get singleton from index.ts module-level variable
+        const idxMod = await import('../index');
+        const store = (idxMod as any)._expStore;
+        if (store && typeof store.saveRaw === 'function') {
+          try {
+            await store.saveRaw(raw);
+            extractedCount++;
+          } catch (e) { /* ignore save errors */ }
+        } else {
+          logger.warn('experience store not initialized, skipping save');
+        }
       } catch (storeErr) {
         logger.warn({ err: (storeErr as Error).message }, 'failed to save raw experience');
       }

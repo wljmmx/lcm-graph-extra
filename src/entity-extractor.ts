@@ -67,6 +67,9 @@ export function groupByEntity(results: RetrievalResult[]): EntityGroup[] {
  * Extract entity name from a retrieval result.
  */
 function extractEntityName(r: RetrievalResult): string {
+  // RetrievalResult.content is always a string; fallback for safety
+  const textContent = r.content ?? '';
+
   // For graph results, use the name from metadata
   if (r.source === 'graph') {
     const metaName = r.metadata?.name;
@@ -78,7 +81,7 @@ function extractEntityName(r: RetrievalResult): string {
   // For qmd results, try to extract from content
   if (r.source === 'qmd') {
     // Try "Title: xxx" format
-    const titleMatch = r.content.match(/Title:\s*(.+)/);
+    const titleMatch = textContent.match(/Title:\s*(.+)/);
     if (titleMatch) {
       const title = titleMatch[1].trim();
       // Remove "Session: " prefix and date
@@ -88,7 +91,7 @@ function extractEntityName(r: RetrievalResult): string {
   }
 
   // Fallback: use first meaningful content line (up to 60 chars)
-  const firstLine = r.content
+  const firstLine = textContent
     .split('\n')
     .find((l) => l.trim().length > 0 && !l.startsWith('File:') && !l.startsWith('Score:') && !l.startsWith('@@'));
 
@@ -227,7 +230,7 @@ function pickBestDisplayName(results: RetrievalResult[]): string {
   }
 
   // Fallback: shortest non-id name
-  let best = results[0]?.content.slice(0, 60) ?? 'unknown';
+  let best = (results[0]?.content ?? '').slice(0, 60) || 'unknown';
   for (const r of results) {
     const name = extractEntityName(r);
     if (name.length < best.length && name.length > 2) {

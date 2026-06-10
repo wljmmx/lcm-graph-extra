@@ -38,60 +38,6 @@ export const CompactionConfigSchema = z.object({
   keepRecentTokens: z.number().int().positive().default(65536),
 }).passthrough();
 
-// --- 窗口监控配置 (Window Monitor) ---
-export const MaxContextCharsSchema = z.object({
-  low: z.number().int().positive().default(6000),
-  medium: z.number().int().positive().default(3000),
-  high: z.number().int().positive().default(800),
-});
-
-export const RetrievalLimitsSchema = z.object({
-  low: z.object({
-    qmd: z.number().default(5),
-    graph: z.number().default(5),
-    exp: z.number().default(3),
-  }).default({ qmd: 5, graph: 5, exp: 3 }),
-  medium: z.object({
-    qmd: z.number().default(3),
-    graph: z.number().default(3),
-    exp: z.number().default(1),
-  }).default({ qmd: 3, graph: 3, exp: 1 }),
-  high: z.object({
-    qmd: z.number().default(1),
-    graph: z.number().default(1),
-    exp: z.number().default(0),
-  }).default({ qmd: 1, graph: 1, exp: 0 }),
-});
-
-/** 窗口监控配置 — 控制上下文压力等级、注入裁剪 */
-export const WindowMonitorConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  /** 模型上下文窗口上限 */
-  contextWindow: z.number().int().positive().default(131072),
-  /** 触发后台 compact 的 token 比例阈值 */
-  proactiveThreshold: z.number().min(0).max(1).default(0.65),
-  /** 触发后台 compact 的消息数阈值 */
-  messageTriggerCount: z.number().int().positive().default(24),
-  /** 高压力 token 比例阈值 */
-  highPressureThreshold: z.number().min(0).max(1).default(0.85),
-  /** 中压力 token 比例阈值 */
-  mediumPressureThreshold: z.number().min(0).max(1).default(0.70),
-  /** 写入 lossless-claw compaction_maintenance 的 token_budget */
-  compactTokenBudget: z.number().int().positive().default(57344),
-  /** 各级总注入字符上限（按优先级逐级裁剪） */
-  maxContextChars: MaxContextCharsSchema.default({
-    low: 6000, medium: 3000, high: 800,
-  }),
-  /** 各级检索条数限制 */
-  retrievalLimits: RetrievalLimitsSchema.default({
-    low: { qmd: 5, graph: 5, exp: 3 },
-    medium: { qmd: 3, graph: 3, exp: 1 },
-    high: { qmd: 1, graph: 1, exp: 0 },
-  }),
-});
-
-export type WindowMonitorConfig = z.infer<typeof WindowMonitorConfigSchema>;
-
 export const PluginConfigSchema = z.object({
   // Summary strategy
   summaryStrategy: z.enum(['strategy', 'hybrid', 'full']).default('strategy'),
@@ -138,14 +84,36 @@ export const PluginConfigSchema = z.object({
     maxTokens: z.number().int().positive().default(4096),
   }).optional(),
 
-  // 窗口监控 — 可选
-  windowMonitor: WindowMonitorConfigSchema.optional(),
+  // CLI fallback (QmdClient) — 可选
+  cliTimeout: z.number().int().positive().default(30_000),
+  cliFallbackSearchType: z.enum(['search', 'query']).default('search'),
 }).passthrough();
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;
 export type ExperienceTrigger = z.infer<typeof ExperienceTriggerSchema>;
 
 // --- Default Config ---
+
+/** Window Monitor configuration schema (v2.1.4b) */
+export const WindowMonitorConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  contextWindow: z.number().default(131072),
+  messageTriggerCount: z.number().default(24),
+  highPressureThreshold: z.number().default(0.85),
+  mediumPressureThreshold: z.number().default(0.70),
+  proactiveThreshold: z.number().default(0.65),
+  compactTokenBudget: z.number().default(57344),
+  retrievalLimits: z.object({
+    low: z.object({ qmd: z.number().default(5), graph: z.number().default(5), exp: z.number().default(3) }),
+    medium: z.object({ qmd: z.number().default(3), graph: z.number().default(3), exp: z.number().default(1) }),
+    high: z.object({ qmd: z.number().default(1), graph: z.number().default(1), exp: z.number().default(0) }),
+  }).optional(),
+  maxContextChars: z.object({
+    low: z.number().default(6000),
+    medium: z.number().default(3000),
+    high: z.number().default(800),
+  }).optional(),
+});
 export const DEFAULT_CONFIG: PluginConfig = {
   summaryStrategy: 'strategy',
   maxGraphDepth: 10,
@@ -155,17 +123,8 @@ export const DEFAULT_CONFIG: PluginConfig = {
   maxTokens: 32768,
   budgetRatio: 0.3,
   experience: { enabled: true, triggers: ["correction", "failure", "fix_success", "explicit_save"], summaryMode: "async", relevanceThreshold: 0.6 },
-  windowMonitor: {
-    enabled: true,
-    contextWindow: 131072,
-    proactiveThreshold: 0.65,
-    messageTriggerCount: 24,
-    highPressureThreshold: 0.85,
-    mediumPressureThreshold: 0.70,
-    compactTokenBudget: 57344,
-    maxContextChars: { low: 6000, medium: 3000, high: 800 },
-    retrievalLimits: { low: { qmd: 5, graph: 5, exp: 3 }, medium: { qmd: 3, graph: 3, exp: 1 }, high: { qmd: 1, graph: 1, exp: 0 } },
-  },
+  cliTimeout: 30_000,
+  cliFallbackSearchType: 'search',
 };
 
 // --- Validate ---

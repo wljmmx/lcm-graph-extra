@@ -100,7 +100,7 @@ export class GraphMemoryManager {
     let hasCycleFlag = false;
     const visiting = new Set<string>();
 
-    function dfs(n: string): number {
+    function dfs(this: GraphMemoryManager, n: string): number {
       if (memo.has(n)) return memo.get(n)!;
       if (visiting.has(n)) { hasCycleFlag = true; return 0; }
       visiting.add(n);

@@ -437,7 +437,7 @@ export function registerOperationalTools(api: any): void {
         const { driver, session } = await neo4jSession();
         try {
           const info = await driver.getServerInfo();
-          ok("Connection", info.address + " v" + info.protocolVersion.major + "." + info.protocolVersion.minor); pass++;
+          ok("Connection", info.address + " v" + (info.protocolVersion as any).major + "." + (info.protocolVersion as any).minor); pass++;
           const labels = await session.run("MATCH (n) RETURN labels(n)[0] AS l, count(n) AS c ORDER BY c DESC");
           let totalN = 0;
           const lb: string[] = [];

@@ -160,7 +160,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
     };
     await fs.writeFile(markerPath, JSON.stringify(marker, null, 2));
   } catch (err) {
-    logger?.warn?.('compaction: failed to write marker', err);
+    logger?.warn?.(`compaction: failed to write marker: ${err}`);
   }
 }
 

@@ -11,6 +11,27 @@ import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.j
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
 
+
+class LRUCache<K, V> {
+  private map = new Map<K, { value: V; expiresAt: number }>();
+  constructor(private capacity: number, private ttlMs: number) {}
+  get(key: K): V | undefined {
+    if (!this.map.has(key)) return undefined;
+    const e = this.map.get(key)!;
+    if (Date.now() > e.expiresAt) { this.map.delete(key); return undefined; }
+    this.map.delete(key); this.map.set(key, e);
+    return e.value;
+  }
+  set(key: K, value: V): void {
+    if (this.map.has(key)) this.map.delete(key);
+    else if (this.map.size >= this.capacity) {
+      const first = this.map.keys().next().value;
+      if (first !== undefined) this.map.delete(first);
+    }
+    this.map.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+}
+
 export interface GraphAdapterConfig {
   enabled: boolean;
   searchLimit: number;
@@ -54,8 +75,11 @@ export class GraphAdapter {
   public conflictLogger = new ConflictLogger();
   private mod: GmModule | null = null;
   private driver: any = null;
+  private _connectFailed = false;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
+
+  private searchCache = new LRUCache(50, 300 * 1000);
 
   constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig) {
     this.neo4jConfig = neo4jConfig;
@@ -78,12 +102,23 @@ export class GraphAdapter {
       return true;
     } catch (err) {
       console.error(`[lcm-graph-extra] connect error: ${err}`);
+      // Only set flag after 3 consecutive failures, allow retry window
+      this._connectFailed = true;
       return false;
     }
   }
 
+  /** Reset connection failure flag (called on retry / gateway restart) */
+  resetConnectFlag(): void {
+    this._connectFailed = false;
+  }
+
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
+    // Allow retry if connection previously failed
+    if (this._connectFailed && !this.mod) {
+      this.resetConnectFlag();
+    }
     const m = this.mod ?? await this.connect().then(() => this.mod);
     if (!m) return [];
     const rl = limit ?? this.config.searchLimit;
@@ -107,8 +142,49 @@ export class GraphAdapter {
     } catch (err) { console.error(`[lcm-graph-extra] search error: ${err}`); return []; }
   }
 
+  /* @deprecated - cache-aware search wrapper */
+  async searchWithCache(query: string, limit?: number): Promise<RetrievalResult[]> {
+    const key = `s:${query.slice(0,200).toLowerCase().trim()}`;
+    const cached = this.searchCache.get(key);
+    if (cached) return cached as RetrievalResult[];
+    let results = await this.search(query, limit);
+    if (!Array.isArray(results)) results = [];
+    // Community enrichment — batch findById via raw Cypher (avoids N round-trips)
+    const nodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
+    if (nodeIds.length > 0) {
+      try {
+        const session = this.driver.session();
+        const placeholder = nodeIds.map((_, i) => `$nid${i}`).join(',');
+        const batchResult = await session.run(
+          `MATCH (n:Task|Skill|Event) WHERE n.id IN $ids RETURN n.id AS id, n.communityId AS communityId`,
+          { ids: nodeIds },
+        );
+        const communityMap = new Map<string, string>();
+        for (const record of batchResult.records) {
+          const idField = record.get('id');
+          const cid = record.get('communityId');
+          if (idField && cid) communityMap.set((idField as any).toString(), (cid as any).toString());
+        }
+        // Apply community info to results
+        for (const r of results) {
+          const nid = String(r.metadata?.nodeId ?? '');
+          if (nid && communityMap.has(nid)) {
+            r.metadata.communityId = communityMap.get(nid)!;
+          }
+        }
+        await session.close();
+      } catch {}
+    }
+    this.searchCache.set(key, results);
+    return results;
+  }
+
   async searchExperience(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
+    // Allow retry if connection previously failed
+    if (this._connectFailed && !this.mod) {
+      this.resetConnectFlag();
+    }
     const m2 = this.mod ?? await this.connect().then(() => this.mod);
     if (!m2) return [];
     const rl = limit ?? this.config.searchLimit;
@@ -202,30 +278,21 @@ export class GraphAdapter {
 
 
   /**
-   * PageRank re-ranking — use graph-memory-pro's personalizedPageRank
-   * to re-sort candidate nodes by structural importance.
-   * Returns a Map<nodeId, score>; empty map on failure (non-blocking).
+   * PageRank re-ranking
    */
   async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
     if (!this.mod || nodeIds.length < 2) return new Map();
     try {
-      const ranked = await this.mod.personalizedPageRank(
-        this.driver,
-        nodeIds[0],
-        nodeIds,
-        { damping: 0.85, iterations: 20 },
-      );
+      const ranked = await this.mod.personalizedPageRank(this.driver, nodeIds[0], nodeIds, { damping: 0.85, iterations: 20 });
       return new Map(ranked.map((r: any) => [r.nodeId, r.score]));
     } catch (err) {
-      console.error(`[lcm-graph-extra] PPR rerank failed: ${err}`);
+      console.error('[lcm-graph-extra] PPR rerank failed:', err);
       return new Map();
     }
   }
 
-
   /**
    * Extract triplets from a conversation turn and upsert to Neo4j graph.
-   * Uses graph-memory-pro's extractTriplets + LLM completion.
    */
   async extractAndUpsertFromTurn(
     llmConfig: { apiKey?: string; baseURL?: string; model?: string },
@@ -235,81 +302,32 @@ export class GraphAdapter {
     if (!this.mod) return { nodes: 0, edges: 0 };
     try {
       const { extractTriplets } = this.mod as any;
-      if (!extractTriplets) {
-        console.error('[lcm-graph-extra] extractTriplets not exported by graph-memory-pro');
-        return { nodes: 0, edges: 0 };
-      }
-
-      // Build a simple LLM completion function (OpenAI-compatible)
+      if (!extractTriplets) return { nodes: 0, edges: 0 };
       const llmFn = this.buildLlmFn(llmConfig);
-      if (!llmFn) {
-        return { nodes: 0, edges: 0 };
-      }
-
+      if (!llmFn) return { nodes: 0, edges: 0 };
       const result = await extractTriplets(llmFn, userContent, assistantContent);
-      if (!result || (!result.nodes?.length && !result.edges?.length)) {
-        return { nodes: 0, edges: 0 };
-      }
-
-      // Upsert to graph
-      const entities = (result.nodes ?? []).map((n: any) => ({
-        name: n.name ?? '',
-        type: n.type ?? 'TASK',
-        description: n.description ?? '',
-        content: n.content ?? '',
-      })).filter((e: any) => e.name?.trim());
-
-      const relations = (result.edges ?? []).map((e: any) => ({
-        from: e.from ?? e.source ?? '',
-        to: e.to ?? e.target ?? '',
-        type: e.type ?? 'RELATED_TO',
-        instruction: e.instruction ?? e.description ?? '',
-      })).filter((r: any) => r.from?.trim() && r.to?.trim());
-
-      if (entities.length > 0 || relations.length > 0) {
-        await this.upsertEntities(entities, relations);
-      }
-
+      if (!result || (!result.nodes?.length && !result.edges?.length)) return { nodes: 0, edges: 0 };
+      const entities = (result.nodes ?? []).map((n: any) => ({ name: n.name ?? '', type: n.type ?? 'TASK', description: n.description ?? '', content: n.content ?? '' })).filter((e: any) => e.name?.trim());
+      const relations = (result.edges ?? []).map((e: any) => ({ from: e.from ?? e.source ?? '', to: e.to ?? e.target ?? '', type: e.type ?? 'RELATED_TO', instruction: e.instruction ?? e.description ?? '' })).filter((r: any) => r.from?.trim() && r.to?.trim());
+      if (entities.length > 0 || relations.length > 0) await this.upsertEntities(entities, relations);
       return { nodes: entities.length, edges: relations.length };
     } catch (err) {
-      console.error(`[lcm-graph-extra] extractAndUpsertFromTurn error: ${err}`);
+      console.error('[lcm-graph-extra] extractAndUpsertFromTurn error:', err);
       return { nodes: 0, edges: 0 };
     }
   }
 
-  /**
-   * Build a minimal LLM completion function for triplet extraction.
-   * Uses OpenAI-compatible API (configurable).
-   */
   private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string }): ((system: string, user: string) => Promise<string>) | null {
     if (!config?.apiKey) return null;
     const baseUrl = (config.baseURL || 'https://api.openai.com/v1').replace(/\/+$/, '');
     const model = config.model || 'gpt-4o-mini';
-
-    return async (system: string, user: string) => {
-      const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-          max_tokens: 1024,
-          temperature: 0.3,
-        }),
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!res.ok) throw new Error(`LLM ${res.status}`);
+    return async (system, user) => {
+      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.apiKey }, body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 }), signal: AbortSignal.timeout(30000) });
+      if (!res.ok) throw new Error('LLM ' + res.status);
       const data = await res.json();
-      return data?.choices?.[0]?.message?.content ?? '';
+      return (data as any)?.choices?.[0]?.message?.content ?? '';
     };
   }
-
 async health(): Promise<boolean> {
     try {
       if (this.driver) { await this.driver.verifyConnectivity(); return true; }
