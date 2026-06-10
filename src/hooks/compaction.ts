@@ -13,7 +13,6 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type { PluginInstance } from '../register';
-import { resolveNeo4jConfig, resolveNeo4jSearchConfig } from '../config/neo4j-helper';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -122,20 +121,18 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
   }
 
   // --- step 2 — delegate to lossless-claw --------------------------------
-  // DAG 压缩由 engine.compact() Step 1 通过 LosslessClawAdapter 调用
+  // 实际压缩由 OpenClaw 内置 lossless-claw 自动执行
   logger?.info?.(
     `compaction: backed up ${fileCount} files; ` +
-    `lossless-claw DAG compact runs via LosslessClawAdapter in engine.compact()`,
+    `lossless-claw DAG compact runs as built-in OpenClaw behavior`,
   );
 
   // --- step 3 — post-compaction entity extraction -------------------------
   try {
     const { GraphAdapter } = await import('../adapters/graph-adapter');
-    const neo4jConn = resolveNeo4jConfig(instance.config);
-    const neo4jSearch = resolveNeo4jSearchConfig(instance.config);
     const adapter = new GraphAdapter(
-      { uri: neo4jConn.uri, user: neo4jConn.user, password: neo4jConn.password },
-      { enabled: neo4jSearch.enabled, searchLimit: neo4jSearch.searchLimit },
+      { uri: 'bolt://192.168.50.89:7687', user: 'neo4j', password: 'pro-gm-2.1.0' },
+      { enabled: true, searchLimit: 5 },
     );
     // 记录压缩事件到 Neo4j（用于跟踪）
     await adapter.query(`

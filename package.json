@@ -1,25 +1,16 @@
 {
-  "name": "lcm-graph-extra",
-  "version": "0.1.0",
-  "description": "Dual-engine retrieval context engine: coordinates LCM + qmd + graph-memory-pro",
+  "name": "@openclaw/lcm-graph-extra",
+  "version": "2.1.0",
+  "description": "OpenClaw ContextEngine plugin: coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
   "type": "module",
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
-    "dev": "tsc --watch"
-  },
-  "dependencies": {
-    "@sinclair/typebox": "^0.34.48",
-    "neo4j-driver": "^5.27.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.8.0",
-    "vitest": "^3.1.0"
-  },
-  "peerDependencies": {
-    "openclaw": "*"
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "openclaw": {
     "extensions": [
@@ -28,6 +19,49 @@
     "compat": {
       "pluginApi": ">=2026.3.24-beta.2",
       "minGatewayVersion": "2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24-beta.2",
+      "pluginSdkVersion": "2026.3.24-beta.2"
     }
-  }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup src/index.ts --format esm --watch",
+    "test": "vitest run",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "openclaw",
+    "lcm",
+    "graph",
+    "memory",
+    "context-engine",
+    "plugin"
+  ],
+  "author": "wljmmx",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wljmmx/lcm-graph-extra.git"
+  },
+  "dependencies": {
+    "neo4j-driver": "^6.0.1",
+    "pino": "^9.0.0",
+    "zod": "^3.24.0",
+    "typebox": "1.1.39"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ]
 }

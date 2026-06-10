@@ -13,11 +13,10 @@ import { QmdClient } from '../qmd-client';
 import { RetrievalGateway } from '../retrieval-gateway';
 import { GraphAdapter } from '../adapters/graph-adapter';
 import { ExperienceStorage } from '../experience';
-import { resolveNeo4jConfig, resolveNeo4jSearchConfig } from '../config/neo4j-helper';
 import type { PluginInstance } from '../register';
 
 // ---------------------------------------------------------------------------
-// Lazy singletons (init once with config)
+// Lazy singletons
 // ---------------------------------------------------------------------------
 
 let _qmdClient: QmdClient | null = null;
@@ -29,24 +28,17 @@ function getQmdClient(): QmdClient {
   return _qmdClient;
 }
 
-function getRetrievalGateway(instance: PluginInstance): RetrievalGateway {
+function getRetrievalGateway(): RetrievalGateway {
   if (!_retrievalGateway) {
     const qmd = getQmdClient();
-
-    // 从配置 + 环境变量解析凭证，彻底消除硬编码
-    const neo4jConn = resolveNeo4jConfig(instance.config);
-    const neo4jSearch = resolveNeo4jSearchConfig(instance.config);
-
     const graph = new GraphAdapter(
-      { uri: neo4jConn.uri, user: neo4jConn.user, password: neo4jConn.password },
-      { enabled: neo4jSearch.enabled, searchLimit: neo4jSearch.searchLimit },
+      { uri: 'bolt://192.168.50.89:7687', user: 'neo4j', password: 'pro-gm-2.1.0' },
+      { enabled: true, searchLimit: 5 },
     );
-
-    const mergerCfg = (instance.config as any).retrieval?.merger ?? {};
     _retrievalGateway = new RetrievalGateway(qmd, graph, {
-      maxResults: mergerCfg.maxResults ?? 10,
-      fuzzyMatchThreshold: mergerCfg.fuzzyMatchThreshold ?? 0.85,
-      decayHalfLifeDays: mergerCfg.decayHalfLifeDays ?? 30,
+      maxResults: 10,
+      fuzzyMatchThreshold: 0.85,
+      decayHalfLifeDays: 30,
     });
     _experienceStorage = new ExperienceStorage(graph);
   }
@@ -55,7 +47,7 @@ function getRetrievalGateway(instance: PluginInstance): RetrievalGateway {
 
 function getExperienceStorage(): ExperienceStorage | null {
   if (!_experienceStorage) {
-    const gateway = getRetrievalGateway;
+    const gateway = getRetrievalGateway();
   }
   return _experienceStorage;
 }
@@ -129,7 +121,7 @@ function sourceToLabel(source: string): string {
  *   Layer 3: GraphAdapter → Neo4j 知识图谱
  *   Layer 4: ExperienceStorage → 精炼经验召回
  */
-export async function onBeforeTurn(instance: PluginInstance, prompt?: string): Promise<string> {
+export async function onBeforeTurn(instance: PluginInstance): Promise<string> {
   const logger = instance.logger;
   const budgetTokens = computeBudget(instance);
 
@@ -140,11 +132,8 @@ export async function onBeforeTurn(instance: PluginInstance, prompt?: string): P
   }> = [];
 
   try {
-    const gateway = getRetrievalGateway(instance);
-    const searchQuery = prompt && prompt.length > 0
-          ? `current task context: ${prompt.slice(0, 300)}`
-          : 'relevant memory context for current conversation';
-    results = await gateway.search(searchQuery);
+    const gateway = getRetrievalGateway();
+    results = await gateway.search('relevant memory context for current conversation');
     logger?.debug?.(
       `before_turn: retrieval gateway returned ${results.length} results`,
     );

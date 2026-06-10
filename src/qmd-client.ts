@@ -46,19 +46,17 @@ export interface QmdClientOptions {
 }
 
 // ---------------------------------------------------------------------------
-// MCP response shape (from POST /query)
+// MCP response shape (from tools/call "query")
 // ---------------------------------------------------------------------------
 
-interface McpQueryResponse {
-  results?: Array<{
-    docid?: string;
-    file?: string;
-    title?: string;
-    score?: number;
-    snippet?: string;
-    line?: number;
-    context?: string | null;
-  }>;
+interface McpToolsCallResponse {
+  result?: {
+    content?: Array<{
+      type?: string;
+      text?: string;
+    }>;
+    isError?: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -66,9 +64,10 @@ interface McpQueryResponse {
 // ---------------------------------------------------------------------------
 
 const DEFAULTS = {
-  mcpBaseUrl: "http://127.0.0.1:8082",
+  mcpBaseUrl: "http://127.0.0.1:8081",
   mcpTimeout: 5000,
   cliTimeout: 30_000,
+  cliFallbackSearchType: 'search',
   pingInterval: 30_000,
 };
 
@@ -79,32 +78,21 @@ const DEFAULTS = {
 export class QmdClient {
   private readonly mcpBaseUrl: string;
   private readonly mcpTimeout: number;
+  private mcpSessionId: string | null = null;
   private readonly cliTimeout: number;
+  private readonly cliFallbackSearchType: string;
   private readonly pingInterval: number;
 
   /** null = undetermined, true = MCP可用, false = MCP不可用 */
   private mcpAvailable: boolean | null = null;
-  /** 并发锁：保护 mcpAvailable 状态读写 */
-  private mcpLock: Promise<void> = Promise.resolve();
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: QmdClientOptions = {}) {
     this.mcpBaseUrl = opts.mcpBaseUrl ?? DEFAULTS.mcpBaseUrl;
     this.mcpTimeout = opts.mcpTimeout ?? DEFAULTS.mcpTimeout;
     this.cliTimeout = opts.cliTimeout ?? DEFAULTS.cliTimeout;
+    this.cliFallbackSearchType = opts.cliFallbackSearchType ?? DEFAULTS.cliFallbackSearchType;
     this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
-  }
-
-  /**
-   * 并发安全的 mcpAvailable 状态更新锁。
-   * 保证多个 async 操作不会同时写入状态。
-   */
-  private async withMcpLock(fn: () => Promise<void>): Promise<void> {
-    const prev = this.mcpLock;
-    this.mcpLock = new Promise<void>((resolve) => {
-      prev.then(() => fn().then(resolve, resolve));
-    });
-    await this.mcpLock;
   }
 
   // ===================== public API =======================================
@@ -117,11 +105,11 @@ export class QmdClient {
     if (this.mcpAvailable !== false) {
       try {
         const results = await this.queryViaMcp(params);
-        await this.withMcpLock(async () => { this.mcpAvailable = true; });
+        this.mcpAvailable = true;
         this.clearRecovery();
         return results;
       } catch (err) {
-        await this.withMcpLock(async () => { this.mcpAvailable = false; });
+        this.mcpAvailable = false;
         this.scheduleRecovery();
         console.warn("[qmd-client] MCP query failed, falling back to CLI:", (err as Error).message);
       }
@@ -144,7 +132,11 @@ export class QmdClient {
         };
         const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": await this.mcpInitialize(),
+          },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(this.mcpTimeout),
         });
@@ -184,7 +176,11 @@ export class QmdClient {
         };
         const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": await this.mcpInitialize(),
+          },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(this.mcpTimeout),
         });
@@ -227,21 +223,97 @@ export class QmdClient {
     }
   }
 
+  /**
+   * QMD index status — calls MCP tools/call for "status".
+   * Returns index health and collection info as a string.
+   */
+  async status(): Promise<string | null> {
+    try {
+      const body = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "status", arguments: {} },
+      };
+      const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "mcp-session-id": await this.mcpInitialize(),
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.mcpTimeout),
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json() as McpToolsCallResponse;
+      const text = data?.result?.content?.[0]?.text;
+      return typeof text === "string" ? text : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ===================== internal — MCP path ==============================
 
-  private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
-    const body: Record<string, unknown> = {
-      searches: params.searches,
-      limit: params.limit ?? 10,
-      minScore: params.minScore ?? 0,
-      rerank: params.rerank ?? true,
-    };
-    if (params.collections) body.collections = params.collections;
-    if (params.intent) body.intent = params.intent;
+  /** Initialize MCP session via initialize handshake */
+  private async mcpInitialize(): Promise<string> {
+    if (this.mcpSessionId) return this.mcpSessionId;
 
-    const resp = await fetch(`${this.mcpBaseUrl}/query`, {
+    const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "init",
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "qmd-client", version: "1.0" },
+        },
+      }),
+      signal: AbortSignal.timeout(this.mcpTimeout),
+    });
+
+    if (!resp.ok) throw new Error(`MCP initialize HTTP ${resp.status}`);
+
+    const sessionId = resp.headers.get("mcp-session-id");
+    if (!sessionId) throw new Error("MCP initialize: no mcp-session-id header");
+
+    this.mcpSessionId = sessionId;
+    return sessionId;
+  }
+
+  private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
+    const sessionId = await this.mcpInitialize();
+    const body = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "query",
+        arguments: {
+          searches: params.searches,
+          limit: params.limit ?? 10,
+          minScore: params.minScore ?? 0,
+          rerank: params.rerank ?? true,
+        } as Record<string, unknown>,
+      },
+    };
+    if (params.collections) (body.params.arguments as Record<string, unknown>).collections = params.collections;
+    if (params.intent) (body.params.arguments as Record<string, unknown>).intent = params.intent;
+
+    const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": sessionId,
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.mcpTimeout),
     });
@@ -250,8 +322,27 @@ export class QmdClient {
       throw new Error(`MCP HTTP ${resp.status}`);
     }
 
-    const data = await resp.json() as McpQueryResponse;
-    const raw = data.results ?? [];
+    const data = await resp.json() as McpToolsCallResponse;
+    const textContent = data?.result?.content?.[0]?.text;
+    if (!textContent) {
+      throw new Error("MCP query returned empty response");
+    }
+
+    let raw: Array<{
+      docid?: string; file?: string; title?: string;
+      score?: number; snippet?: string; line?: number; context?: string | null;
+    }> = [];
+    try {
+      const parsed = JSON.parse(textContent);
+      if (Array.isArray(parsed)) raw = parsed;
+    } catch {
+      // Non-JSON response (e.g. "No results found"), treat as empty
+    }
+
+    if (raw.length === 0) {
+      return [];
+    }
+
     return raw.map((r) => ({
       docid: r.docid ?? "",
       file: r.file ?? "",
@@ -309,7 +400,15 @@ export class QmdClient {
       return { cmd: "qmd", args: ["vsearch", query, "-n", n, "--format", "json"] };
     }
 
-    // Mixed -> build typed query document
+    // Mixed -> use search (lightweight) if cliFallbackSearchType is "search"
+    if (this.cliFallbackSearchType === 'search') {
+      const lexQuery = params.searches.find((s) => s.type === "lex")?.query ?? "";
+      const args = ["search", lexQuery, "-n", n, "--format", "json"];
+      if (!withRerank) args.push("--no-rerank");
+      return { cmd: "qmd", args };
+    }
+
+    // Mixed -> build typed query document (full hybrid)
     const lines: string[] = [];
     if (params.intent) {
       lines.push(`intent: ${params.intent}`);

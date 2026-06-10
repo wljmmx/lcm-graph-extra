@@ -48,8 +48,8 @@ export interface Neo4jConfig {
   /** Path to graph-memory-pro module (for dynamic import) */
   modulePath?: string;
   uri: string;
-  user?: string;// 可从配置或环境变量 NEO4J_USER 获取
-  password?: string;// 可从配置或环境变量 NEO4J_PASSWORD 获取
+  user: string;
+  password: string;
 }
 
 export interface LlmConfig {

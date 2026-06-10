@@ -154,17 +154,10 @@ export class ExperienceStorage {
       SEARCH_RELEVANT,
       { minScore, limit },
     );
-    const now = Date.now();
-    // 遗忘曲线：每 30 天 relevanceScore 衰减 20%（指数衰减）
-    const FORGET_HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
-    return (rows || []).map((r: any) => {
-      const age = r.createdAt ? now - new Date(r.createdAt).getTime() : 0;
-      const decayFactor = Math.pow(0.8, age / FORGET_HALF_LIFE_MS);
-      return {
-        experience: rowToDistilled(r),
-        score: (r.relevanceScore ?? 0.5) * decayFactor,
-      };
-    });
+    return (rows || []).map((r: any) => ({
+      experience: rowToDistilled(r),
+      score: r.relevanceScore,
+    }));
   }
 
   /**
@@ -228,7 +221,7 @@ interface ExperienceSearchRow {
   matchCount: number;
 }
 
-export interface PendingRow {
+interface PendingRow {
   id: string;
   source: string;
   context: string;

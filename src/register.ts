@@ -13,6 +13,7 @@
  *   maintain: TTL + health checks
  */
 
+import { createRequire } from "node:module";
 import pino from 'pino';
 import { validateConfig } from './config';
 import type { PluginConfig } from './config';
@@ -86,7 +87,7 @@ const registeredPlugins = new Map<string, PluginInstance>();
 // ---------------------------------------------------------------------------
 
 export const info: ContextEngineInfo = {
-  id: 'lcm-graph-extra',
+  id: '@openclaw/lcm-graph-extra',
   name: 'LCM Graph Extra',
   version: '0.1.0',
   ownsCompaction: true,
@@ -112,7 +113,8 @@ export async function bootstrap(ctx: OpenClawContext): Promise<ContextEngineBoot
 
     // 验证 lossless-claw 是否正常
     try {
-      const { DatabaseSync } = require('node:sqlite');
+      const _lcmRequire = createRequire(import.meta.url);
+      const { DatabaseSync } = _lcmRequire("node:sqlite");
       const db = new DatabaseSync('/home/wljmmx/.openclaw/lcm.db');
       const msgCount = db.prepare('SELECT COUNT(*) as cnt FROM messages').get().cnt;
       const summaryCount = db.prepare('SELECT COUNT(*) as cnt FROM summaries').get().cnt;

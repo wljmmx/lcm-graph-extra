@@ -2,7 +2,7 @@
   "id": "lcm-graph-extra",
   "name": "LCM Graph Extra",
   "description": "Dual-engine retrieval context engine: coordinates lossless-claw + qmd + graph-memory-pro for enhanced context assembly",
-  "version": "2.1.0",
+  "version": "0.2.0",
   "kind": "context-engine",
   "requiresPlugins": [
     "lossless-claw"
@@ -48,7 +48,7 @@
       "description": "Run self-diagnostic and output system health analysis report"
     },
     "lcmg_sync": {
-      "description": "Three-way data consistency check and repair (lossless-claw \u2194 Neo4j \u2194 files)"
+      "description": "Three-way data consistency check and repair (lossless-claw ↔ Neo4j ↔ files)"
     },
     "lcmg_qmd_status": {
       "description": "Check QMD MCP server health via status endpoint"
@@ -102,20 +102,6 @@
                 "default": 5,
                 "minimum": 1,
                 "maximum": 20
-              },
-              "mcpEndpoint": {
-                "type": "string",
-                "default": "http://127.0.0.1:8081",
-                "description": "QMD MCP server base URL"
-              },
-              "searchMode": {
-                "type": "string",
-                "enum": [
-                  "mcp_fallback",
-                  "cli_only"
-                ],
-                "default": "mcp_fallback",
-                "description": "QMD search mode: mcp_fallback (prefer MCP, fall back to CLI) or cli_only"
               }
             }
           },
@@ -239,137 +225,6 @@
             }
           }
         }
-      },
-      "windowMonitor": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "enabled": {
-            "type": "boolean",
-            "default": true
-          },
-          "contextWindow": {
-            "type": "integer",
-            "default": 131072,
-            "description": "\u6a21\u578b\u4e0a\u4e0b\u6587\u7a97\u53e3\u4e0a\u9650"
-          },
-          "proactiveThreshold": {
-            "type": "number",
-            "default": 0.65,
-            "minimum": 0,
-            "maximum": 1,
-            "description": "\u89e6\u53d1\u540e\u53f0 compact \u7684 token \u6bd4\u4f8b\u9608\u503c"
-          },
-          "messageTriggerCount": {
-            "type": "integer",
-            "default": 24,
-            "minimum": 1,
-            "description": "\u89e6\u53d1\u540e\u53f0 compact \u7684\u6d88\u606f\u6570\u9608\u503c"
-          },
-          "highPressureThreshold": {
-            "type": "number",
-            "default": 0.85,
-            "minimum": 0,
-            "maximum": 1,
-            "description": "\u9ad8\u538b\u529b token \u6bd4\u4f8b\u9608\u503c"
-          },
-          "mediumPressureThreshold": {
-            "type": "number",
-            "default": 0.7,
-            "minimum": 0,
-            "maximum": 1,
-            "description": "\u4e2d\u538b\u529b token \u6bd4\u4f8b\u9608\u503c"
-          },
-          "compactTokenBudget": {
-            "type": "integer",
-            "default": 57344,
-            "description": "\u5199\u5165 compact debt \u7684 token_budget"
-          },
-          "maxContextChars": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "low": {
-                "type": "integer",
-                "default": 6000
-              },
-              "medium": {
-                "type": "integer",
-                "default": 3000
-              },
-              "high": {
-                "type": "integer",
-                "default": 800
-              }
-            }
-          },
-          "retrievalLimits": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "low": {
-                "type": "object",
-                "properties": {
-                  "qmd": {
-                    "type": "integer",
-                    "default": 5
-                  },
-                  "graph": {
-                    "type": "integer",
-                    "default": 5
-                  },
-                  "exp": {
-                    "type": "integer",
-                    "default": 3
-                  }
-                }
-              },
-              "medium": {
-                "type": "object",
-                "properties": {
-                  "qmd": {
-                    "type": "integer",
-                    "default": 3
-                  },
-                  "graph": {
-                    "type": "integer",
-                    "default": 3
-                  },
-                  "exp": {
-                    "type": "integer",
-                    "default": 1
-                  }
-                }
-              },
-              "high": {
-                "type": "object",
-                "properties": {
-                  "qmd": {
-                    "type": "integer",
-                    "default": 1
-                  },
-                  "graph": {
-                    "type": "integer",
-                    "default": 1
-                  },
-                  "exp": {
-                    "type": "integer",
-                    "default": 0
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "cliFallbackSearchType": {
-        "type": "string",
-        "enum": [
-          "search",
-          "count"
-        ],
-        "default": "search",
-        "description": "CLI fallback search type when MCP is unavailable"
       }
     }
   },

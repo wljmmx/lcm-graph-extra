@@ -169,11 +169,12 @@ export class RetrievalGateway {
     return this.lastQuery;
   }
 
-  async health(): Promise<{ qmd: boolean; graph: boolean }> {
-    const [qmdHealth, graphHealth] = await Promise.all([
+  async health(): Promise<{ qmd: boolean; qmdStatus: string | null; graph: boolean }> {
+    const [qmdHealth, qmdStatus, graphHealth] = await Promise.all([
       this.qmdClient.ping().catch(() => false),
+      this.qmdClient.status().catch(() => null),
       this.graphAdapter.health().catch(() => false),
     ]);
-    return { qmd: qmdHealth, graph: graphHealth };
+    return { qmd: qmdHealth, qmdStatus, graph: graphHealth };
   }
 }

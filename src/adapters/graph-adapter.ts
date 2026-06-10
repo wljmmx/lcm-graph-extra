@@ -4,15 +4,12 @@
  * Bridges lcm-graph-extra with graph-memory-pro's compiled module exports.
  * Dynamically imports from graph-memory-pro/dist/index.js.
  * Uses Recaller.recall(), searchNodes, upsertNode/upsertEdge.
- *
- * 连接管理：使用全局 Neo4jConnectionPool 复用 driver，防止连接泄漏。
  */
 
 import { createHash } from 'node:crypto';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
-import { acquireDriver, releaseDriver } from './connection-pool.js';
 
 export interface GraphAdapterConfig {
   enabled: boolean;
@@ -59,8 +56,6 @@ export class GraphAdapter {
   private driver: any = null;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
-  /** 是否已获取池连接（确保 release 时只释放一次） */
-  private poolAcquired = false;
 
   constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig) {
     this.neo4jConfig = neo4jConfig;
@@ -73,9 +68,12 @@ export class GraphAdapter {
       this.mod = mod;
       this.driver = mod.getDriver?.() ?? null;
       if (!this.driver) {
-        // graph-memory-pro 尚未初始化驱动 → 从连接池获取
-        this.driver = await acquireDriver(this.neo4jConfig);
-        this.poolAcquired = true;
+        // graph-memory-pro 尚未初始化驱动 → 自己建一个
+        const neo4j = await import('neo4j-driver');
+        this.driver = neo4j.default.driver(this.neo4jConfig.uri,
+          neo4j.default.auth.basic(this.neo4jConfig.user, this.neo4jConfig.password),
+          { maxConnectionLifetime: 30 * 60 * 1000, connectionAcquisitionTimeout: 5000 });
+        await this.driver.verifyConnectivity();
       }
       return true;
     } catch (err) {
@@ -202,6 +200,116 @@ export class GraphAdapter {
     }
   }
 
+
+  /**
+   * PageRank re-ranking — use graph-memory-pro's personalizedPageRank
+   * to re-sort candidate nodes by structural importance.
+   * Returns a Map<nodeId, score>; empty map on failure (non-blocking).
+   */
+  async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
+    if (!this.mod || nodeIds.length < 2) return new Map();
+    try {
+      const ranked = await this.mod.personalizedPageRank(
+        this.driver,
+        nodeIds[0],
+        nodeIds,
+        { damping: 0.85, iterations: 20 },
+      );
+      return new Map(ranked.map((r: any) => [r.nodeId, r.score]));
+    } catch (err) {
+      console.error(`[lcm-graph-extra] PPR rerank failed: ${err}`);
+      return new Map();
+    }
+  }
+
+
+  /**
+   * Extract triplets from a conversation turn and upsert to Neo4j graph.
+   * Uses graph-memory-pro's extractTriplets + LLM completion.
+   */
+  async extractAndUpsertFromTurn(
+    llmConfig: { apiKey?: string; baseURL?: string; model?: string },
+    userContent: string,
+    assistantContent: string,
+  ): Promise<{ nodes: number; edges: number }> {
+    if (!this.mod) return { nodes: 0, edges: 0 };
+    try {
+      const { extractTriplets } = this.mod as any;
+      if (!extractTriplets) {
+        console.error('[lcm-graph-extra] extractTriplets not exported by graph-memory-pro');
+        return { nodes: 0, edges: 0 };
+      }
+
+      // Build a simple LLM completion function (OpenAI-compatible)
+      const llmFn = this.buildLlmFn(llmConfig);
+      if (!llmFn) {
+        return { nodes: 0, edges: 0 };
+      }
+
+      const result = await extractTriplets(llmFn, userContent, assistantContent);
+      if (!result || (!result.nodes?.length && !result.edges?.length)) {
+        return { nodes: 0, edges: 0 };
+      }
+
+      // Upsert to graph
+      const entities = (result.nodes ?? []).map((n: any) => ({
+        name: n.name ?? '',
+        type: n.type ?? 'TASK',
+        description: n.description ?? '',
+        content: n.content ?? '',
+      })).filter((e: any) => e.name?.trim());
+
+      const relations = (result.edges ?? []).map((e: any) => ({
+        from: e.from ?? e.source ?? '',
+        to: e.to ?? e.target ?? '',
+        type: e.type ?? 'RELATED_TO',
+        instruction: e.instruction ?? e.description ?? '',
+      })).filter((r: any) => r.from?.trim() && r.to?.trim());
+
+      if (entities.length > 0 || relations.length > 0) {
+        await this.upsertEntities(entities, relations);
+      }
+
+      return { nodes: entities.length, edges: relations.length };
+    } catch (err) {
+      console.error(`[lcm-graph-extra] extractAndUpsertFromTurn error: ${err}`);
+      return { nodes: 0, edges: 0 };
+    }
+  }
+
+  /**
+   * Build a minimal LLM completion function for triplet extraction.
+   * Uses OpenAI-compatible API (configurable).
+   */
+  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string }): ((system: string, user: string) => Promise<string>) | null {
+    if (!config?.apiKey) return null;
+    const baseUrl = (config.baseURL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    const model = config.model || 'gpt-4o-mini';
+
+    return async (system: string, user: string) => {
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          max_tokens: 1024,
+          temperature: 0.3,
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`LLM ${res.status}`);
+      const data = await res.json();
+      return data?.choices?.[0]?.message?.content ?? '';
+    };
+  }
+
 async health(): Promise<boolean> {
     try {
       if (this.driver) { await this.driver.verifyConnectivity(); return true; }
@@ -210,12 +318,7 @@ async health(): Promise<boolean> {
   }
 
   async close(): Promise<void> {
-    // 从连接池释放（非 graph-memory-pro 管理的 driver）
-    if (this.driver && this.poolAcquired) {
-      await releaseDriver(this.neo4jConfig);
-      this.poolAcquired = false;
-    }
-    this.driver = null;
-    this.mod = null;
+    try { if (this.driver) await this.driver.close(); } catch { /* */ }
+    this.driver = null; this.mod = null;
   }
 }

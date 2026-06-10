@@ -5,8 +5,10 @@
  * 通过注册函数由 definePluginEntry 调用。
  */
 
-import { Type } from "openclaw/plugin-sdk/typebox";
-import { DatabaseSync } from "node:sqlite";
+import { Type } from "typebox";
+import { createRequire } from "node:module";
+const _lcmRequire = createRequire(import.meta.url);
+const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
@@ -417,8 +419,11 @@ export function registerOperationalTools(api: any): void {
       try {
         const { QmdClient } = await import("./qmd-client.js");
         const c = new QmdClient();
-        if (await c.ping()) { ok("QmdClient 8082", "MCP available (CLI fallback ready)"); pass++; }
+        if (await c.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
         else { warn("QmdClient", "MCP down, running in CLI fallback mode"); warns++; }
+        const stat = await c.status();
+        if (stat) { ok("Qmd status", stat.slice(0, 100).replace(/\n/g, " ")); pass++; }
+        else { warn("Qmd status", "status() returned no data"); warns++; }
         const r2 = await c.query({ searches: [{ type: "lex", query: "test" }], limit: 1 });
         ok("Search test", r2.length > 0 ? r2.length + " results" : "0 results (empty index)"); pass++;
       } catch (e: any) { warn("qmd", "unavailable: " + e.message); warns++; }
@@ -708,4 +713,86 @@ export function registerOperationalTools(api: any): void {
       return { content: [{ type: "text" as const, text: lines.join("") }] };
     },
   });
+  // ===================================================================
+  // 9. lcmg_qmd_status — QMD index health and collection info
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_qmd_status",
+    description: "Check QMD MCP index status: index health, collection info, uptime. " +
+      "Calls the 'status' tool on QMD's MCP server.",
+    parameters: Type.Object({}),
+    async execute() {
+      try {
+        const { QmdClient } = await import("./qmd-client.js");
+        const qmd = new QmdClient();
+        const [pingOk, statusText] = await Promise.all([
+          qmd.ping().catch(() => false),
+          qmd.status().catch(() => null),
+        ]);
+        const lines: string[] = [];
+        lines.push("# QMD MCP Status\n");
+        lines.push(`Health: ${pingOk ? "✅ OK" : "❌ Down"}`);
+        if (statusText) {
+          lines.push(`\nStatus output:\n${statusText}`);
+        } else {
+          lines.push("\nStatus: unavailable");
+        }
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 10. lcmg_get_document — Retrieve a document by path or docid
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_get_document",
+    description: "Retrieve a document from QMD index by file path or docid. " +
+      "Returns full document content with fuzzy matching suggestions when exact path is not found.",
+    parameters: Type.Object({
+      file: Type.String({ description: "File path or docid to retrieve" }),
+    }),
+    async execute(_id: string, params: { file: string }) {
+      try {
+        const { QmdClient } = await import("./qmd-client.js");
+        const qmd = new QmdClient();
+        const content = await qmd.get(params.file);
+        if (content) {
+          return { content: [{ type: "text" as const, text: content }] };
+        }
+        return { content: [{ type: "text" as const, text: `Document not found: ${params.file}` }] };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 11. lcmg_batch_get — Batch retrieve documents by glob pattern
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_batch_get",
+    description: "Batch retrieve documents from QMD index by glob pattern, comma-separated list, or docids. " +
+      "Returns multiple documents' content.",
+    parameters: Type.Object({
+      pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
+    }),
+    async execute(_id: string, params: { pattern: string }) {
+      try {
+        const { QmdClient } = await import("./qmd-client.js");
+        const qmd = new QmdClient();
+        const results = await qmd.multiGet(params.pattern);
+        if (results.length === 0) {
+          return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }] };
+        }
+        const lines = results.map((doc, i) => `--- Document ${i + 1} ---\n${doc}`);
+        return { content: [{ type: "text" as const, text: lines.join("\n\n") }] };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      }
+    },
+  });
+
 }
