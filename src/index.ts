@@ -35,7 +35,7 @@ import {
   writeCompactionDebt,
   estimateTokensFromMessages,
 } from "./lcm-bridge.js";
-n/** Simple string hash for cross-turn dedup */
+/** Simple string hash for cross-turn dedup */
 function quickHash(s: string): string {
   let h = 0;
   for (let i = 0; i < s.length; i++) {
@@ -102,6 +102,7 @@ function applyTotalControl(
 
   // 阶段1：从低优先级整段移除
   let result = injected;
+  const removedStats: { label: string; chars: number }[] = [];
   for (let i = 0; i < sections.length && result.length > maxChars; i++) {
     // 只移除当前最低优先级的非最高优先级段
     const lowestPriority = sections[i].priority;
@@ -109,7 +110,11 @@ function applyTotalControl(
     for (const candidate of candidates) {
       if (result.length <= maxChars) break;
       result = result.replace(candidate.content, '').replace(/\n{3,}/g, '\n\n').trim();
+      removedStats.push({ label: candidate.label, chars: candidate.content.length });
     }
+  }
+  if (removedSections) {
+    for (const rs of removedStats) removedSections.push(rs);
   }
 
   // 阶段2：如果还超，截断最后的保留内容
@@ -275,10 +280,6 @@ export default definePluginEntry({
       },
 
       async ingestBatch(params: any) {
-        // Delegate to lossless-claw for DAG storage
-        try {
-          await _losslessClawAdapter?.ingestBatch?.(params);
-        } catch { /* non-fatal */ }
         const count = (params.messages ?? []).length;
         return { ingestedCount: count };
       },
@@ -484,7 +485,7 @@ export default definePluginEntry({
           }, "lcm-graph-extra assemble metrics");
 
           // ---- Merge results ----
-n          // Cross-turn dedup: snapshot last turn hashes, clear for this turn
+          // Cross-turn dedup: snapshot last turn hashes, clear for this turn
           const prevInjectHashes = lastInjectHashes;
           lastInjectHashes = new Set<string>();
 
@@ -542,7 +543,8 @@ n          // Cross-turn dedup: snapshot last turn hashes, clear for this turn
           // Final: apply total control trim if Window Monitor enabled
           // ==================================================================
           if (systemPromptAddition && wm) {
-            const trimmed = applyTotalControl(systemPromptAddition, maxContextChars);
+            const removedSections: { label: string; chars: number }[] = [];
+            const trimmed = applyTotalControl(systemPromptAddition, maxContextChars, removedSections);
             if (trimmed !== systemPromptAddition) {
               logger?.debug?.(
                 `[wm] total control: ${systemPromptAddition.length} -> ${trimmed.length} chars (tier=${tier})`
@@ -606,11 +608,6 @@ n          // Cross-turn dedup: snapshot last turn hashes, clear for this turn
           if (signal?.aborted) {
             return;
           }
-
-        // Step 1: Delegate to lossless-claw for DAG operations
-        try {
-          await _losslessClawAdapter?.afterTurn?.(params);
-        } catch { /* non-fatal */ }
 
         try {
           // Split messages into prior (history) and recent (this turn)
@@ -752,5 +749,6 @@ export type {
   ExperienceSource, RawExperience, DistilledExperience,
   ExperienceNode, ExperienceSearchResult,
 } from './experience/types.js';
+
 
 export const VERSION = '2.1.7';
