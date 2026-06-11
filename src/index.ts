@@ -280,6 +280,9 @@ export default definePluginEntry({
       },
 
       async ingestBatch(params: any) {
+        try {
+          await _losslessClawAdapter?.ingestBatch?.(params);
+        } catch { /* non-fatal */ }
         const count = (params.messages ?? []).length;
         return { ingestedCount: count };
       },
@@ -608,6 +611,10 @@ export default definePluginEntry({
           if (signal?.aborted) {
             return;
           }
+
+        try {
+          await _losslessClawAdapter?.afterTurn?.(params);
+        } catch { /* non-fatal */ }
 
         try {
           // Split messages into prior (history) and recent (this turn)
