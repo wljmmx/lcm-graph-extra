@@ -24,6 +24,8 @@ let _qmdClient: QmdClient | null = null;
 let _retrievalGateway: RetrievalGateway | null = null;
 let _experienceStorage: ExperienceStorage | null = null;
 let _initializedWithConfig: boolean = false;
+let _lastInitTime: number = 0;
+const MAX_SINGLETON_AGE_MS = 5 * 60 * 1000; // 5 minutes
 
 function getQmdClient(): QmdClient {
   if (!_qmdClient) _qmdClient = new QmdClient();
@@ -45,9 +47,14 @@ function initRetrievalGateway(pluginConfig?: Record<string, unknown>): void {
   });
   _experienceStorage = new ExperienceStorage(graph);
   _initializedWithConfig = true;
+  _lastInitTime = Date.now();
 }
 
 function getRetrievalGateway(): RetrievalGateway | null {
+  const now = Date.now();
+  if (_lastInitTime > 0 && (now - _lastInitTime) > MAX_SINGLETON_AGE_MS) {
+    disposeAfterTurn();
+  }
   if (!_retrievalGateway) {
     // Fallback: init without plugin config (uses env vars + defaults)
     initRetrievalGateway();

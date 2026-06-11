@@ -127,7 +127,13 @@ export class RetrievalGateway {
   ): Promise<RetrievalResult[]> {
     const start = performance.now();
     try {
-      const results = await searchFn();
+      const timer = AbortSignal.timeout(this.globalTimeoutMs);
+      const results = await Promise.race([
+        searchFn(),
+        new Promise((_, reject) => {
+          timer.addEventListener('abort', () => reject(new Error('search timeout')));
+        }),
+      ]);
       const duration = performance.now() - start;
       const s = this.stats[engine];
       s.searches++;

@@ -77,6 +77,8 @@ export class GraphAdapter {
   private mod: GmModule | null = null;
   private driver: any = null;
   private _connectFailed = false;
+  private _connectRetryCount = 0;
+  private readonly maxRetries = 3;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
   private logger: any;
@@ -124,7 +126,12 @@ export class GraphAdapter {
     if (!this.config.enabled) return [];
     // Allow retry if connection previously failed
     if (this._connectFailed && !this.mod) {
-      this.resetConnectFlag();
+      if (this._connectRetryCount < this.maxRetries) {
+        this.resetConnectFlag();
+      } else {
+        this.logger?.warn?.(`[lcm-graph-extra] search: max retries (${this.maxRetries}) reached, skipping`);
+        return [];
+      }
     }
     const m = this.mod ?? await this.connect().then(() => this.mod);
     if (!m) return [];
