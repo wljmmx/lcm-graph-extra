@@ -1,3 +1,4 @@
+import sqlite from 'node:sqlite';
 /**
  * lcm-bridge — lossless-claw SQLite DB 操作桥接
  *
@@ -9,7 +10,6 @@
 
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { createRequire } from 'node:module';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -48,9 +48,8 @@ export interface MaxContextChars {
 // ---------------------------------------------------------------------------
 
 function getDb(): any {
-  const _require = createRequire(import.meta.url);
   try {
-    return new (_require('node:sqlite') as any).DatabaseSync(LCM_DB_PATH);
+    return new (sqlite).DatabaseSync(LCM_DB_PATH);
   } catch {
     return null;
   }
@@ -159,15 +158,15 @@ export function determinePressureTier(
   messageCount: number,
   tokenRatio: number,
   config: {
-    messageTriggerCount: number;
+    dedupRounds: number;
     highPressureThreshold: number;
     mediumPressureThreshold: number;
   },
 ): PressureTier {
-  if (messageCount > config.messageTriggerCount * 2 || tokenRatio >= config.highPressureThreshold) {
+  if (messageCount > config.dedupRounds * 2 || tokenRatio >= config.highPressureThreshold) {
     return 'high';
   }
-  if (messageCount >= config.messageTriggerCount || tokenRatio >= config.mediumPressureThreshold) {
+  if (messageCount >= config.dedupRounds || tokenRatio >= config.mediumPressureThreshold) {
     return 'medium';
   }
   return 'low';
@@ -180,11 +179,11 @@ export function shouldTriggerCompact(
   messageCount: number,
   tokenRatio: number,
   config: {
-    messageTriggerCount: number;
+    dedupRounds: number;
     proactiveThreshold: number;
   },
 ): boolean {
-  return messageCount >= config.messageTriggerCount || tokenRatio >= config.proactiveThreshold;
+  return messageCount >= config.dedupRounds || tokenRatio >= config.proactiveThreshold;
 }
 
 /**

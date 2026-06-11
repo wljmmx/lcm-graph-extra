@@ -35,6 +35,7 @@ export class RetrievalGateway {
     experience: { searches: 0, totalDurationMs: 0, maxDurationMs: 0, failures: 0, lastQueryTime: 0 },
   };
   public slowSearchThresholdMs = 1000;
+  public globalTimeoutMs = 15000;
 
   constructor(
     qmdClient: QmdClient,
@@ -44,6 +45,7 @@ export class RetrievalGateway {
     this.qmdClient = qmdClient;
     this.graphAdapter = graphAdapter;
     this.merger = new Merger(mergerConfig);
+    // globalTimeoutMs default is 15000 (class property)
   }
 
   /**

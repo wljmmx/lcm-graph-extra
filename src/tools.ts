@@ -527,7 +527,6 @@ export function registerOperationalTools(api: any): void {
       // --- qmd ---
       if (engines === "all" || engines === "qmd_only") {
         try {
-          const { execSync } = require("child_process");
           const out = execSync(`qmd query "${query.replace(/"/g, '\\"')}"`, {
             timeout: 15000, encoding: "utf-8",
           });

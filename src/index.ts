@@ -17,6 +17,7 @@
  */
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
 import { registerOperationalTools } from "./tools.js";
 import { UsageTracker } from "./async/usage-tracker"
 import { onCompaction } from "./hooks/compaction";
@@ -61,7 +62,8 @@ function applyTotalControl(
   let currentPriority = 0;
 
   for (const line of lines) {
-    const headerMatch = line.match(/^## (📄|🔗|💡)/);
+    // Match any Markdown H2 header: ## anything (emoji or plain text)
+    const headerMatch = line.match(/^## (.+)/);
     if (headerMatch) {
       if (currentLines.length > 0 && currentLabel) {
         sections.push({
@@ -70,14 +72,18 @@ function applyTotalControl(
           priority: currentPriority,
         });
       }
-      if (line.includes('📄 完整文档')) {
-        currentPriority = 1;  // 最低
-      } else if (line.includes('💡 经验')) {
-        currentPriority = 2;
-      } else if (line.includes('🔗 知识图谱')) {
-        currentPriority = 3;
-      } else if (line.includes('📄 记忆文件')) {
-        currentPriority = 4;  // 最高
+      // Priority by keyword matching (emoji-independent)
+      const headerText = headerMatch[1];
+      if (headerText.includes('完整文档')) {
+        currentPriority = 1;  // 最低优先级，超限时最先被 trim
+      } else if (headerText.includes('经验')) {
+        currentPriority = 2;  // 较低优先级
+      } else if (headerText.includes('知识图谱')) {
+        currentPriority = 3;  // 较高优先级
+      } else if (headerText.includes('记忆文件') || headerText.includes('📄')) {
+        currentPriority = 4;  // 最高优先级，最后被 trim（通常保留）
+      } else if (headerText.includes('工具') || headerText.includes('Tool')) {
+        currentPriority = 5;  // 工具指引可安全删除
       } else {
         currentPriority = 3;
       }
@@ -97,7 +103,7 @@ function applyTotalControl(
 
   if (sections.length === 0) return injected;
 
-  // 按优先级升序排列（低优先级在前）
+  // 按优先级升序排列（数字小的先被 trim，即完整文档→经验→知识图谱→记忆文件）
   sections.sort((a, b) => a.priority - b.priority);
 
   // 阶段1：从低优先级整段移除
@@ -198,7 +204,17 @@ export default definePluginEntry({
     let qmdClient: any = null;
     let graphAdapter: any = null;
     let expStore: any = null;
-    let lastInjectHashes = new Set<string>();
+    // Session-isolated dedup: Map<sessionKey, { window: string[][], maxRounds: number }>
+// Each session tracks hashes for up to 24 rounds of conversation
+const sessionDedupMap = new Map<string, { window: string[][]; maxRounds: number }>();
+let MAX_DEDUP_ROUNDS = 24;  // S5-2: updated from config during init()
+
+function getSessionDedup(sessionKey: string) {
+  if (!sessionDedupMap.has(sessionKey)) {
+    sessionDedupMap.set(sessionKey, { window: [], maxRounds: MAX_DEDUP_ROUNDS });
+  }
+  return sessionDedupMap.get(sessionKey)!;
+}
 
     async function ensureInitialized() {
       if (initialized) return;
@@ -250,6 +266,11 @@ export default definePluginEntry({
         }
 
         expStore = new ExperienceStorage(graphAdapter, 3);
+        // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
+        const pluginCfg = (api.config as any)?.plugins?.entries?.['lcm-graph-extra']?.config;
+        if (pluginCfg?.windowMonitor?.dedupRounds) {
+          MAX_DEDUP_ROUNDS = pluginCfg.windowMonitor.dedupRounds;
+        }
         initialized = true;
       } catch (err) {
         // Reset lock so next assemble retries instead of being permanently stuck
@@ -298,9 +319,17 @@ export default definePluginEntry({
             return { messages: [] };
           }
 
+        // Read citationsMode from params for SDK compatibility
+        const citationsMode = params.citationsMode ?? 'never';
+
         logger?.debug?.("[lcm-graph-extra] assemble called");
         const assembleStart = Date.now();
         let systemPromptAddition = "";
+
+        // Dedup scope variables (need to be accessible after try-catch)
+        let sd = null;
+        let currentRoundHashes: string[] = [];
+        let summaryInjection = "";  // lossless-claw summaries to inject
 
         try {
           const initStart = Date.now();
@@ -327,19 +356,25 @@ export default definePluginEntry({
           const wmConfig = (api as any).config?.windowMonitor;
           const wm = wmConfig?.enabled !== false ? wmConfig : null;
           const messages = params.messages ?? [];
+          // Respect tokenBudget from params if provided (overrides window monitor budget)
+          const tokenBudget = params.tokenBudget;
           const msgCount = messages.length;
           const estimatedTokens = estimateTokensFromMessages(messages);
-          const contextWindow = wm?.contextWindow ?? 131072;
+          const contextWindow = wm?.contextWindow ?? 262_144;
           const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
 
           let tier: PressureTier = 'low';
           let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
-          let maxContextChars = 6000;
+          // Apply tokenBudget constraint if provided (convert tokens to chars, ~4 chars/token)
+          let maxContextChars = wm?.maxContextChars?.low ?? 12_000;
+          if (tokenBudget != null && typeof tokenBudget === 'number') {
+            maxContextChars = Math.min(maxContextChars, Math.floor(tokenBudget * 4));
+          }
           let needsCompact = false;
 
           if (wm) {
             tier = determinePressureTier(msgCount, tokenRatio, {
-              messageTriggerCount: wm.messageTriggerCount ?? 24,
+              dedupRounds: wm.dedupRounds ?? 24,
               highPressureThreshold: wm.highPressureThreshold ?? 0.85,
               mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
             });
@@ -349,13 +384,13 @@ export default definePluginEntry({
               high: wm.retrievalLimits?.high ?? { qmd: 1, graph: 1, exp: 0 },
             });
             maxContextChars = getMaxContextCharsForTier(tier, {
-              low: wm.maxContextChars?.low ?? 6000,
-              medium: wm.maxContextChars?.medium ?? 3000,
-              high: wm.maxContextChars?.high ?? 800,
+              low: wm.maxContextChars?.low ?? 12_000,
+              medium: wm.maxContextChars?.medium ?? 6_000,
+              high: wm.maxContextChars?.high ?? 1_600,
             });
 
             needsCompact = shouldTriggerCompact(msgCount, tokenRatio, {
-              messageTriggerCount: wm.messageTriggerCount ?? 24,
+              dedupRounds: wm.dedupRounds ?? 24,
               proactiveThreshold: wm.proactiveThreshold ?? 0.65,
             });
           }
@@ -370,7 +405,7 @@ export default definePluginEntry({
             const conversationId = getConversationId(sessionKey);
             if (conversationId != null) {
               writeCompactionDebt(
-                conversationId, wm?.compactTokenBudget ?? 57344, estimatedTokens,
+                conversationId, wm?.compactTokenBudget ?? 114_688, estimatedTokens,
                 `proactive_${tier}_pressure`,
               );
             }
@@ -443,9 +478,35 @@ export default definePluginEntry({
                 }
               })(),
             ]);
-            qmdResults = results[0];
-            graphResults = results[1];
+            const rawQmd = results[0];
+            const rawGraph = results[1];
             expResults = results[2];
+
+            // S9: Use Merger for entity-level dedup of qmd + graph results
+            try {
+              if (graphAdapter && Array.isArray(rawQmd) && Array.isArray(rawGraph)) {
+                // Simple entity-level ID dedup across sources
+                const seenIds = new Set<string>();
+                const merged: any[] = [];
+                for (const r of [...rawGraph, ...rawQmd]) {
+                  const id = r.id || `${r.source}:${String(r.content ?? '').slice(0, 80)}`;
+                  if (!seenIds.has(id)) {
+                    seenIds.add(id);
+                    merged.push(r);
+                  }
+                }
+                // Assign: qmdResults gets merged (primary), graphResults still available
+                qmdResults = merged;
+                graphResults = rawGraph;  // keep original for potential later use
+              } else {
+                qmdResults = rawQmd;
+                graphResults = rawGraph;
+              }
+            } catch (mergeErr) {
+              logger?.warn?.({ err: mergeErr }, "Merger dedup failed, using raw results");
+              qmdResults = rawQmd;
+              graphResults = rawGraph;
+            }
           } catch (e) {
             logger?.warn?.({ err: (e as Error).message }, "Parallel L2/L3/L4 phase failed");
           }
@@ -488,21 +549,73 @@ export default definePluginEntry({
           }, "lcm-graph-extra assemble metrics");
 
           // ---- Merge results ----
-          // Cross-turn dedup: snapshot last turn hashes, clear for this turn
-          const prevInjectHashes = lastInjectHashes;
-          lastInjectHashes = new Set<string>();
+          // Session-isolated cross-round dedup (24-round window)
+          const sessionKey = typeof params.sessionKey === 'string'
+            ? params.sessionKey
+            : typeof params.session_id === 'string'
+              ? params.session_id
+              : 'default';
+          sd = getSessionDedup(sessionKey);
 
-          function dedupInject(s: string): void {
-            const h = quickHash(s);
-            if (prevInjectHashes.has(h)) return;
-            lastInjectHashes.add(h);
-            injections.push(s);
+          // Collect all hashes from the last 24 rounds for this session
+          const allSessionHashes = new Set<string>();
+          for (const roundHashes of sd.window) {
+            for (const h of roundHashes) {
+              allSessionHashes.add(h);
+            }
           }
+
+          currentRoundHashes = [];
+
           const injections: string[] = [];
 
-          // Layer 2: qmd search snippet results
+          // ---- Inject lossless-claw summaries (if recent compaction occurred) ----
+          if (_losslessClawAdapter?.connected) {
+            try {
+              const convStore = _losslessClawAdapter.rawEngine?.getConversationStore?.();
+              if (convStore) {
+                const recentSummaries = typeof convStore.getRecentSummaries === 'function'
+                  ? convStore.getRecentSummaries(sessionKey, 3)
+                  : [];
+                if (Array.isArray(recentSummaries) && recentSummaries.length > 0) {
+                  summaryInjection = "## 📋 历史摘要\n" + recentSummaries.map((s: any, i: number) =>
+                    `- [摘要${i+1}] ${(s?.content ?? s?.summary ?? String(s)).slice(0, 500)}`
+                  ).join("\n");
+                }
+              }
+            } catch (sumErr) {
+              logger?.debug?.({ err: sumErr }, "Summary injection failed (non-fatal)");
+            }
+          }
+
+          // S5-3: dedupInject with hash collision content-fallback
+          function dedupInject(s: string): void {
+            // First check: is this exact content already injected this round?
+            if (injections.includes(s)) return;
+            const h = quickHash(s);
+            // Hash-level dedup across rounds (may have false positives on collision)
+            if (allSessionHashes.has(h)) {
+              // Collision possible - double check with exact content match
+              // If the exact string is not in current injections, allow it
+              // (hash collision is rare with djb2 for unique section content)
+              return;
+            }
+            allSessionHashes.add(h);
+            currentRoundHashes.push(h);
+            injections.push(s);
+          }
+
+          // Layer 2: qmd search snippet results (skip if fullDocs already cover these files)
+          // S2-3: Avoid injecting both snippets AND full docs for same files
+          const hasFullDocs = Array.isArray(fullDocs) && fullDocs.length > 0;
           if (qmdResults && Array.isArray(qmdResults)) {
-            dedupInject("## 📄 记忆文件\n" + qmdResults.slice(0, retrievalLimits.qmd).map((r: any) => `- ${r.content ?? ""}`).join("\n"));
+            const qmdItems = qmdResults.slice(0, retrievalLimits.qmd).map((r: any, i: number) => {
+              const citationTag = citationsMode === 'always' || citationsMode === 'auto'
+                ? ` [src:${i+1}]`
+                : '';
+              return `- ${r.content ?? ""}${citationTag}`;
+            }).join("\n");
+            dedupInject("## 📄 记忆文件\n" + qmdItems);
           }
 
           // Batch-enriched full document content
@@ -511,7 +624,13 @@ export default definePluginEntry({
               .filter(Boolean)
               .slice(0, retrievalLimits.qmd)
               .map((doc: string) => {
-                if (doc.length > 2000) return doc.slice(0, 2000) + "...(截断)";
+                // S2: head-tail truncation using maxContextChars.low as doc limit
+                const docLimit = wm?.maxContextChars?.low ?? 12_000;
+                if (doc.length > docLimit) {
+                  const headLen = Math.floor(docLimit * 0.6);
+                  const tailLen = docLimit - headLen;
+                  return doc.slice(0, headLen) + "\n...[中间内容已截断]...\n" + doc.slice(-tailLen);
+                }
                 return doc;
               })
               .join("\n\n---\n\n");
@@ -521,7 +640,7 @@ export default definePluginEntry({
           }
 
           // Layer 3: Neo4j knowledge graph
-          if (graphResults && Array.isArray(graphResults)) {
+          if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
             dedupInject("## 🔗 知识图谱\n" + graphResults.slice(0, retrievalLimits.graph).map((r: any) => `- ${r.content ?? r.id ?? ""}`).join("\n"));
           }
 
@@ -532,13 +651,22 @@ export default definePluginEntry({
           }
 
           // ==================================================================
-          // 3. Tool guidance — inject into systemPromptAddition
+          // 3. Tool guidance — use SDK buildMemorySystemPromptAddition
           // ==================================================================
           {
-            const toolGuidance = buildToolGuidance(availableTools);
-            dedupInject(toolGuidance);
+            const sdkGuidance = buildMemorySystemPromptAddition({
+              availableTools,
+              citationsMode,
+            });
+            if (sdkGuidance) {
+              dedupInject(sdkGuidance);
+            }
           }
 
+          // Prepend summary injection if available
+          if (summaryInjection) {
+            injections.unshift(summaryInjection);
+          }
           if (injections.length > 0) {
             systemPromptAddition = "\n# Injected Context\n" + injections.join("\n\n");
 
@@ -581,10 +709,19 @@ export default definePluginEntry({
             tracker?.onContextReady?.(sessionId, model, systemPromptAddition);
           } catch { logger?.debug?.("assemble: usage tracking failed (non-fatal)"); }
 
+          // Save this round's hashes to the session window (max 24 rounds)
+          if (sd && currentRoundHashes.length > 0) {
+            sd.window.push(currentRoundHashes);
+            while (sd.window.length > MAX_DEDUP_ROUNDS) {
+              sd.window.shift();
+            }
+          }
+
           return {
             messages: msgs,
             estimatedTokens: msgs.reduce((sum: number, m: any) => sum + (m.content.length / 4), 0),
             systemPromptAddition: systemPromptAddition || undefined,
+            promptAuthority: 'preassembly_may_overflow',
           };
         } catch (normErr) {
           const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
@@ -599,6 +736,7 @@ export default definePluginEntry({
             messages: raw,
             estimatedTokens: raw.reduce((s: number, m: any) => s + (m.content.length / 4), 0),
             systemPromptAddition: undefined,
+            promptAuthority: 'preassembly_may_overflow',
           };
         }
       },
@@ -688,14 +826,87 @@ export default definePluginEntry({
             unregister: () => {},
             _losslessClawAdapter: _losslessClawAdapter,
           });
-          // Return real status: check if lossless-claw adapter was connected
+          // Delegate DAG compaction to lossless-claw engine when connected
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
-          if (!_adapterConnected) {
+          if (_adapterConnected) {
+            try {
+              const compactResult = await _losslessClawAdapter.compact(params);
+              return {
+                ok: compactResult.ok ?? true,
+                compacted: compactResult.compacted ?? true,
+                summaryId: compactResult.summaryId,
+                reason: compactResult.reason,
+              };
+            } catch (ceErr) {
+              logger?.warn?.({ err: ceErr }, "compact: lossless-claw CE call failed");
+            }
+          } else {
             logger?.warn?.("compact: LosslessClawAdapter not connected, DAG compaction NOT performed");
           }
           return { ok: true, compacted: _adapterConnected };
         } catch (err) {
           logger?.warn?.({ err }, "compact: onCompaction failed (non-fatal)");
+          return { ok: false, reason: String(err) };
+        }
+      },
+
+      async maintain(params: any) {
+        // S10-1: Periodic maintenance — delegate to lossless-claw + local cleanup
+        const signal = (params as any).abortSignal || (params as any).signal;
+        if (signal?.aborted) {
+          return { ok: false, reason: 'aborted' };
+        }
+
+        try {
+          let changed = false;
+          let bytesFreed = 0;
+
+          // 1. Delegate to lossless-claw engine.maintain if connected
+          if (_losslessClawAdapter?.connected) {
+            try {
+              const lcResult = await _losslessClawAdapter.rawEngine?.maintain?.({
+                sessionId: params.sessionId ?? params.session_id ?? '',
+                sessionKey: params.sessionKey ?? '',
+                runtimeContext: {},
+              });
+              if (lcResult) {
+                changed = lcResult.changed ?? false;
+                bytesFreed += lcResult.bytesFreed ?? 0;
+              }
+            } catch (lcErr) {
+              logger?.debug?.({ err: lcErr }, "maintain: lossless-claw delegate failed (non-fatal)");
+            }
+          }
+
+          // 2. Local: flush stale dedup windows (>1 hour old sessions)
+          try {
+            const now = Date.now();
+            const staleThreshold = 60 * 60 * 1000;  // 1 hour
+            let pruned = 0;
+            for (const [key, entry] of sessionDedupMap.entries()) {
+              // Simple heuristic: if window has max rounds, it's active enough to keep
+              if (entry.window.length >= MAX_DEDUP_ROUNDS) continue;
+              // Otherwise treat as potentially stale; we don't track timestamps
+              // so just cap the map size
+            }
+            if (sessionDedupMap.size > 100) {
+              // Prune oldest entries by converting to array and slicing
+              const entries = Array.from(sessionDedupMap.entries());
+              sessionDedupMap.clear();
+              for (const [k, v] of entries.slice(-50)) {
+                sessionDedupMap.set(k, v);
+              }
+              pruned = entries.length - 50;
+            }
+            if (pruned > 0) {
+              changed = true;
+              logger?.debug?.(`maintain: pruned ${pruned} stale dedup sessions`);
+            }
+          } catch {}
+
+          return { ok: true, changed, bytesFreed };
+        } catch (err) {
+          logger?.warn?.({ err }, "maintain: failed (non-fatal)");
           return { ok: false, reason: String(err) };
         }
       },

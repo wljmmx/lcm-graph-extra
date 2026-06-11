@@ -209,6 +209,27 @@ export async function onBeforeTurn(instance: PluginInstance, params?: { messages
     logger?.warn?.({ err: (err as Error).message }, 'before_turn: experience injection failed');
   }
 
+  // --- Phase 2.5: Final dedup across all sources (qmd + graph + experience) ---
+  {
+    const seenIds = new Set<string>();
+    const seenContent = new Map<string, number>();
+    const deduped: typeof results = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (seenIds.has(r.id)) continue;
+      const contentKey = (r.content || "").slice(0, 120).toLowerCase().trim();
+      if (contentKey && seenContent.has(contentKey)) continue;
+      seenIds.add(r.id);
+      if (contentKey) seenContent.set(contentKey, i);
+      deduped.push(r);
+    }
+    if (deduped.length < results.length) {
+      logger?.debug?.(`before_turn: deduped ${results.length} → ${deduped.length} results`);
+    }
+    results.length = 0;
+    for (const r of deduped) results.push(r);
+  }
+
   // --- Phase 3: Format & return -----------------------------------------
   if (results.length > 0) {
     return formatRetrievalResults(results, budgetTokens);

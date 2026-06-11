@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 // ============================================================
 // GraphMemoryManager — DAG-based memory graph for LCM recall
 // ============================================================
@@ -351,8 +353,6 @@ export class GraphMemoryManager {
   // ===================== File Persistence ===============================
 
   persist(filePath: string, metadata?: Record<string, unknown>): string {
-    const fs = require("fs");
-    const path = require("path");
     const dir = path.dirname(filePath);
     if (dir) fs.mkdirSync(dir, { recursive: true });
     const payload = {
@@ -367,7 +367,6 @@ export class GraphMemoryManager {
 
   load(filePath: string): number {
     try {
-      const fs = require("fs");
       const raw = fs.readFileSync(filePath, "utf-8");
       const parsed = JSON.parse(raw);
       this.nodes = new Map(parsed.nodes as [string, GraphNode][]);

@@ -4,6 +4,7 @@
 
 import type { PluginInstance } from '../register';
 import { GraphMemoryManager } from '../core/graph';
+import { CompactionConfigSchema } from '../config.js';
 
 // ---------------------------------------------------------------------------
 // Session state attached to the plugin instance at runtime
@@ -97,14 +98,10 @@ async function loadMemoryContext(
 
 /** Apply session-level defaults to the instance config. */
 function initSessionConfig(instance: PluginInstance): void {
-  // Ensure compaction config exists
+  // Ensure compaction config exists — use Schema defaults (no hardcoded magic numbers)
   if (!instance.config.compaction) {
-    instance.config.compaction = {
-      enabled: true,
-      triggerThreshold: 10_000,
-      softThresholdTokens: 81_920,
-      keepRecentTokens: 65_536,
-    };
+    const schemaDefaults = CompactionConfigSchema.parse({});
+    instance.config.compaction = schemaDefaults;
   }
 
   // Ensure TTL config exists

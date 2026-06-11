@@ -32,10 +32,10 @@ export const ExperienceConfigSchema = z.object({
 export const CompactionConfigSchema = z.object({
   enabled: z.boolean().default(true),
   mode: z.string().optional(),  // delegated-to-lossless-claw | self-managed
-  // 旧版兼容字段
-  triggerThreshold: z.number().int().positive().default(10000),
-  softThresholdTokens: z.number().int().positive().default(81920),
-  keepRecentTokens: z.number().int().positive().default(65536),
+  // 256K上下文适配（翻倍）
+  triggerThreshold: z.number().int().positive().default(20_000),
+  softThresholdTokens: z.number().int().positive().default(163_840),
+  keepRecentTokens: z.number().int().positive().default(131_072),
 }).passthrough();
 
 export const PluginConfigSchema = z.object({
@@ -45,7 +45,8 @@ export const PluginConfigSchema = z.object({
   maxNodeCount: z.number().int().positive().default(5000),
   enableCrossFileLinkage: z.boolean().default(true),
   crossReferenceRetentionDays: z.number().int().positive().default(90),
-  maxTokens: z.number().int().positive().default(32768),
+  // 256K上下文适配（翻倍）
+  maxTokens: z.number().int().positive().default(65_536),
   budgetRatio: z.number().min(0).max(1).default(0.3),
 
   // Compaction — 可选，兼容旧版字段
@@ -94,24 +95,27 @@ export type ExperienceTrigger = z.infer<typeof ExperienceTriggerSchema>;
 
 // --- Default Config ---
 
-/** Window Monitor configuration schema (v2.1.4b) */
+/** Window Monitor configuration schema (v2.1.5 - 256K context) */
 export const WindowMonitorConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  contextWindow: z.number().default(131072),
-  messageTriggerCount: z.number().default(24),
+  // 256K上下文适配
+  contextWindow: z.number().default(262_144),
+  dedupRounds: z.number().default(24),
   highPressureThreshold: z.number().default(0.85),
   mediumPressureThreshold: z.number().default(0.70),
   proactiveThreshold: z.number().default(0.65),
-  compactTokenBudget: z.number().default(57344),
+  // 256K上下文适配（翻倍）
+  compactTokenBudget: z.number().default(114_688),
   retrievalLimits: z.object({
     low: z.object({ qmd: z.number().default(5), graph: z.number().default(5), exp: z.number().default(3) }),
     medium: z.object({ qmd: z.number().default(3), graph: z.number().default(3), exp: z.number().default(1) }),
     high: z.object({ qmd: z.number().default(1), graph: z.number().default(1), exp: z.number().default(0) }),
   }).optional(),
+  // 256K上下文适配（翻倍）
   maxContextChars: z.object({
-    low: z.number().default(6000),
-    medium: z.number().default(3000),
-    high: z.number().default(800),
+    low: z.number().default(12_000),
+    medium: z.number().default(6_000),
+    high: z.number().default(1_600),
   }).optional(),
 });
 export const DEFAULT_CONFIG: PluginConfig = {
@@ -120,7 +124,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   maxNodeCount: 5000,
   enableCrossFileLinkage: true,
   crossReferenceRetentionDays: 90,
-  maxTokens: 32768,
+  maxTokens: 65_536,
   budgetRatio: 0.3,
   experience: { enabled: true, triggers: ["correction", "failure", "fix_success", "explicit_save"], summaryMode: "async", relevanceThreshold: 0.6 },
   cliTimeout: 30_000,
