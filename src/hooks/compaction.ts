@@ -13,6 +13,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type { PluginInstance } from '../register';
+import { resolveNeo4jConfig } from '../config/neo4j-helper';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -120,18 +121,46 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
     logger?.error?.({ err }, 'compaction: backup failed');
   }
 
-  // --- step 2 — delegate to lossless-claw --------------------------------
-  // 实际压缩由 OpenClaw 内置 lossless-claw 自动执行
-  logger?.info?.(
-    `compaction: backed up ${fileCount} files; ` +
-    `lossless-claw DAG compact runs as built-in OpenClaw behavior`,
-  );
-
+  // --- step 2 — delegate to lossless-claw via adapter ------------------
+  try {
+    const inst = instance as any;
+    const adapter = inst._losslessClawAdapter;
+    if (adapter && adapter.connected) {
+      const sessionKey = inst.context?.sessionKey ?? ("session-" + Date.now());
+      const sessionFile = inst.context?.sessionFile ?? ("memory/" + new Date().toISOString().slice(0,10) + ".md");
+      const compactResult = await adapter.compact({
+        sessionId: sessionKey,
+        sessionKey,
+        sessionFile,
+        tokenBudget: (compConfig as any)?.tokenBudget,
+        force: (compConfig as any)?.force ?? true,
+      });
+      if (compactResult.ok) {
+        logger?.info?.("compaction: lossless-claw DAG compact completed");
+      } else {
+        const reasonStr = compactResult.reason ?? "";
+      if (reasonStr.includes("replay") || reasonStr.includes("refused")) {
+        logger?.warn?.({ reason: reasonStr }, "compaction: lossless-claw replay protection triggered, skipping DAG compact");
+      } else {
+        logger?.warn?.({ reason: reasonStr }, "compaction: lossless-claw adapter compact reported issue");
+      }
+      }
+    } else {
+      logger?.debug?.("compaction: LosslessClawAdapter not connected, skipping DAG compact");
+    }
+  } catch (err) {
+    const errMsg = typeof err === "string" ? err : (err as Error).message ?? "unknown";
+      if (errMsg.includes("replay") || errMsg.includes("refused")) {
+        logger?.warn?.({ err }, "compaction: lossless-claw replay protection active, will retry next cycle");
+      } else {
+        logger?.warn?.({ err }, "compaction: LosslessClawAdapter call failed (non-fatal)");
+      }
+  }
   // --- step 3 — post-compaction entity extraction -------------------------
   try {
     const { GraphAdapter } = await import('../adapters/graph-adapter');
     const adapter = new GraphAdapter(
-      { uri: 'bolt://192.168.50.89:7687', user: 'neo4j', password: 'pro-gm-2.1.0' },
+      resolveNeo4jConfig(undefined),
       { enabled: true, searchLimit: 5 },
     );
     // 记录压缩事件到 Neo4j（用于跟踪）

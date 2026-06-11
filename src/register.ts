@@ -43,6 +43,7 @@ export interface PluginInstance {
   logger: pino.Logger;
   context: OpenClawContext;
   unregister: () => void;
+  _losslessClawAdapter?: any;
 }
 
 export interface ContextEngineInfo {
@@ -76,6 +77,22 @@ export interface ContextEngineMaintenanceResult {
   reason?: string;
 }
 
+// Replay guard: lossless-claw may refuse to ingest messages that look like replays
+// after gateway restart. Detect and handle gracefully.
+const REPLAY_REFUSED_PATTERN = /refused replay-like message batch/;
+
+let replayRefusedThisSession = false;
+
+function isReplayRefusedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const msg = (err as Error).message ?? JSON.stringify(err);
+  return REPLAY_REFUSED_PATTERN.test(msg);
+}
+
+function resetReplayState(): void {
+  replayRefusedThisSession = false;
+}
+
 // ---------------------------------------------------------------------------
 // Global registry
 // ---------------------------------------------------------------------------
@@ -89,7 +106,7 @@ const registeredPlugins = new Map<string, PluginInstance>();
 export const info: ContextEngineInfo = {
   id: '@openclaw/lcm-graph-extra',
   name: 'LCM Graph Extra',
-  version: '0.1.0',
+  version: "2.1.7",
   ownsCompaction: true,
   turnMaintenanceMode: 'background',
 };
@@ -108,6 +125,8 @@ export async function bootstrap(ctx: OpenClawContext): Promise<ContextEngineBoot
       unregister: () => { registeredPlugins.delete(info.id); },
     };
     registeredPlugins.set(info.id, instance);
+
+    resetReplayState();
 
     await onSessionCreated(instance);
 
@@ -171,7 +190,13 @@ export async function afterTurn(
     await onTurnComplete(instance);
     return { ingested: 1, failed: 0 };
   } catch (err) {
-    console.error(`[lcm-graph-extra] afterTurn failed: ${(err as Error).message}`);
+    const msg = (err as Error).message;
+    if (isReplayRefusedError(err)) {
+      replayRefusedThisSession = true;
+      console.warn(`[lcm-graph-extra] afterTurn: lossless-claw refused replay, session recovery in progress`);
+      return { ingested: 0, failed: 0 };
+    }
+    console.error(`[lcm-graph-extra] afterTurn failed: ${msg}`);
     return { ingested: 0, failed: 1 };
   }
 }

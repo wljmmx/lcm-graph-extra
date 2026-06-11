@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
+import { acquireDriver, releaseDriver } from './connection-pool';
 
 
 class LRUCache<K, V> {
@@ -78,12 +79,14 @@ export class GraphAdapter {
   private _connectFailed = false;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
+  private logger: any;
 
   private searchCache = new LRUCache(50, 300 * 1000);
 
-  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig) {
+  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: any) {
     this.neo4jConfig = neo4jConfig;
     this.config = config;
+    this.logger = logger;
   }
 
   async connect(): Promise<boolean> {
@@ -93,15 +96,19 @@ export class GraphAdapter {
       this.driver = mod.getDriver?.() ?? null;
       if (!this.driver) {
         // graph-memory-pro 尚未初始化驱动 → 自己建一个
-        const neo4j = await import('neo4j-driver');
-        this.driver = neo4j.default.driver(this.neo4jConfig.uri,
-          neo4j.default.auth.basic(this.neo4jConfig.user, this.neo4jConfig.password),
-          { maxConnectionLifetime: 30 * 60 * 1000, connectionAcquisitionTimeout: 5000 });
-        await this.driver.verifyConnectivity();
+        // Use connection pool instead of creating new driver each time
+        this.driver = await acquireDriver(this.neo4jConfig);
+        if (this.driver) {
+          try {
+            await this.driver.verifyConnectivity();
+          } catch (connErr) {
+            this.logger?.warn?.(`[graph-adapter] connectivity verify failed, pool may recover: ${connErr}`);
+          }
+        }
       }
       return true;
     } catch (err) {
-      console.error(`[lcm-graph-extra] connect error: ${err}`);
+      this.logger?.error?.(`[lcm-graph-extra] connect error: ${err}`);
       // Only set flag after 3 consecutive failures, allow retry window
       this._connectFailed = true;
       return false;
@@ -124,7 +131,22 @@ export class GraphAdapter {
     const rl = limit ?? this.config.searchLimit;
     try {
       const nodes = await m.searchNodes(this.driver, query, rl);
-      return (nodes ?? []).map((n: any) => {
+      // Rerank by PageRank if enough nodes
+      let reranked = (nodes ?? []);
+      if (reranked.length >= 2) {
+        const nodeIds = reranked.map((n: any) => n.id).filter(Boolean);
+        if (nodeIds.length >= 2) {
+          const pprScores = await this.rerankByPageRank(nodeIds);
+          if (pprScores.size > 0) {
+            reranked.sort((a: any, b: any) => {
+              const sa = pprScores.get(a.id) ?? 0.5;
+              const sb = pprScores.get(b.id) ?? 0.5;
+              return sb - sa;
+            });
+          }
+        }
+      }
+      return (reranked).map((n: any) => {
         const name = n.name ?? n.properties?.name ?? '';
         const label = n.type ?? n.labels?.[0] ?? 'TASK';
         const desc = n.description ?? n.properties?.description ?? '';
@@ -139,7 +161,7 @@ export class GraphAdapter {
           metadata: { nodeId: n.id, nodeType: label, name, updatedAt: n.updatedAt ?? n.properties?.updatedAt ?? 0 },
         };
       });
-    } catch (err) { console.error(`[lcm-graph-extra] search error: ${err}`); return []; }
+    } catch (err) { this.logger?.error?.(`[lcm-graph-extra] search error: ${err}`); return []; }
   }
 
   /* @deprecated - cache-aware search wrapper */
@@ -149,6 +171,18 @@ export class GraphAdapter {
     if (cached) return cached as RetrievalResult[];
     let results = await this.search(query, limit);
     if (!Array.isArray(results)) results = [];
+    // PPR rerank (in case search() didn't have enough data)
+    const cacheNodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
+    if (cacheNodeIds.length >= 2) {
+      const pprScores = await this.rerankByPageRank(cacheNodeIds as string[]);
+      if (pprScores.size > 0) {
+        results.sort((a, b) => {
+          const sa = pprScores.get(a.metadata?.nodeId as string) ?? 0.5;
+          const sb = pprScores.get(b.metadata?.nodeId as string) ?? 0.5;
+          return sb - sa;
+        });
+      }
+    }
     // Community enrichment — batch findById via raw Cypher (avoids N round-trips)
     const nodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
     if (nodeIds.length > 0) {
@@ -227,12 +261,45 @@ export class GraphAdapter {
         if (existing) {
           const ec = existing.properties?.content ?? '';
           if (ec.trim() !== (e.content ?? '').trim()) {
-            this.conflictLogger.resolve(e.name.trim(), t,
+            const decision = this.conflictLogger.resolve(e.name.trim(), t,
               { updatedAt: existing.properties?.updatedAt ?? 0, validatedCount: existing.properties?.validatedCount ?? 0, content: ec },
               { updatedAt: now, validatedCount: 1, content: e.content ?? '' });
             cc++;
+
+            // Execute decision-based upsert strategy
+            if (decision === 'keep_existing') {
+              // Skip upsert - keep existing content intact
+              uc++;
+              continue;
+            } else if (decision === 'replace_with_new') {
+              // Full replacement with new content
+              await this.mod!.upsertNode(this.driver, {
+                id: nid, type: t, name: e.name.trim(),
+                description: (e.description ?? '').slice(0, 500),
+                content: (e.content ?? '').slice(0, 2000),
+                status: 'active', pagerank: 0.5,
+                validatedCount: 1,
+                createdAt: existing.properties?.createdAt ?? now, updatedAt: now,
+              });
+              uc++;
+              continue;
+            } else if (decision === 'merge_both') {
+              // Merge existing + new content
+              const mergedContent = (ec.trim() || '') + '\n---\n' + ((e.content ?? '').trim() || '');
+              await this.mod!.upsertNode(this.driver, {
+                id: nid, type: t, name: e.name.trim(),
+                description: (e.description ?? '').slice(0, 500),
+                content: mergedContent.slice(0, 2000),
+                status: 'active', pagerank: 0.5,
+                validatedCount: (existing.properties?.validatedCount ?? 0) + 1,
+                createdAt: existing.properties?.createdAt ?? now, updatedAt: now,
+              });
+              uc++;
+              continue;
+            }
           }
         }
+        // No conflict or no decision path matched - standard upsert
         await this.mod!.upsertNode(this.driver, {
           id: nid, type: t, name: e.name.trim(),
           description: (e.description ?? '').slice(0, 500),
@@ -253,7 +320,7 @@ export class GraphAdapter {
           condition: '', weight: 1.0, createdAt: now, updatedAt: now,
         });
       }
-    } catch (err) { console.error(`[lcm-graph-extra] upsert error: ${err}`); }
+    } catch (err) { this.logger?.error?.(`[lcm-graph-extra] upsert error: ${err}`); }
     return { upserted: uc, conflicts: cc };
   }
 
@@ -286,7 +353,7 @@ export class GraphAdapter {
       const ranked = await this.mod.personalizedPageRank(this.driver, nodeIds[0], nodeIds, { damping: 0.85, iterations: 20 });
       return new Map(ranked.map((r: any) => [r.nodeId, r.score]));
     } catch (err) {
-      console.error('[lcm-graph-extra] PPR rerank failed:', err);
+      this.logger?.error?.('[lcm-graph-extra] PPR rerank failed:', err);
       return new Map();
     }
   }
@@ -312,7 +379,7 @@ export class GraphAdapter {
       if (entities.length > 0 || relations.length > 0) await this.upsertEntities(entities, relations);
       return { nodes: entities.length, edges: relations.length };
     } catch (err) {
-      console.error('[lcm-graph-extra] extractAndUpsertFromTurn error:', err);
+      this.logger?.error?.('[lcm-graph-extra] extractAndUpsertFromTurn error:', err);
       return { nodes: 0, edges: 0 };
     }
   }
@@ -336,7 +403,12 @@ async health(): Promise<boolean> {
   }
 
   async close(): Promise<void> {
-    try { if (this.driver) await this.driver.close(); } catch { /* */ }
+    // Release driver back to pool instead of closing directly
+    try {
+      await releaseDriver(this.neo4jConfig);
+    } catch (relErr) {
+      this.logger?.warn?.(`[graph-adapter] releaseDriver failed: ${relErr}`);
+    }
     this.driver = null; this.mod = null;
   }
 }

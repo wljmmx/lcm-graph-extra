@@ -19,6 +19,23 @@ export interface SessionState {
 
 /** Per-session state store keyed by session ID. */
 const sessionStore = new Map<string, SessionState>();
+/** Session TTL: 24 hours. */
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Remove expired session states from the store. */
+function cleanupSessionStore(): void {
+  const now = Date.now();
+  for (const [sid, state] of sessionStore) {
+    try {
+      const age = now - new Date(state.initializedAt).getTime();
+      if (age > SESSION_TTL_MS) {
+        sessionStore.delete(sid);
+      }
+    } catch {
+      sessionStore.delete(sid);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -115,6 +132,7 @@ export async function onSessionCreated(
   instance: PluginInstance,
   sessionId?: string,
 ): Promise<SessionState> {
+  cleanupSessionStore();
   const logger = instance.logger;
 
   // Derive session ID from context or caller hint
@@ -133,6 +151,12 @@ export async function onSessionCreated(
   logger?.debug?.(
     `session_created hook: loaded memory context for ${id} (${contextSummary.length} chars summary)`,
   );
+
+  // --- cleanup any stale entries for this sessionId (gateway restart recovery) ---
+  if (sessionStore.has(id)) {
+    logger?.debug?.(`session_created hook: clearing stale state for ${id} (gateway restart detected)`);
+    sessionStore.delete(id);
+  }
 
   // --- create and store session state ------------------------------------
   const state: SessionState = {

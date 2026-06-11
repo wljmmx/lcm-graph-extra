@@ -104,3 +104,50 @@ export interface AssembledContext {
   estimatedTokens: number;
   systemPromptAddition?: string;
 }
+
+// ─── Plugin lifecycle types ───────────────────────────────
+
+/** Plugin API surface exposed by the context engine. */
+export interface PluginAPI {
+  config: Record<string, any>;
+  logger: { debug?: Function; info?: Function; warn?: Function; error?: Function };
+  register: Function;
+  unregister: Function;
+}
+
+/** Parameters for the assemble() lifecycle hook. */
+export interface AssembleParams {
+  messages?: Array<{ role: string; content?: string }>;
+  sessionId?: string;
+  session_id?: string;
+  model?: string;
+  abortSignal?: AbortSignal;
+  signal?: AbortSignal;
+  config?: PluginConfig;
+  [key: string]: unknown;
+}
+
+/** Parameters for the afterTurn() lifecycle hook. */
+export interface AfterTurnParams {
+  messages?: Array<{ role: string; content?: string }>;
+  sessionId?: string;
+  session_id?: string;
+  model?: string;
+  abortSignal?: AbortSignal;
+  signal?: AbortSignal;
+  [key: string]: unknown;
+}
+
+/** Parameters for the compact() lifecycle hook. */
+export interface CompactParams {
+  sessionId?: string;
+  config?: PluginConfig;
+  [key: string]: unknown;
+}
+
+/** Parameters for the ingest() lifecycle hook. */
+export interface IngestParams {
+  sessionId?: string;
+  messages?: unknown[];
+  [key: string]: unknown;
+}

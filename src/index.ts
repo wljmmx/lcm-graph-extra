@@ -18,6 +18,11 @@
 
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { registerOperationalTools } from "./tools.js";
+import { UsageTracker } from "./async/usage-tracker"
+import { onCompaction } from "./hooks/compaction";
+import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
+import { resolveNeo4jConfig } from "./config/neo4j-helper";
+import { disposeAfterTurn as disposeRetrievalSingletons } from "./hooks/before-turn";
 
 import {
   type PressureInfo,
@@ -30,11 +35,21 @@ import {
   writeCompactionDebt,
   estimateTokensFromMessages,
 } from "./lcm-bridge.js";
+n/** Simple string hash for cross-turn dedup */
+function quickHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h) + s.charCodeAt(i);
+    h |= 0;
+  }
+  return h.toString(36);
+}
 
 
 function applyTotalControl(
   injected: string,
   maxChars: number,
+  removedSections?: { label: string; chars: number }[],
 ): string {
   if (!injected || injected.length <= maxChars) return injected;
 
@@ -105,6 +120,61 @@ function applyTotalControl(
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Tool-aware retrieval strategy helpers
+// ---------------------------------------------------------------------------
+
+/** Extract available tool names from params.availableTools (Set or array). */
+function extractAvailableTools(params: any): string[] {
+  const tools = params.availableTools;
+  if (!tools) return [];
+  if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
+  if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
+  return [];
+}
+
+/** Check if a tool category is available among the runtime tools. */
+function hasToolCategory(availableTools: string[], category: string): boolean {
+  switch (category) {
+    case "graph":
+      return availableTools.some(t => t.includes("graph"));
+    case "experience":
+      return availableTools.some(t => t.includes("experience"));
+    case "qmd":
+      return availableTools.some(t => t.includes("qmd") || t.includes("memory"));
+    default:
+      return false;
+  }
+}
+
+/** Build tool guidance section for systemPromptAddition. */
+function buildToolGuidance(availableTools: string[]): string {
+  const hasGraph = hasToolCategory(availableTools, "graph");
+  const hasExperience = hasToolCategory(availableTools, "experience");
+  const hasQmd = hasToolCategory(availableTools, "qmd");
+  const lines: string[] = [];
+  lines.push("## 🛠️ 可用检索工具");
+  if (hasQmd) {
+    lines.push("- ✅ **记忆文件搜索** — 可通过 lcm-search/qmd 查询记忆文件");
+  } else {
+    lines.push("- ⏭️ **记忆文件搜索** — 已自动注入相关上下文（无需手动搜索）");
+  }
+  if (hasGraph) {
+    lines.push("- ✅ **知识图谱查询** — 可通过 graph-search 查询实体关系");
+  } else {
+    lines.push("- ⏭️ **知识图谱查询** — 已自动注入相关实体（无需手动查询）");
+  }
+  if (hasExperience) {
+    lines.push("- ✅ **经验检索** — 可通过 experience-search 查找历史经验");
+  } else {
+    lines.push("- ⏭️ **经验检索** — 已自动注入相关经验（无需手动搜索）");
+  }
+  if (!hasGraph && !hasExperience && !hasQmd) {
+    lines.push("\n> 💡 提示：已根据上下文自动注入相关知识，如需更多信息可直接询问。");
+  }
+  return lines.join("\n");
+}
+
 export default definePluginEntry({
   id: "lcm-graph-extra",
   name: "LCM Graph Extra",
@@ -116,17 +186,31 @@ export default definePluginEntry({
     // -----------------------------------------------------------------------
     // Lazy singleton instances — created once, reused across all assemble calls
     // -----------------------------------------------------------------------
+    let tracker: any = null;
     let initialized = false;
     let initPromise: Promise<void> | null = null;
+    let _losslessClawAdapter: any = null;
     let qmdClient: any = null;
     let graphAdapter: any = null;
     let expStore: any = null;
+    let lastInjectHashes = new Set<string>();
 
     async function ensureInitialized() {
       if (initialized) return;
       if (initPromise) return initPromise;
       initPromise = (async () => {
       try {
+        tracker = new UsageTracker(logger);
+        _losslessClawAdapter = new LosslessClawAdapter();
+        // P1-2 fix: await connection and log result
+        try {
+          const adapterConnected = await _losslessClawAdapter.connect();
+          if (!adapterConnected) {
+            logger?.warn?.({ err: _losslessClawAdapter.initError }, "init: lossless-claw adapter connection failed, compact will be backup-only");
+          }
+        } catch (adapterErr) {
+          logger?.warn?.({ err: (adapterErr as Error).message }, "init: lossless-claw adapter connect threw");
+        }
         const { QmdClient } = await import("./qmd-client.js");
         const { GraphAdapter } = await import("./adapters/graph-adapter.js");
         const { ExperienceStorage } = await import("./experience/index.js");
@@ -148,8 +232,9 @@ export default definePluginEntry({
           cliFallbackSearchType: cliFallbackSearchType,
         });
         graphAdapter = new GraphAdapter(
-          { uri: "bolt://192.168.50.89:7687", user: "neo4j", password: "pro-gm-2.1.0" },
+          resolveNeo4jConfig(pluginConfig),
           { enabled: true, searchLimit: 5 },
+          logger,
         );
 
         // Connect once; if Neo4j unavailable, still initialize so L2 works
@@ -177,23 +262,39 @@ export default definePluginEntry({
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "0.2.0",
+        version: "2.1.7",
         ownsCompaction: true,
       },
 
       async ingest(_params: any) {
+        // Forward to lossless-claw for actual message storage
+        try {
+          await _losslessClawAdapter?.ingest?.(_params);
+        } catch {}
         return { ingested: true };
       },
 
-      async ingestBatch(_params: any) {
-        return { ingested: true };
+      async ingestBatch(params: any) {
+        // Delegate to lossless-claw for DAG storage
+        try {
+          await _losslessClawAdapter?.ingestBatch?.(params);
+        } catch { /* non-fatal */ }
+        const count = (params.messages ?? []).length;
+        return { ingestedCount: count };
       },
 
       /**
        * Assemble — optimized: instances reused, L2/L3/L4 fully parallelized.
        */
       async assemble(params: any) {
-        console.log(`[lcm-graph-extra] assemble called`);
+
+          // AbortSignal support - early exit if cancelled
+          const signal = (params as any).abortSignal || (params as any).signal;
+          if (signal?.aborted) {
+            return { messages: [] };
+          }
+
+        logger?.debug?.("[lcm-graph-extra] assemble called");
         const assembleStart = Date.now();
         let systemPromptAddition = "";
 
@@ -202,7 +303,20 @@ export default definePluginEntry({
           await ensureInitialized();
           const initMs = Date.now() - initStart;
 
-          
+          // ==================================================================
+          // 0. Tool-aware retrieval strategy — read availableTools
+          // ==================================================================
+          const availableTools = extractAvailableTools(params);
+          const hasGraphTool = hasToolCategory(availableTools, "graph");
+          const hasExperienceTool = hasToolCategory(availableTools, "experience");
+
+          if (availableTools.length > 0) {
+            logger?.debug?.(
+              "[lcm-graph-extra] availableTools: " + JSON.stringify(availableTools) +
+              ", hasGraph=" + hasGraphTool + ", hasExperience=" + hasExperienceTool
+            );
+          }
+
           // ==================================================================
           // 1. Window Monitor — pressure check + tier determination
           // ==================================================================
@@ -280,7 +394,7 @@ export default definePluginEntry({
 
           try {
             const results = await Promise.all([
-              // L2: qmd search
+              // L2: qmd search (always executed — core memory retrieval, not tool-gated)
               (async () => {
                 try {
                   if (!qmdQuery) return [];
@@ -289,7 +403,7 @@ export default definePluginEntry({
                       { type: "lex", query: qmdQuery },
                       { type: "vec", query: qmdQuery }
                     ],
-                    limit: 5,
+                    limit: retrievalLimits.qmd,
                     rerank: true
                   });
                 } catch (e) {
@@ -297,19 +411,28 @@ export default definePluginEntry({
                   return [];
                 }
               })(),
-              // L3: Neo4j knowledge graph (independent of L2)
+              // L3: Neo4j knowledge graph — skip if no graph tool available
               (async () => {
                 try {
-                  return await graphAdapter.search(qmdQuery);
+                  if (!hasGraphTool) {
+                    logger?.debug?.("[lcm-graph-extra] L3 graph search skipped (no graph tool)");
+                    return [];
+                  }
+                  return await graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph);
                 } catch (e) {
                   logger?.warn?.({ err: (e as Error).message }, "L3 graph search failed");
                   return [];
                 }
               })(),
-              // L4: Experience search (independent of L2)
+              // L4: Experience search — skip if no experience tool available
               (async () => {
                 try {
-                  return await expStore.searchRelevant(0.6, 3);
+                  if (!hasExperienceTool) {
+                    logger?.debug?.("[lcm-graph-extra] L4 experience search skipped (no experience tool)");
+                    return [];
+                  }
+                  if (retrievalLimits.exp === 0) return [];
+                  return await expStore.searchRelevant(0.6, retrievalLimits.exp);
                 } catch (e) {
                   logger?.warn?.({ err: (e as Error).message }, "L4 experience search failed");
                   return [];
@@ -328,7 +451,7 @@ export default definePluginEntry({
           // ---- Parallel Phase 2: multiGet (depends on L2 file paths) ----
           const mgStart = Date.now();
           const topFiles = [...new Set(
-            (qmdResults ?? []).slice(0, 3).map((r: any) => r.file).filter(Boolean)
+            (qmdResults ?? []).slice(0, retrievalLimits.qmd).map((r: any) => r.file).filter(Boolean)
           )];
 
           let fullDocs: string[] = [];
@@ -336,6 +459,7 @@ export default definePluginEntry({
             try {
               fullDocs = await qmdClient.multiGet(topFiles.join(','));
             } catch {
+              logger?.debug?.("assemble: qmd multiGet failed, returning empty");
               fullDocs = [];
             }
           }
@@ -352,40 +476,63 @@ export default definePluginEntry({
             l3_count: Array.isArray(graphResults) ? graphResults.length : 0,
             l4_count: expResults.length,
             doc_count: fullDocs?.length ?? 0,
+            tier: tier,
+            retrieval_limits: JSON.stringify(retrievalLimits),
+            available_tools_count: availableTools.length,
+            has_graph_tool: hasGraphTool,
+            has_experience_tool: hasExperienceTool,
           }, "lcm-graph-extra assemble metrics");
 
           // ---- Merge results ----
+n          // Cross-turn dedup: snapshot last turn hashes, clear for this turn
+          const prevInjectHashes = lastInjectHashes;
+          lastInjectHashes = new Set<string>();
+
+          function dedupInject(s: string): void {
+            const h = quickHash(s);
+            if (prevInjectHashes.has(h)) return;
+            lastInjectHashes.add(h);
+            injections.push(s);
+          }
           const injections: string[] = [];
 
           // Layer 2: qmd search snippet results
           if (qmdResults && Array.isArray(qmdResults)) {
-            injections.push("## 📄 记忆文件\n" + qmdResults.slice(0, 3).map((r: any) => `- ${r.content ?? ""}`).join("\n"));
+            dedupInject("## 📄 记忆文件\n" + qmdResults.slice(0, retrievalLimits.qmd).map((r: any) => `- ${r.content ?? ""}`).join("\n"));
           }
 
           // Batch-enriched full document content
           if (Array.isArray(fullDocs) && fullDocs.length > 0) {
             const docBlock = fullDocs
               .filter(Boolean)
-              .slice(0, 3)
+              .slice(0, retrievalLimits.qmd)
               .map((doc: string) => {
                 if (doc.length > 2000) return doc.slice(0, 2000) + "...(截断)";
                 return doc;
               })
               .join("\n\n---\n\n");
             if (docBlock) {
-              injections.push("## 📄 完整文档已加载\n" + docBlock);
+              dedupInject("## 📄 完整文档已加载\n" + docBlock);
             }
           }
 
           // Layer 3: Neo4j knowledge graph
           if (graphResults && Array.isArray(graphResults)) {
-            injections.push("## 🔗 知识图谱\n" + graphResults.slice(0, 5).map((r: any) => `- ${r.content ?? r.id ?? ""}`).join("\n"));
+            dedupInject("## 🔗 知识图谱\n" + graphResults.slice(0, retrievalLimits.graph).map((r: any) => `- ${r.content ?? r.id ?? ""}`).join("\n"));
           }
 
           // Layer 4: Experience
           if (expResults.length > 0) {
-            injections.push("## 💡 经验总结\n" + expResults.map((e: any) => `- [${e.experience.type}] ${e.experience.summary}`).join("\n"));
+            dedupInject("## 💡 经验总结\n" + expResults.map((e: any) => `- [${e.experience.type}] ${e.experience.summary}`).join("\n"));
             for (const e of expResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
+          }
+
+          // ==================================================================
+          // 3. Tool guidance — inject into systemPromptAddition
+          // ==================================================================
+          {
+            const toolGuidance = buildToolGuidance(availableTools);
+            dedupInject(toolGuidance);
           }
 
           if (injections.length > 0) {
@@ -422,6 +569,13 @@ export default definePluginEntry({
               : String(m.content ?? ""),
         }));
 
+          // Track usage (non-blocking)
+          try {
+            const model = params.model ?? "unknown";
+            const sessionId = params.sessionId ?? params.session_id ?? "unknown";
+            tracker?.onContextReady?.(sessionId, model, systemPromptAddition);
+          } catch { logger?.debug?.("assemble: usage tracking failed (non-fatal)"); }
+
           return {
             messages: msgs,
             estimatedTokens: msgs.reduce((sum: number, m: any) => sum + (m.content.length / 4), 0),
@@ -429,7 +583,7 @@ export default definePluginEntry({
           };
         } catch (normErr) {
           const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
-          console.error(`[lcm-graph-extra] NORMALIZE ERROR: ${ne.message}\n${ne.stack}`);
+          logger?.error?.({ err: ne }, "assemble: normalize error")
           // Ultra fallback: just strip runtime context and return raw messages
           const raw = (params.messages ?? []).map((m: any) => ({
             seq: m.seq,
@@ -445,8 +599,26 @@ export default definePluginEntry({
       },
 
       async afterTurn(params: any) {
+        const afterTurnStart = Date.now();
+
+          // AbortSignal support - early exit if cancelled
+          const signal = (params as any).abortSignal || (params as any).signal;
+          if (signal?.aborted) {
+            return;
+          }
+
+        // Step 1: Delegate to lossless-claw for DAG operations
         try {
-          const msgs = params.messages ?? [];
+          await _losslessClawAdapter?.afterTurn?.(params);
+        } catch { /* non-fatal */ }
+
+        try {
+          // Split messages into prior (history) and recent (this turn)
+          const splitIdx = params.prePromptMessageCount ?? 0;
+          const allMsgs = params.messages ?? [];
+          const priorMessages = splitIdx > 0 ? allMsgs.slice(0, splitIdx) : allMsgs;
+          const recentMessages = splitIdx > 0 ? allMsgs.slice(splitIdx) : [];
+          const msgs = allMsgs;
           if (msgs.length < 2) return;
 
           let userContent = '', assistantContent = '';
@@ -482,18 +654,52 @@ export default definePluginEntry({
               logger?.debug?.(`[afterTurn] triplets: +${result.nodes} nodes, +${result.edges} edges`);
             }
           }
-        } catch (err) {
-          console.error(`[lcm-graph-extra] afterTurn error: ${err}`);
+        // Track response tokens (non-blocking)
+        try {
+          const model = params.model ?? "unknown";
+          const sessionId = params.sessionId ?? params.session_id ?? "unknown";
+          if (assistantContent) {
+            tracker?.onResponseReceived?.(sessionId, model, Math.ceil(assistantContent.length / 4), "completed", Date.now() - afterTurnStart);
+          }
+        } catch {}
+      } catch (err) {
+          logger?.error?.({ err }, '[lcm-graph-extra] afterTurn error');
         }
       },
 
-      async compact(_params: any) {
-        return { ok: true, compacted: true };
+      async compact(params: any) {
+
+          // AbortSignal support - early exit if cancelled
+          const signal = (params as any).abortSignal || (params as any).signal;
+          if (signal?.aborted) {
+            return { ok: false, reason: 'aborted' };
+          }
+
+        try {
+          // Delegate to onCompaction hook (backup + Neo4j marker + debt write)
+          await onCompaction({
+            config: api.config,
+            logger: logger,
+            context: {} as any,
+            unregister: () => {},
+            _losslessClawAdapter: _losslessClawAdapter,
+          });
+          // Return real status: check if lossless-claw adapter was connected
+          const _adapterConnected = !!(_losslessClawAdapter?.connected);
+          if (!_adapterConnected) {
+            logger?.warn?.("compact: LosslessClawAdapter not connected, DAG compaction NOT performed");
+          }
+          return { ok: true, compacted: _adapterConnected };
+        } catch (err) {
+          logger?.warn?.({ err }, "compact: onCompaction failed (non-fatal)");
+          return { ok: false, reason: String(err) };
+        }
       },
 
       dispose() {
         // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
+        try { (disposeRetrievalSingletons as any)?.(); } catch {}
         initialized = false;
         initPromise = null;
         qmdClient = null;
@@ -547,4 +753,4 @@ export type {
   ExperienceNode, ExperienceSearchResult,
 } from './experience/types.js';
 
-export const VERSION = '2.1.5';
+export const VERSION = '2.1.7';

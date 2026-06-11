@@ -9,6 +9,23 @@
 
 import type { PluginInstance } from '../register';
 import { detectExperienceTrigger, extractRawExperience } from '../experience';
+import { ExperienceStorage } from '../experience/storage.js';
+import { GraphAdapter } from '../adapters/graph-adapter.js';
+import { resolveNeo4jConfig } from '../config/neo4j-helper.js';
+
+/** Cached Neo4j adapter and store for turn-complete (lazy init). */
+let _turnCompleteExpStore: ExperienceStorage | null = null;
+let _turnCompleteAdapter: GraphAdapter | null = null;
+function getTurnCompleteExpStore(): ExperienceStorage {
+  if (!_turnCompleteExpStore) {
+    _turnCompleteAdapter = new GraphAdapter(
+      resolveNeo4jConfig(undefined),
+      { enabled: true, searchLimit: 5 },
+    );
+    _turnCompleteExpStore = new ExperienceStorage(_turnCompleteAdapter, 10);
+  }
+  return _turnCompleteExpStore;
+}
 
 // ---------------------------------------------------------------------------
 // Public hook
@@ -51,30 +68,23 @@ export async function onTurnComplete(instance: PluginInstance): Promise<void> {
       const taskId = (instance.context as any).taskId;
       const raw = extractRawExperience(trigger, message, sessionId, taskId);
 
-      // 写入 Neo4j EXPERIENCE PENDING 节点 (reuse singleton from index.ts)
+      // 写入 Neo4j EXPERIENCE PENDING 节点 (use cached store)
       try {
-        const expMod = await import('../experience');
-        // get singleton from index.ts module-level variable
-        const idxMod = await import('../index');
-        const store = (idxMod as any)._expStore;
-        if (store && typeof store.saveRaw === 'function') {
-          try {
-            await store.saveRaw(raw);
-            extractedCount++;
-          } catch (e) { /* ignore save errors */ }
-        } else {
-          logger.warn('experience store not initialized, skipping save');
-        }
+        const store = getTurnCompleteExpStore();
+        try {
+          await store.saveRaw(raw);
+          extractedCount++;
+        } catch (e) { /* ignore save errors */ }
       } catch (storeErr) {
-        logger.warn({ err: (storeErr as Error).message }, 'failed to save raw experience');
+        logger?.warn?.({ err: (storeErr as Error).message }, 'failed to save raw experience');
       }
     }
 
     if (extractedCount > 0) {
-      logger.info(`turn_complete: extracted ${extractedCount} raw experience(s)`);
+      logger?.info?.(`turn_complete: extracted ${extractedCount} raw experience(s)`);
     }
   } catch (err) {
-    logger.warn({ err: (err as Error).message }, 'turn_complete: experience extraction failed');
+    logger?.warn?.({ err: (err as Error).message }, 'turn_complete: experience extraction failed');
   }
 
   // --- Legacy: entity extraction (preserved) -----------------------------

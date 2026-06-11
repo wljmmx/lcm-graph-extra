@@ -3,6 +3,7 @@
  */
 
 import type { PluginInstance } from '../register';
+// DreamingEngine removed (2026-06-10): replaced by OpenClaw native runDreamingSweepPhases
 import { cleanupExpiredNodes } from '../core/ttl';
 import type { TTLConfig } from '../core/ttl';
 import { GraphMemoryManager } from '../core/graph';
@@ -47,9 +48,16 @@ function getQmdClient(): QmdClient {
 
 /**
  * heartbeat hook: 定期检查 DAG 健康状态、过期清理、qmd 状态
+ *
+ * TODO: 接入 OpenClaw 原生 runDreamingSweepPhases 替代自建 DreamingEngine
+ *   - 从 openclaw/dist/dreaming-phases 导入
+ *   - 传入 workspaceDir + pluginConfig + logger
  */
 export async function onHeartbeat(instance: PluginInstance): Promise<void> {
   const { config, logger } = instance;
+
+  // DreamingEngine removed — will be replaced by OpenClaw runDreamingSweepPhases
+  // (see TODO above)
 
   try {
     // 1. TTL 清理（如果启用）
@@ -155,7 +163,7 @@ export async function runHealthCheck(instance: PluginInstance): Promise<void> {
 /**
  * If enough time has passed since the last backup, trigger one.
  */
-export async function checkBackupNeeded(instance: PluginInstance): Promise<void> {
+async function checkBackupNeeded(instance: PluginInstance): Promise<void> {
   const { config, logger } = instance;
 
   if (!config.backupConfig) return;

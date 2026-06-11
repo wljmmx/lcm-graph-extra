@@ -348,6 +348,36 @@ export class GraphMemoryManager {
     return copy;
   }
 
+  // ===================== File Persistence ===============================
+
+  persist(filePath: string, metadata?: Record<string, unknown>): string {
+    const fs = require("fs");
+    const path = require("path");
+    const dir = path.dirname(filePath);
+    if (dir) fs.mkdirSync(dir, { recursive: true });
+    const payload = {
+      metadata: metadata ?? {},
+      nodes: [...this.nodes.entries()],
+      edges: this.edges,
+      savedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf-8");
+    return filePath;
+  }
+
+  load(filePath: string): number {
+    try {
+      const fs = require("fs");
+      const raw = fs.readFileSync(filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      this.nodes = new Map(parsed.nodes as [string, GraphNode][]);
+      this.edges = parsed.edges as GraphEdge[];
+      return this.nodes.size;
+    } catch {
+      return 0;
+    }
+  }
+
   // ===================== Iteration Accessors ============================
 
   _allNodeEntries(): [string, GraphNode][] {

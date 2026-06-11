@@ -13,43 +13,64 @@ import { QmdClient } from '../qmd-client';
 import { RetrievalGateway } from '../retrieval-gateway';
 import { GraphAdapter } from '../adapters/graph-adapter';
 import { ExperienceStorage } from '../experience';
+import { resolveNeo4jConfig, type Neo4jSearchConfig } from '../config/neo4j-helper';
 import type { PluginInstance } from '../register';
 
 // ---------------------------------------------------------------------------
-// Lazy singletons
+// Lazy singletons (initialized on first call with config from instance)
 // ---------------------------------------------------------------------------
 
 let _qmdClient: QmdClient | null = null;
 let _retrievalGateway: RetrievalGateway | null = null;
 let _experienceStorage: ExperienceStorage | null = null;
+let _initializedWithConfig: boolean = false;
 
 function getQmdClient(): QmdClient {
   if (!_qmdClient) _qmdClient = new QmdClient();
   return _qmdClient;
 }
 
-function getRetrievalGateway(): RetrievalGateway {
+function initRetrievalGateway(pluginConfig?: Record<string, unknown>): void {
+  if (_retrievalGateway) return;
+
+  const qmd = getQmdClient();
+  const graph = new GraphAdapter(
+    resolveNeo4jConfig(pluginConfig),
+    { enabled: true, searchLimit: 5 },
+  );
+  _retrievalGateway = new RetrievalGateway(qmd, graph, {
+    maxResults: 10,
+    fuzzyMatchThreshold: 0.85,
+    decayHalfLifeDays: 30,
+  });
+  _experienceStorage = new ExperienceStorage(graph);
+  _initializedWithConfig = true;
+}
+
+function getRetrievalGateway(): RetrievalGateway | null {
   if (!_retrievalGateway) {
-    const qmd = getQmdClient();
-    const graph = new GraphAdapter(
-      { uri: 'bolt://192.168.50.89:7687', user: 'neo4j', password: 'pro-gm-2.1.0' },
-      { enabled: true, searchLimit: 5 },
-    );
-    _retrievalGateway = new RetrievalGateway(qmd, graph, {
-      maxResults: 10,
-      fuzzyMatchThreshold: 0.85,
-      decayHalfLifeDays: 30,
-    });
-    _experienceStorage = new ExperienceStorage(graph);
+    // Fallback: init without plugin config (uses env vars + defaults)
+    initRetrievalGateway();
   }
   return _retrievalGateway;
 }
 
 function getExperienceStorage(): ExperienceStorage | null {
   if (!_experienceStorage) {
-    const gateway = getRetrievalGateway();
+    initRetrievalGateway();
   }
   return _experienceStorage;
+}
+
+/**
+ * Cleanup singletons to avoid resource leaks.
+ * Call during plugin dispose or between major lifecycle events.
+ */
+export function disposeAfterTurn(): void {
+  _qmdClient = null;
+  _retrievalGateway = null;
+  _experienceStorage = null;
+  _initializedWithConfig = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,9 +142,12 @@ function sourceToLabel(source: string): string {
  *   Layer 3: GraphAdapter → Neo4j 知识图谱
  *   Layer 4: ExperienceStorage → 精炼经验召回
  */
-export async function onBeforeTurn(instance: PluginInstance): Promise<string> {
+export async function onBeforeTurn(instance: PluginInstance, params?: { messages?: Array<{ role?: string; content?: string }> }): Promise<string> {
   const logger = instance.logger;
   const budgetTokens = computeBudget(instance);
+
+  // Initialize retrieval gateway with plugin config (ensures neo4j credentials resolved)
+  initRetrievalGateway(instance.config);
 
   // --- Phase 1: RetrievalGateway (qmd + graph) --------------------------
   let results: Array<{
@@ -133,7 +157,16 @@ export async function onBeforeTurn(instance: PluginInstance): Promise<string> {
 
   try {
     const gateway = getRetrievalGateway();
-    results = await gateway.search('relevant memory context for current conversation');
+    if (!gateway) {
+      logger?.warn?.('before_turn: retrieval gateway not initialized');
+      return '';
+    }
+    // Build search query from actual prompt context
+    const userMessages = (params?.messages ?? []).filter(m => m.role === 'user' && m.content);
+    const promptSnippet = userMessages.length > 0
+      ? (userMessages[userMessages.length - 1].content ?? '').slice(0, 200)
+      : 'relevant memory context for current conversation';
+    results = await gateway.search(promptSnippet);
     logger?.debug?.(
       `before_turn: retrieval gateway returned ${results.length} results`,
     );
@@ -189,4 +222,5 @@ export const __test__ = {
   getQmdClient,
   getRetrievalGateway,
   getExperienceStorage,
+  initRetrievalGateway,
 };

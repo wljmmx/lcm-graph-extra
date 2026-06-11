@@ -3,8 +3,8 @@
 // ============================================================
 
 import * as fs from 'fs';
+import * as zlib from 'zlib';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
 import { GraphMemoryManager, GraphNode, GraphEdge } from './graph';
 
 // ---------- types ---------------------------------------------------------
@@ -296,8 +296,8 @@ export async function archiveDAG(
 
   try {
     const outPath = path.join(archiveDir, fileName.replace(/\.json$/, '.tar.gz'));
-    execFileSync('tar', ['czf', outPath, '-C', archiveDir, `${fileName}.tmp`]);
-
+    const gzipData = zlib.gzipSync(Buffer.from(json, "utf-8"));
+    fs.writeFileSync(outPath, gzipData);
     return { archivedAt: now, path: outPath };
   } finally {
     try { fs.unlinkSync(tmpPath); } catch { /* already removed by tar */ }

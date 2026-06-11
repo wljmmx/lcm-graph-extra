@@ -12,11 +12,12 @@ const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
+import { resolveNeo4jConfig } from './config/neo4j-helper';
 
 const LCM_DB = "/home/wljmmx/.openclaw/lcm.db";
-const NEO4J_URI = "bolt://192.168.50.89:7687";
-const NEO4J_USER = "neo4j";
-const NEO4J_PASS = "pro-gm-2.1.0";
+// Neo4j credentials resolved at runtime via neo4j-helper
+// Neo4j user resolved at runtime via neo4j-helper
+// Neo4j credentials resolved at runtime via neo4j-helper
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,7 +29,8 @@ function openDb() {
 
 async function neo4jSession() {
   const neo4j = await import("neo4j-driver").then((m) => m.default);
-  const driver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASS));
+  const config = resolveNeo4jConfig(undefined);
+  const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
   return { driver, session: driver.session() };
 }
 
@@ -536,7 +538,7 @@ export function registerOperationalTools(api: any): void {
             for (const l of qmdLines) results.push(`- ${l}`);
             results.push("");
           }
-        } catch { /* qmd unavailable */ }
+        } catch { console.debug("[tools] qmd search unavailable"); }
       }
 
       // --- Neo4j ---
