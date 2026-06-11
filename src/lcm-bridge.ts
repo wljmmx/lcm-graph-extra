@@ -1,4 +1,3 @@
-import sqlite from 'node:sqlite';
 /**
  * lcm-bridge — lossless-claw SQLite DB 操作桥接
  *
@@ -47,9 +46,12 @@ export interface MaxContextChars {
 // Internal — lazy DB 连接
 // ---------------------------------------------------------------------------
 
+const _lcmRequire = (await import('node:module')).createRequire(import.meta.url);
+
 function getDb(): any {
   try {
-    return new (sqlite).DatabaseSync(LCM_DB_PATH);
+    const { DatabaseSync } = _lcmRequire('node:sqlite');
+    return new DatabaseSync(LCM_DB_PATH);
   } catch {
     return null;
   }
