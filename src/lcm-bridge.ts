@@ -9,6 +9,7 @@
 
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { createRequire } from 'node:module';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -46,7 +47,7 @@ export interface MaxContextChars {
 // Internal — lazy DB 连接
 // ---------------------------------------------------------------------------
 
-const _lcmRequire = (await import('node:module')).createRequire(import.meta.url);
+const _lcmRequire = createRequire(import.meta.url);
 
 function getDb(): any {
   try {
