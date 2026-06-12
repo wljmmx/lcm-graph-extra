@@ -253,7 +253,28 @@ export class LosslessClawAdapter {
     if (!this._connected || !this.engine) return;
     if (typeof this.engine.afterTurn !== 'function') return;
     try {
-      await this.engine.afterTurn(params);
+      const normalizedMessages = (params.messages ?? []).map((msg) => {
+        if (Array.isArray(msg.content)) {
+          return {
+            ...msg,
+            content: msg.content
+              .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .join('\n'),
+          };
+        }
+        if (typeof msg.content !== 'string') {
+          return { ...msg, content: String(msg.content ?? '') };
+        }
+        return msg;
+      });
+
+      const normalizedParams = {
+        ...params,
+        messages: normalizedMessages,
+      };
+
+      await this.engine.afterTurn(normalizedParams);
     } catch {
       // 非关键路径，忽略错误
     }
@@ -273,7 +294,28 @@ export class LosslessClawAdapter {
       return { bootstrapped: false, importedMessages: 0 };
     }
     try {
-      return await this.engine.bootstrap(params);
+      const normalizedMessages = (params.messages ?? []).map((msg) => {
+        if (Array.isArray(msg.content)) {
+          return {
+            ...msg,
+            content: msg.content
+              .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .join('\n'),
+          };
+        }
+        if (typeof msg.content !== 'string') {
+          return { ...msg, content: String(msg.content ?? '') };
+        }
+        return msg;
+      });
+
+      const normalizedParams = {
+        ...params,
+        messages: normalizedMessages,
+      };
+
+      return await this.engine.bootstrap(normalizedParams);
     } catch {
       return { bootstrapped: false, importedMessages: 0 };
     }
