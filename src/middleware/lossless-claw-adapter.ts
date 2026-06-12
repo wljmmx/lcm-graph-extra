@@ -179,6 +179,21 @@ export class LosslessClawAdapter {
       return { ingested: false };
     }
     try {
+      // Normalize message content before passing to lossless-claw engine
+      const msg = params.message;
+      if (msg && Array.isArray(msg.content)) {
+        const normalizedContent = msg.content
+          .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+          .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+          .join('
+');
+        const normalizedParams = { ...params, message: { ...msg, content: normalizedContent } };
+        return await this.engine.ingest(normalizedParams);
+      }
+      if (msg && typeof msg.content !== 'string') {
+        const normalizedParams = { ...params, message: { ...msg, content: String(msg.content ?? '') } };
+        return await this.engine.ingest(normalizedParams);
+      }
       return await this.engine.ingest(params);
     } catch {
       return { ingested: false };
@@ -199,7 +214,31 @@ export class LosslessClawAdapter {
       return { ingestedCount: (params.messages ?? []).length };
     }
     try {
-      return await this.engine.ingestBatch(params);
+      // Normalize messages before passing to lossless-claw engine
+      // OpenClaw may pass content as arrays (rich text/images), but engine expects strings
+      const normalizedMessages = (params.messages ?? []).map((msg) => {
+        if (Array.isArray(msg.content)) {
+          return {
+            ...msg,
+            content: msg.content
+              .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .join('
+'),
+          };
+        }
+        if (typeof msg.content !== 'string') {
+          return { ...msg, content: String(msg.content ?? '') };
+        }
+        return msg;
+      });
+
+      const normalizedParams = {
+        ...params,
+        messages: normalizedMessages,
+      };
+
+      return await this.engine.ingestBatch(normalizedParams);
     } catch {
       return { ingestedCount: 0 };
     }
