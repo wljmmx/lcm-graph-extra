@@ -185,8 +185,7 @@ export class LosslessClawAdapter {
         const normalizedContent = msg.content
           .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
           .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
-          .join('
-');
+          .join('\n');
         const normalizedParams = { ...params, message: { ...msg, content: normalizedContent } };
         return await this.engine.ingest(normalizedParams);
       }
@@ -223,8 +222,7 @@ export class LosslessClawAdapter {
             content: msg.content
               .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
               .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('
-'),
+              .join('\n'),
           };
         }
         if (typeof msg.content !== 'string') {
