@@ -204,16 +204,52 @@ export default definePluginEntry({
     let qmdClient: any = null;
     let graphAdapter: any = null;
     let expStore: any = null;
-    // Session-isolated dedup: Map<sessionKey, { window: string[][], maxRounds: number }>
+    // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
 // Each session tracks hashes for up to 24 rounds of conversation
-const sessionDedupMap = new Map<string, { window: string[][]; maxRounds: number }>();
+const MAX_DEDUP_CAPACITY = 500;
+const DEDUP_TTL_MS = 60 * 60 * 1000;
+const sessionDedupCache = new Map<string, { window: string[][]; maxRounds: number; lastAccess: number }>();
+const dedupAccessOrder: string[] = [];
 let MAX_DEDUP_ROUNDS = 24;  // S5-2: updated from config during init()
 
-function getSessionDedup(sessionKey: string) {
-  if (!sessionDedupMap.has(sessionKey)) {
-    sessionDedupMap.set(sessionKey, { window: [], maxRounds: MAX_DEDUP_ROUNDS });
+function evictStaleDedup(): void {
+  const now = Date.now();
+  let evicted = 0;
+  while (dedupAccessOrder.length > 0) {
+    const key = dedupAccessOrder[0];
+    const entry = sessionDedupCache.get(key);
+    if (!entry || (now - entry.lastAccess) > DEDUP_TTL_MS) {
+      dedupAccessOrder.shift();
+      sessionDedupCache.delete(key);
+      evicted++;
+    } else {
+      break;
+    }
   }
-  return sessionDedupMap.get(sessionKey)!;
+  while (sessionDedupCache.size > MAX_DEDUP_CAPACITY) {
+    const lru = dedupAccessOrder.shift()!;
+    sessionDedupCache.delete(lru);
+    evicted++;
+  }
+}
+
+function touchDedup(sessionKey: string): void {
+  const idx = dedupAccessOrder.indexOf(sessionKey);
+  if (idx !== -1) dedupAccessOrder.splice(idx, 1);
+  dedupAccessOrder.push(sessionKey);
+}
+
+function getSessionDedup(sessionKey: string) {
+  let entry = sessionDedupCache.get(sessionKey);
+  if (!entry) {
+    evictStaleDedup();
+    entry = { window: [], maxRounds: MAX_DEDUP_ROUNDS, lastAccess: Date.now() };
+    sessionDedupCache.set(sessionKey, entry);
+  } else {
+    entry.lastAccess = Date.now();
+  }
+  touchDedup(sessionKey);
+  return entry;
 }
 
     async function ensureInitialized() {
@@ -408,6 +444,19 @@ function getSessionDedup(sessionKey: string) {
                 conversationId, wm?.compactTokenBudget ?? 114_688, estimatedTokens,
                 `proactive_${tier}_pressure`,
               );
+              // Fire DAG compaction immediately (non-blocking) for next assemble to use compressed history
+              if (_losslessClawAdapter?.connected) {
+                const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
+                _losslessClawAdapter.compact({
+                  sessionId: conversationId,
+                  sessionKey: sessionKey,
+                  sessionFile: sessionFile,
+                  tokenBudget: wm?.compactTokenBudget ?? 114_688,
+                  force: true,
+                  currentTokenCount: estimatedTokens,
+                  compactionTarget: 'threshold',
+                }).catch(() => {});
+              }
             }
           }
 
@@ -717,6 +766,23 @@ function getSessionDedup(sessionKey: string) {
             }
           }
 
+          // Assemble audit log
+          logger?.info?.({
+            audit: {
+              totalInjectedChars: (systemPromptAddition || '').length,
+              msgCount: msgs.length,
+              tier: tier,
+              retrievalLimits: retrievalLimits,
+              maxContextChars: maxContextChars,
+              l2_count: qmdResults.length,
+              l3_count: graphResults.length,
+              l4_count: expResults.length,
+              lca_connected: !!_losslessClawAdapter?.connected,
+              truncated: (systemPromptAddition || '').length > maxContextChars,
+              removedSectionsCount: removedSections.length,
+              removedSections: removedSections,
+            }
+          }, 'assemble: injection audit');
           return {
             messages: msgs,
             estimatedTokens: msgs.reduce((sum: number, m: any) => sum + (m.content.length / 4), 0),
@@ -789,12 +855,17 @@ function getSessionDedup(sessionKey: string) {
           };
 
           if (graphAdapter) {
-            const result = await graphAdapter.extractAndUpsertFromTurn(
-              llmConfig, userContent, assistantContent,
-            );
-            if (result.nodes > 0 || result.edges > 0) {
-              logger?.debug?.(`[afterTurn] triplets: +${result.nodes} nodes, +${result.edges} edges`);
-            }
+            // Fire-and-forget: don't block afterTurn lifecycle
+            Promise.race([
+              graphAdapter.extractAndUpsertFromTurn(llmConfig, userContent, assistantContent),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Triplet extraction timeout: 8s')), 8000))
+            ]).then(result => {
+              if (result && (result.nodes > 0 || result.edges > 0)) {
+                logger?.debug?.(`[afterTurn] triplets: +${result.nodes} nodes, +${result.edges} edges`);
+              }
+            }).catch((err: Error) => {
+              logger?.warn?.({ err: err.message }, 'afterTurn: triplet extraction skipped (async)');
+            });
           }
         // Track response tokens (non-blocking)
         try {
@@ -878,30 +949,9 @@ function getSessionDedup(sessionKey: string) {
             }
           }
 
-          // 2. Local: flush stale dedup windows (>1 hour old sessions)
+          // 2. Local: evict stale dedup via LRU cache
           try {
-            const now = Date.now();
-            const staleThreshold = 60 * 60 * 1000;  // 1 hour
-            let pruned = 0;
-            for (const [key, entry] of sessionDedupMap.entries()) {
-              // Simple heuristic: if window has max rounds, it's active enough to keep
-              if (entry.window.length >= MAX_DEDUP_ROUNDS) continue;
-              // Otherwise treat as potentially stale; we don't track timestamps
-              // so just cap the map size
-            }
-            if (sessionDedupMap.size > 100) {
-              // Prune oldest entries by converting to array and slicing
-              const entries = Array.from(sessionDedupMap.entries());
-              sessionDedupMap.clear();
-              for (const [k, v] of entries.slice(-50)) {
-                sessionDedupMap.set(k, v);
-              }
-              pruned = entries.length - 50;
-            }
-            if (pruned > 0) {
-              changed = true;
-              logger?.debug?.(`maintain: pruned ${pruned} stale dedup sessions`);
-            }
+            evictStaleDedup();
           } catch {}
 
           return { ok: true, changed, bytesFreed };
