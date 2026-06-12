@@ -7,3 +7,4 @@ dist/
 # Performance test generated artifacts
 test/perf/*-results.json
 test/perf/REPORT-latest.md
+test/perf/CE-report.md

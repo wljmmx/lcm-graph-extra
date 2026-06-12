@@ -13,10 +13,12 @@ cd "$DIR"
 
 SKIP_NEO4J=false
 SKIP_QMD=false
+SKIP_CE=false
 for arg in "$@"; do
   case "$arg" in
     --skip-neo4j) SKIP_NEO4J=true ;;
     --skip-qmd) SKIP_QMD=true ;;
+    --skip-ce) SKIP_CE=true ;;
   esac
 done
 
@@ -65,11 +67,22 @@ if [ "$SKIP_NEO4J" = false ]; then
   echo ""
 fi
 
-# Phase 5: Generate Final Report
-echo "--- Phase 5: Generating Report ---"
+# Phase 6: OpenClaw CE (Context Engine) Tests
+if [ "$SKIP_CE" = false ]; then
+  echo "--- Phase 6: OpenClaw CE Performance Tests ---"
+  echo ""
+  python3 test/perf/test-ce.py 2>&1 || echo "CE tests failed (use --skip-ce to bypass)"
+  echo ""
+else
+  echo "--- Phase 6: OpenClaw CE Performance Tests (SKIPPED) ---"
+  echo ""
+fi
+
+# Phase 7: Generate Final Report
+echo "--- Phase X: Generating Report ---"
 echo ""
 NODE_PATH=./node_modules node test/perf/generate-report.cjs 2>&1
 echo ""
-echo "Report written to: test/perf/REPORT-latest.md"
+echo "Reports written to: test/perf/REPORT-latest.md and test/perf/CE-report.md"
 echo ""
 echo "Done."

@@ -183,3 +183,16 @@
 3. **记忆文件层 (QMD):** MCP HTTP通信8-12ms，lex/vec/rerank三种模式延迟接近，无明显差异。Warm cache后更低(~8ms)。
 4. **图查询引擎 (graph-memory-pro):** searchNodes平均5-10ms，最高96ms（首次冷启动含import 188ms）。findById batch约7ms，PPR查询约30ms。
 5. **整体吞吐:** 单次完整检索流水线约20-50ms（QMD+Neo4j并行+Rerank+Merger），256K上下文窗口下按P95计算可支持~40次/秒的检索吞吐。
+
+## CE (Context Engine) 测试
+
+| 模块 | 延迟范围 | 说明 |
+|------|---------|------|
+| Context Build | avg ~862s (含长会话) | 包含首次系统提示词注入+对话历史加载 |
+| P50 Runtime | ~393s | 中位数运行时，多数会话较快完成 |
+| Token Rate | ~795 tok/s | 平均token处理速率 |
+| Max Context Utilization | 432.9% | 部分会话超过上下文窗口触发压缩 |
+| Cache Hit Rate | 100% | ollama本地模型无远程缓存 |
+| Success Rate | 67.7% | 42/62会话正常完成，其余为running/timeout |
+| Total Compactions | 6 | 仅6次上下文压缩触发 |
+
