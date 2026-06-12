@@ -115,7 +115,7 @@ function formatRetrievalResults(
   for (const r of results) {
     const sourceLabel = sourceToLabel(r.source);
     const block = `### [${sourceLabel}] ${r.metadata?.title ?? r.metadata?.name ?? r.id}\n`
-      + `Score: ${Math.round(r.score * 100)}% | `
+      + `Score: ${Math.round(r.score * 100)}% | ` 
       + `Type: ${r.metadata?.nodeType ?? r.type}\n\n`
       + (r.content || '(no content)');
     const tokenCost = estimateTokens(block);
@@ -138,6 +138,22 @@ function sourceToLabel(source: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Performance timing helper (structured output for test parser)
+// ---------------------------------------------------------------------------
+
+interface BeforeTurnTimings {
+  total: number;
+  init_gateway: number;
+  retrieval_gateway_total: number;
+  qmd_search: number | null;
+  graph_search: number | null;
+  merger: number | null;
+  experience_search: number;
+  dedup: number;
+  format: number;
+}
+
+// ---------------------------------------------------------------------------
 // Public hook
 // ---------------------------------------------------------------------------
 
@@ -150,17 +166,25 @@ function sourceToLabel(source: string): string {
  *   Layer 4: ExperienceStorage → 精炼经验召回
  */
 export async function onBeforeTurn(instance: PluginInstance, params?: { messages?: Array<{ role?: string; content?: string }> }): Promise<string> {
+  const t0 = performance.now();
   const logger = instance.logger;
   const budgetTokens = computeBudget(instance);
 
-  // Initialize retrieval gateway with plugin config (ensures neo4j credentials resolved)
+  // --- Timing: init gateway -----------------------------------------
+  const t_init_start = performance.now();
   initRetrievalGateway(instance.config);
+  const t_init_end = performance.now();
 
   // --- Phase 1: RetrievalGateway (qmd + graph) --------------------------
   let results: Array<{
     id: string; content: string; source: string; type: string;
     score: number; metadata?: Record<string, unknown>;
   }> = [];
+
+  const t_rgw_start = performance.now();
+  let qmdMs: number | null = null;
+  let graphMs: number | null = null;
+  let mergerMs: number | null = null;
 
   try {
     const gateway = getRetrievalGateway();
@@ -174,14 +198,23 @@ export async function onBeforeTurn(instance: PluginInstance, params?: { messages
       ? (userMessages[userMessages.length - 1].content ?? '').slice(0, 200)
       : 'relevant memory context for current conversation';
     results = await gateway.search(promptSnippet);
+    
+    // Extract per-engine timing from stats
+    const gwStats = (gateway as any).stats || {};
+    qmdMs = gwStats.qmd?.lastQueryTime ?? null;
+    graphMs = gwStats.graph?.lastQueryTime ?? null;
+    mergerMs = null; // merger is fast, embedded in gateway.search timing
+    
     logger?.debug?.(
       `before_turn: retrieval gateway returned ${results.length} results`,
     );
   } catch (err) {
     logger?.warn?.({ err: (err as Error).message }, 'before_turn: retrieval failed');
   }
+  const t_rgw_end = performance.now();
 
   // --- Phase 2: Experience injection (Layer 4) --------------------------
+  const t_exp_start = performance.now();
   try {
     const expThreshold = instance.config.experience?.relevanceThreshold ?? 0.6;
     const expLimit = 3;
@@ -208,8 +241,10 @@ export async function onBeforeTurn(instance: PluginInstance, params?: { messages
   } catch (err) {
     logger?.warn?.({ err: (err as Error).message }, 'before_turn: experience injection failed');
   }
+  const t_exp_end = performance.now();
 
   // --- Phase 2.5: Final dedup across all sources (qmd + graph + experience) ---
+  const t_dedup_start = performance.now();
   {
     const seenIds = new Set<string>();
     const seenContent = new Map<string, number>();
@@ -229,14 +264,24 @@ export async function onBeforeTurn(instance: PluginInstance, params?: { messages
     results.length = 0;
     for (const r of deduped) results.push(r);
   }
+  const t_dedup_end = performance.now();
 
   // --- Phase 3: Format & return -----------------------------------------
+  const t_fmt_start = performance.now();
+  let output = '';
   if (results.length > 0) {
-    return formatRetrievalResults(results, budgetTokens);
+    output = formatRetrievalResults(results, budgetTokens);
   }
+  const t_fmt_end = performance.now();
 
-  logger?.debug?.('before_turn: no context results, returning empty');
-  return '';
+  const t_total = performance.now() - t0;
+
+  // --- Log structured timing for test parser ----------------------------
+  logger?.info?.(
+    `[TIMING] before_turn total=${t_total.toFixed(1)}ms init=${(t_init_end - t_init_start).toFixed(1)}ms rgw=${(t_rgw_end - t_rgw_start).toFixed(1)}ms qmd=${qmdMs?.toFixed(1) ?? '-'}ms graph=${graphMs?.toFixed(1) ?? '-'}ms exp=${(t_exp_end - t_exp_start).toFixed(1)}ms dedup=${(t_dedup_end - t_dedup_start).toFixed(1)}ms fmt=${(t_fmt_end - t_fmt_start).toFixed(1)}ms results=${results.length}`,
+  );
+
+  return output;
 }
 
 // ---------------------------------------------------------------------------
