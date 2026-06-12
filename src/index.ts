@@ -655,7 +655,7 @@ function getSessionDedup(sessionKey: string) {
           // ==================================================================
           {
             const sdkGuidance = buildMemorySystemPromptAddition({
-              availableTools,
+              availableTools: new Set(availableTools),
               citationsMode,
             });
             if (sdkGuidance) {
