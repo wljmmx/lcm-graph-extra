@@ -432,6 +432,16 @@ function getSessionDedup(sessionKey: string) {
           }
 
           // ==================================================================
+          // 1b. Token ratio warning: log when approaching threshold (>0.65)
+          // ==================================================================
+          if (tokenRatio > 0.65 && !needsCompact) {
+            logger?.warn?.(
+              { tokenRatio: Number(tokenRatio.toFixed(3)), estimatedTokens, contextWindow },
+              "window monitor: token ratio above 0.65, approaching compaction threshold",
+            );
+          }
+
+          // ==================================================================
           // 2. Fire-and-forget: write compaction debt if needed
           // ==================================================================
           if (needsCompact) {
@@ -895,33 +905,50 @@ function getSessionDedup(sessionKey: string) {
           
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
 
-          // --- Fire-and-forget: trigger lossless-claw DAG compaction asynchronously ---
+          // --- Promise.race + 30s timeout: trigger lossless-claw DAG compaction asynchronously ---
           if (_adapterConnected) {
             try {
-              void _losslessClawAdapter.compact(params).catch((ceErr) => {
-                logger?.warn?.({ err: ceErr }, "compact: background DAG compaction failed");
+              const compactTimeout = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('compact: 30s timeout reached')), 30000);
               });
+              await Promise.race([
+                _losslessClawAdapter.compact(params),
+                compactTimeout,
+              ]);
             } catch (ceErr) {
-              logger?.warn?.({ err: ceErr }, "compact: fire-and-forget call threw");
+              const msg = String(ceErr);
+              if (msg.includes('timeout')) {
+                logger?.warn?.({ err: ceErr }, "compact: DAG compaction timed out after 30s");
+              } else {
+                logger?.warn?.({ err: ceErr }, "compact: background DAG compaction failed");
+              }
             }
           } else {
             logger?.debug("compact: LosslessClawAdapter not connected, DAG compaction skipped");
           }
 
-          // --- Fire-and-forget onCompaction hook too (backup + Neo4j marker) ---
-          // Avoid blocking the main session even for file I/O operations
+          // --- Promise.race + 30s timeout: onCompaction hook (backup + Neo4j marker) ---
           try {
-            void onCompaction({
-              config: api.config,
-              logger: logger,
-              context: {} as any,
-              unregister: () => {},
-              _losslessClawAdapter: null,
-            }).catch((hookErr) => {
-              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook failed (non-fatal)");
+            const hookTimeout = new Promise((_, reject) => {
+              setTimeout(() => reject(new Error('onCompaction: 30s timeout reached')), 30000);
             });
+            await Promise.race([
+              onCompaction({
+                config: api.config,
+                logger: logger,
+                context: {} as any,
+                unregister: () => {},
+                _losslessClawAdapter: null,
+              }),
+              hookTimeout,
+            ]);
           } catch (hookErr) {
-            logger?.warn?.({ err: hookErr }, "compact: onCompaction hook threw (non-fatal)");
+            const msg = String(hookErr);
+            if (msg.includes('timeout')) {
+              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook timed out after 30s");
+            } else {
+              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook failed (non-fatal)");
+            }
           }
 
           return { ok: true, compacted: _adapterConnected, reason: 'compaction triggered (background)' };
@@ -930,7 +957,6 @@ function getSessionDedup(sessionKey: string) {
           return { ok: false, reason: String(err) };
         }
       },
-
       async maintain(params: any) {
         // S10-1: Periodic maintenance — delegate to lossless-claw + local cleanup
         const signal = (params as any).abortSignal || (params as any).signal;

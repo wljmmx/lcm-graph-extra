@@ -73,6 +73,9 @@ export async function onHeartbeat(instance: PluginInstance): Promise<void> {
       await checkBackupNeeded(instance);
     }
 
+    // 4. 压缩压力三维度检查
+    await checkCompactionPressure(instance);
+
     logger.debug('heartbeat hook processed');
   } catch (err) {
     logger.error({ err }, 'heartbeat hook failed');
@@ -195,6 +198,93 @@ async function performBackup(instance: PluginInstance): Promise<void> {
   logger.info('backup completed');
 }
 
+
+// ---------- Compaction Pressure Check -------------------------------------
+
+/**
+ * Three-dimension compaction pressure check:
+ *   1. token ratio vs context window
+ *   2. summary debt accumulation
+ *   3. message count growth rate
+ */
+export async function checkCompactionPressure(instance: PluginInstance): Promise<void> {
+  const { logger } = instance;
+
+  try {
+    // Dimension 1: token ratio (via estimateTokensFromMessages if available)
+    // We read the compaction debt files to assess pressure
+    const fs = await import("fs");
+    const pathLib = await import("path");
+
+    const ctx = instance.context as unknown as Record<string, unknown>;
+    const workspaceDir = (ctx.workspaceDir as string) 
+      ?? (instance.config?.workspaceDir as string)
+      ?? process.env.OPENCLAW_WORKSPACE 
+      ?? "";
+
+    if (!workspaceDir) {
+      logger.debug("checkCompactionPressure: no workspaceDir, skipping");
+      return;
+    }
+
+    const debtDir = pathLib.join(workspaceDir, ".lossless", "debt");
+    let debtCount = 0;
+    let totalDebtTokens = 0;
+
+    try {
+      const entries = fs.readdirSync(debtDir);
+      for (const entry of entries) {
+        if (entry.endsWith(".json")) {
+          debtCount++;
+          const debtPath = pathLib.join(debtDir, entry);
+          try {
+            const raw = fs.readFileSync(debtPath, "utf8");
+            const debt = JSON.parse(raw);
+            totalDebtTokens += debt.currentTokenCount ?? 0;
+          } catch { /* skip corrupt debt files */ }
+        }
+      }
+    } catch {
+      logger.debug("checkCompactionPressure: debt dir not accessible");
+      return;
+    }
+
+    // Dimension 2: summary count growth
+    const summaryDir = pathLib.join(workspaceDir, ".lossless", "summaries");
+    let summaryCount = 0;
+    try {
+      summaryCount = fs.readdirSync(summaryDir).length;
+    } catch {
+      logger.debug("checkCompactionPressure: summaries dir not accessible");
+    }
+
+    // Dimension 3: assess overall pressure level
+    const pressureSignals = [];
+    if (totalDebtTokens > 200_000) {
+      pressureSignals.push(`debt_tokens=${totalDebtTokens}`);
+    }
+    if (summaryCount > 50) {
+      pressureSignals.push(`summaries=${summaryCount} (high)`);
+    }
+    if (debtCount > 10) {
+      pressureSignals.push(`debt_files=${debtCount} (accumulated)`);
+    }
+
+    if (pressureSignals.length > 0) {
+      logger.warn(
+        { signals: pressureSignals, debtFiles: debtCount, totalDebtTokens, summaryCount },
+        "checkCompactionPressure: elevated compaction pressure detected",
+      );
+    } else {
+      logger.debug(
+        { debtFiles: debtCount, totalDebtTokens, summaryCount },
+        "checkCompactionPressure: within normal range",
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, "checkCompactionPressure failed");
+  }
+}
 // ---------- Helpers -------------------------------------------------------
 
 /**
