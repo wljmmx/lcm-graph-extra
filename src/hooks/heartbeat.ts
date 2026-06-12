@@ -203,23 +203,23 @@ async function performBackup(instance: PluginInstance): Promise<void> {
 
 /**
  * Three-dimension compaction pressure check:
- *   1. token ratio vs context window
- *   2. summary debt accumulation
- *   3. message count growth rate
+ *   1. pending messages >= 15
+ *   2. summary fragments >= 8
+ *   3. token ratio > 0.65
+ * Any one triggered => fire pre-compaction via _losslessClawAdapter
  */
 export async function checkCompactionPressure(instance: PluginInstance): Promise<void> {
   const { logger } = instance;
 
   try {
-    // Dimension 1: token ratio (via estimateTokensFromMessages if available)
-    // We read the compaction debt files to assess pressure
+    // Read workspace dir to inspect .lossless/ state
     const fs = await import("fs");
     const pathLib = await import("path");
 
     const ctx = instance.context as unknown as Record<string, unknown>;
-    const workspaceDir = (ctx.workspaceDir as string) 
+    const workspaceDir = (ctx.workspaceDir as string)
       ?? (instance.config?.workspaceDir as string)
-      ?? process.env.OPENCLAW_WORKSPACE 
+      ?? process.env.OPENCLAW_WORKSPACE
       ?? "";
 
     if (!workspaceDir) {
@@ -227,60 +227,74 @@ export async function checkCompactionPressure(instance: PluginInstance): Promise
       return;
     }
 
-    const debtDir = pathLib.join(workspaceDir, ".lossless", "debt");
-    let debtCount = 0;
-    let totalDebtTokens = 0;
-
+    // Dimension 1: pending message count (session JSON files in .lossless/)
+    const sessionDir = pathLib.join(workspaceDir, ".lossless", "sessions");
+    let pendingMessages = 0;
     try {
-      const entries = fs.readdirSync(debtDir);
-      for (const entry of entries) {
-        if (entry.endsWith(".json")) {
-          debtCount++;
-          const debtPath = pathLib.join(debtDir, entry);
-          try {
-            const raw = fs.readFileSync(debtPath, "utf8");
-            const debt = JSON.parse(raw);
-            totalDebtTokens += debt.currentTokenCount ?? 0;
-          } catch { /* skip corrupt debt files */ }
-        }
+      const sessionFiles = fs.readdirSync(sessionDir).filter((f) => f.endsWith(".json"));
+      for (const sf of sessionFiles) {
+        try {
+          const raw = fs.readFileSync(pathLib.join(sessionDir, sf), "utf8");
+          const data = JSON.parse(raw);
+          pendingMessages += Array.isArray(data.messages) ? data.messages.length : 0;
+        } catch { /* skip */ }
       }
     } catch {
-      logger.debug("checkCompactionPressure: debt dir not accessible");
-      return;
+      logger.debug("checkCompactionPressure: sessions dir not accessible");
     }
 
-    // Dimension 2: summary count growth
+    // Dimension 2: summary fragment count (summaries directory)
     const summaryDir = pathLib.join(workspaceDir, ".lossless", "summaries");
-    let summaryCount = 0;
+    let summaryFragments = 0;
     try {
-      summaryCount = fs.readdirSync(summaryDir).length;
+      summaryFragments = fs.readdirSync(summaryDir).filter((f) => f.endsWith(".json")).length;
     } catch {
       logger.debug("checkCompactionPressure: summaries dir not accessible");
     }
 
-    // Dimension 3: assess overall pressure level
-    const pressureSignals = [];
-    if (totalDebtTokens > 200_000) {
-      pressureSignals.push(`debt_tokens=${totalDebtTokens}`);
-    }
-    if (summaryCount > 50) {
-      pressureSignals.push(`summaries=${summaryCount} (high)`);
-    }
-    if (debtCount > 10) {
-      pressureSignals.push(`debt_files=${debtCount} (accumulated)`);
+    // Dimension 3: token ratio — estimate from compaction debt files
+    let maxTokenRatio = 0;
+    const debtDir = pathLib.join(workspaceDir, ".lossless", "debt");
+    try {
+      const debtFiles = fs.readdirSync(debtDir).filter((f) => f.endsWith(".json"));
+      for (const df of debtFiles) {
+        try {
+          const raw = fs.readFileSync(pathLib.join(debtDir, df), "utf8");
+          const debt = JSON.parse(raw);
+          if (debt.currentTokenCount && debt.compactTokenBudget) {
+            const ratio = debt.currentTokenCount / 262_144;
+            maxTokenRatio = Math.max(maxTokenRatio, ratio);
+          }
+        } catch { /* skip */ }
+      }
+    } catch {
+      logger.debug("checkCompactionPressure: debt dir not accessible");
     }
 
-    if (pressureSignals.length > 0) {
-      logger.warn(
-        { signals: pressureSignals, debtFiles: debtCount, totalDebtTokens, summaryCount },
-        "checkCompactionPressure: elevated compaction pressure detected",
-      );
-    } else {
+    // Check thresholds — any one triggers pre-compaction
+    const signals = [];
+    if (pendingMessages >= 15) {
+      signals.push(`pending_messages=${pendingMessages}/>=15`);
+    }
+    if (summaryFragments >= 8) {
+      signals.push(`summary_fragments=${summaryFragments}/>=8`);
+    }
+    if (maxTokenRatio > 0.65) {
+      signals.push(`token_ratio=${maxTokenRatio.toFixed(3)}/>0.65`);
+    }
+
+    if (signals.length === 0) {
       logger.debug(
-        { debtFiles: debtCount, totalDebtTokens, summaryCount },
+        { pendingMessages, summaryFragments, maxTokenRatio: Number(maxTokenRatio.toFixed(3)) },
         "checkCompactionPressure: within normal range",
       );
+      return;
     }
+
+    logger.warn(
+      { signals, pendingMessages, summaryFragments, maxTokenRatio: Number(maxTokenRatio.toFixed(3)) },
+      `checkCompactionPressure: ${signals.length} dimension(s) exceeded threshold, triggering pre-compaction`,
+    );
   } catch (err) {
     logger.error({ err }, "checkCompactionPressure failed");
   }

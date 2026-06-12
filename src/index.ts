@@ -432,13 +432,30 @@ function getSessionDedup(sessionKey: string) {
           }
 
           // ==================================================================
-          // 1b. Token ratio warning: log when approaching threshold (>0.65)
+          // 1b. Token ratio > 0.65 warning + async pre-compaction trigger
           // ==================================================================
           if (tokenRatio > 0.65 && !needsCompact) {
             logger?.warn?.(
               { tokenRatio: Number(tokenRatio.toFixed(3)), estimatedTokens, contextWindow },
-              "window monitor: token ratio above 0.65, approaching compaction threshold",
+              "window monitor: token ratio above 0.65, triggering async pre-compaction",
             );
+            // Fire-and-forget pre-compaction to reduce context before it gets worse
+            if (_losslessClawAdapter?.connected) {
+              const preCompactSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+                : typeof params.session_id === 'string' ? params.session_id
+                : '';
+              const preCompactConversationId = getConversationId(preCompactSessionKey);
+              if (preCompactConversationId != null) {
+                _losslessClawAdapter.compact({
+                  sessionId: preCompactConversationId,
+                  sessionKey: preCompactSessionKey,
+                  sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                  force: true,
+                  currentTokenCount: estimatedTokens,
+                  compactionTarget: 'preventive',
+                }).catch(() => {});
+              }
+            }
           }
 
           // ==================================================================
