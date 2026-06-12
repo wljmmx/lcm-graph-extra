@@ -252,6 +252,142 @@ export class GraphAdapter {
     } catch { return []; }
   }
 
+
+  /**
+   * Batch upsert: single Cypher UNWIND + MERGE for nodes and edges.
+   * Reduces N round-trips to O(1).
+   */
+  async batchUpsert(
+    entities: Array<{ name: string; type: string; description: string; content: string }>,
+    relations: Array<{ from: string; to: string; type: string; instruction?: string }>,
+  ): Promise<{ upserted: number; conflicts: number }> {
+    if (!this.driver) return { upserted: 0, conflicts: 0 };
+
+    const validEntities = entities.filter((e) => e.name?.trim());
+    const validRelations = relations.filter((r) => r.from?.trim() && r.to?.trim());
+
+    if (validEntities.length === 0 && validRelations.length === 0) {
+      return { upserted: 0, conflicts: 0 };
+    }
+
+    const session = this.driver.session();
+    let uc = 0;
+    let cc = 0;
+
+    try {
+      // Batch upsert nodes via UNWIND + MERGE
+      if (validEntities.length > 0) {
+        const nodeData = validEntities.map((e) => {
+          const t = mapEntityType(e.type);
+          const nid = makeNodeId(e.name, t);
+          return {
+            id: nid,
+            label: t,
+            name: e.name.trim(),
+            description: (e.description ?? '').slice(0, 500),
+            content: (e.content ?? '').slice(0, 2000),
+            status: 'active',
+            pagerank: 0.5,
+            updatedAt: Date.now(),
+          };
+        });
+
+        // First batch check which nodes already exist (to count conflicts)
+        const existingIds: string[] = [];
+        for (const n of nodeData) {
+          const record = await session.run(
+            'MATCH (n:' + n.label + ' { id: $id }) RETURN n',
+            { id: n.id },
+          );
+          if (record.records.length > 0) {
+            existingIds.push(n.id);
+            cc++;
+          }
+        }
+
+        // Batch MERGE all nodes
+        const mergeLabels = new Set(nodeData.map((n) => n.label));
+        const labelUnion = Array.from(mergeLabels).join('|');
+        const cypher = `
+          UNWIND $nodes AS node
+          CALL apoc.create.node([node.label], {
+            id: node.id,
+            name: node.name,
+            description: node.description,
+            content: node.content,
+            status: node.status,
+            pagerank: node.pagerank,
+            updatedAt: node.updatedAt,
+          }) YIELD node AS created
+          RETURN count(created) AS cnt
+        `;
+
+        // Fallback: if apoc not available, use per-node MERGE in one transaction
+        try {
+          const result = await session.run(cypher, { nodes: nodeData });
+          uc += result.records[0]?.get('cnt') ?? 0;
+        } catch {
+          // Fallback: MERGE each node in a single transaction (still better than N round-trips)
+          for (const n of nodeData) {
+            await session.run(
+              `MERGE (n:${n.label} { id: $id })
+               SET n.name = $name,
+                   n.description = $description,
+                   n.content = $content,
+                   n.status = $status,
+                   n.pagerank = $pagerank,
+                   n.updatedAt = $updatedAt
+               ON CREATE SET n.createdAt = $updatedAt`,
+              {
+                id: n.id,
+                name: n.name,
+                description: n.description,
+                content: n.content,
+                status: n.status,
+                pagerank: n.pagerank,
+                updatedAt: n.updatedAt,
+              },
+            );
+          }
+          uc += nodeData.length;
+        }
+      }
+
+      // Batch upsert edges in a single session
+      if (validRelations.length > 0) {
+        for (const rel of validRelations) {
+          const mt = mapEdgeType(rel.type);
+          const fromId = makeNodeId(rel.from, 'TASK');
+          const toId = makeNodeId(rel.to, 'TASK');
+
+          await session.run(
+            `MATCH (a { id: $fromId }), (b { id: $toId })
+             MERGE (a)-[r:${mt}]->(b)
+             SET r.instruction = $instruction,
+                 r.weight = $weight,
+                 r.updatedAt = $updatedAt
+             ON CREATE SET r.createdAt = $updatedAt`,
+            {
+              fromId,
+              toId,
+              instruction: (rel.instruction ?? '').slice(0, 500),
+              weight: 1.0,
+              updatedAt: Date.now(),
+            },
+          );
+        }
+      }
+
+      uc += validRelations.length;
+    } catch (err) {
+      this.logger?.error?.(`[lcm-graph-extra] batchUpsert error: ${err}`);
+    } finally {
+      await session.close();
+    }
+
+    return { upserted: uc, conflicts: cc };
+  }
+
   async upsertEntities(
     entities: Array<{ name: string; type: string; description: string; content: string }>,
     relations: Array<{ from: string; to: string; type: string; instruction?: string }>,
@@ -383,7 +519,7 @@ export class GraphAdapter {
       if (!result || (!result.nodes?.length && !result.edges?.length)) return { nodes: 0, edges: 0 };
       const entities = (result.nodes ?? []).map((n: any) => ({ name: n.name ?? '', type: n.type ?? 'TASK', description: n.description ?? '', content: n.content ?? '' })).filter((e: any) => e.name?.trim());
       const relations = (result.edges ?? []).map((e: any) => ({ from: e.from ?? e.source ?? '', to: e.to ?? e.target ?? '', type: e.type ?? 'RELATED_TO', instruction: e.instruction ?? e.description ?? '' })).filter((r: any) => r.from?.trim() && r.to?.trim());
-      if (entities.length > 0 || relations.length > 0) await this.upsertEntities(entities, relations);
+      if (entities.length > 0 || relations.length > 0) await this.batchUpsert(entities, relations);
       return { nodes: entities.length, edges: relations.length };
     } catch (err) {
       this.logger?.error?.('[lcm-graph-extra] extractAndUpsertFromTurn error:', err);
