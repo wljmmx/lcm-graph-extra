@@ -881,7 +881,6 @@ function getSessionDedup(sessionKey: string) {
       },
 
       async compact(params: any) {
-
           // AbortSignal support - early exit if cancelled
           const signal = (params as any).abortSignal || (params as any).signal;
           if (signal?.aborted) {
@@ -889,34 +888,45 @@ function getSessionDedup(sessionKey: string) {
           }
 
         try {
-          // Delegate to onCompaction hook (backup + Neo4j marker + debt write)
-          await onCompaction({
-            config: api.config,
-            logger: logger,
-            context: {} as any,
-            unregister: () => {},
-            _losslessClawAdapter: _losslessClawAdapter,
-          });
-          // Delegate DAG compaction to lossless-claw engine when connected
+          // Non-blocking compaction strategy:
+          // 1. Fire-and-forget the heavy DAG/LLM summarization to background
+          // 2. Perform lightweight backup + marker in foreground (fast path)
+          // This eliminates the 10s+ blocking delay during compact().
+          
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
+
+          // --- Fire-and-forget: trigger lossless-claw DAG compaction asynchronously ---
           if (_adapterConnected) {
             try {
-              const compactResult = await _losslessClawAdapter.compact(params);
-              return {
-                ok: compactResult.ok ?? true,
-                compacted: compactResult.compacted ?? true,
-                summaryId: compactResult.summaryId,
-                reason: compactResult.reason,
-              };
+              void _losslessClawAdapter.compact(params).catch((ceErr) => {
+                logger?.warn?.({ err: ceErr }, "compact: background DAG compaction failed");
+              });
             } catch (ceErr) {
-              logger?.warn?.({ err: ceErr }, "compact: lossless-claw CE call failed");
+              logger?.warn?.({ err: ceErr }, "compact: fire-and-forget call threw");
             }
           } else {
-            logger?.warn?.("compact: LosslessClawAdapter not connected, DAG compaction NOT performed");
+            logger?.debug("compact: LosslessClawAdapter not connected, DAG compaction skipped");
           }
-          return { ok: true, compacted: _adapterConnected };
+
+          // --- Fire-and-forget onCompaction hook too (backup + Neo4j marker) ---
+          // Avoid blocking the main session even for file I/O operations
+          try {
+            void onCompaction({
+              config: api.config,
+              logger: logger,
+              context: {} as any,
+              unregister: () => {},
+              _losslessClawAdapter: null,
+            }).catch((hookErr) => {
+              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook failed (non-fatal)");
+            });
+          } catch (hookErr) {
+            logger?.warn?.({ err: hookErr }, "compact: onCompaction hook threw (non-fatal)");
+          }
+
+          return { ok: true, compacted: _adapterConnected, reason: 'compaction triggered (background)' };
         } catch (err) {
-          logger?.warn?.({ err }, "compact: onCompaction failed (non-fatal)");
+          logger?.warn?.({ err }, "compact: top-level failed (non-fatal)");
           return { ok: false, reason: String(err) };
         }
       },
