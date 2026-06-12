@@ -3,3 +3,7 @@ dist/
 .changelog/
 *.log
 .DS_Store
+
+# Performance test generated artifacts
+test/perf/*-results.json
+test/perf/REPORT-latest.md
