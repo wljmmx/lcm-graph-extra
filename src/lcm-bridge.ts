@@ -144,7 +144,18 @@ export function estimateTokensFromMessages(messages: any[]): number {
     if (msg?.token_count && typeof msg.token_count === 'number') {
       total += msg.token_count;
     } else if (msg?.content) {
-      total += Math.ceil(String(msg.content).length / 4);
+      // Handle both string content and array content [{type: "text", text: "..."}]
+      const c = msg.content;
+      if (typeof c === 'string') {
+        total += Math.ceil(c.length / 4);
+      } else if (Array.isArray(c)) {
+        const textParts = c.filter((p: any) => p.type === 'text' && typeof p.text === 'string');
+        for (const tp of textParts) {
+          total += Math.ceil(tp.text.length / 4);
+        }
+      } else {
+        total += Math.ceil(String(c).length / 4);
+      }
     }
   }
   return total;
