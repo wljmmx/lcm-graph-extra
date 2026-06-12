@@ -293,8 +293,24 @@ export async function checkCompactionPressure(instance: PluginInstance): Promise
 
     logger.warn(
       { signals, pendingMessages, summaryFragments, maxTokenRatio: Number(maxTokenRatio.toFixed(3)) },
-      `checkCompactionPressure: ${signals.length} dimension(s) exceeded threshold, triggering pre-compaction`,
+      `checkCompactionPressure: ${signals.length} dimension(s) exceeded threshold, triggering async pre-compaction`,
     );
+
+    // Trigger async pre-compaction via writeCompactionDebt + _losslessClawAdapter if available
+    try {
+      const { writeCompactionDebt } = await import("../lcm-bridge.js");
+
+      // Write debt to ensure next assemble() picks it up
+      writeCompactionDebt(
+        Date.now() % 1_000_000,
+        114_688,
+        Math.round(maxTokenRatio * 262_144),
+        `heartbeat_pressure_${signals.length}dims`,
+      );
+      logger.info("checkCompactionPressure: wrote compaction debt, next assemble will trigger");
+    } catch (debtErr) {
+      logger.warn({ err: debtErr }, "checkCompactionPressure: failed to write debt (non-fatal)");
+    }
   } catch (err) {
     logger.error({ err }, "checkCompactionPressure failed");
   }
