@@ -501,19 +501,22 @@ function getSessionDedup(sessionKey: string) {
             }
           }
 
-          // ---- Parallel Phase 1: L2 + L3 + L4 all fire together ----
+          // ---- Parallel Phase 1: L2 + L3 + L4 all fire together (with per-layer timing) ----
           const parallelStart = Date.now();
           let qmdResults: any = [];
           let graphResults: any = [];
           let expResults: any = [];
+          // Per-module latency tracking
+          let l2_ms = 0, l3_ms = 0, l4_ms = 0;
 
           try {
             const results = await Promise.all([
               // L2: qmd search (always executed — core memory retrieval, not tool-gated)
               (async () => {
+                const t0 = Date.now();
                 try {
-                  if (!qmdQuery) return [];
-                  return await qmdClient.query({
+                  if (!qmdQuery) return { results: [], ms: 0 };
+                  const res = await qmdClient.query({
                     searches: [
                       { type: "lex", query: qmdQuery },
                       { type: "vec", query: qmdQuery }
@@ -521,42 +524,56 @@ function getSessionDedup(sessionKey: string) {
                     limit: retrievalLimits.qmd,
                     rerank: true
                   });
+                  return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.({ err: (e as Error).message }, "L2 qmd query failed");
-                  return [];
+                  return { results: [], ms: Date.now() - t0 };
                 }
               })(),
               // L3: Neo4j knowledge graph — skip if no graph tool available
               (async () => {
+                const t0 = Date.now();
                 try {
                   if (!hasGraphTool) {
                     logger?.debug?.("[lcm-graph-extra] L3 graph search skipped (no graph tool)");
-                    return [];
+                    return { results: [], ms: 0 };
                   }
-                  return await graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph);
+                  const res = await graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph);
+                  return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.({ err: (e as Error).message }, "L3 graph search failed");
-                  return [];
+                  return { results: [], ms: Date.now() - t0 };
                 }
               })(),
               // L4: Experience search — skip if no experience tool available
               (async () => {
+                const t0 = Date.now();
                 try {
                   if (!hasExperienceTool) {
                     logger?.debug?.("[lcm-graph-extra] L4 experience search skipped (no experience tool)");
-                    return [];
+                    return { results: [], ms: 0 };
                   }
-                  if (retrievalLimits.exp === 0) return [];
-                  return await expStore.searchRelevant(0.6, retrievalLimits.exp);
+                  if (retrievalLimits.exp === 0) return { results: [], ms: 0 };
+                  const res = await expStore.searchRelevant(0.6, retrievalLimits.exp);
+                  return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.({ err: (e as Error).message }, "L4 experience search failed");
-                  return [];
+                  return { results: [], ms: Date.now() - t0 };
                 }
               })(),
             ]);
-            const rawQmd = results[0];
-            const rawGraph = results[1];
-            expResults = results[2];
+
+            // Extract per-layer timing
+            const l2 = results[0];
+            const l3 = results[1];
+            const l4 = results[2];
+            l2_ms = typeof l2?.ms === "number" ? l2.ms : 0;
+            l3_ms = typeof l3?.ms === "number" ? l3.ms : 0;
+            l4_ms = typeof l4?.ms === "number" ? l4.ms : 0;
+
+            const rawQmd = Array.isArray(l2?.results) ? l2.results : [];
+            const rawGraph = Array.isArray(l3?.results) ? l3.results : [];
+            expResults = Array.isArray(l4?.results) ? l4.results : [];
 
             // S9: Use Merger for entity-level dedup of qmd + graph results
             try {
@@ -608,21 +625,31 @@ function getSessionDedup(sessionKey: string) {
           const mgMs = Date.now() - mgStart;
 
           // ---- Metrics log ----
-          logger?.debug?.({
+          logger?.info?.({
             elapsed: Date.now() - assembleStart,
             init_ms: initMs,
             parallel_ms: parallelMs,
             multiget_ms: mgMs,
+            // Per-module latency breakdown
+            l2_qmd_ms: l2_ms,
+            l3_graph_ms: l3_ms,
+            l4_experience_ms: l4_ms,
+            multiGet_ms: mgMs,
+            // Counts
             l2_count: Array.isArray(qmdResults) ? qmdResults.length : 0,
             l3_count: Array.isArray(graphResults) ? graphResults.length : 0,
             l4_count: expResults.length,
             doc_count: fullDocs?.length ?? 0,
+            // Context budget
+            tokenRatio: Number(tokenRatio.toFixed(3)),
+            estimatedTokens,
+            contextWindow,
             tier: tier,
             retrieval_limits: JSON.stringify(retrievalLimits),
             available_tools_count: availableTools.length,
             has_graph_tool: hasGraphTool,
             has_experience_tool: hasExperienceTool,
-          }, "lcm-graph-extra assemble metrics");
+          }, `⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${estimatedTokens}/${contextWindow}(${(tokenRatio*100).toFixed(1)}%) | tier=${tier}`);
 
           // ---- Merge results ----
           // Session-isolated cross-round dedup (24-round window)
@@ -843,9 +870,11 @@ function getSessionDedup(sessionKey: string) {
             return;
           }
 
+        const lcAfterTurnStart = Date.now();
         try {
           await _losslessClawAdapter?.afterTurn?.(params);
         } catch { /* non-fatal */ }
+        const lcAfterTurnMs = Date.now() - lcAfterTurnStart;
 
         try {
           // Split messages into prior (history) and recent (this turn)
@@ -868,9 +897,16 @@ function getSessionDedup(sessionKey: string) {
             if (userContent && assistantContent) break;
           }
 
+          const qualityFilterMs = Date.now() - afterTurnStart;
           // Quality filter: skip low-signal turns
-          if (!userContent?.trim() || userContent.length < 50) return;
-          if (!assistantContent?.trim() || assistantContent.length < 30) return;
+          if (!userContent?.trim() || userContent.length < 50) {
+            logger?.debug?.(`[afterTurn] skipped (user content too short, ${qualityFilterMs}ms total)`);
+            return;
+          }
+          if (!assistantContent?.trim() || assistantContent.length < 30) {
+            logger?.debug?.(`[afterTurn] skipped (assistant content too short, ${qualityFilterMs}ms total)`);
+            return;
+          }
           // Skip if content is mostly whitespace or repetitive
           const wordRatio = (userContent.match(/[\w]+/g) || []).length / userContent.trim().length;
           if (wordRatio < 0.3) return;
@@ -882,13 +918,17 @@ function getSessionDedup(sessionKey: string) {
           };
 
           if (graphAdapter) {
-            // Fire-and-forget: don't block afterTurn lifecycle
+            // Fire-and-forget with latency tracking: don't block afterTurn lifecycle
+            const tripletStart = Date.now();
             Promise.race([
               graphAdapter.extractAndUpsertFromTurn(llmConfig, userContent, assistantContent),
               new Promise((_, reject) => setTimeout(() => reject(new Error('Triplet extraction timeout: 8s')), 8000))
             ]).then(result => {
+              const tripletMs = Date.now() - tripletStart;
               if (result && (result.nodes > 0 || result.edges > 0)) {
-                logger?.debug?.(`[afterTurn] triplets: +${result.nodes} nodes, +${result.edges} edges`);
+                logger?.debug?.(`[afterTurn] triplets: +${result.nodes} nodes, +${result.edges} edges (${tripletMs}ms)`);
+              } else {
+                logger?.debug?.(`[afterTurn] triplets: no extraction needed (${tripletMs}ms)`);
               }
             }).catch((err: Error) => {
               logger?.warn?.({ err: err.message }, 'afterTurn: triplet extraction skipped (async)');
