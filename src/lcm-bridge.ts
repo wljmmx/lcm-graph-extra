@@ -138,6 +138,31 @@ export function writeCompactionDebt(
 /**
  * 从消息列表估计 token 用量（快速估算，不查 DB）
  */
+/**
+ * Estimate tokens from text using a Chinese-aware heuristic.
+ * Formula: (CJK chars / 1.5) + (non-CJK chars / 4.0) + 1
+ */
+export function estimateTokensFromText(text: string): number {
+  let cjkCount = 0;
+  let nonCjkCount = 0;
+  for (let i = 0; i < text.length; i++) {
+    const cp = text.charCodeAt(i);
+    // CJK Unified Ideographs + extensions, Hiragana, Katakana, Hangul
+    if (
+      (cp >= 0x2E80 && cp <= 0x9FFF) ||
+      (cp >= 0xF900 && cp <= 0xFAFF) ||
+      (cp >= 0xAC00 && cp <= 0xD7AF) ||
+      (cp >= 0x3040 && cp <= 0x30FF) ||
+      (cp >= 0x31F0 && cp <= 0x31FF)
+    ) {
+      cjkCount++;
+    } else {
+      nonCjkCount++;
+    }
+  }
+  return Math.ceil(cjkCount / 1.5 + nonCjkCount / 4.0) + 1;
+}
+
 export function estimateTokensFromMessages(messages: any[]): number {
   let total = 0;
   for (const msg of messages) {
@@ -147,14 +172,14 @@ export function estimateTokensFromMessages(messages: any[]): number {
       // Handle both string content and array content [{type: "text", text: "..."}]
       const c = msg.content;
       if (typeof c === 'string') {
-        total += Math.ceil(c.length / 4);
+        total += estimateTokensFromText(c);
       } else if (Array.isArray(c)) {
         const textParts = c.filter((p: any) => p.type === 'text' && typeof p.text === 'string');
         for (const tp of textParts) {
-          total += Math.ceil(tp.text.length / 4);
+          total += estimateTokensFromText(tp.text);
         }
       } else {
-        total += Math.ceil(String(c).length / 4);
+        total += estimateTokensFromText(String(c));
       }
     }
   }

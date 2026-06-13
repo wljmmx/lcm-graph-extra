@@ -35,6 +35,7 @@ import {
   getConversationId,
   writeCompactionDebt,
   estimateTokensFromMessages,
+  estimateTokensFromText,
 } from "./lcm-bridge.js";
 /** Simple string hash for cross-turn dedup */
 function quickHash(s: string): string {
@@ -326,14 +327,35 @@ function getSessionDedup(sessionKey: string) {
         name: "LCM Graph Extra",
         version: "2.1.7",
         ownsCompaction: true,
+        turnMaintenanceMode: 'background',
+        hostRequirements: {
+          'agent-run': {
+            requiredCapabilities: ['assemble-before-prompt', 'after-turn', 'compact', 'maintain']
+          }
+        },
       },
 
-      async ingest(_params: any) {
+      async ingest(params: { sessionId: string; sessionKey?: string; message: any; isHeartbeat?: boolean }) {
         // Forward to lossless-claw for actual message storage
         try {
-          await _losslessClawAdapter?.ingest?.(_params);
-        } catch {}
-        return { ingested: true };
+          if (_losslessClawAdapter?.ingest) {
+            // Validate required SDK fields
+            if (!params.sessionId) {
+              logger?.warn?.('[lcm-graph-extra] ingest: missing sessionId');
+              return { ingested: false };
+            }
+            if (!params.message) {
+              logger?.warn?.('[lcm-graph-extra] ingest: missing message');
+              return { ingested: false };
+            }
+            await _losslessClawAdapter.ingest(params);
+            return { ingested: true };
+          }
+          return { ingested: false };
+        } catch (err) {
+          logger?.error?.({ err }, '[lcm-graph-extra] ingest failed');
+          return { ingested: false };
+        }
       },
 
       async ingestBatch(params: any) {
@@ -352,7 +374,7 @@ function getSessionDedup(sessionKey: string) {
           // AbortSignal support - early exit if cancelled
           const signal = (params as any).abortSignal || (params as any).signal;
           if (signal?.aborted) {
-            return { messages: [] };
+            return { messages: [], estimatedTokens: 0 };
           }
 
         // Read citationsMode from params for SDK compatibility
@@ -473,6 +495,7 @@ function getSessionDedup(sessionKey: string) {
               );
               // Fire DAG compaction immediately (non-blocking) for next assemble to use compressed history
               if (_losslessClawAdapter?.connected) {
+                // NOTE: sessionFile from runtime context (not in SDK assemble spec); adapter compact requires it
                 const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
                 _losslessClawAdapter.compact({
                   sessionId: conversationId,
@@ -487,10 +510,12 @@ function getSessionDedup(sessionKey: string) {
             }
           }
 
-// Extract query text - handle both string and {type, text}[] content formats
+// Extract query text from params.prompt (SDK field for retrieval queries), fallback to last message content
           const lastMsg = params.messages?.at(-1);
-          let qmdQuery = "";
-          if (lastMsg?.content) {
+          let qmdQuery = typeof params.prompt === 'string' && params.prompt
+            ? params.prompt
+            : "";
+          if (!qmdQuery && lastMsg?.content) {
             const c = lastMsg.content;
             if (typeof c === 'string') {
               qmdQuery = c;
@@ -853,11 +878,12 @@ logger?.info?.({
             }
             return msg;
           });
-          // Debug: log first normalized message to verify structure
-          // Only inject via systemPromptAddition
+          // Include systemPromptAddition tokens in total estimate for accurate overflow precheck
+          const additionTokens = systemPromptAddition ? estimateTokensFromText(systemPromptAddition) - 1 : 0;
+          const finalEstimatedTokens = estimatedTokens + additionTokens;
           return {
             messages: normalizedMessages,
-            estimatedTokens,
+            estimatedTokens: finalEstimatedTokens,
             systemPromptAddition: systemPromptAddition || undefined,
             promptAuthority: 'preassembly_may_overflow',
           };
@@ -875,9 +901,12 @@ logger?.info?.({
             }
             return msg;
           });
+          // Include systemPromptAddition tokens in total estimate for accurate overflow precheck
+          const additionTokensFb = systemPromptAddition ? estimateTokensFromText(systemPromptAddition) - 1 : 0;
+          const finalEstimatedTokensFb = estimatedTokens + additionTokensFb;
           return {
             messages: fallbackMessages,
-            estimatedTokens,
+            estimatedTokens: finalEstimatedTokensFb,
             systemPromptAddition: undefined,
             promptAuthority: 'preassembly_may_overflow',
           };
@@ -921,8 +950,13 @@ logger?.info?.({
           }
 
           const qualityFilterMs = Date.now() - afterTurnStart;
-          // Quality filter: skip low-signal turns
-          if (!userContent?.trim() || userContent.length < 50) {
+          // Use autoCompactionSummary as additional context for triplet extraction
+          const autoSummary = params.autoCompactionSummary;
+          if (autoSummary) {
+            logger?.debug?.(`[afterTurn] using autoCompactionSummary (${autoSummary.length} chars) for enrichment`);
+          }
+          // Quality filter: skip low-signal turns (relaxed when autoSummary is available)
+          if (!userContent?.trim() || userContent.length < (autoSummary ? 20 : 50)) {
             logger?.debug?.(`[afterTurn] skipped (user content too short, ${qualityFilterMs}ms total)`);
             return;
           }
@@ -934,17 +968,25 @@ logger?.info?.({
           const wordRatio = (userContent.match(/[\w]+/g) || []).length / userContent.trim().length;
           if (wordRatio < 0.3) return;
 
-          const llmConfig = (api as any).config?.llm || {
-            apiKey: process.env.OPENAI_API_KEY || '',
-            baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-            model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-          };
+          // Prefer runtimeContext.llm (SDK-provided LLM config), fallback to custom config
+          const runtimeLlm = params.runtimeContext?.llm;
+          const llmConfig = runtimeLlm?.model
+            ? {
+                model: runtimeLlm.model,
+                apiKey: runtimeLlm.apiKey || process.env.OPENAI_API_KEY || '',
+                baseURL: runtimeLlm.baseURL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+              }
+            : (api as any).config?.llm || {
+                apiKey: process.env.OPENAI_API_KEY || '',
+                baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+                model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+              };
 
           if (graphAdapter) {
             // Fire-and-forget with latency tracking: don't block afterTurn lifecycle
             const tripletStart = Date.now();
             Promise.race([
-              graphAdapter.extractAndUpsertFromTurn(llmConfig, userContent, assistantContent),
+              graphAdapter.extractAndUpsertFromTurn(llmConfig, autoSummary ? `${userContent}\n\n[Compaction Context]\n${autoSummary}` : userContent, assistantContent),
               new Promise((_, reject) => setTimeout(() => reject(new Error('Triplet extraction timeout: 8s')), 8000))
             ]).then(result => {
               const tripletMs = Date.now() - tripletStart;
@@ -971,10 +1013,13 @@ logger?.info?.({
       },
 
       async compact(params: any) {
+    if (params.abortSignal?.aborted) {
+      return { ok: false, compacted: false, reason: 'compaction aborted' };
+    }
           // AbortSignal support - early exit if cancelled
           const signal = (params as any).abortSignal || (params as any).signal;
           if (signal?.aborted) {
-            return { ok: false, reason: 'aborted' };
+            return { ok: false, compacted: false, reason: 'aborted' };
           }
 
         try {
@@ -984,20 +1029,33 @@ logger?.info?.({
           // This eliminates the 10s+ blocking delay during compact().
           
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
+          const signal = (params as any).abortSignal || (params as any).signal;
 
           // --- Promise.race + 30s timeout: trigger lossless-claw DAG compaction asynchronously ---
+          let summaryContent: string | undefined;
           if (_adapterConnected) {
             try {
-              const compactTimeout = new Promise((_, reject) => {
+              const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
                 setTimeout(() => reject(new Error('compact: 30s timeout reached')), 30000);
               });
-              await Promise.race([
+              const abortOnCompact = signal
+                ? new Promise((_, reject) => {
+                    if (signal.aborted) reject(new Error('compaction aborted'));
+                    else signal.addEventListener('abort', () => reject(new Error('compaction aborted')), { once: true });
+                  })
+                : new Promise(() => {});
+              const compactResult: any = await Promise.race([
                 _losslessClawAdapter.compact(params),
                 compactTimeout,
+                abortOnCompact,
               ]);
+              // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
+              summaryContent = compactResult?.result?.summary || compactResult?.summary;
             } catch (ceErr) {
               const msg = String(ceErr);
-              if (msg.includes('timeout')) {
+              if (msg.includes('aborted')) {
+                logger?.warn?.({ err: ceErr }, "compact: DAG compaction aborted by host");
+              } else if (msg.includes('timeout')) {
                 logger?.warn?.({ err: ceErr }, "compact: DAG compaction timed out after 30s");
               } else {
                 logger?.warn?.({ err: ceErr }, "compact: background DAG compaction failed");
@@ -1012,6 +1070,12 @@ logger?.info?.({
             const hookTimeout = new Promise((_, reject) => {
               setTimeout(() => reject(new Error('onCompaction: 30s timeout reached')), 30000);
             });
+            const abortOnHook = signal
+              ? new Promise((_, reject) => {
+                  if (signal.aborted) reject(new Error('onCompaction aborted'));
+                  else signal.addEventListener('abort', () => reject(new Error('onCompaction aborted')), { once: true });
+                })
+              : new Promise(() => {});
             await Promise.race([
               onCompaction({
                 config: api.config,
@@ -1021,32 +1085,50 @@ logger?.info?.({
                 _losslessClawAdapter: null,
               }),
               hookTimeout,
+              abortOnHook,
             ]);
           } catch (hookErr) {
             const msg = String(hookErr);
-            if (msg.includes('timeout')) {
+            if (msg.includes('aborted')) {
+              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook aborted by host");
+            } else if (msg.includes('timeout')) {
               logger?.warn?.({ err: hookErr }, "compact: onCompaction hook timed out after 30s");
             } else {
               logger?.warn?.({ err: hookErr }, "compact: onCompaction hook failed (non-fatal)");
             }
           }
 
-          return { ok: true, compacted: _adapterConnected, reason: 'compaction triggered (background)' };
+          const tokensBefore = params.currentTokenCount ?? 0;
+          const compacted = !!summaryContent;
+          return {
+            ok: true,
+            compacted,
+            reason: compacted ? 'compaction completed' : 'compaction attempted but no summary produced',
+            result: {
+              tokensBefore,
+              // After compaction, the summary replaces the original messages
+              tokensAfter: compacted && summaryContent
+                ? estimateTokensFromText(summaryContent)
+                : tokensBefore,
+              summary: summaryContent,
+            },
+          };
         } catch (err) {
           logger?.warn?.({ err }, "compact: top-level failed (non-fatal)");
-          return { ok: false, reason: String(err) };
+          return { ok: false, compacted: false, reason: String(err) };
         }
       },
       async maintain(params: any) {
         // S10-1: Periodic maintenance — delegate to lossless-claw + local cleanup
         const signal = (params as any).abortSignal || (params as any).signal;
         if (signal?.aborted) {
-          return { ok: false, reason: 'aborted' };
+          return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: 'aborted' };
         }
 
         try {
           let changed = false;
           let bytesFreed = 0;
+          let rewrittenEntries = 0;
 
           // 1. Delegate to lossless-claw engine.maintain if connected
           if (_losslessClawAdapter?.connected) {
@@ -1059,6 +1141,7 @@ logger?.info?.({
               if (lcResult) {
                 changed = lcResult.changed ?? false;
                 bytesFreed += lcResult.bytesFreed ?? 0;
+                rewrittenEntries = lcResult.rewrittenEntries ?? 0;
               }
             } catch (lcErr) {
               logger?.debug?.({ err: lcErr }, "maintain: lossless-claw delegate failed (non-fatal)");
@@ -1070,10 +1153,10 @@ logger?.info?.({
             evictStaleDedup();
           } catch {}
 
-          return { ok: true, changed, bytesFreed };
+          return { changed, bytesFreed, rewrittenEntries };
         } catch (err) {
           logger?.warn?.({ err }, "maintain: failed (non-fatal)");
-          return { ok: false, reason: String(err) };
+          return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: String(err) };
         }
       },
 

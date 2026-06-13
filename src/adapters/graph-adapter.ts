@@ -110,9 +110,12 @@ export class GraphAdapter {
       }
       return true;
     } catch (err) {
-      this.logger?.error?.(`[lcm-graph-extra] connect error: ${err}`);
-      // Only set flag after 3 consecutive failures, allow retry window
-      this._connectFailed = true;
+      this._connectRetryCount++;
+      this.logger?.warn?.(`[graph-adapter] connect attempt ${this._connectRetryCount}/${this.maxRetries} failed: ${err}`);
+      if (this._connectRetryCount >= this.maxRetries) {
+        this._connectFailed = true;
+        this.logger?.error?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts`);
+      }
       return false;
     }
   }
@@ -120,6 +123,7 @@ export class GraphAdapter {
   /** Reset connection failure flag (called on retry / gateway restart) */
   resetConnectFlag(): void {
     this._connectFailed = false;
+    this._connectRetryCount = 0;
   }
 
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
@@ -127,6 +131,7 @@ export class GraphAdapter {
     // Allow retry if connection previously failed
     if (this._connectFailed && !this.mod) {
       if (this._connectRetryCount < this.maxRetries) {
+        this._connectRetryCount++;
         this.resetConnectFlag();
       } else {
         this.logger?.warn?.(`[lcm-graph-extra] search: max retries (${this.maxRetries}) reached, skipping`);
@@ -224,7 +229,13 @@ export class GraphAdapter {
     if (!this.config.enabled) return [];
     // Allow retry if connection previously failed
     if (this._connectFailed && !this.mod) {
-      this.resetConnectFlag();
+      if (this._connectRetryCount < this.maxRetries) {
+        this._connectRetryCount++;
+        this.resetConnectFlag();
+      } else {
+        this.logger?.warn?.(`[lcm-graph-extra] searchExperience: max retries (${this.maxRetries}) reached, skipping`);
+        return [];
+      }
     }
     const m2 = this.mod ?? await this.connect().then(() => this.mod);
     if (!m2) return [];
