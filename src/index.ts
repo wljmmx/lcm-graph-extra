@@ -388,6 +388,14 @@ function getSessionDedup(sessionKey: string) {
         let sd = null;
         let currentRoundHashes: string[] = [];
         let summaryInjection = "";  // lossless-claw summaries to inject
+        let estimatedTokens = 0;
+        let tier: PressureTier = 'low';
+        let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
+        let maxContextChars = 12_000;
+        let qmdResults: any = [];
+        let graphResults: any = [];
+        let expResults: any = [];
+        let removedSections: { label: string; chars: number }[] = [];
 
         try {
           const initStart = Date.now();
@@ -417,14 +425,14 @@ function getSessionDedup(sessionKey: string) {
           // Respect tokenBudget from params if provided (overrides window monitor budget)
           const tokenBudget = params.tokenBudget;
           const msgCount = messages.length;
-          const estimatedTokens = estimateTokensFromMessages(messages);
+          estimatedTokens = estimateTokensFromMessages(messages);
           const contextWindow = wm?.contextWindow ?? 262_144;
           const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
 
-          let tier: PressureTier = 'low';
-          let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
+          tier = 'low';
+          retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
           // Apply tokenBudget constraint if provided (convert tokens to chars, ~4 chars/token)
-          let maxContextChars = wm?.maxContextChars?.low ?? 12_000;
+          maxContextChars = wm?.maxContextChars?.low ?? 12_000;
           if (tokenBudget != null && typeof tokenBudget === 'number') {
             maxContextChars = Math.min(maxContextChars, Math.floor(tokenBudget * 4));
           }
@@ -528,9 +536,9 @@ function getSessionDedup(sessionKey: string) {
 
           // ---- Parallel Phase 1: L2 + L3 + L4 all fire together (with per-layer timing) ----
           const parallelStart = Date.now();
-          let qmdResults: any = [];
-          let graphResults: any = [];
-          let expResults: any = [];
+          qmdResults = [];
+          graphResults = [];
+          expResults = [];
           // Per-module latency tracking
           let l2_ms = 0, l3_ms = 0, l4_ms = 0;
 
@@ -801,7 +809,7 @@ logger?.info?.({
           // Final: apply total control trim if Window Monitor enabled
           // ==================================================================
           if (systemPromptAddition && wm) {
-            const removedSections: { label: string; chars: number }[] = [];
+            removedSections = [];
             const trimmed = applyTotalControl(systemPromptAddition, maxContextChars, removedSections);
             if (trimmed !== systemPromptAddition) {
               logger?.debug?.(
