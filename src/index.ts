@@ -837,24 +837,21 @@ function getSessionDedup(sessionKey: string) {
               removedSections: removedSections,
             }
           }, 'assemble: injection audit');
+          // Return original messages to avoid SDK validation issues
+          // Only inject via systemPromptAddition, don't modify message content format
           return {
-            messages: msgs,
-            estimatedTokens: msgs.reduce((sum: number, m: any) => sum + (m.content.length / 4), 0),
+            messages: params.messages ?? [],
+            estimatedTokens,
             systemPromptAddition: systemPromptAddition || undefined,
             promptAuthority: 'preassembly_may_overflow',
           };
         } catch (normErr) {
           const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
           logger?.error?.({ err: ne }, "assemble: normalize error")
-          // Ultra fallback: just strip runtime context and return raw messages
-          const raw = (params.messages ?? []).map((m: any) => ({
-            seq: m.seq,
-            role: m.role,
-            content: typeof m.content === 'string' ? m.content : String(m.content ?? ''),
-          }));
+          // Ultra fallback: return original messages untouched
           return {
-            messages: raw,
-            estimatedTokens: raw.reduce((s: number, m: any) => s + (m.content.length / 4), 0),
+            messages: params.messages ?? [],
+            estimatedTokens,
             systemPromptAddition: undefined,
             promptAuthority: 'preassembly_may_overflow',
           };
