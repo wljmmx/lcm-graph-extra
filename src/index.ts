@@ -625,32 +625,31 @@ function getSessionDedup(sessionKey: string) {
           const mgMs = Date.now() - mgStart;
 
           // ---- Metrics log ----
-          logger?.info?.({
-            elapsed: Date.now() - assembleStart,
-            init_ms: initMs,
-            parallel_ms: parallelMs,
-            multiget_ms: mgMs,
-            // Per-module latency breakdown
-            l2_qmd_ms: l2_ms,
-            l3_graph_ms: l3_ms,
-            l4_experience_ms: l4_ms,
-            multiGet_ms: mgMs,
-            // Counts
-            l2_count: Array.isArray(qmdResults) ? qmdResults.length : 0,
-            l3_count: Array.isArray(graphResults) ? graphResults.length : 0,
-            l4_count: expResults.length,
-            doc_count: fullDocs?.length ?? 0,
-            // Context budget
-            tokenRatio: Number(tokenRatio.toFixed(3)),
-            estimatedTokens,
-            contextWindow,
-            tier: tier,
-            retrieval_limits: JSON.stringify(retrievalLimits),
-            available_tools_count: availableTools.length,
-            has_graph_tool: hasGraphTool,
-            has_experience_tool: hasExperienceTool,
-          }, `⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${estimatedTokens}/${contextWindow}(${(tokenRatio*100).toFixed(1)}%) | tier=${tier}`);
-
+logger?.info?.({
+  elapsed: Date.now() - assembleStart,
+  init_ms: initMs,
+  parallel_ms: parallelMs,
+  multiget_ms: mgMs,
+  // Per-module latency breakdown
+  l2_qmd_ms: l2_ms,
+  l3_graph_ms: l3_ms,
+  l4_experience_ms: l4_ms,
+  multiGet_ms: mgMs,
+  // Counts
+  l2_count: Array.isArray(qmdResults) ? qmdResults.length : 0,
+  l3_count: Array.isArray(graphResults) ? graphResults.length : 0,
+  l4_count: expResults.length,
+  doc_count: fullDocs?.length ?? 0,
+  // Context budget
+  tokenRatio: Number(tokenRatio.toFixed(3)),
+  estimatedTokens,
+  contextWindow,
+  tier: tier,
+  retrieval_limits: JSON.stringify(retrievalLimits),
+  available_tools_count: availableTools.length,
+  has_graph_tool: hasGraphTool,
+  has_experience_tool: hasExperienceTool,
+}, `⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${estimatedTokens}/${contextWindow}(${(tokenRatio*100).toFixed(1)}%) | tier=${tier}`);
           // ---- Merge results ----
           // Session-isolated cross-round dedup (24-round window)
           const sessionKey = typeof params.sessionKey === 'string'
@@ -837,20 +836,47 @@ function getSessionDedup(sessionKey: string) {
               removedSections: removedSections,
             }
           }, 'assemble: injection audit');
-          // Return original messages to avoid SDK validation issues
-          // Only inject via systemPromptAddition, don't modify message content format
+          // Normalize message content to string for SDK compatibility
+          // SDK calls .startsWith() on content, which fails if content is an array
+          const normalizedMessages = (params.messages ?? []).map((msg: any) => {
+            if (Array.isArray(msg.content)) {
+              return {
+                ...msg,
+                content: msg.content
+                  .filter((p: any) => typeof p === 'string' || (typeof p === 'object' && p !== null && 'text' in p))
+                  .map((p: any) => typeof p === 'string' ? p : String(p.text ?? ''))
+                  .join('\n'),
+              };
+            }
+            if (typeof msg.content !== 'string') {
+              return { ...msg, content: String(msg.content ?? '') };
+            }
+            return msg;
+          });
+          // Debug: log first normalized message to verify structure
+          // Only inject via systemPromptAddition
           return {
-            messages: params.messages ?? [],
+            messages: normalizedMessages,
             estimatedTokens,
             systemPromptAddition: systemPromptAddition || undefined,
             promptAuthority: 'preassembly_may_overflow',
           };
         } catch (normErr) {
           const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
+          logger?.error?.({ err: ne, stack: ne.stack }, '[DEBUG] assemble outer try-catch error');
           logger?.error?.({ err: ne }, "assemble: normalize error")
-          // Ultra fallback: return original messages untouched
+          // Ultra fallback: normalize content to string for SDK compatibility
+          const fallbackMessages = (params.messages ?? []).map((msg: any) => {
+            if (Array.isArray(msg.content)) {
+              return { ...msg, content: msg.content.map((p: any) => typeof p === 'object' ? String(p.text ?? '') : p).join('\n') };
+            }
+            if (typeof msg.content !== 'string') {
+              return { ...msg, content: String(msg.content ?? '') };
+            }
+            return msg;
+          });
           return {
-            messages: params.messages ?? [],
+            messages: fallbackMessages,
             estimatedTokens,
             systemPromptAddition: undefined,
             promptAuthority: 'preassembly_may_overflow',
