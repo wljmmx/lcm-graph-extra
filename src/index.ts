@@ -822,7 +822,8 @@ logger?.info?.({
           }
 
         } catch (err) {
-          logger?.warn?.({ err: (err as Error).message }, "assemble: retrieval failed");
+          const e = err instanceof Error ? err : new Error(String(err));
+          logger?.warn?.({ err: e.message, stack: e.stack, name: e.name }, "assemble: retrieval failed");
         }
 
         // Normalize messages for OpenClaw SDK - content must be string
