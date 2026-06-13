@@ -264,10 +264,10 @@ function getSessionDedup(sessionKey: string) {
         try {
           const adapterConnected = await _losslessClawAdapter.connect();
           if (!adapterConnected) {
-            logger?.warn?.({ err: _losslessClawAdapter.initError }, "init: lossless-claw adapter connection failed, compact will be backup-only");
+            logger?.warn?.("init: lossless-claw adapter connection failed, compact will be backup-only", { err: _losslessClawAdapter.initError });
           }
         } catch (adapterErr) {
-          logger?.warn?.({ err: (adapterErr as Error).message }, "init: lossless-claw adapter connect threw");
+          logger?.warn?.("init: lossless-claw adapter connect threw", { err: (adapterErr as Error).message });
         }
         const { QmdClient } = await import("./qmd-client.js");
         const { GraphAdapter } = await import("./adapters/graph-adapter.js");
@@ -299,7 +299,7 @@ function getSessionDedup(sessionKey: string) {
         try {
           await graphAdapter.connect();
         } catch (err) {
-          logger?.warn?.({ err: (err as Error).message }, "init: Neo4j unavailable, L3/L4 will be skipped");
+          logger?.warn?.("init: Neo4j unavailable, L3/L4 will be skipped", { err: (err as Error).message });
         }
 
         expStore = new ExperienceStorage(graphAdapter, 3);
@@ -312,7 +312,7 @@ function getSessionDedup(sessionKey: string) {
       } catch (err) {
         // Reset lock so next assemble retries instead of being permanently stuck
         initPromise = null;
-        logger?.error?.({ err: (err as Error).message }, "init: failed, will retry on next assemble");
+        logger?.error?.("init: failed, will retry on next assemble", { err: (err as Error).message });
       }
     })();
     return initPromise;
@@ -353,7 +353,7 @@ function getSessionDedup(sessionKey: string) {
           }
           return { ingested: false };
         } catch (err) {
-          logger?.error?.({ err }, '[lcm-graph-extra] ingest failed');
+          logger?.error?.('[lcm-graph-extra] ingest failed', { err });
           return { ingested: false };
         }
       },
@@ -559,7 +559,7 @@ function getSessionDedup(sessionKey: string) {
                   });
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
-                  logger?.warn?.({ err: (e as Error).message }, "L2 qmd query failed");
+                  logger?.warn?.("L2 qmd query failed", { err: (e as Error).message });
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
@@ -574,7 +574,7 @@ function getSessionDedup(sessionKey: string) {
                   const res = await graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph);
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
-                  logger?.warn?.({ err: (e as Error).message }, "L3 graph search failed");
+                  logger?.warn?.("L3 graph search failed", { err: (e as Error).message });
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
@@ -590,7 +590,7 @@ function getSessionDedup(sessionKey: string) {
                   const res = await expStore.searchRelevant(0.6, retrievalLimits.exp);
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
-                  logger?.warn?.({ err: (e as Error).message }, "L4 experience search failed");
+                  logger?.warn?.("L4 experience search failed", { err: (e as Error).message });
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
@@ -629,12 +629,12 @@ function getSessionDedup(sessionKey: string) {
                 graphResults = rawGraph;
               }
             } catch (mergeErr) {
-              logger?.warn?.({ err: mergeErr }, "Merger dedup failed, using raw results");
+              logger?.warn?.("Merger dedup failed, using raw results", { err: mergeErr });
               qmdResults = rawQmd;
               graphResults = rawGraph;
             }
           } catch (e) {
-            logger?.warn?.({ err: (e as Error).message }, "Parallel L2/L3/L4 phase failed");
+            logger?.warn?.("Parallel L2/L3/L4 phase failed", { err: (e as Error).message });
           }
 
           const parallelMs = Date.now() - parallelStart;
@@ -658,7 +658,7 @@ function getSessionDedup(sessionKey: string) {
           const mgMs = Date.now() - mgStart;
 
           // ---- Metrics log ----
-logger?.info?.({
+logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${estimatedTokens}/${contextWindow}(${(tokenRatio*100).toFixed(1)}%) | tier=${tier}`, {
   elapsed: Date.now() - assembleStart,
   init_ms: initMs,
   parallel_ms: parallelMs,
@@ -682,7 +682,7 @@ logger?.info?.({
   available_tools_count: availableTools.length,
   has_graph_tool: hasGraphTool,
   has_experience_tool: hasExperienceTool,
-}, `⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${estimatedTokens}/${contextWindow}(${(tokenRatio*100).toFixed(1)}%) | tier=${tier}`);
+});
           // ---- Merge results ----
           // Session-isolated cross-round dedup (24-round window)
           const sessionKey = typeof params.sessionKey === 'string'
@@ -719,7 +719,7 @@ logger?.info?.({
                 }
               }
             } catch (sumErr) {
-              logger?.debug?.({ err: sumErr }, "Summary injection failed (non-fatal)");
+              logger?.debug?.("Summary injection failed (non-fatal)", { err: sumErr });
             }
           }
 
@@ -823,7 +823,7 @@ logger?.info?.({
 
         } catch (err) {
           const e = err instanceof Error ? err : new Error(String(err));
-          logger?.warn?.({ err: e.message, stack: e.stack, name: e.name }, "assemble: retrieval failed");
+          logger?.warn?.("assemble: retrieval failed", { err: e.message, stack: e.stack, name: e.name });
         }
 
         // Normalize messages for OpenClaw SDK - content must be string
@@ -898,8 +898,8 @@ logger?.info?.({
           };
         } catch (normErr) {
           const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
-          logger?.error?.({ err: ne, stack: ne.stack }, '[DEBUG] assemble outer try-catch error');
-          logger?.error?.({ err: ne }, "assemble: normalize error")
+          logger?.error?.('[DEBUG] assemble outer try-catch error', { err: ne, stack: ne.stack });
+          logger?.error?.("assemble: normalize error", { err: ne })
           // Ultra fallback: normalize content to string for SDK compatibility
           const fallbackMessages = (params.messages ?? []).map((msg: any) => {
             if (Array.isArray(msg.content)) {
@@ -1005,7 +1005,7 @@ logger?.info?.({
                 logger?.debug?.(`[afterTurn] triplets: no extraction needed (${tripletMs}ms)`);
               }
             }).catch((err: Error) => {
-              logger?.warn?.({ err: err.message }, 'afterTurn: triplet extraction skipped (async)');
+              logger?.warn?.('afterTurn: triplet extraction skipped (async)', { err: err.message });
             });
           }
         // Track response tokens (non-blocking)
@@ -1017,7 +1017,7 @@ logger?.info?.({
           }
         } catch {}
       } catch (err) {
-          logger?.error?.({ err }, '[lcm-graph-extra] afterTurn error');
+          logger?.error?.('[lcm-graph-extra] afterTurn error', { err });
         }
       },
 
@@ -1063,11 +1063,11 @@ logger?.info?.({
             } catch (ceErr) {
               const msg = String(ceErr);
               if (msg.includes('aborted')) {
-                logger?.warn?.({ err: ceErr }, "compact: DAG compaction aborted by host");
+                logger?.warn?.("compact: DAG compaction aborted by host", { err: ceErr });
               } else if (msg.includes('timeout')) {
-                logger?.warn?.({ err: ceErr }, "compact: DAG compaction timed out after 30s");
+                logger?.warn?.("compact: DAG compaction timed out after 30s", { err: ceErr });
               } else {
-                logger?.warn?.({ err: ceErr }, "compact: background DAG compaction failed");
+                logger?.warn?.("compact: background DAG compaction failed", { err: ceErr });
               }
             }
           } else {
@@ -1099,11 +1099,11 @@ logger?.info?.({
           } catch (hookErr) {
             const msg = String(hookErr);
             if (msg.includes('aborted')) {
-              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook aborted by host");
+              logger?.warn?.("compact: onCompaction hook aborted by host", { err: hookErr });
             } else if (msg.includes('timeout')) {
-              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook timed out after 30s");
+              logger?.warn?.("compact: onCompaction hook timed out after 30s", { err: hookErr });
             } else {
-              logger?.warn?.({ err: hookErr }, "compact: onCompaction hook failed (non-fatal)");
+              logger?.warn?.("compact: onCompaction hook failed (non-fatal)", { err: hookErr });
             }
           }
 
@@ -1123,7 +1123,7 @@ logger?.info?.({
             },
           };
         } catch (err) {
-          logger?.warn?.({ err }, "compact: top-level failed (non-fatal)");
+          logger?.warn?.("compact: top-level failed (non-fatal)", { err });
           return { ok: false, compacted: false, reason: String(err) };
         }
       },
@@ -1153,7 +1153,7 @@ logger?.info?.({
                 rewrittenEntries = lcResult.rewrittenEntries ?? 0;
               }
             } catch (lcErr) {
-              logger?.debug?.({ err: lcErr }, "maintain: lossless-claw delegate failed (non-fatal)");
+              logger?.debug?.("maintain: lossless-claw delegate failed (non-fatal)", { err: lcErr });
             }
           }
 
@@ -1164,7 +1164,7 @@ logger?.info?.({
 
           return { changed, bytesFreed, rewrittenEntries };
         } catch (err) {
-          logger?.warn?.({ err }, "maintain: failed (non-fatal)");
+          logger?.warn?.("maintain: failed (non-fatal)", { err });
           return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: String(err) };
         }
       },
