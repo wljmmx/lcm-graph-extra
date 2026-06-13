@@ -1199,17 +1199,6 @@ export { onTurnComplete } from './hooks/turn-complete.js';
 export { onHeartbeat } from './hooks/heartbeat.js';
 
 export {
-  info, bootstrap, assemble, afterTurn, maintain, compact,
-  register, getRegisteredPlugin, listRegisteredPlugins,
-} from './register.js';
-export type {
-  PluginInstance, OpenClawContext,
-  ContextEngineInfo, ContextEngineAssemblyResult,
-  ContextEngineIngestResult, ContextEngineBootstrapResult,
-  ContextEngineMaintenanceResult,
-} from './register.js';
-
-export {
   detectExperienceTrigger, extractRawExperience, ExperienceStorage,
 } from './experience/index.js';
 export type {
