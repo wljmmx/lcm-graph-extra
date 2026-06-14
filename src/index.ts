@@ -836,98 +836,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           logger?.warn?.("assemble: retrieval failed", { err: e.message, stack: e.stack, name: e.name });
         }
 
-        // Normalize messages for OpenClaw SDK - content must be string
+        // Pass through messages as-is (lossless-claw style, no normalization needed)
+        // SDK handles content format natively; estimateTokensFromMessages supports both string and array content
         try {
-          const msgs = (params.messages ?? []).map((m: any) => ({
-          seq: m.seq,
-          role: m.role,
-          content: typeof m.content === 'string'
-            ? m.content
-            : Array.isArray(m.content)
-              ? m.content.map((p: any) => p.text ?? "").join("\n")
-              : String(m.content ?? ""),
-        }));
-
-          // Track usage (non-blocking)
-          try {
-            const model = params.model ?? "unknown";
-            const sessionId = params.sessionId ?? params.session_id ?? "unknown";
-            tracker?.onContextReady?.(sessionId, model, systemPromptAddition);
-          } catch { logger?.debug?.("assemble: usage tracking failed (non-fatal)"); }
-
-          // Save this round's hashes to the session window (max 24 rounds)
-          if (sd && currentRoundHashes.length > 0) {
-            sd.window.push(currentRoundHashes);
-            while (sd.window.length > MAX_DEDUP_ROUNDS) {
-              sd.window.shift();
-            }
-          }
-
-          // Assemble audit log
-          logger?.info?.('assemble: injection audit', {
-            audit: {
-              totalInjectedChars: (systemPromptAddition || '').length,
-              msgCount: msgs.length,
-              tier: tier,
-              retrievalLimits: retrievalLimits,
-              maxContextChars: maxContextChars,
-              l2_count: qmdResults.length,
-              l3_count: graphResults.length,
-              l4_count: expResults.length,
-              lca_connected: !!_losslessClawAdapter?.connected,
-              truncated: (systemPromptAddition || '').length > maxContextChars,
-              removedSectionsCount: removedSections.length,
-              removedSections: removedSections,
-            }
-          });
-          // Normalize message content to string for SDK compatibility
-          // SDK calls .startsWith() on content, which fails if content is an array
-          const normalizedMessages = (params.messages ?? []).map((msg: any) => {
-            if (Array.isArray(msg.content)) {
-              return {
-                ...msg,
-                content: msg.content
-                  .filter((p: any) => typeof p === 'string' || (typeof p === 'object' && p !== null && 'text' in p))
-                  .map((p: any) => typeof p === 'string' ? p : String(p.text ?? ''))
-                  .join('\n'),
-              };
-            }
-            if (typeof msg.content !== 'string') {
-              return { ...msg, content: String(msg.content ?? '') };
-            }
-            return msg;
-          });
-          // Include systemPromptAddition tokens in total estimate for accurate overflow precheck
+          // Include systemPromptAddition tokens in total estimate
           const additionTokens = systemPromptAddition ? estimateTokensFromText(systemPromptAddition) - 1 : 0;
-          const finalEstimatedTokens = estimatedTokens + additionTokens;
           return {
-            messages: normalizedMessages,
-            estimatedTokens: finalEstimatedTokens,
+            messages: params.messages,
+            estimatedTokens: estimatedTokens + additionTokens,
             systemPromptAddition: systemPromptAddition || undefined,
-            promptAuthority: 'preassembly_may_overflow',
+            promptAuthority: typeof systemPromptAddition == "string" && systemPromptAddition.length > 0 ? "preassembly_may_overflow" : "assembled",
           };
-        } catch (normErr) {
-          const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
-          logger?.error?.('[DEBUG] assemble outer try-catch error', { err: ne, stack: ne.stack });
-          logger?.error?.("assemble: normalize error", { err: ne });
-          // Ultra fallback: normalize content to string for SDK compatibility
-          const fallbackMessages = (params.messages ?? []).map((msg: any) => {
-            if (Array.isArray(msg.content)) {
-              return { ...msg, content: msg.content.map((p: any) => typeof p === 'object' ? String(p.text ?? '') : p).join('\n') };
-            }
-            if (typeof msg.content !== 'string') {
-              return { ...msg, content: String(msg.content ?? '') };
-            }
-            return msg;
-          });
-          // Include systemPromptAddition tokens in total estimate for accurate overflow precheck
-          const additionTokensFb = systemPromptAddition ? estimateTokensFromText(systemPromptAddition) - 1 : 0;
-          const finalEstimatedTokensFb = estimatedTokens + additionTokensFb;
+        } catch (finalErr) {
+          const fe = finalErr instanceof Error ? finalErr : new Error(String(finalErr));
+          logger?.error?.("assemble: return error", { err: fe.message, stack: fe.stack });
           return {
-            messages: fallbackMessages,
-            estimatedTokens: finalEstimatedTokensFb,
+            messages: params.messages,
+            estimatedTokens: 0,
             systemPromptAddition: undefined,
-            promptAuthority: 'preassembly_may_overflow',
+            promptAuthority: "assembled",
           };
         }
       },
