@@ -118,6 +118,76 @@ export const WindowMonitorConfigSchema = z.object({
     high: z.number().default(1_600),
   }).optional(),
 });
+
+/**
+ * Resolve context window configuration from provider model definition, user config, or defaults.
+ *
+ * Priority:
+ *   1. providerModelContext — openclaw.json provider model definition
+ *   2. wm (user-configured WindowMonitorConfig)
+ *   3. default (262_144 = 256K)
+ */
+export interface RetrievalLimits {
+  qmd: number; graph: number; exp: number;
+}
+
+export interface ContextCharLimits {
+  low: number; medium: number; high: number;
+}
+
+export interface ResolvedWindowConfig {
+  contextWindow: number;
+  compactTokenBudget: number;
+  retrievalLimits: RetrievalLimits;
+  maxContextChars: ContextCharLimits;
+  tokenRatio: number;
+  tier: string;
+  shouldCompact: boolean;
+}
+
+export function defaultRetrievalLimits(scale: number): RetrievalLimits {
+  const s = Math.max(0.2, Math.min(8, scale));
+  return {
+    qmd: Math.max(1, Math.round(5 * s)),
+    graph: Math.max(1, Math.round(5 * s)),
+    exp: Math.max(0, Math.round(3 * s)),
+  };
+}
+
+export function defaultMaxContextChars(scale: number): ContextCharLimits {
+  const s = Math.max(0.2, Math.min(8, scale));
+  return {
+    low: Math.round(12000 * s),
+    medium: Math.round(6000 * s),
+    high: Math.round(1600 * s),
+  };
+}
+
+export const COMPACT_RATIO = 0.44; // compaction retains ~44% of context window
+
+/**
+ * Resolve effective window/retrieval config for the current model.
+ *
+ * @param providerModelCtx - contextWindow from openclaw.json provider model definition
+ * @param wm - optional user-configured WindowMonitorConfig from plugin config
+ * @returns resolved window config with all parameters scaled proportionally
+ */
+export function resolveContextProfile(
+  providerModelCtx?: number,
+  wm?: z.infer<typeof WindowMonitorConfigSchema>,
+): Pick<ResolvedWindowConfig, 'contextWindow' | 'compactTokenBudget' | 'retrievalLimits' | 'maxContextChars'> {
+  // Priority: provider model config > user wm config > fallback 256K
+  const ctxWindow = providerModelCtx ?? wm?.contextWindow ?? 262_144;
+  const base = 262_144;
+  const scale = ctxWindow / base;
+  
+  return {
+    contextWindow: ctxWindow,
+    compactTokenBudget: Math.round(ctxWindow * COMPACT_RATIO),
+    retrievalLimits: defaultRetrievalLimits(scale),
+    maxContextChars: defaultMaxContextChars(scale),
+  };
+}
 export const DEFAULT_CONFIG: PluginConfig = {
   summaryStrategy: 'strategy',
   maxGraphDepth: 10,

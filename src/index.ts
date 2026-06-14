@@ -24,6 +24,7 @@ import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig } from "./config/neo4j-helper";
 import { withCircuitBreaker } from "./circuit-breaker.js";
+import { resolveContextProfile } from "./config.js";
 
 import {
   type PressureInfo,
@@ -204,7 +205,8 @@ export default definePluginEntry({
     let _losslessClawAdapter: any = null;
     let qmdClient: any = null;
     let graphAdapter: any = null;
-    let expStore: any = null;
+let expStore: any = null;
+let _providerModelCtx: number | undefined;
     // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
 // Each session tracks hashes for up to 24 rounds of conversation
 const MAX_DEDUP_CAPACITY = 500;
@@ -308,6 +310,27 @@ function getSessionDedup(sessionKey: string) {
         if (api.config?.windowMonitor?.dedupRounds) {
           MAX_DEDUP_ROUNDS = api.config.windowMonitor.dedupRounds;
         }
+
+        // Read provider model context window from openclaw.json
+        try {
+          const defaultConfigPath = require("os").homedir() + "/.openclaw/openclaw.json";
+          const { readFileSync } = require("node:fs");
+          const cfg = JSON.parse(readFileSync(defaultConfigPath, "utf8"));
+          const primaryModel = cfg?.agents?.defaults?.model?.primary;
+          if (primaryModel && typeof primaryModel === "string") {
+            const [provider, ...modelParts] = primaryModel.split("/");
+            const modelId = modelParts.join("/");
+            const providerDefs = cfg?.models?.providers?.[provider];
+            if (Array.isArray(providerDefs?.models)) {
+              const modelDef = providerDefs.models.find((m: any) => m.id === modelId || m.name === modelId);
+              if (modelDef?.contextWindow && typeof modelDef.contextWindow === "number") {
+                _providerModelCtx = modelDef.contextWindow;
+                logger?.debug?.("resolved model context window: " + modelDef.contextWindow + " (" + provider + "/" + modelId + ")");
+              }
+            }
+          }
+        } catch { /* non-fatal, will use defaults */ }
+
         initialized = true;
       } catch (err) {
         // Reset lock so next assemble retries instead of being permanently stuck
@@ -426,7 +449,8 @@ function getSessionDedup(sessionKey: string) {
           const tokenBudget = params.tokenBudget;
           const msgCount = messages.length;
           estimatedTokens = estimateTokensFromMessages(messages);
-          const contextWindow = wm?.contextWindow ?? 262_144;
+          const resolvedCtx = resolveContextProfile(_providerModelCtx, wm || undefined);
+          const contextWindow = resolvedCtx.contextWindow;
           const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
 
           tier = 'low';
