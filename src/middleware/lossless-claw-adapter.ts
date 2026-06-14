@@ -331,7 +331,7 @@ export class LosslessClawAdapter {
   async compact(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile?: string;
+    sessionFile: string;
     tokenBudget?: number;
     force?: boolean;
     currentTokenCount?: number;

@@ -137,12 +137,22 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
     if (adapter && adapter.connected) {
       const sessionKey = inst.context?.sessionKey ?? ("session-" + Date.now());
       const sessionFile = inst.context?.sessionFile ?? ("memory/" + new Date().toISOString().slice(0,10) + ".md");
+      // Resolve real numeric sessionId from conversation store
+      const bridge = inst._lcmBridge;
+      let resolvedSessionId: string | undefined;
+      if (bridge?.getConversationId && inst.context?.sessionKey) {
+        try {
+          resolvedSessionId = bridge.getConversationId(inst.context.sessionKey);
+        } catch (_) {}
+      }
+
       const compactResult = await adapter.compact({
-        sessionId: sessionKey,
+        sessionId: String(resolvedSessionId ?? sessionKey),
         sessionKey,
         sessionFile,
         tokenBudget: (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget,
         force: (compConfig as any)?.force ?? true,
+        currentTokenCount: totalTokens !== undefined ? totalTokens : undefined,
       });
       if (compactResult.ok) {
         logger?.info?.("compaction: lossless-claw DAG compact completed");
