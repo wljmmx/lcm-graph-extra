@@ -1183,7 +1183,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (signals.length > 0) {
               logger?.warn?.({ signals }, "heartbeat: pressure threshold(s) exceeded, writing compaction debt");
               const { writeCompactionDebt } = await import("./lcm-bridge.js");
-              writeCompactionDebt(Date.now() % 1000000, 114688, Math.round(maxTokenRatio * 262144), "hb_pressure_" + signals.length + "dims");
+              writeCompactionDebt(Date.now() % 1000000, 114688, Math.round((maxTokenRatio || 0.5) * 262144), "hb_pressure_" + signals.length + "dims");
             }
           }
         } catch { /* pressure check failed, non-fatal */ }
@@ -1250,7 +1250,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
         }
         
-        logger?.debug?.("heartbeat: cycle completed in " + (Date.now() - t0) + "ms");
+        try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
       } catch (hbErr) {
         logger?.error?.({ err: hbErr instanceof Error ? hbErr.message : String(hbErr) }, "heartbeat: cycle failed");
       }
