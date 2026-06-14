@@ -152,7 +152,11 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
         tokenBudget: (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget,
         force: (compConfig as any)?.force ?? true,
         currentTokenCount: totalTokens,
-        compactionTarget: (compConfig as any)?.compactionTarget ?? 'budget',
+        customInstructions: (compConfig as any)?.customInstructions,
+        runtimeContext: {
+          ...(typeof totalTokens === 'number' ? { currentTokenCount: totalTokens } : {}),
+          workspaceDir: memoryDir,
+        },
       });
       if (compactResult.ok) {
         logger?.info?.("compaction: lossless-claw DAG compact completed");
