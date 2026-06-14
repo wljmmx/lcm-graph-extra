@@ -206,7 +206,7 @@ export default definePluginEntry({
     let qmdClient: any = null;
     let graphAdapter: any = null;
 let expStore: any = null;
-let _providerModelCtx: number | undefined;
+let _modelRegistry: Record<string, number> | undefined;
     // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
 // Each session tracks hashes for up to 24 rounds of conversation
 const MAX_DEDUP_CAPACITY = 500;
@@ -317,19 +317,20 @@ function getSessionDedup(sessionKey: string) {
           const defaultConfigPath = homedir() + "/.openclaw/openclaw.json";
           const { readFileSync } = await import("node:fs");
           const cfg = JSON.parse(readFileSync(defaultConfigPath, "utf8"));
-          const primaryModel = cfg?.agents?.defaults?.model?.primary;
-          if (primaryModel && typeof primaryModel === "string") {
-            const [provider, ...modelParts] = primaryModel.split("/");
-            const modelId = modelParts.join("/");
-            const providerDefs = cfg?.models?.providers?.[provider];
-            if (Array.isArray(providerDefs?.models)) {
-              const modelDef = providerDefs.models.find((m: any) => m.id === modelId || m.name === modelId);
-              if (modelDef?.contextWindow && typeof modelDef.contextWindow === "number") {
-                _providerModelCtx = modelDef.contextWindow;
-                logger?.debug?.("resolved model context window: " + modelDef.contextWindow + " (" + provider + "/" + modelId + ")");
+          const modelRegistry: Record<string, number> = {};
+          const providers = cfg?.models?.providers ?? {};
+          for (const [, providerDef] of Object.entries(providers)) {
+            const provider = providerDef as any;
+            if (Array.isArray(provider.models)) {
+              for (const m of provider.models) {
+                if (m.contextWindow && typeof m.contextWindow === "number") {
+                  modelRegistry[m.id] = m.contextWindow;
+                }
               }
             }
           }
+          _modelRegistry = modelRegistry;
+          logger?.debug?.("cached " + Object.keys(modelRegistry).length + " model context window(s)");
         } catch { /* non-fatal, will use defaults */ }
 
         initialized = true;
@@ -450,7 +451,10 @@ function getSessionDedup(sessionKey: string) {
           const tokenBudget = params.tokenBudget;
           const msgCount = messages.length;
           estimatedTokens = estimateTokensFromMessages(messages);
-          const resolvedCtx = resolveContextProfile(_providerModelCtx, wm || undefined);
+          const modelFullId = typeof params.model === "string" ? params.model : "";
+          const modelName = modelFullId.includes("/") ? modelFullId.split("/").pop()! : modelFullId;
+          const providerModelCtx = _modelRegistry ? _modelRegistry[modelName] : undefined;
+          const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
           const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
 
