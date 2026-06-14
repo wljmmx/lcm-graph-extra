@@ -1197,6 +1197,58 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           } catch { /* qmd health check failed, non-fatal */ }
         }
         
+        // --- 3. Experience distillation (PENDING -> DISTILLED) ---
+        if (expStore && typeof expStore.fetchPending === "function") {
+          try {
+            const pending = await expStore.fetchPending(5);
+            if (pending.length > 0) {
+              logger?.info?.(`heartbeat: distilling ${pending.length} pending experience(s)`);
+              for (const raw of pending) {
+                try {
+                  const prompt = `Summarize the following experience into a concise lesson.\nSource: ${raw.source}Context: ${raw.context}Detail: ${raw.detail}----\nReturn a JSON with: title (short title), summary (1-2 sentences), type (lesson|failure|correction|fix|best_practice), relevanceScore (0.0-1.0)\nReturn ONLY the JSON, no other text.`;
+                  const llmModel = process.env.LLM_MODEL || "deepseek-chat";
+                  const llmApiKey = process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || "";
+                  const llmBaseUrl = process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.deepseek.com";
+                  const llmResp = await fetch(llmBaseUrl + "/chat/completions", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json", "Authorization": "Bearer " + llmApiKey},
+                    body: JSON.stringify({
+                      model: llmModel,
+                      messages: [{ role: "user", content: prompt }],
+                      temperature: 0.3,
+                      max_tokens: 512,
+                    }),
+                  });
+                  const responseData = await llmResp.json();
+                  const llmContent = responseData?.choices?.[0]?.message?.content;
+                  if (llmContent) {
+                    const parsed = JSON.parse(llmContent);
+                    const distilled = {
+                      id: "exp_dist_" + Date.now() + "_" + Math.random().toString(36).slice(2, 10),
+                      rawIds: [raw.id],
+                      type: parsed.type || "lesson",
+                      title: parsed.title || raw.source,
+                      summary: parsed.summary || "(no summary)",
+                      detail: (raw.detail || "").slice(0, 2000),
+                      context: raw.context || "",
+                      relevanceScore: parsed.relevanceScore ?? 0.5,
+                      createdAt: new Date(),
+                      matchCount: 0,
+                    };
+                    await expStore.saveDistilled(distilled);
+                    await expStore.deleteById(raw.id);
+                    logger?.info?.(`heartbeat: distilled experience "${parsed.title || "untitled"}" (${raw.source})`);
+                  }
+                } catch (distillErr) {
+                  logger?.warn?.({ err: distillErr instanceof Error ? distillErr.message : String(distillErr), id: raw.id }, "heartbeat: distillation failed for single experience");
+                }
+              }
+            }
+          } catch (fetchErr) {
+            logger?.warn?.({ err: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) }, "heartbeat: experience fetch failed");
+          }
+        }
+        
         logger?.debug?.("heartbeat: cycle completed in " + (Date.now() - t0) + "ms");
       } catch (hbErr) {
         logger?.error?.("heartbeat: cycle failed", { err: hbErr instanceof Error ? hbErr.message : String(hbErr) });
