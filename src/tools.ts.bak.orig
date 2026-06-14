@@ -47,7 +47,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_experience_report",
-    description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown. default limit=20. tag filters by community label. " +
+    description: "Extract experience summaries from the Neo4j knowledge graph. " +
       "Searches for EVENT nodes with SOLVED_BY relationships and formats as a report.",
     parameters: Type.Object({
       format: Type.Optional(Type.String({ description: 'Output: "text", "json", "markdown"', default: "text" })),
@@ -125,7 +125,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_backup",
-    description: "Full system backup: exports Neo4j nodes+relationships, lossless-claw conversations, and all workspace memory/*.md into a single JSON file. Default output: /tmp/lcm-backup-<timestamp>.json. Use before destructive operations.",
+    description: "Backup ALL memory data: Neo4j graph + lossless-claw messages + memory markdown files",
     parameters: Type.Object({
       outputPath: Type.Optional(Type.String({ description: "Output directory" })),
     }),
@@ -211,7 +211,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_restore",
-    description: "Restore from lcmg_backup JSON file. targets=all (default), neo4j_only, lcm_only, files_only. dryRun=true previews without writing. NOTE: Neo4j restore uses MERGE (does NOT delete existing nodes).",
+    description: "Restore memory data from a backup JSON into Neo4j + lossless-claw DB + memory files",
     parameters: Type.Object({
       backupPath: Type.String({ description: "Path to backup JSON file" }),
       targets: Type.Optional(Type.String({
@@ -309,7 +309,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_import",
-    description: "One-time import of historical data into Neo4j knowledge graph. source=lcm_messages imports chat history, source=memory_files imports *.md files, source=all does both. Uses LLM entity extraction when configured." +
+    description: "Import historical data from lossless-claw DB or memory files into Neo4j knowledge graph." +
       " Uses LLM entity extraction when configured.",
     parameters: Type.Object({
       source: Type.String({ description: '"lcm_messages", "memory_files", or "all"' }),
@@ -370,7 +370,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_diagnose",
-    description: "Full system diagnostics: checks Neo4j connectivity + node/rel counts, lossless-claw DB size, QMD MCP health, and all circuit breaker states. Returns structured JSON with per-subsystem status (healthy/degraded/down). Use when troubleshooting memory or recall issues.",
+    description: "Comprehensive health report: lossless-claw DB, qmd, Neo4j, circuit breakers",
     parameters: Type.Object({}),
     async execute() {
       const L: string[] = [];
@@ -490,7 +490,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_search",
-    description: "Unified search across all three memory backends: (1) lossless-claw FTS5 (conversation messages), (2) QMD BM25/vector (code/docs retrieval), (3) Neo4j knowledge graph (entities/relationships). Returns merged, deduplicated results with source-tagged entries. " +
+    description: "Cross-engine search: queries lossless-claw FTS5 + qmd BM25/vector + Neo4j knowledge graph. " +
       "Returns merged & deduplicated results across all three memory stores.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
@@ -577,7 +577,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_pin",
-    description: "Pin/unpin a Neo4j knowledge graph node. Pinned nodes are excluded from TTL-based memory decay and will never be auto-deleted. Use when a piece of knowledge should never be forgotten. " +
+    description: "Mark a Neo4j node as pinned (excluded from TTL-based memory decay). " +
       "Use when a piece of knowledge should never be forgotten.",
     parameters: Type.Object({
       id: Type.String({ description: "Node ID to pin" }),
@@ -607,7 +607,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_sync",
-    description: "Cross-store consistency check and repair for lossless-claw, Neo4j, and memory files. mode=check: read-only audit (reports orphaned entities and missing refs). mode=repair: actively prunes orphans and re-imports missing data. " +
+    description: "Repair data consistency across lossless-claw DB / Neo4j / memory files. " +
       "Detects stale Neo4j entities (orphaned after compaction), missing entities, and cross-reference drift.",
     parameters: Type.Object({
       mode: Type.Optional(Type.String({
@@ -721,7 +721,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_qmd_status",
-    description: "Query QMD MCP service health: returns index stats (document count, vector dim), collection metadata, and service uptime. " +
+    description: "Check QMD MCP index status: index health, collection info, uptime. " +
       "Calls the 'status' tool on QMD's MCP server.",
     parameters: Type.Object({}),
     async execute() {
@@ -752,7 +752,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_get_document",
-    description: "Fetch a single document from QMD document index. Accepts absolute file path or QMD docid. Returns full content with fuzzy matching suggestions when exact path is not found. " +
+    description: "Retrieve a document from QMD index by file path or docid. " +
       "Returns full document content with fuzzy matching suggestions when exact path is not found.",
     parameters: Type.Object({
       file: Type.String({ description: "File path or docid to retrieve" }),
@@ -777,7 +777,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_batch_get",
-    description: "Batch fetch documents from QMD index. Input formats: glob patterns (e.g. **/memory/*.md), comma-separated paths, or docid list. Max 50 docs per call. Returns array of {path, content, size}. " +
+    description: "Batch retrieve documents from QMD index by glob pattern, comma-separated list, or docids. " +
       "Returns multiple documents' content.",
     parameters: Type.Object({
       pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
