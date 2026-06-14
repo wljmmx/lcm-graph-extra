@@ -1252,7 +1252,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         
         logger?.debug?.("heartbeat: cycle completed in " + (Date.now() - t0) + "ms");
       } catch (hbErr) {
-        logger?.error?.("heartbeat: cycle failed", { err: hbErr instanceof Error ? hbErr.message : String(hbErr) });
+        logger?.error?.({ err: hbErr instanceof Error ? hbErr.message : String(hbErr) }, "heartbeat: cycle failed");
       }
     }
     
