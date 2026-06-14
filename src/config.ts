@@ -107,15 +107,15 @@ export const WindowMonitorConfigSchema = z.object({
   // 256K上下文适配（翻倍）
   compactTokenBudget: z.number().default(114_688),
   retrievalLimits: z.object({
-    low: z.object({ qmd: z.number().default(5), graph: z.number().default(5), exp: z.number().default(3) }),
-    medium: z.object({ qmd: z.number().default(3), graph: z.number().default(3), exp: z.number().default(1) }),
-    high: z.object({ qmd: z.number().default(1), graph: z.number().default(1), exp: z.number().default(0) }),
+    low: z.object({ qmd: z.number().int().default(5), graph: z.number().int().default(5), exp: z.number().int().default(3) }),
+    medium: z.object({ qmd: z.number().int().default(3), graph: z.number().int().default(3), exp: z.number().int().default(1) }),
+    high: z.object({ qmd: z.number().int().default(1), graph: z.number().int().default(1), exp: z.number().int().default(0) }),
   }).optional(),
   // 256K上下文适配（翻倍）
   maxContextChars: z.object({
-    low: z.number().default(12_000),
-    medium: z.number().default(6_000),
-    high: z.number().default(1_600),
+    low: z.number().int().default(12_000),
+    medium: z.number().int().default(6_000),
+    high: z.number().int().default(1_600),
   }).optional(),
 });
 

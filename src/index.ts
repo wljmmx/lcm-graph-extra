@@ -1051,11 +1051,22 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   else signal.addEventListener('abort', () => reject(new Error('onCompaction aborted')), { once: true });
                 })
               : null;
+            // Resolve memoryDir from params or api.config for onCompaction
+            const _wsDir = typeof api?.config?.workspaceDir === "string" ? api.config.workspaceDir : process.env.OPENCLAW_WORKSPACE;
+            const _memoryDir = _wsDir ? require("path").join(_wsDir, "memory") : undefined;
+            const _sessionKey = typeof params.sessionKey === "string" ? params.sessionKey
+              : typeof params.session_id === "string" ? params.session_id : undefined;
+            const _sessionFile = typeof params.sessionFile === "string" ? params.sessionFile : undefined;
             await Promise.race([
               onCompaction({
                 config: api.config,
                 logger: logger,
-                context: {} as any,
+                context: {
+                  memoryDir: _memoryDir,
+                  sessionKey: _sessionKey,
+                  sessionFile: _sessionFile,
+                  sessionId: params.sessionId ?? params.session_id,
+                } as any,
                 unregister: () => {},
                 _losslessClawAdapter: _losslessClawAdapter,
               }),
