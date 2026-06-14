@@ -1117,6 +1117,102 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     }));
 
     registerOperationalTools(api);
+    // -------------------------------------------------------------------
+    // Heartbeat - periodic async maintenance (every 5 minutes)
+    //   1. Compaction pressure check + predictive pre-compaction
+    //   2. qmd MCP health check
+    //   3. (future) PENDING experience distillation
+    // -------------------------------------------------------------------
+    const HB_INTERVAL_MS = 5 * 60 * 1000;
+    let hbTimer = null;
+    async function runHeartbeat() {
+      if (!initialized) return;
+      const t0 = Date.now();
+      try {
+        // --- 1. Compaction pressure check (scan .lossless/ directories) ---
+        try {
+          const { readdirSync, readFileSync, existsSync } = await import("node:fs");
+          const { join } = await import("node:path");
+          const wsDir = process.env.OPENCLAW_WORKSPACE || 
+            (typeof process?.cwd === "function" ? process.cwd() : 
+             (typeof api?.config?.workspaceDir === "string" ? api.config.workspaceDir : null));
+          if (wsDir && existsSync) {
+            const losslessDir = join(wsDir, ".lossless");
+            
+            // pending messages count
+            let pendingMessages = 0;
+            const sessionDir = join(losslessDir, "sessions");
+            if (existsSync(sessionDir)) {
+              const files = readdirSync(sessionDir).filter((f) => f.endsWith(".json"));
+              for (const sf of files) {
+                try {
+                  const data = JSON.parse(readFileSync(join(sessionDir, sf), "utf8"));
+                  pendingMessages += Array.isArray(data.messages) ? data.messages.length : 0;
+                } catch { /* skip */ }
+              }
+            }
+            
+            // summary fragments count
+            let summaryFragments = 0;
+            const summaryDir = join(losslessDir, "summaries");
+            if (existsSync(summaryDir)) {
+              summaryFragments = readdirSync(summaryDir).filter((f) => f.endsWith(".json")).length;
+            }
+            
+            // token ratio from debt files
+            let maxTokenRatio = 0;
+            const debtDir = join(losslessDir, "debt");
+            if (existsSync(debtDir)) {
+              const debtFiles = readdirSync(debtDir).filter((f) => f.endsWith(".json"));
+              for (const df of debtFiles) {
+                try {
+                  const debt = JSON.parse(readFileSync(join(debtDir, df), "utf8"));
+                  if (debt.currentTokenCount) {
+                    maxTokenRatio = Math.max(maxTokenRatio, debt.currentTokenCount / 262144);
+                  }
+                } catch { /* skip */ }
+              }
+            }
+            
+            // Check thresholds
+            const signals = [];
+            if (pendingMessages >= 15) signals.push("pending_msgs>=" + pendingMessages);
+            if (summaryFragments >= 8) signals.push("summary_frags>=" + summaryFragments);
+            if (maxTokenRatio > 0.65) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
+            if (signals.length > 0) {
+              logger?.warn?.({ signals }, "heartbeat: pressure threshold(s) exceeded, writing compaction debt");
+              const { writeCompactionDebt } = await import("./lcm-bridge.js");
+              writeCompactionDebt(Date.now() % 1000000, 114688, Math.round(maxTokenRatio * 262144), "hb_pressure_" + signals.length + "dims");
+            }
+          }
+        } catch { /* pressure check failed, non-fatal */ }
+        
+        // --- 2. qmd MCP health check ---
+        if (qmdClient && typeof qmdClient.ping === "function") {
+          try {
+            const qmdOnline = await qmdClient.ping();
+            if (!qmdOnline) {
+              logger?.warn?.("heartbeat: qmd MCP unavailable");
+            }
+          } catch { /* qmd health check failed, non-fatal */ }
+        }
+        
+        logger?.debug?.("heartbeat: cycle completed in " + (Date.now() - t0) + "ms");
+      } catch (hbErr) {
+        logger?.error?.("heartbeat: cycle failed", { err: hbErr instanceof Error ? hbErr.message : String(hbErr) });
+      }
+    }
+    
+    // Start heartbeat 60s after plugin init, then every 5 minutes
+    hbTimer = setTimeout(function startHb() {
+      runHeartbeat();
+      hbTimer = setInterval(runHeartbeat, HB_INTERVAL_MS);
+    }, 60_000);
+    
+    // Expose for manual trigger
+    (api as any).__lcmHeartbeat = runHeartbeat;
+
+
   },
 });
 
@@ -1137,9 +1233,6 @@ export { RetrievalGateway } from './retrieval-gateway.js';
 export { GraphAdapter } from './adapters/graph-adapter.js';
 export { Merger } from './merger.js';
 export { onCompaction } from './hooks/compaction.js';
-export { onSessionCreated } from './hooks/session-created.js';
-export { onTurnComplete } from './hooks/turn-complete.js';
-export { onHeartbeat } from './hooks/heartbeat.js';
 
 export {
   detectExperienceTrigger, extractRawExperience, ExperienceStorage,
