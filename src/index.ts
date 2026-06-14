@@ -23,7 +23,6 @@ import { UsageTracker } from "./async/usage-tracker"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig } from "./config/neo4j-helper";
-import { disposeAfterTurn as disposeRetrievalSingletons } from "./hooks/before-turn";
 
 import {
   type PressureInfo,
@@ -193,7 +192,7 @@ export default definePluginEntry({
   description: "Coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
 
   register(api: any) {
-    const logger = (api as any).logger;
+    const logger = api.logger;
 
     // -----------------------------------------------------------------------
     // Lazy singleton instances — created once, reused across all assemble calls
@@ -274,13 +273,13 @@ function getSessionDedup(sessionKey: string) {
         const { ExperienceStorage } = await import("./experience/index.js");
 
         // -- QMD 全局配置 (来自 memory.qmd) --
-        const qmdConfig = (api as any).config?.retrieval?.qmd ?? {};
+        const qmdConfig = api.config?.retrieval?.qmd ?? {};
         const qmdBaseUrl = typeof qmdConfig.mcpEndpoint === 'string'
           ? qmdConfig.mcpEndpoint.replace(/\/mcp$/, '')
           : undefined;
 
         // -- 插件自有参数 (来自 plugins.lcm-graph-extra) --
-        const pluginConfig = (api as any).config ?? {};
+        const pluginConfig = api.config ?? {};
         const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? 'search';
         const cliTimeout = pluginConfig.cliTimeout ?? 30_000;
 
@@ -419,7 +418,7 @@ function getSessionDedup(sessionKey: string) {
           // ==================================================================
           // 1. Window Monitor — pressure check + tier determination
           // ==================================================================
-          const wmConfig = (api as any).config?.windowMonitor;
+          const wmConfig = api.config?.windowMonitor;
           const wm = wmConfig?.enabled !== false ? wmConfig : null;
           const messages = params.messages ?? [];
           // Respect tokenBudget from params if provided (overrides window monitor budget)
@@ -465,10 +464,10 @@ function getSessionDedup(sessionKey: string) {
           // 1b. Token ratio > 0.65 warning + async pre-compaction trigger
           // ==================================================================
           if (tokenRatio > 0.65 && !needsCompact) {
-            logger?.warn?.(
-              { tokenRatio: Number(tokenRatio.toFixed(3)), estimatedTokens, contextWindow },
-              "window monitor: token ratio above 0.65, triggering async pre-compaction",
-            );
+              logger?.warn?.(
+                "window monitor: token ratio above 0.65, triggering async pre-compaction",
+                { tokenRatio: Number(tokenRatio.toFixed(3)), estimatedTokens, contextWindow },
+              );
             // Fire-and-forget pre-compaction to reduce context before it gets worse
             if (_losslessClawAdapter?.connected) {
               const preCompactSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
@@ -549,14 +548,14 @@ function getSessionDedup(sessionKey: string) {
                 const t0 = Date.now();
                 try {
                   if (!qmdQuery) return { results: [], ms: 0 };
-                  const res = await qmdClient.query({
+                  const res = await withCircuitBreaker("qmd", "L2 qmdClient.query", () => qmdClient.query({
                     searches: [
                       { type: "lex", query: qmdQuery },
                       { type: "vec", query: qmdQuery }
                     ],
                     limit: retrievalLimits.qmd,
                     rerank: true
-                  });
+                  }));
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.("L2 qmd query failed", { err: (e as Error).message });
@@ -571,7 +570,7 @@ function getSessionDedup(sessionKey: string) {
                     logger?.debug?.("[lcm-graph-extra] L3 graph search skipped (no graph tool)");
                     return { results: [], ms: 0 };
                   }
-                  const res = await graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph);
+                  const res = await withCircuitBreaker("neo4j", "L3 graphAdapter.search", () => graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph));
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.("L3 graph search failed", { err: (e as Error).message });
@@ -587,7 +586,7 @@ function getSessionDedup(sessionKey: string) {
                     return { results: [], ms: 0 };
                   }
                   if (retrievalLimits.exp === 0) return { results: [], ms: 0 };
-                  const res = await expStore.searchRelevant(0.6, retrievalLimits.exp);
+                  const res = await withCircuitBreaker("neo4j", "L4 expStore.search", () => expStore.searchRelevant(0.6, retrievalLimits.exp));
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.("L4 experience search failed", { err: (e as Error).message });
@@ -854,7 +853,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
 
           // Assemble audit log
-          logger?.info?.({
+          logger?.info?.('assemble: injection audit', {
             audit: {
               totalInjectedChars: (systemPromptAddition || '').length,
               msgCount: msgs.length,
@@ -869,7 +868,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               removedSectionsCount: removedSections.length,
               removedSections: removedSections,
             }
-          }, 'assemble: injection audit');
+          });
           // Normalize message content to string for SDK compatibility
           // SDK calls .startsWith() on content, which fails if content is an array
           const normalizedMessages = (params.messages ?? []).map((msg: any) => {
@@ -899,7 +898,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         } catch (normErr) {
           const ne = normErr instanceof Error ? normErr : new Error(String(normErr));
           logger?.error?.('[DEBUG] assemble outer try-catch error', { err: ne, stack: ne.stack });
-          logger?.error?.("assemble: normalize error", { err: ne })
+          logger?.error?.("assemble: normalize error", { err: ne });
           // Ultra fallback: normalize content to string for SDK compatibility
           const fallbackMessages = (params.messages ?? []).map((msg: any) => {
             if (Array.isArray(msg.content)) {
@@ -985,7 +984,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 apiKey: runtimeLlm.apiKey || process.env.OPENAI_API_KEY || '',
                 baseURL: runtimeLlm.baseURL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
               }
-            : (api as any).config?.llm || {
+            : api.config?.llm || {
                 apiKey: process.env.OPENAI_API_KEY || '',
                 baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
@@ -1038,7 +1037,6 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // This eliminates the 10s+ blocking delay during compact().
           
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
-          const signal = (params as any).abortSignal || (params as any).signal;
 
           // --- Promise.race + 30s timeout: trigger lossless-claw DAG compaction asynchronously ---
           let summaryContent: string | undefined;
@@ -1052,11 +1050,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     if (signal.aborted) reject(new Error('compaction aborted'));
                     else signal.addEventListener('abort', () => reject(new Error('compaction aborted')), { once: true });
                   })
-                : new Promise(() => {});
+                : null;
               const compactResult: any = await Promise.race([
                 _losslessClawAdapter.compact(params),
                 compactTimeout,
-                abortOnCompact,
+                ...(abortOnCompact ? [abortOnCompact] : []),
               ]);
               // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
               summaryContent = compactResult?.result?.summary || compactResult?.summary;
@@ -1071,7 +1069,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               }
             }
           } else {
-            logger?.debug("compact: LosslessClawAdapter not connected, DAG compaction skipped");
+            logger?.debug?.("compact: LosslessClawAdapter not connected, DAG compaction skipped");
           }
 
           // --- Promise.race + 30s timeout: onCompaction hook (backup + Neo4j marker) ---
@@ -1084,17 +1082,17 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   if (signal.aborted) reject(new Error('onCompaction aborted'));
                   else signal.addEventListener('abort', () => reject(new Error('onCompaction aborted')), { once: true });
                 })
-              : new Promise(() => {});
+              : null;
             await Promise.race([
               onCompaction({
                 config: api.config,
                 logger: logger,
                 context: {} as any,
                 unregister: () => {},
-                _losslessClawAdapter: null,
+                _losslessClawAdapter: _losslessClawAdapter,
               }),
               hookTimeout,
-              abortOnHook,
+              ...(abortOnHook ? [abortOnHook] : []),
             ]);
           } catch (hookErr) {
             const msg = String(hookErr);
@@ -1172,7 +1170,6 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       dispose() {
         // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
-        try { (disposeRetrievalSingletons as any)?.(); } catch {}
         initialized = false;
         initPromise = null;
         qmdClient = null;
@@ -1202,7 +1199,6 @@ export { RetrievalGateway } from './retrieval-gateway.js';
 export { GraphAdapter } from './adapters/graph-adapter.js';
 export { Merger } from './merger.js';
 export { onCompaction } from './hooks/compaction.js';
-export { onBeforeTurn } from './hooks/before-turn.js';
 export { onSessionCreated } from './hooks/session-created.js';
 export { onTurnComplete } from './hooks/turn-complete.js';
 export { onHeartbeat } from './hooks/heartbeat.js';

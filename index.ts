@@ -7,4 +7,4 @@
  * (via CE registry's getContextEngineFactory)
  */
 
-export { default } from './src/entry.js';
+export { default } from './src/index.js';

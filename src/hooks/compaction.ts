@@ -118,7 +118,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
       await enforceRetention(fp, backupDir, maxBackups);
     }
   } catch (err) {
-    logger?.error?.({ err }, 'compaction: backup failed');
+    logger?.error?.('compaction: backup failed', { err });
   }
 
   // --- step 2 — delegate to lossless-claw via adapter ------------------
@@ -176,7 +176,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
       backupDir,
     });
   } catch (err) {
-    logger?.warn?.({ err }, 'compaction: Neo4j event logging failed');
+    logger?.warn?.('compaction: Neo4j event logging failed', { err });
   }
 
   // --- step 4 — record DAG snapshot marker ------------------------------

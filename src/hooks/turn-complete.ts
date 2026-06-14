@@ -40,7 +40,7 @@ export async function onTurnComplete(instance: PluginInstance): Promise<void> {
   // --- Check if experience extraction is enabled -------------------------
   const expConfig = config.experience;
   if (!expConfig?.enabled) {
-    logger.debug('experience extraction disabled, skipping turn_complete work');
+    logger?.debug?.('experience extraction disabled, skipping turn_complete work');
     return;
   }
 

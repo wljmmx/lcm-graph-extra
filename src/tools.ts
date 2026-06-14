@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
 const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
@@ -537,7 +538,7 @@ export function registerOperationalTools(api: any): void {
             for (const l of qmdLines) results.push(`- ${l}`);
             results.push("");
           }
-        } catch { console.debug("[tools] qmd search unavailable"); }
+        } catch { /* qmd CLI fallback, silent */ }
       }
 
       // --- Neo4j ---

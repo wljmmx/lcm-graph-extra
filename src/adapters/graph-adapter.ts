@@ -7,6 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
@@ -38,7 +39,17 @@ export interface GraphAdapterConfig {
   searchLimit: number;
 }
 
-const GM_PRO_PATH = process.env.GM_PRO_PATH || '/home/wljmmx/.openclaw/extensions/graph-memory-pro';
+const _gmpRequire = createRequire(import.meta.url);
+const GM_PRO_PATH = process.env.GM_PRO_PATH
+  || (() => {
+      try {
+        const resolved = _gmpRequire.resolve('@openclaw/graph-memory-pro/dist/index.js');
+        return resolved.endsWith('/dist/index.js') ? resolved.slice(0, -14) : resolved;
+      } catch {
+        return undefined;
+      }
+    })()
+  || '/home/wljmmx/.openclaw/extensions/graph-memory-pro';
 
 /** Map node label to result type */
 function inferType(label: string): RetrievalType {
