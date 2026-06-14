@@ -23,6 +23,7 @@ import { UsageTracker } from "./async/usage-tracker"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig } from "./config/neo4j-helper";
+import { withCircuitBreaker } from "./circuit-breaker.js";
 
 import {
   type PressureInfo,
