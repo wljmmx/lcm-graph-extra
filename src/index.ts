@@ -313,8 +313,9 @@ function getSessionDedup(sessionKey: string) {
 
         // Read provider model context window from openclaw.json
         try {
-          const defaultConfigPath = require("os").homedir() + "/.openclaw/openclaw.json";
-          const { readFileSync } = require("node:fs");
+          const { homedir } = await import("node:os");
+          const defaultConfigPath = homedir() + "/.openclaw/openclaw.json";
+          const { readFileSync } = await import("node:fs");
           const cfg = JSON.parse(readFileSync(defaultConfigPath, "utf8"));
           const primaryModel = cfg?.agents?.defaults?.model?.primary;
           if (primaryModel && typeof primaryModel === "string") {

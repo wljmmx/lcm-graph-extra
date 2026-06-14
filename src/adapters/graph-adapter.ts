@@ -501,7 +501,8 @@ export class GraphAdapter {
     if (!this.driver) return [];
     const session = this.driver.session();
     try {
-      const result = await session.run(cypher, params ?? {});
+      const safeParams = params ? Object.fromEntries(Object.entries(params).map(([k,v]) => [k, typeof v === "number" ? Math.floor(v) : v])) : {};
+      const result = await session.run(cypher, safeParams);
       return result.records.map((r: any) => r.toObject() as Record<string, unknown>);
     } finally {
       await session.close();
