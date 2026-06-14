@@ -140,9 +140,9 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
       } else {
         const reasonStr = compactResult.reason ?? "";
       if (reasonStr.includes("replay") || reasonStr.includes("refused")) {
-        logger?.warn?.({ reason: reasonStr }, "compaction: lossless-claw replay protection triggered, skipping DAG compact");
+        logger?.warn?.("compaction: lossless-claw replay protection triggered, skipping DAG compact", { reason: reasonStr });
       } else {
-        logger?.warn?.({ reason: reasonStr }, "compaction: lossless-claw adapter compact reported issue");
+        logger?.warn?.("compaction: lossless-claw adapter compact reported issue", { reason: reasonStr });
       }
       }
     } else {
@@ -151,9 +151,9 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
   } catch (err) {
     const errMsg = typeof err === "string" ? err : (err as Error).message ?? "unknown";
       if (errMsg.includes("replay") || errMsg.includes("refused")) {
-        logger?.warn?.({ err }, "compaction: lossless-claw replay protection active, will retry next cycle");
+        logger?.warn?.("compaction: lossless-claw replay protection active, will retry next cycle", { err });
       } else {
-        logger?.warn?.({ err }, "compaction: LosslessClawAdapter call failed (non-fatal)");
+        logger?.warn?.("compaction: LosslessClawAdapter call failed (non-fatal)", { err });
       }
   }
   // --- step 3 — post-compaction entity extraction -------------------------

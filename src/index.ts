@@ -1221,7 +1221,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (summaryFragments >= 8) signals.push("summary_frags>=" + summaryFragments);
             if (maxTokenRatio > 0.65) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
             if (signals.length > 0) {
-              logger?.warn?.({ signals }, "heartbeat: pressure threshold(s) exceeded, writing compaction debt");
+              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, writing compaction debt", { signals });
               const { writeCompactionDebt } = await import("./lcm-bridge.js");
               writeCompactionDebt(Date.now() % 1000000, 114688, Math.round((maxTokenRatio || 0.5) * 262144), "hb_pressure_" + signals.length + "dims");
             }
@@ -1281,18 +1281,18 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     logger?.info?.(`heartbeat: distilled experience "${parsed.title || "untitled"}" (${raw.source})`);
                   }
                 } catch (distillErr) {
-                  logger?.warn?.({ err: distillErr instanceof Error ? distillErr.message : String(distillErr), id: raw.id }, "heartbeat: distillation failed for single experience");
+                  logger?.warn?.("heartbeat: distillation failed for single experience", { err: distillErr instanceof Error ? distillErr.message : String(distillErr), id: raw.id });
                 }
               }
             }
           } catch (fetchErr) {
-            logger?.warn?.({ err: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) }, "heartbeat: experience fetch failed");
+            logger?.warn?.("heartbeat: experience fetch failed", { err: fetchErr instanceof Error ? fetchErr.message : String(fetchErr) });
           }
         }
         
         try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
       } catch (hbErr) {
-        logger?.error?.({ err: hbErr instanceof Error ? hbErr.message : String(hbErr) }, "heartbeat: cycle failed");
+        logger?.error?.("heartbeat: cycle failed", { err: hbErr instanceof Error ? hbErr.message : String(hbErr) });
       }
     }
     

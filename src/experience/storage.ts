@@ -152,7 +152,7 @@ export class ExperienceStorage {
   ): Promise<ExperienceSearchResult[]> {
     const rows = await this.adapter.query<ExperienceSearchRow>(
       SEARCH_RELEVANT,
-      { minScore, limit },
+      { minScore, limit: Math.trunc(limit) },
     );
     return (rows || []).map((r: any) => ({
       experience: rowToDistilled(r),
@@ -169,7 +169,7 @@ export class ExperienceStorage {
   ): Promise<ExperienceSearchResult[]> {
     const rows = await this.adapter.query<ExperienceSearchRow>(
       SEARCH_BY_CONTEXT,
-      { keyword, limit },
+      { keyword, limit: Math.trunc(limit) },
     );
     return (rows || []).map((r: any) => ({
       experience: rowToDistilled(r),
@@ -190,7 +190,7 @@ export class ExperienceStorage {
   async fetchPending(limit: number = 200): Promise<PendingRow[]> {
     const rows = await this.adapter.query<PendingRow>(
       FETCH_PENDING,
-      { limit },
+      { limit: Math.trunc(limit) },
     );
     return (rows || []).map((r: any) => ({
       ...r,

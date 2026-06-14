@@ -519,7 +519,7 @@ export class GraphAdapter {
       const ranked = await this.mod.personalizedPageRank(this.driver, nodeIds[0], nodeIds, { damping: 0.85, iterations: 20 });
       return new Map(ranked.map((r: any) => [r.nodeId, r.score]));
     } catch (err) {
-      this.logger?.error?.('[lcm-graph-extra] PPR rerank failed:', err);
+      this.logger?.error?.('[lcm-graph-extra] PPR rerank failed', { err });
       return new Map();
     }
   }
@@ -545,7 +545,7 @@ export class GraphAdapter {
       if (entities.length > 0 || relations.length > 0) await this.batchUpsert(entities, relations);
       return { nodes: entities.length, edges: relations.length };
     } catch (err) {
-      this.logger?.error?.('[lcm-graph-extra] extractAndUpsertFromTurn error:', err);
+      this.logger?.error?.('[lcm-graph-extra] extractAndUpsertFromTurn error', { err });
       return { nodes: 0, edges: 0 };
     }
   }
