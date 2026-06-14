@@ -87,8 +87,17 @@ function resolveBackupDir(instance: PluginInstance): string {
 export async function onCompaction(instance: PluginInstance): Promise<void> {
   const logger = instance.logger;
 
-  // --- compaction config -------------------------------------------------
-  const compConfig = instance.config.compaction;
+  // --- compaction config (fallback to windowMonitor) ---------------------
+  const rawCompConfig = instance.config.compaction;
+  const windowMonitor = instance.config.windowMonitor;
+
+  // If compaction config is empty/missing, fall back to windowMonitor
+  const compConfig = (
+    rawCompConfig && Object.keys(rawCompConfig).length > 0
+      ? rawCompConfig
+      : windowMonitor || {}
+  );
+
   if (compConfig?.enabled === false) {
     logger?.debug?.('compaction: disabled by config, skipping');
     return;
@@ -132,7 +141,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
         sessionId: sessionKey,
         sessionKey,
         sessionFile,
-        tokenBudget: (compConfig as any)?.tokenBudget,
+        tokenBudget: (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget,
         force: (compConfig as any)?.force ?? true,
       });
       if (compactResult.ok) {
