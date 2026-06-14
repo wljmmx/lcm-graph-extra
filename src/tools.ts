@@ -6,6 +6,7 @@
  */
 
 import { Type } from "typebox";
+import * as neo4jDriver from 'neo4j-driver';
 import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
 const { DatabaseSync } = _lcmRequire("node:sqlite");
@@ -66,7 +67,7 @@ export function registerOperationalTools(api: any): void {
         query += ` RETURN e.id, e.name, e.description, e.pagerank, e.validatedCount, e.communityId, solutions
           ORDER BY e.pagerank DESC, e.validatedCount DESC LIMIT $limit`;
 
-        const result = await session.run(query, { limit: limitParam, tag: params.tag ?? "" });
+        const result = await session.run(query, { limit: neo4jDriver.int(Math.trunc(limitParam)) as any, tag: params.tag ?? "" });
         if (result.records.length === 0) {
           return { content: [{ type: "text" as const, text: "No experiences found." }] };
         }
@@ -551,7 +552,7 @@ export function registerOperationalTools(api: any): void {
                WHERE n.name CONTAINS $k OR n.content CONTAINS $k OR toLower(n.name) CONTAINS toLower($k)
                RETURN n.name, labels(n)[0] AS type, n.content, n.pagerank
                ORDER BY n.pagerank DESC LIMIT $limit`,
-              { k: query, limit }
+              { k: query, limit: neo4jDriver.int(Math.trunc(limit)) as any }
             );
             if (rows.records.length > 0) {
               results.push(`## 🔗 Neo4j graph (${rows.records.length} hits)`);
