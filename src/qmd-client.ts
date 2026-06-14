@@ -112,7 +112,16 @@ export class QmdClient {
       } catch (err) {
         this.mcpAvailable = false;
         this.scheduleRecovery();
-        console.warn("[qmd-client] MCP query failed, falling back to CLI:", (err as Error).message);
+        const _mcpErr = (err as Error).message;
+        if (_mcpErr.includes("circuit breaker")) {
+          console.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
+        } else if (_mcpErr.includes("HTTP")) {
+          console.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
+        } else if (_mcpErr.includes("empty response")) {
+          console.warn("[qmd-client] MCP query returned no results, falling back to CLI");
+        } else {
+          console.warn("[qmd-client] MCP query failed, falling back to CLI:", _mcpErr);
+        }
       }
     }
 

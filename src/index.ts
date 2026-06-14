@@ -303,9 +303,9 @@ function getSessionDedup(sessionKey: string) {
 
         expStore = new ExperienceStorage(graphAdapter, 3);
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
-        const pluginCfg = (api.config as any)?.plugins?.entries?.['lcm-graph-extra']?.config;
-        if (pluginCfg?.windowMonitor?.dedupRounds) {
-          MAX_DEDUP_ROUNDS = pluginCfg.windowMonitor.dedupRounds;
+        // WindowMonitor config is at api.config.windowMonitor (not nested under plugins.entries)
+        if (api.config?.windowMonitor?.dedupRounds) {
+          MAX_DEDUP_ROUNDS = api.config.windowMonitor.dedupRounds;
         }
         initialized = true;
       } catch (err) {
@@ -558,7 +558,18 @@ function getSessionDedup(sessionKey: string) {
                   }));
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
-                  logger?.warn?.("L2 qmd query failed", { err: (e as Error).message });
+                  const _l2e = e as Error; const _l2m = _l2e.message;
+          if (_l2m.includes("circuit breaker")) {
+            logger?.warn?.("L2 qmd: circuit breaker OPEN, skipping", { err: _l2m });
+          } else if (_l2m.includes("MCP HTTP")) {
+            logger?.warn?.("L2 qmd: MCP service error (" + _l2m + "), falling back to CLI");
+          } else if (_l2m.includes("empty response")) {
+            logger?.warn?.("L2 qmd: MCP returned empty result, falling back to CLI");
+          } else if (_l2m.includes("CLI output")) {
+            logger?.warn?.("L2 qmd: CLI fallback also failed (" + _l2m + ")");
+          } else {
+            logger?.warn?.("L2 qmd: error - " + _l2m);
+          }
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
