@@ -16,6 +16,13 @@ import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 
+// Module-level Neo4j config, initialized by registerOperationalTools
+let _pluginNeo4jConfig: Record<string, unknown> | undefined;
+
+function getPluginNeo4jConfig(): Record<string, unknown> | undefined {
+  return _pluginNeo4jConfig;
+}
+
 const LCM_DB = "/home/wljmmx/.openclaw/lcm.db";
 // Neo4j credentials resolved at runtime via neo4j-helper
 // Neo4j user resolved at runtime via neo4j-helper
@@ -31,7 +38,7 @@ function openDb() {
 
 async function neo4jSession() {
   const neo4j = await import("neo4j-driver").then((m) => m.default);
-  const config = { uri: "bolt://192.168.50.89:7687", user: "neo4j", password: "pro-gm-2.1.0" };
+  const config = resolveNeo4jConfig(getPluginNeo4jConfig());
   const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
   return { driver, session: driver.session() };
 }
@@ -42,6 +49,7 @@ async function closeNeo4j(driver: any, session: any) {
 }
 
 export function registerOperationalTools(api: any): void {
+  _pluginNeo4jConfig = (api.config || {}) as Record<string, unknown>;
   // ===================================================================
   // 1. lcmg_experience_report
   // ===================================================================
@@ -809,7 +817,7 @@ export function registerOperationalTools(api: any): void {
     parameters: Type.Object({}),
     async execute() {
       try {
-        const config = { uri: "bolt://192.168.50.89:7687", user: "neo4j", password: "pro-gm-2.1.0" };
+        const config = resolveNeo4jConfig(getPluginNeo4jConfig());
         const neo4j = await import("neo4j-driver").then((m) => m.default);
         const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
         const { createRequire } = await import("node:module");
