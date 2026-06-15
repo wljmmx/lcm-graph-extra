@@ -181,11 +181,24 @@ export function resolveContextProfile(
   const base = 262_144;
   const scale = ctxWindow / base;
   
+  // Adaptive values computed from model's context window (primary source)
+  const adaptiveLimits = defaultRetrievalLimits(scale);
+  const adaptiveChars = defaultMaxContextChars(scale);
+
+  // User config as fallback only when user didn't configure specific fields
   return {
     contextWindow: ctxWindow,
-    compactTokenBudget: Math.round(ctxWindow * COMPACT_RATIO),
-    retrievalLimits: defaultRetrievalLimits(scale),
-    maxContextChars: defaultMaxContextChars(scale),
+    compactTokenBudget: wm?.compactTokenBudget ?? Math.round(ctxWindow * COMPACT_RATIO),
+    retrievalLimits: wm?.retrievalLimits?.low ? {
+      qmd: wm.retrievalLimits.low.qmd ?? adaptiveLimits.qmd,
+      graph: wm.retrievalLimits.low.graph ?? adaptiveLimits.graph,
+      exp: wm.retrievalLimits.low.exp ?? adaptiveLimits.exp,
+    } : adaptiveLimits,
+    maxContextChars: wm?.maxContextChars?.low ? {
+      low: wm.maxContextChars.low ?? adaptiveChars.low,
+      medium: wm.maxContextChars.medium ?? adaptiveChars.medium,
+      high: wm.maxContextChars.high ?? adaptiveChars.high,
+    } : adaptiveChars,
   };
 }
 

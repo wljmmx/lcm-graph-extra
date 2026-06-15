@@ -474,14 +474,14 @@ function getSessionDedup(sessionKey: string) {
               mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
             });
             retrievalLimits = getRetrievalLimitsForTier(tier, {
-              low: wm.retrievalLimits?.low ?? resolvedCtx.retrievalLimits,
-              medium: wm.retrievalLimits?.medium ?? { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
-              high: wm.retrievalLimits?.high ?? { qmd: 1, graph: 1, exp: 0 },
+              low: resolvedCtx.retrievalLimits,
+              medium: { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
+              high: { qmd: 1, graph: 1, exp: 0 },
             });
             maxContextChars = getMaxContextCharsForTier(tier, {
-              low: wm.maxContextChars?.low ?? resolvedCtx.maxContextChars.low,
-              medium: wm.maxContextChars?.medium ?? resolvedCtx.maxContextChars.medium,
-              high: wm.maxContextChars?.high ?? resolvedCtx.maxContextChars.high,
+              low: resolvedCtx.maxContextChars.low,
+              medium: resolvedCtx.maxContextChars.medium,
+              high: resolvedCtx.maxContextChars.high,
             });
 
             needsCompact = shouldTriggerCompact(msgCount, tokenRatio, {
