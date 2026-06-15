@@ -859,7 +859,8 @@ export function registerOperationalTools(api: any): void {
 
         return { content: [{ type: "text" as const, text: lines.join("\n") }] };
       } catch (e) {
-        return { content: [{ type: "text" as const, text: "Maintenance failed: " + e.message }], isError: true };
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], isError: true };
       }
     },
   });

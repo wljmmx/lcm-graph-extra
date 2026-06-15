@@ -66,7 +66,7 @@ export class RetrievalGateway {
    * Standard dual-engine search (qmd + graph).
    */
   async search(query: string): Promise<RetrievalResult[]> {
-    if (!query || !query.trim()) return [];
+    if (!query || !query.trim()) return [] as RetrievalResult[];
     this.lastQuery = query;
 
     const [qmdResults, graphResults] = await Promise.all([
@@ -130,9 +130,9 @@ export class RetrievalGateway {
     const start = performance.now();
     try {
       const timer = AbortSignal.timeout(this.globalTimeoutMs);
-      const results = await Promise.race([
+      const results: RetrievalResult[] = await Promise.race([
         searchFn(),
-        new Promise((_, reject) => {
+        new Promise<never>((_, reject) => {
           timer.addEventListener('abort', () => reject(new Error('search timeout')));
         }),
       ]);
@@ -152,7 +152,7 @@ export class RetrievalGateway {
       this.stats[engine].failures++;
       this.stats[engine].lastQueryTime = duration;
       console.error(`[lcm-graph-extra] ${engine} search failed (${duration.toFixed(0)}ms): ${err}`);
-      return [];
+      return [] as RetrievalResult[];
     }
   }
 

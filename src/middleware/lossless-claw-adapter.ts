@@ -183,8 +183,8 @@ export class LosslessClawAdapter {
       const msg = params.message;
       if (msg && Array.isArray(msg.content)) {
         const normalizedContent = msg.content
-          .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-          .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+          .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+          .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
           .join('\n');
         const normalizedParams = { ...params, message: { ...msg, content: normalizedContent } };
         return await this.engine.ingest(normalizedParams);
@@ -220,8 +220,8 @@ export class LosslessClawAdapter {
           return {
             ...msg,
             content: msg.content
-              .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
               .join('\n'),
           };
         }
@@ -258,8 +258,8 @@ export class LosslessClawAdapter {
           return {
             ...msg,
             content: msg.content
-              .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
               .join('\n'),
           };
         }
@@ -299,8 +299,8 @@ export class LosslessClawAdapter {
           return {
             ...msg,
             content: msg.content
-              .filter((c) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
               .join('\n'),
           };
         }

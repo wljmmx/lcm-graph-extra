@@ -16,7 +16,9 @@
  *   compact → delegated to lossless-claw (returns ok=true)
  */
 
+// @ts-ignore - plugin-sdk types only available at runtime
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+// @ts-ignore - plugin-sdk types only available at runtime
 import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
 import { registerOperationalTools } from "./tools.js";
 import { UsageTracker } from "./async/usage-tracker"
@@ -1283,7 +1285,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       max_tokens: 512,
                     }),
                   });
-                  const responseData = await llmResp.json();
+                  const responseData: any = await llmResp.json();
                   const llmContent = responseData?.choices?.[0]?.message?.content;
                   if (llmContent) {
                     const parsed = JSON.parse(llmContent);

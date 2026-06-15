@@ -284,7 +284,7 @@ export class GraphAdapter {
         for (const r of results) {
           const nid = String(r.metadata?.nodeId ?? '');
           if (nid && communityMap.has(nid)) {
-            r.metadata.communityId = communityMap.get(nid)!;
+            if (r.metadata) { r.metadata.communityId = communityMap.get(nid)!; }
           }
         }
         await session.close();
