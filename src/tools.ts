@@ -31,7 +31,7 @@ function openDb() {
 
 async function neo4jSession() {
   const neo4j = await import("neo4j-driver").then((m) => m.default);
-  const config = resolveNeo4jConfig(undefined);
+  const config = { uri: "bolt://192.168.50.89:7687", user: "neo4j", password: "pro-gm-2.1.0" };
   const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
   return { driver, session: driver.session() };
 }
@@ -809,7 +809,7 @@ export function registerOperationalTools(api: any): void {
     parameters: Type.Object({}),
     async execute() {
       try {
-        const config = resolveNeo4jConfig(undefined);
+        const config = { uri: "bolt://192.168.50.89:7687", user: "neo4j", password: "pro-gm-2.1.0" };
         const neo4j = await import("neo4j-driver").then((m) => m.default);
         const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
         const { createRequire } = await import("node:module");
