@@ -181,24 +181,39 @@ export function resolveContextProfile(
   const base = 262_144;
   const scale = ctxWindow / base;
   
-  // Adaptive values computed from model's context window (primary source)
+  // Level 1: Adaptive values computed from model's context window (primary)
   const adaptiveLimits = defaultRetrievalLimits(scale);
   const adaptiveChars = defaultMaxContextChars(scale);
 
-  // User config as fallback only when user didn't configure specific fields
+  // Level 2: User config as fallback if provided
+  // Level 3: Hardcoded 256K defaults as last resort (兜底)
   return {
     contextWindow: ctxWindow,
-    compactTokenBudget: wm?.compactTokenBudget ?? Math.round(ctxWindow * COMPACT_RATIO),
-    retrievalLimits: wm?.retrievalLimits?.low ? {
-      qmd: wm.retrievalLimits.low.qmd ?? adaptiveLimits.qmd,
-      graph: wm.retrievalLimits.low.graph ?? adaptiveLimits.graph,
-      exp: wm.retrievalLimits.low.exp ?? adaptiveLimits.exp,
-    } : adaptiveLimits,
-    maxContextChars: wm?.maxContextChars?.low ? {
-      low: wm.maxContextChars.low ?? adaptiveChars.low,
-      medium: wm.maxContextChars.medium ?? adaptiveChars.medium,
-      high: wm.maxContextChars.high ?? adaptiveChars.high,
-    } : adaptiveChars,
+    compactTokenBudget: Math.round(ctxWindow * COMPACT_RATIO)
+      ?? wm?.compactTokenBudget
+        ?? 114_688,
+    retrievalLimits: {
+      qmd: adaptiveLimits.qmd
+        ?? wm?.retrievalLimits?.low?.qmd
+          ?? 5,
+      graph: adaptiveLimits.graph
+        ?? wm?.retrievalLimits?.low?.graph
+          ?? 5,
+      exp: adaptiveLimits.exp
+        ?? wm?.retrievalLimits?.low?.exp
+          ?? 3,
+    },
+    maxContextChars: {
+      low: adaptiveChars.low
+        ?? wm?.maxContextChars?.low
+          ?? 12_000,
+      medium: adaptiveChars.medium
+        ?? wm?.maxContextChars?.medium
+          ?? 6_000,
+      high: adaptiveChars.high
+        ?? wm?.maxContextChars?.high
+          ?? 1_600,
+    },
   };
 }
 
