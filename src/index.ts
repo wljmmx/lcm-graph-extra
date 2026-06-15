@@ -481,7 +481,7 @@ function getSessionDedup(sessionKey: string) {
             maxContextChars = getMaxContextCharsForTier(tier, {
               low: resolvedCtx.maxContextChars.low,
               medium: resolvedCtx.maxContextChars.medium,
-              high: resolvedCtx.maxContextChars.high,
+              high: wm?.maxContextChars?.high ?? 1_600,
             });
 
             needsCompact = shouldTriggerCompact(msgCount, tokenRatio, {
