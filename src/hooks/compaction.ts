@@ -149,7 +149,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
         sessionId,
         sessionKey,
         sessionFile,
-        tokenBudget: (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget ?? Math.floor(((compConfig as any)?.contextWindow ?? 131072) * 0.45),
+        tokenBudget: (windowMonitor as any)?.compactTokenBudget ?? (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget ?? Math.floor(((windowMonitor as any)?.contextWindow ?? (compConfig as any)?.contextWindow ?? 131072) * 0.45),
         force: (compConfig as any)?.force ?? true,
         currentTokenCount: undefined,
         customInstructions: (compConfig as any)?.customInstructions,
