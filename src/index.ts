@@ -1152,7 +1152,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
       dispose() {
         // Stop debt scheduler and heartbeat timers on dispose
-        try { stopScheduler(); } catch {}
+        (async () => { try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {} })()
         if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
         // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
@@ -1172,7 +1172,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     //   3. (future) PENDING experience distillation
     // -------------------------------------------------------------------
     const HB_INTERVAL_MS = 5 * 60 * 1000;
-    let hbTimer = null;
+    let hbTimer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | null = null;
     async function runHeartbeat() {
       if (!initialized) return;
       const t0 = Date.now();

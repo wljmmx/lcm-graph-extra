@@ -23,7 +23,7 @@ export interface DebtSchedulerConfig {
   urgentThreshold?: number;
 }
 
-export const DEFAULT_SCHEDULER_CONFIG: DebtSchedulerConfig = {
+export const DEFAULT_SCHEDULER_CONFIG: Required<DebtSchedulerConfig> = {
   pollIntervalMs: 60_000,
   maxConcurrent: 1,
   urgentThreshold: 0.7,
@@ -152,7 +152,7 @@ let schedulerTimer: NodeJS.Timeout | null = null;
 let activeJobs: Map<number, Promise<any>> = new Map();
 let _onCompactionFn: ((instance: any) => Promise<void>) | null = null;
 let _apiContext: { config: any; logger?: any } | null = null;
-let _config: DebtSchedulerConfig = DEFAULT_SCHEDULER_CONFIG;
+let _config: Required<DebtSchedulerConfig> = { ...DEFAULT_SCHEDULER_CONFIG };
 
 export interface SchedulerStats {
   running: number;

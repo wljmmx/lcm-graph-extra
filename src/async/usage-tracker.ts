@@ -55,6 +55,7 @@ class TokenCounter {
   private ready = false;
   private initDone = false;
   private logger: any;
+  private exitCount = 0;
 
   constructor(logger: any = console) {
     this.logger = logger;
