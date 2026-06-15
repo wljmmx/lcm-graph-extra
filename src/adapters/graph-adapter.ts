@@ -94,6 +94,8 @@ export class GraphAdapter {
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
   private logger: any;
+  private _recaller: any = null;
+  private _gmConfig: Record<string, any> = {};
 
   private searchCache = new LRUCache(50, 300 * 1000);
 
@@ -120,6 +122,44 @@ export class GraphAdapter {
           }
         }
       }
+
+      // - Initialize Recaller (gm-pro dual-path recall) -
+      try {
+        // Full GmConfig — all required fields for type safety
+        const gmCfg: Record<string, any> = {
+          neo4j: this.neo4jConfig,
+          compactTurnCount: 10,
+          recallMaxNodes: 10,
+          recallMaxDepth: 2,
+          freshTailCount: 5,
+          dedupThreshold: 0.90,
+          pagerankDamping: 0.85,
+          pagerankIterations: 20,
+        };
+        this._recaller = new mod.Recaller(this.driver, gmCfg);
+        this._gmConfig = gmCfg;
+
+        // Set embedding function for community generalized recall
+        try {
+          const { resolveEmbeddingConfig } = await import("./config/neo4j-helper.js");
+          const embedCfg = resolveEmbeddingConfig(undefined);
+          if (embedCfg && mod.createEmbedFn) {
+            const embedFn = mod.createEmbedFn(embedCfg);
+            this._recaller.setEmbedFn(embedFn);
+            this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model: embedCfg.model });
+          } else {
+            this.logger?.warn?.('[graph-adapter] No embedding config, community recall disabled');
+          }
+        } catch (embedErr) {
+          this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller:', embedErr);
+        }
+
+        this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
+      } catch (initErr) {
+        this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes:', initErr);
+        this._recaller = null;
+      }
+
       return true;
     } catch (err) {
       this._connectRetryCount++;
@@ -154,7 +194,23 @@ export class GraphAdapter {
     if (!m) return [];
     const rl = limit ?? this.config.searchLimit;
     try {
-      const nodes = await m.searchNodes(this.driver, query, rl);
+      let nodes: any[] = [];
+
+      // Prefer Recaller (dual-path: precise + generalized community recall)
+      if (this._recaller) {
+        try {
+          const recallResult = await this._recaller.recall(query);
+          nodes = recallResult.nodes ?? [];
+          this.logger?.debug?.('[graph-adapter] Recaller returned', { nodeCount: nodes.length });
+        } catch (recallErr) {
+          this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back:', recallErr);
+        }
+      }
+
+      // Fallback to simple searchNodes if no results
+      if (nodes.length === 0) {
+        nodes = await m.searchNodes(this.driver, query, rl);
+      }
       // Rerank by PageRank if enough nodes
       let reranked = (nodes ?? []);
       if (reranked.length >= 2) {
@@ -527,8 +583,14 @@ export class GraphAdapter {
   async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
     if (!this.mod || nodeIds.length < 2) return new Map();
     try {
-      const ranked = await this.mod.personalizedPageRank(this.driver, nodeIds[0], nodeIds, { damping: 0.85, iterations: 20 });
-      return new Map(ranked.map((r: any) => [r.nodeId, r.score]));
+      // gm-pro personalizedPageRank(driver, seedIds[], candidateIds[], GmConfig): PPRResult { scores: Map }
+      const cfg = {
+        pagerankDamping: 0.85,
+        pagerankIterations: 20,
+      };
+      const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
+      // gm-pro returns PPRResult with scores Map
+      return result.scores ?? new Map();
     } catch (err) {
       this.logger?.error?.('[lcm-graph-extra] PPR rerank failed', { err });
       return new Map();
@@ -571,6 +633,37 @@ export class GraphAdapter {
       const data = await res.json();
       return (data as any)?.choices?.[0]?.message?.content ?? '';
     };
+  }
+
+  /**
+   * Trigger graph maintenance: deduplication, PageRank, community detection.
+   */
+  async runMaintenance(): Promise<any> {
+    if (!this.mod || !this.driver) return null;
+    try {
+      // Full GmConfig for runMaintenance
+      const cfg: Record<string, any> = {
+        neo4j: this.neo4jConfig,
+        compactTurnCount: 10,
+        recallMaxNodes: 10,
+        recallMaxDepth: 2,
+        freshTailCount: 5,
+        dedupThreshold: 0.90,
+        pagerankDamping: 0.85,
+        pagerankIterations: 20,
+      };
+      this.logger?.info?.('[graph-adapter] triggering maintenance pipeline');
+      const result = await this.mod.runMaintenance(this.driver, cfg);
+      this.logger?.info?.('[graph-adapter] maintenance completed', {
+        durationMs: result?.durationMs,
+        dedupMerged: result?.dedup?.mergedCount,
+        communitiesDetected: result?.community?.communities?.size,
+      });
+      return result;
+    } catch (err) {
+      this.logger?.error?.('[graph-adapter] maintenance failed', { err });
+      return null;
+    }
   }
 async health(): Promise<boolean> {
     try {

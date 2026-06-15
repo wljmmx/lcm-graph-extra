@@ -60,3 +60,26 @@ export function resolveNeo4jSearchConfig(
     searchLimit: (graphSection.searchLimit as number) ?? 5,
   };
 }
+
+/**
+ * Resolve embedding config from plugin config or defaults.
+ */
+export interface EmbeddingPluginConfig {
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+  dimensions?: number;
+}
+
+export function resolveEmbeddingConfig(
+  pluginConfig: Record<string, unknown> | undefined,
+): EmbeddingPluginConfig | null {
+  const embeddingSection = (pluginConfig?.embedding ?? {}) as Record<string, unknown>;
+  if (!embeddingSection) return null;
+
+  const model = (embeddingSection.model as string) || process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
+  const baseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://192.168.50.5:11434/v1";
+  const dimensions = (embeddingSection.dimensions as number) ?? 1024;
+
+  return { model, baseURL, dimensions };
+}

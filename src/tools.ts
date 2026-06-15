@@ -798,4 +798,61 @@ export function registerOperationalTools(api: any): void {
     },
   });
 
+
+
+  // ===================================================================
+  // 12. lcmg_maintain - Trigger graph maintenance pipeline
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_maintain",
+    description: "Trigger knowledge graph maintenance: dedup, PageRank, community detection.",
+    parameters: Type.Object({}),
+    async execute() {
+      try {
+        const config = resolveNeo4jConfig(undefined);
+        const neo4j = await import("neo4j-driver").then((m) => m.default);
+        const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+        const { createRequire } = await import("node:module");
+        const _req = createRequire(import.meta.url);
+        const GM_PRO_PATH = process.env.GM_PRO_PATH
+          || (() => {
+              try {
+                const resolved = _req.resolve("@openclaw/graph-memory-pro/dist/index.js");
+                return resolved.endsWith("/dist/index.js") ? resolved.slice(0, -14) : resolved;
+              } catch { return undefined; }
+            })()
+          || "/home/wljmmx/.openclaw/extensions/graph-memory-pro";
+
+        const gm = await import(GM_PRO_PATH + "/dist/index.js");
+        // Full GmConfig — all required fields
+        const cfg = {
+          neo4j: config,
+          compactTurnCount: 10,
+          recallMaxNodes: 10,
+          recallMaxDepth: 2,
+          freshTailCount: 5,
+          dedupThreshold: 0.90,
+          pagerankDamping: 0.85,
+          pagerankIterations: 20,
+        };
+        const result = await gm.runMaintenance(driver, cfg);
+        await driver.close();
+
+        const lines = [];
+        lines.push("# Graph Maintenance Report");
+        lines.push("");
+        lines.push("Duration: " + (result?.durationMs ?? 0) + "ms");
+        lines.push("Dedup merged: " + (result?.dedup?.mergedCount ?? 0) + " nodes");
+        lines.push("PageRank top: " + (result?.pagerank?.topK?.length ?? 0) + " nodes");
+        lines.push("Communities detected: " + (result?.community?.communities?.size ?? 0));
+        lines.push("Community summaries: " + (result?.communitySummaries ?? 0));
+        lines.push("");
+        lines.push("[OK] Maintenance complete.");
+
+        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      } catch (e) {
+        return { content: [{ type: "text" as const, text: "Maintenance failed: " + e.message }], isError: true };
+      }
+    },
+  });
 }
