@@ -151,10 +151,9 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
         sessionFile,
         tokenBudget: (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget,
         force: (compConfig as any)?.force ?? true,
-        currentTokenCount: totalTokens,
+        currentTokenCount: undefined,
         customInstructions: (compConfig as any)?.customInstructions,
         runtimeContext: {
-          ...(typeof totalTokens === 'number' ? { currentTokenCount: totalTokens } : {}),
           workspaceDir: memoryDir,
         },
       });

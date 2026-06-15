@@ -1052,8 +1052,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 })
               : null;
             // Resolve memoryDir from params or api.config for onCompaction
-            const _wsDir = typeof api?.config?.workspaceDir === "string" ? api.config.workspaceDir : process.env.OPENCLAW_WORKSPACE;
-            const _memoryDir = _wsDir ? require("path").join(_wsDir, "memory") : undefined;
+            // Derive memoryDir from sessionFile provided by SDK (authoritative)
+            const { resolveMemoryDir } = await import("./core/debt-manager.js");
+            const _memoryDir = resolveMemoryDir(
+              typeof params.sessionFile === "string" ? params.sessionFile : undefined,
+              api.config
+            );
             const _sessionKey = typeof params.sessionKey === "string" ? params.sessionKey
               : typeof params.session_id === "string" ? params.session_id : undefined;
             const _sessionFile = typeof params.sessionFile === "string" ? params.sessionFile : undefined;
@@ -1175,8 +1179,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const { readdirSync, readFileSync, existsSync } = await import("node:fs");
           const { join } = await import("node:path");
           const wsDir = process.env.OPENCLAW_WORKSPACE || 
-            (typeof process?.cwd === "function" ? process.cwd() : 
-             (typeof api?.config?.workspaceDir === "string" ? api.config.workspaceDir : null));
+            (typeof api?.config?.workspace === "string" ? api.config.workspace : 
+             (typeof process?.cwd === "function" ? process.cwd() : null));
           if (wsDir && existsSync) {
             const losslessDir = join(wsDir, ".lossless");
             
@@ -1221,9 +1225,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (summaryFragments >= 8) signals.push("summary_frags>=" + summaryFragments);
             if (maxTokenRatio > 0.65) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
             if (signals.length > 0) {
-              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, writing compaction debt", { signals });
+              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, processing compaction debt", { signals });
+              // Write debt record first (for tracking)
               const { writeCompactionDebt } = await import("./lcm-bridge.js");
               writeCompactionDebt(Date.now() % 1000000, 114688, Math.round((maxTokenRatio || 0.5) * 262144), "hb_pressure_" + signals.length + "dims");
+              // Then process pending debts via debt manager
+              try {
+                const { processPendingDebts } = await import("./core/debt-manager.js");
+                const compResult = await processPendingDebts(
+                  async (instance) => {
+                    const { onCompaction } = await import("./hooks/compaction.js");
+                    await onCompaction(instance);
+                  },
+                  { config: api.config, logger: logger },
+                  1
+                );
+                logger?.info?.("heartbeat: debt processing completed", { processed: compResult.processed, failed: compResult.failed.length });
+              } catch (debtErr) {
+                logger?.warn?.("heartbeat: debt manager failed (non-fatal)", { err: debtErr instanceof Error ? debtErr.message : String(debtErr) });
+              }
             }
           }
         } catch { /* pressure check failed, non-fatal */ }
