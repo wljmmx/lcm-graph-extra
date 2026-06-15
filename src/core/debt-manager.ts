@@ -333,11 +333,20 @@ export async function startScheduler(
 /**
  * Stop the resident debt scheduler.
  */
-export function stopScheduler(): void {
+/**
+ * Stop the resident debt scheduler and wait for active jobs to finish.
+ */
+export async function stopScheduler(): Promise<void> {
   if (schedulerTimer !== null) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
   }
+  // Wait for all active jobs to complete
+  if (activeJobs.size > 0 && _apiContext) {
+    _apiContext.logger?.info?.('debt-manager: waiting for ' + activeJobs.size + ' active job(s) to finish');
+    await Promise.all(Array.from(activeJobs.values()));
+  }
+  activeJobs.clear();
 }
 
 /**
@@ -347,37 +356,15 @@ export function isSchedulerRunning(): boolean {
   return schedulerTimer !== null;
 }
 
-// ─── Backward Compatible Shims ──────────────────────────
+// ─── Emergency one-shot (for manual trigger only) ──────────────────────────
 
 /**
- * Process all pending debts immediately (for one-shot use).
- * Used by backward-compatible callers and tests.
+ * Trigger immediate poll-and-dispatch without waiting for next interval.
+ * Uses the already-configured scheduler state (no global mutation).
  */
-export async function processPendingDebts(
-  onCompactionFn: (instance: any) => Promise<void>,
-  apiContext: { config: any; logger?: any },
-  maxConcurrent = 1,
-): Promise<{ processed: number; skipped: number; failed: string[] }> {
-  const savedOnCompaction = _onCompactionFn;
-  const savedApiContext = _apiContext;
-
-  _onCompactionFn = onCompactionFn;
-  _apiContext = apiContext;
-
-  const pending = getPendingDebts();
-  const result = { processed: 0, skipped: 0, failed: [] as string[] };
-
-  for (let i = 0; i < pending.length && i < maxConcurrent; i++) {
-    try {
-      await processSingleDebt(pending[i]);
-      result.processed++;
-    } catch (err) {
-      result.failed.push(String(err));
-    }
+export async function triggerNow(): Promise<void> {
+  if (!_onCompactionFn || !_apiContext) {
+    throw new Error('debt-manager: scheduler not initialized, call startScheduler first');
   }
-
-  _onCompactionFn = savedOnCompaction;
-  _apiContext = savedApiContext;
-
-  return result;
+  await pollAndDispatch();
 }

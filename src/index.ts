@@ -1225,9 +1225,24 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (summaryFragments >= 8) signals.push("summary_frags>=" + summaryFragments);
             if (maxTokenRatio > 0.65) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
             if (signals.length > 0) {
-              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, enqueuing compaction debt", { signals });
-              const { writeCompactionDebt } = await import("./lcm-bridge.js");
-              writeCompactionDebt(Date.now() % 1000000, 114688, Math.round((maxTokenRatio || 0.5) * 262144), "hb_pressure_" + signals.length + "dims");
+              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, writing debt for affected sessions", { signals });
+              // writeCompactionDebt is already imported at top; use it directly
+              try {
+                if (existsSync(sessionDir)) {
+                  const files = readdirSync(sessionDir).filter((f) => f.endsWith(".json"));
+                  for (const sf of files) {
+                    try {
+                      const data = JSON.parse(readFileSync(join(sessionDir, sf), "utf8"));
+                      const convId = getConversationId(data.sessionKey, String(data.sessionId || ''));
+                      if (!convId) continue;
+                      const tokenCount = Math.round((maxTokenRatio || 0.5) * 262144);
+                      writeCompactionDebt(convId, 114688, tokenCount, "hb_pressure_" + signals.length + "dims");
+                    } catch { /* skip bad session file */ }
+                  }
+                }
+              } catch (debtWriteErr) {
+                logger?.warn?.("heartbeat: debt write failed", { err: String(debtWriteErr) });
+              }
               // Debt scheduler (resident) will pick this up automatically
             }
           }
@@ -1328,13 +1343,16 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // Expose for manual trigger
     (api as any).__lcmHeartbeat = runHeartbeat;
 
-    // Teardown: stop scheduler on unregister
-    originalUnregister && originalUnregister();
-    try {
-      const { stopScheduler } = require("./core/debt-manager.js");
-      stopScheduler();
-    } catch {}
 
+    // Teardown: wrap originalUnregister to also stop debt scheduler when CE unregisters
+    const origUnreg = originalUnregister;
+    originalUnregister = async () => {
+      origUnreg && origUnreg();
+      try {
+        const { stopScheduler } = require("./core/debt-manager.js");
+        await stopScheduler();
+      } catch { /* ignore teardown errors */ }
+    };
 
   },
 });
