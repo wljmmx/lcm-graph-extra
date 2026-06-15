@@ -416,7 +416,7 @@ function getSessionDedup(sessionKey: string) {
         let estimatedTokens = 0;
         let tier: PressureTier = 'low';
         let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
-        let maxContextChars = 12_000;
+        let maxContextChars = 12000;
         let qmdResults: any = [];
         let graphResults: any = [];
         let expResults: any = [];
@@ -459,9 +459,9 @@ function getSessionDedup(sessionKey: string) {
           const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
 
           tier = 'low';
-          retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
+          retrievalLimits = resolvedCtx.retrievalLimits;
           // Apply tokenBudget constraint if provided (convert tokens to chars, ~4 chars/token)
-          maxContextChars = wm?.maxContextChars?.low ?? 12_000;
+          maxContextChars = resolvedCtx.maxContextChars.low;
           if (tokenBudget != null && typeof tokenBudget === 'number') {
             maxContextChars = Math.min(maxContextChars, Math.floor(tokenBudget * 4));
           }
@@ -474,14 +474,14 @@ function getSessionDedup(sessionKey: string) {
               mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
             });
             retrievalLimits = getRetrievalLimitsForTier(tier, {
-              low: wm.retrievalLimits?.low ?? { qmd: 5, graph: 5, exp: 3 },
-              medium: wm.retrievalLimits?.medium ?? { qmd: 3, graph: 3, exp: 1 },
+              low: wm.retrievalLimits?.low ?? resolvedCtx.retrievalLimits,
+              medium: wm.retrievalLimits?.medium ?? { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
               high: wm.retrievalLimits?.high ?? { qmd: 1, graph: 1, exp: 0 },
             });
             maxContextChars = getMaxContextCharsForTier(tier, {
-              low: wm.maxContextChars?.low ?? 12_000,
-              medium: wm.maxContextChars?.medium ?? 6_000,
-              high: wm.maxContextChars?.high ?? 1_600,
+              low: wm.maxContextChars?.low ?? resolvedCtx.maxContextChars.low,
+              medium: wm.maxContextChars?.medium ?? resolvedCtx.maxContextChars.medium,
+              high: wm.maxContextChars?.high ?? resolvedCtx.maxContextChars.high,
             });
 
             needsCompact = shouldTriggerCompact(msgCount, tokenRatio, {
@@ -527,7 +527,7 @@ function getSessionDedup(sessionKey: string) {
             const conversationId = getConversationId(sessionKey);
             if (conversationId != null) {
               writeCompactionDebt(
-                conversationId, wm?.compactTokenBudget ?? 114_688, estimatedTokens,
+                conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
                 `proactive_${tier}_pressure`,
               );
               // Fire DAG compaction immediately (non-blocking) for next assemble to use compressed history
@@ -538,7 +538,7 @@ function getSessionDedup(sessionKey: string) {
                   sessionId: conversationId,
                   sessionKey: sessionKey,
                   sessionFile: sessionFile,
-                  tokenBudget: wm?.compactTokenBudget ?? 114_688,
+                  tokenBudget: resolvedCtx.compactTokenBudget,
                   force: true,
                   currentTokenCount: estimatedTokens,
                   compactionTarget: 'threshold',
@@ -800,7 +800,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               .slice(0, retrievalLimits.qmd)
               .map((doc: string) => {
                 // S2: head-tail truncation using maxContextChars.low as doc limit
-                const docLimit = wm?.maxContextChars?.low ?? 12_000;
+                const docLimit = resolvedCtx.maxContextChars.low;
                 if (doc.length > docLimit) {
                   const headLen = Math.floor(docLimit * 0.6);
                   const tailLen = docLimit - headLen;
