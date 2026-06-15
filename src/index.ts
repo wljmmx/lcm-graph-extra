@@ -1151,6 +1151,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       },
 
       dispose() {
+        // Stop debt scheduler and heartbeat timers on dispose
+        try { stopScheduler(); } catch {}
+        if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
         // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
         initialized = false;
@@ -1342,8 +1345,6 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     
     // Expose for manual trigger
     (api as any).__lcmHeartbeat = runHeartbeat;
-
-
   },
 });
 
