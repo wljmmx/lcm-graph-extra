@@ -58,6 +58,9 @@
     },
     "lcmg_batch_get": {
       "description": "Batch retrieve multiple documents by their paths"
+    },
+    "lcmg_maintain": {
+      "description": "Trigger knowledge graph maintenance pipeline"
     }
   },
   "configSchema": {

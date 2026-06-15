@@ -141,14 +141,15 @@ export class GraphAdapter {
 
         // Set embedding function for community generalized recall
         try {
-          const { resolveEmbeddingConfig } = await import("./config/neo4j-helper.js");
-          const embedCfg = resolveEmbeddingConfig(undefined);
-          if (embedCfg && mod.createEmbedFn) {
-            const embedFn = mod.createEmbedFn(embedCfg);
+          const model = process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
+          const baseURL = process.env.GM_EMBED_BASE_URL || "http://192.168.50.5:11434/v1";
+          const dimensions = 1024;
+          if (mod.createEmbedFn) {
+            const embedFn = mod.createEmbedFn({ model, baseURL, dimensions });
             this._recaller.setEmbedFn(embedFn);
-            this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model: embedCfg.model });
+            this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model });
           } else {
-            this.logger?.warn?.('[graph-adapter] No embedding config, community recall disabled');
+            this.logger?.warn?.('[graph-adapter] createEmbedFn not available, community recall disabled');
           }
         } catch (embedErr) {
           this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller:', embedErr);
