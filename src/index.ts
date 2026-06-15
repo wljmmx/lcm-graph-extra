@@ -917,13 +917,20 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (msgs.length < 2) return;
 
           let userContent = '', assistantContent = '';
+          // S3-5 fix: extract actual text from content array (not JSON.stringify)
+          const extractText = (c: any): string => {
+            if (typeof c === 'string') return c;
+            if (Array.isArray(c)) return c.map((item: any) => typeof item === 'string' ? item : (item?.text ?? JSON.stringify(item))).join('');
+            return JSON.stringify(c);
+          };
+
           for (let i = msgs.length - 1; i >= 0; i--) {
             const m = msgs[i];
             const role = m.role ?? '';
             if (!userContent && role === 'user') {
-              userContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+              userContent = extractText(m.content);
             } else if (!assistantContent && role === 'assistant') {
-              assistantContent = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+              assistantContent = extractText(m.content);
             }
             if (userContent && assistantContent) break;
           }

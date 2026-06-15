@@ -121,7 +121,8 @@
 
 | 时间 | 修正内容 |
 |------|---------|
-| 2026-06-16 02:45 | S2-3 hasFullDocs guard、S2-5随修、S3-1 SDK方法已用、S3-3 citationsMode已传 — 仅剩S3-5未修复 |
+| 2026-06-16 02:45 | S2-3 hasFullDocs guard、S2-5随修、S3-1 SDK方法已用、S3-3 citationsMode已传 ||
+| 2026-06-16 02:50 | S3-5 extractText 解析 content array — ✅ ALL ISSUES RESOLVED |
 
 | 2026-06-16 02:15 | S1-1 Merger entity-level dedup 接入 assemble()，总计高优问题剩12个未修复 |
 | 2026-06-16 02:15 | S3-2 promptAuthority 已补全（P1 修复时完成） |
