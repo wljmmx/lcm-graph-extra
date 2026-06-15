@@ -1225,25 +1225,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (summaryFragments >= 8) signals.push("summary_frags>=" + summaryFragments);
             if (maxTokenRatio > 0.65) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
             if (signals.length > 0) {
-              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, processing compaction debt", { signals });
-              // Write debt record first (for tracking)
+              logger?.warn?.("heartbeat: pressure threshold(s) exceeded, enqueuing compaction debt", { signals });
               const { writeCompactionDebt } = await import("./lcm-bridge.js");
               writeCompactionDebt(Date.now() % 1000000, 114688, Math.round((maxTokenRatio || 0.5) * 262144), "hb_pressure_" + signals.length + "dims");
-              // Then process pending debts via debt manager
-              try {
-                const { processPendingDebts } = await import("./core/debt-manager.js");
-                const compResult = await processPendingDebts(
-                  async (instance) => {
-                    const { onCompaction } = await import("./hooks/compaction.js");
-                    await onCompaction(instance);
-                  },
-                  { config: api.config, logger: logger },
-                  1
-                );
-                logger?.info?.("heartbeat: debt processing completed", { processed: compResult.processed, failed: compResult.failed.length });
-              } catch (debtErr) {
-                logger?.warn?.("heartbeat: debt manager failed (non-fatal)", { err: debtErr instanceof Error ? debtErr.message : String(debtErr) });
-              }
+              // Debt scheduler (resident) will pick this up automatically
             }
           }
         } catch { /* pressure check failed, non-fatal */ }
@@ -1316,6 +1301,24 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       }
     }
     
+    // ── Start resident debt scheduler (fire-and-forget, picks up debts every 60s) ──
+    (async () => {
+      try {
+        const { startScheduler } = await import("./core/debt-manager.js");
+        await startScheduler(
+          async (instance) => {
+            const { onCompaction } = await import("./hooks/compaction.js");
+            await onCompaction(instance);
+          },
+          { config: api.config, logger: logger },
+          { pollIntervalMs: 60_000, maxConcurrent: 2, urgentThreshold: 0.7 }
+        );
+        logger?.info?.("debt-manager: resident scheduler started");
+      } catch (schedErr) {
+        logger?.warn?.("debt-manager: failed to start scheduler", { err: String(schedErr) });
+      }
+    })();
+
     // Start heartbeat 60s after plugin init, then every 5 minutes
     hbTimer = setTimeout(function startHb() {
       runHeartbeat();
@@ -1324,6 +1327,13 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     
     // Expose for manual trigger
     (api as any).__lcmHeartbeat = runHeartbeat;
+
+    // Teardown: stop scheduler on unregister
+    originalUnregister && originalUnregister();
+    try {
+      const { stopScheduler } = require("./core/debt-manager.js");
+      stopScheduler();
+    } catch {}
 
 
   },
