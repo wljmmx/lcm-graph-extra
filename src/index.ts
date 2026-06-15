@@ -783,10 +783,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             injections.push(s);
           }
 
-          // Layer 2: qmd search snippet results (skip if fullDocs already cover these files)
-          // S2-3: Avoid injecting both snippets AND full docs for same files
+          // Layer 2: qmd search snippet results
+          // S2-3+S2-5: Skip snippets when fullDocs already loaded (same files, redundant tokens)
           const hasFullDocs = Array.isArray(fullDocs) && fullDocs.length > 0;
-          if (qmdResults && Array.isArray(qmdResults)) {
+          if (qmdResults && Array.isArray(qmdResults) && !hasFullDocs) {
             const qmdItems = qmdResults.slice(0, retrievalLimits.qmd).map((r: any, i: number) => {
               const citationTag = citationsMode === 'always' || citationsMode === 'auto'
                 ? ` [src:${i+1}]`
