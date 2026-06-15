@@ -8,7 +8,7 @@
 
 | ID | 问题 | 位置 | 严重度 |
 |----|------|------|--------|
-| S1-1 | Merger 实体去重类闲置未调用，导致 L2/L3 结果无交叉去重（原S1-1+S3-2合并） | index.ts + merger.ts | 🔴 |
+| ~~S1-1~~ | ~~Merger 实体去重类闲置未调用~~ → ✅ 已接入 entity-level dedup | index.ts (ensureInitialized + assemble) | 🟢 |
 | S1-2 | P5 priority trim 顺序错误：记忆文件优先级最高(4)但最先被裁 | index.ts L95-140 | 🔴 |
 | S1-3 | estimatedTokens 用 length/4 估算，不准确 | index.ts L608 | 🟡 |
 | S1-4 | window monitor enabled 检查在 P3 之前，wm 可能为 undefined 导致短路 | index.ts L320 | 🟡 |
@@ -32,7 +32,7 @@
 | ID | 问题 | 位置 | 严重度 |
 |----|------|------|--------|
 | S3-1 | toolGuidance 未用 SDK 标准方法 buildMemorySystemPromptAddition，工具名硬编码不跟随注册变化 | index.ts L156-175 | 🔴 |
-| S3-2 | assemble() 返回结果缺少 promptAuthority 字段（SDK要求控制预检查行为） | index.ts L618-622 | 🔴 |
+| ~~S3-2~~ | ~~assemble() 返回结果缺少 promptAuthority 字段~~ | ✅ 已修复 (2026-06-16, commit 4edaf52) | 🟢 |
 | S3-3 | citationsMode SDK 参数被忽略，未传入 buildMemorySystemPromptAddition | index.ts (全局) | 🟡 |
 | S3-4 | tokenBudget SDK 参数被忽略，assemble 未根据 budget 裁剪消息 | index.ts (全局) | 🟡 |
 | S3-5 | 手动消息归一化（content array→string）可能破坏 OpenClaw session pruning 内部管道 | index.ts L594-602 | 🟢 |
@@ -121,4 +121,6 @@
 
 | 时间 | 修正内容 |
 |------|---------|
+| 2026-06-16 02:15 | S1-1 Merger entity-level dedup 接入 assemble()，总计高优问题剩12个未修复 |
+| 2026-06-16 02:15 | S3-2 promptAuthority 已补全（P1 修复时完成） |
 | 2026-06-11 21:37 | 恢复 S3-5（现S3-4）手动消息归一化问题，总数23个 |

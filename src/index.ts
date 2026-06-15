@@ -207,6 +207,7 @@ export default definePluginEntry({
     let _losslessClawAdapter: any = null;
     let qmdClient: any = null;
     let graphAdapter: any = null;
+let merger: any = null;
 let expStore: any = null;
 let _modelRegistry: Record<string, number> | undefined;
     // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
@@ -307,6 +308,16 @@ function getSessionDedup(sessionKey: string) {
         }
 
         expStore = new ExperienceStorage(graphAdapter, 3);
+
+        // S1-1: Initialize Merger for entity-level cross-engine dedup
+        const { Merger } = await import("./merger.js");
+        merger = new Merger({
+          maxResults: (api.config?.retrieval?.limits ?? {}).qmd
+            ? (api.config.retrieval.limits.qmd + (api.config.retrieval.limits.graph ?? 5))
+            : 10,
+          fuzzyMatchThreshold: 0.85,
+          decayHalfLifeDays: 30,
+        });
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
         // WindowMonitor config is at api.config.windowMonitor (not nested under plugins.entries)
         if (api.config?.windowMonitor?.dedupRounds) {
@@ -650,22 +661,12 @@ function getSessionDedup(sessionKey: string) {
             const rawGraph = Array.isArray(l3?.results) ? l3.results : [];
             expResults = Array.isArray(l4?.results) ? l4.results : [];
 
-            // S9: Use Merger for entity-level dedup of qmd + graph results
+            // S1-1: Use Merger for entity-level cross-engine dedup (replaces hand-written ID dedup)
             try {
-              if (graphAdapter && Array.isArray(rawQmd) && Array.isArray(rawGraph)) {
-                // Simple entity-level ID dedup across sources
-                const seenIds = new Set<string>();
-                const merged: any[] = [];
-                for (const r of [...rawGraph, ...rawQmd]) {
-                  const id = r.id || `${r.source}:${String(r.content ?? '').slice(0, 80)}`;
-                  if (!seenIds.has(id)) {
-                    seenIds.add(id);
-                    merged.push(r);
-                  }
-                }
-                // Assign: qmdResults gets merged (primary), graphResults still available
+              if (merger && Array.isArray(rawQmd) && Array.isArray(rawGraph)) {
+                const merged = merger.merge(rawQmd, rawGraph);
                 qmdResults = merged;
-                graphResults = rawGraph;  // keep original for potential later use
+                graphResults = merged;  // same entity-deduped results for both
               } else {
                 qmdResults = rawQmd;
                 graphResults = rawGraph;
