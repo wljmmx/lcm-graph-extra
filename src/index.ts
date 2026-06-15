@@ -1344,16 +1344,6 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     (api as any).__lcmHeartbeat = runHeartbeat;
 
 
-    // Teardown: wrap originalUnregister to also stop debt scheduler when CE unregisters
-    const origUnreg = originalUnregister;
-    originalUnregister = async () => {
-      origUnreg && origUnreg();
-      try {
-        const { stopScheduler } = require("./core/debt-manager.js");
-        await stopScheduler();
-      } catch { /* ignore teardown errors */ }
-    };
-
   },
 });
 

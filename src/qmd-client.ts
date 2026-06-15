@@ -281,8 +281,8 @@ export class QmdClient {
         id: "init",
         method: "initialize",
         params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
+          protocolVersion: "2025-11-25",
+          capabilities: { tools: {}, resources: {} },
           clientInfo: { name: "qmd-client", version: "1.0" },
         },
       }),

@@ -422,7 +422,7 @@ export function registerOperationalTools(api: any): void {
       } catch { warn("MCP 8081", "unreachable"); warns++; }
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const c = new QmdClient();
+        const c = new QmdClient({ mcpBaseUrl: "http://127.0.0.1:8081" });
         if (await c.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
         else { warn("QmdClient", "MCP down, running in CLI fallback mode"); warns++; }
         const stat = await c.status();
@@ -727,7 +727,7 @@ export function registerOperationalTools(api: any): void {
     async execute() {
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient();
+        const qmd = new QmdClient({ mcpBaseUrl: "http://127.0.0.1:8081" });
         const [pingOk, statusText] = await Promise.all([
           qmd.ping().catch(() => false),
           qmd.status().catch(() => null),
@@ -760,7 +760,7 @@ export function registerOperationalTools(api: any): void {
     async execute(_id: string, params: { file: string }) {
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient();
+        const qmd = new QmdClient({ mcpBaseUrl: "http://127.0.0.1:8081" });
         const content = await qmd.get(params.file);
         if (content) {
           return { content: [{ type: "text" as const, text: content }] };
@@ -785,7 +785,7 @@ export function registerOperationalTools(api: any): void {
     async execute(_id: string, params: { pattern: string }) {
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient();
+        const qmd = new QmdClient({ mcpBaseUrl: "http://127.0.0.1:8081" });
         const results = await qmd.multiGet(params.pattern);
         if (results.length === 0) {
           return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }] };
