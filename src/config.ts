@@ -106,6 +106,9 @@ export const WindowMonitorConfigSchema = z.object({
   proactiveThreshold: z.number().default(0.65),
   // 256K上下文适配（翻倍）
   compactTokenBudget: z.number().default(114_688),
+  // High-pressure emergency compaction settings
+  compactTimeout: z.number().default(60_000),
+  maxSummaryTokenRatio: z.number().default(0.45),
   retrievalLimits: z.object({
     low: z.object({ qmd: z.number().int().default(5), graph: z.number().int().default(5), exp: z.number().int().default(3) }),
     medium: z.object({ qmd: z.number().int().default(3), graph: z.number().int().default(3), exp: z.number().int().default(1) }),

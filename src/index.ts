@@ -39,6 +39,9 @@ import {
   writeCompactionDebt,
   estimateTokensFromMessages,
   estimateTokensFromText,
+  getConversationSummaries,
+  hasUncompressedMessages,
+  trimSummariesToBudget,
 } from "./lcm-bridge.js";
 /** Simple string hash for cross-turn dedup */
 function quickHash(s: string): string {
@@ -430,6 +433,8 @@ function getSessionDedup(sessionKey: string) {
         let tier: PressureTier = 'low';
         let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
         let maxContextChars = 12000;
+        let finalMessages = params.messages ?? [];
+        let finalEstimate = 0;
         let qmdResults: any = [];
         let graphResults: any = [];
         let expResults: any = [];
@@ -531,35 +536,106 @@ function getSessionDedup(sessionKey: string) {
           }
 
           // ==================================================================
-          // 2. Fire-and-forget: write compaction debt if needed
+          
           // ==================================================================
-          if (needsCompact) {
+          // 2. Pressure-tier message assembly
+          // ==================================================================
+          finalMessages = messages;
+
+          if (needsCompact && _losslessClawAdapter?.connected) {
             const sessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
               : typeof params.session_id === 'string' ? params.session_id
               : '';
             const conversationId = getConversationId(sessionKey);
             if (conversationId != null) {
-              writeCompactionDebt(
-                conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
-                `proactive_${tier}_pressure`,
-              );
-              // Fire DAG compaction immediately (non-blocking) for next assemble to use compressed history
-              if (_losslessClawAdapter?.connected) {
-                // NOTE: sessionFile from runtime context (not in SDK assemble spec); adapter compact requires it
-                const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
+              const compactTimeout = (wm as any)?.compactTimeout ?? 60_000;
+              const maxSummaryRatio = (wm as any)?.maxSummaryTokenRatio ?? 0.45;
+              const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
+
+              // Design: <=dedupRounds -> pass through; medium -> summaries+raw+debt; high -> blocking compact+trim
+              const convSummaries = getConversationSummaries(conversationId);
+              const hasExistingSummary = convSummaries.length > 0;
+              const rawCount = messages.length;
+              const dedupLimit = (wm as any)?.dedupRounds ?? 24;
+
+              if (tier === 'medium') {
+                // Medium: fire-and-forget compact, assemble summaries + all raw msgs, write debt if needed
                 _losslessClawAdapter.compact({
-                  sessionId: conversationId,
-                  sessionKey: sessionKey,
-                  sessionFile: sessionFile,
-                  tokenBudget: resolvedCtx.compactTokenBudget,
-                  force: true,
-                  currentTokenCount: estimatedTokens,
+                  sessionId: conversationId, sessionKey, sessionFile, force: true,
+                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: estimatedTokens,
+                  compactionTarget: 'threshold',
+                }).catch(() => {});
+
+                if (hasExistingSummary) {
+                  const summaryMsgs = convSummaries.map((s) => ({
+                    role: 'system', content: s.content, token_count: s.tokenCount,
+                  }));
+                  finalMessages = [...summaryMsgs, ...messages];
+                }
+
+                // Use hasUncompressedMessages to confirm there are messages needing compression
+                const hasPendingUncompressed = hasUncompressedMessages(conversationId);
+                if (rawCount > dedupLimit || hasPendingUncompressed) {
+                  writeCompactionDebt(
+                    conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                    'medium_pressure_uncompressed_' + rawCount + '_exceeds_' + dedupLimit,
+                  );
+                }
+              } else if (tier === 'high') {
+                // High: BLOCKING emergency compaction + trim excess
+                try {
+                  await Promise.race([
+                    _losslessClawAdapter.compact({
+                      sessionId: conversationId, sessionKey, sessionFile, force: true,
+                      tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: estimatedTokens,
+                      compactionTarget: 'threshold',
+                    }),
+                    new Promise((_, r) => setTimeout(() => r(new Error('Compact timeout')), compactTimeout)),
+                  ]);
+                  const freshSummaries = getConversationSummaries(conversationId);
+                  if (freshSummaries.length > 0) {
+                    finalMessages = trimSummariesToBudget(
+                      freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+                      resolvedCtx.compactTokenBudget * maxSummaryRatio,
+                    ).map((s) => ({ role: 'system', content: s.content, token_count: s.tokenCount }));
+                  } else {
+                    writeCompactionDebt(
+                      conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                      'high_pressure_no_summary_after_compact',
+                    );
+                  }
+                } catch (err) {
+                  logger?.warn?.('High pressure compact failed, writing debt', err);
+                  writeCompactionDebt(
+                    conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                    'high_pressure_compact_failed',
+                  );
+                }
+              } else {
+                // Low pressure but needsCompact: write debt + fire-and-forget
+                writeCompactionDebt(
+                  conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                  'proactive_' + tier + '_pressure',
+                );
+                _losslessClawAdapter.compact({
+                  sessionId: conversationId, sessionKey, sessionFile, force: true,
+                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: estimatedTokens,
                   compactionTarget: 'threshold',
                 }).catch(() => {});
               }
             }
+          } else if (needsCompact) {
+            // needsCompact but no adapter
+            const sk = typeof params.sessionKey === 'string' ? params.sessionKey
+              : typeof params.session_id === 'string' ? params.session_id : '';
+            const cid = getConversationId(sk);
+            if (cid != null) {
+              writeCompactionDebt(
+                cid, resolvedCtx.compactTokenBudget, estimatedTokens,
+                'proactive_' + tier + '_pressure_no_adapter',
+              );
+            }
           }
-
 // Extract query text from params.prompt (SDK field for retrieval queries), fallback to last message content
           const lastMsg = params.messages?.at(-1);
           let qmdQuery = typeof params.prompt === 'string' && params.prompt
@@ -701,7 +777,9 @@ function getSessionDedup(sessionKey: string) {
           const mgMs = Date.now() - mgStart;
 
           // ---- Metrics log ----
-logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${estimatedTokens}/${contextWindow}(${(tokenRatio*100).toFixed(1)}%) | tier=${tier}`, {
+          // Final token estimate based on actual messages being returned
+          const finalEstimate = estimateTokensFromMessages(finalMessages);
+logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | tier=${tier}`, {
   elapsed: Date.now() - assembleStart,
   init_ms: initMs,
   parallel_ms: parallelMs,
@@ -718,7 +796,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
   doc_count: fullDocs?.length ?? 0,
   // Context budget
   tokenRatio: Number(tokenRatio.toFixed(3)),
-  estimatedTokens,
+  finalEstimate,
   contextWindow,
   tier: tier,
   retrieval_limits: JSON.stringify(retrievalLimits),
@@ -872,11 +950,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // Pass through messages as-is (lossless-claw style, no normalization needed)
         // SDK handles content format natively; estimateTokensFromMessages supports both string and array content
         try {
-          // Include systemPromptAddition tokens in total estimate
           const additionTokens = systemPromptAddition ? estimateTokensFromText(systemPromptAddition) - 1 : 0;
           return {
-            messages: params.messages,
-            estimatedTokens: estimatedTokens + additionTokens,
+            messages: finalMessages,
+            estimatedTokens: finalEstimate + additionTokens,
             systemPromptAddition: systemPromptAddition || undefined,
             promptAuthority: typeof systemPromptAddition == "string" && systemPromptAddition.length > 0 ? "preassembly_may_overflow" : "assembled",
           };
@@ -884,8 +961,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const fe = finalErr instanceof Error ? finalErr : new Error(String(finalErr));
           logger?.error?.("assemble: return error", { err: fe.message, stack: fe.stack });
           return {
-            messages: params.messages,
-            estimatedTokens: 0,
+            messages: finalMessages,
+            estimatedTokens: estimateTokensFromMessages(finalMessages),
             systemPromptAddition: undefined,
             promptAuthority: "assembled",
           };
