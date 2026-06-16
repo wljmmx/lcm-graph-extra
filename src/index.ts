@@ -142,7 +142,7 @@ function applyTotalControl(
 /** Extract available tool names from params.availableTools (Set or array). */
 function extractAvailableTools(params: any): string[] {
   const tools = params.availableTools;
-  if (!tools) return [];
+  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get_documents","lcmg_maintain"];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
   return [];
