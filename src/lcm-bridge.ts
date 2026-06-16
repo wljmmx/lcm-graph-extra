@@ -243,6 +243,87 @@ export function getMaxContextCharsForTier(tier: PressureTier, maxChars: MaxConte
   return maxChars[tier];
 }
 
+
+/**
+ * Retrieve all summaries for a conversation, sorted by earliestAt (oldest original message first).
+ * Used for pressure-based message assembly.
+ */
+export function getConversationSummaries(conversationId: number): Array<{
+  summaryId: string;
+  content: string;
+  tokenCount: number;
+  earliestAt: string | null;
+}> {
+  try {
+    const db = getDb();
+    if (!db) return [];
+    const rows = db.prepare(
+      "SELECT summary_id, content, token_count, earliest_at " +
+      "FROM summaries WHERE conversation_id = ? ORDER BY earliest_at ASC",
+    ).all(conversationId) as Array<Record<string, unknown>>;
+    try { db.close(); } catch { /* ignore */ }
+    return (rows ?? []).map((r: any) => ({
+      summaryId: r.summary_id as string,
+      content: r.content as string,
+      tokenCount: Number(r.token_count) || 0,
+      earliestAt: r.earliest_at as string | null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Check if there are messages not yet covered by summaries.
+ * Returns true if there appear to be uncompressed messages.
+ */
+export function hasUncompressedMessages(conversationId: number): boolean {
+  try {
+    const db = getDb();
+    if (!db) return true;
+    
+    // Count total tokens in raw messages for this conversation
+    const msgRow = db.prepare(
+      "SELECT COALESCE(SUM(token_count), 0) as t FROM messages WHERE conversation_id = ?",
+    ).get(conversationId) as { t: number } | undefined;
+    const msgTokens = msgRow?.t ?? 0;
+    
+    // Count total tokens in summaries for this conversation
+    const sumRow = db.prepare(
+      "SELECT COALESCE(SUM(token_count), 0) as t FROM summaries WHERE conversation_id = ?",
+    ).get(conversationId) as { t: number } | undefined;
+    const summaryTokens = sumRow?.t ?? 0;
+    
+    try { db.close(); } catch { /* ignore */ }
+    
+    // If summary tokens are a small fraction of message tokens, there's likely uncompressed content
+    return msgTokens > 0 && summaryTokens < msgTokens * 0.3;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Trim summaries from the oldest first until total token count fits within maxTokens.
+ * Summaries must be sorted by earliestAt ASC (oldest first) before calling.
+ */
+export function trimSummariesToBudget(
+  summaries: Array<{ summaryId: string; content: string; tokenCount: number }>,
+  maxTokens: number,
+): typeof summaries {
+  const trimmed = [...summaries];
+  let totalTokens = trimmed.reduce((sum, s) => sum + (s.tokenCount ?? 0), 0);
+  
+  while (totalTokens > maxTokens && trimmed.length > 1) {
+    const removed = trimmed.shift();
+    if (removed) {
+      totalTokens -= (removed.tokenCount ?? 0);
+    }
+  }
+  
+  return trimmed;
+}
+
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
