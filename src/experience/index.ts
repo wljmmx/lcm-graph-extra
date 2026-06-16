@@ -6,10 +6,11 @@
  *   - 异步: 不在主流程组装时运行
  *   - 条件触发: 仅用户纠正/任务失败/修复成功/显式保存
  *   - 批量总结: 由 dreaming 或 cron 定时处理 PENDING 队列
- *   - 瘦召回: assemble 时只查 relevanceScore > threshold 的 DISTILLED 经验
+ *   - Query-aware 召回: 根据上下文场景推断，过滤匹配的经验
  */
 
 export { ExperienceStorage } from './storage';
+export { TagRegistry } from './tag-registry';
 export { detectExperienceTrigger, extractRawExperience } from './extractor';
 export type {
   ExperienceSource,
@@ -17,4 +18,10 @@ export type {
   DistilledExperience,
   ExperienceNode,
   ExperienceSearchResult,
+  ScenarioTag,
+  TechStackTag,
+  ExperienceTags,
+  ExperienceQueryOptions,
+  DynamicTag,
+  TagRegistryResult,
 } from './types';
