@@ -568,7 +568,7 @@ function getSessionDedup(sessionKey: string) {
 
                 if (hasExistingSummary) {
                   const summaryMsgs = convSummaries.map((s) => ({
-                    role: 'system', content: s.content, token_count: s.tokenCount,
+                    role: 'user', content: s.content, token_count: s.tokenCount,
                   }));
                   finalMessages = [...summaryMsgs, ...messages];
                 }
@@ -597,7 +597,7 @@ function getSessionDedup(sessionKey: string) {
                     finalMessages = trimSummariesToBudget(
                       freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                       resolvedCtx.compactTokenBudget * maxSummaryRatio,
-                    ).map((s) => ({ role: 'system', content: s.content, token_count: s.tokenCount }));
+                    ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
                   } else {
                     writeCompactionDebt(
                       conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
@@ -827,7 +827,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // seed their hashes so L2/L3/L4 content won't duplicate them
           if (_losslessClawAdapter?.connected && (tier === 'medium' || tier === 'high')) {
             for (const msg of finalMessages) {
-              if (msg.role === 'system' && typeof msg.content === 'string') {
+              if (msg.role === 'user' && typeof msg.content === 'string' && msg.content.startsWith('##')) {
                 const h = quickHash(msg.content);
                 allSessionHashes.add(h);
               }
@@ -846,7 +846,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (allSessionHashes.has(h)) return;
             allSessionHashes.add(h);
             currentRoundHashes.push(h);
-            finalMessages.push({ role: 'system', content });
+            finalMessages.push({ role: 'user', content });
             injectedLayerTags.push(String(layer));
           }
 
