@@ -20,7 +20,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 // @ts-ignore - plugin-sdk types only available at runtime
 import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
-import { registerOperationalTools } from "./tools.js";
+import { registerOperationalTools, closeNeo4jDriver } from './tools.js';
 import { UsageTracker } from "./async/usage-tracker"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
@@ -1267,6 +1267,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
         tracker?.close?.();
+        (async () => { try { await closeNeo4jDriver(); } catch {} })()
         try { (graphAdapter as any)?.close?.(); } catch {}
         initialized = false;
         initPromise = null;
@@ -1286,6 +1287,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     const HB_INTERVAL_MS = 5 * 60 * 1000;
     let hbTimer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | null = null;
     let lastDistillationRun = 0;
+    let hbDedupCleanupCounter = 0;  // Clean dedup cache every 15 heartbeats (~75min)
     // Distillation helpers
 
     function resolveDistillationLlm(apiRef: any) {
@@ -1429,6 +1431,13 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
         }
         try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
+
+        // Periodic dedup cache cleanup (every 15 heartbeats)
+        hbDedupCleanupCounter++;
+        if (hbDedupCleanupCounter >= 15 && typeof evictStaleDedup === "function") {
+          evictStaleDedup();
+          hbDedupCleanupCounter = 0;
+        }
       } catch (hbErr) {
         logger?.error?.("heartbeat: cycle failed", { err: hbErr instanceof Error ? hbErr.message : String(hbErr) });
       }
