@@ -152,7 +152,7 @@ function extractAvailableTools(params: any): string[] {
 function hasToolCategory(availableTools: string[], category: string): boolean {
   switch (category) {
     case "graph":
-      return availableTools.some(t => t.includes("graph"));
+      return availableTools.some(t => t.includes("lcmg_search") || t.includes("graph"));
     case "experience":
       return availableTools.some(t => t.includes("experience"));
     case "qmd":
