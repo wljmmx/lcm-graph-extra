@@ -822,46 +822,47 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
 
           currentRoundHashes = [];
-
-          const injections: string[] = [];
-
-          // ---- Inject lossless-claw summaries (if recent compaction occurred) ----
-          if (_losslessClawAdapter?.connected) {
-            try {
-              const convStore = _losslessClawAdapter.rawEngine?.getConversationStore?.();
-              if (convStore) {
-                const recentSummaries = typeof convStore.getRecentSummaries === 'function'
-                  ? convStore.getRecentSummaries(sessionKey, 3)
-                  : [];
-                if (Array.isArray(recentSummaries) && recentSummaries.length > 0) {
-                  summaryInjection = "## 📋 历史摘要\n" + recentSummaries.map((s: any, i: number) =>
-                    `- [摘要${i+1}] ${(s?.content ?? s?.summary ?? String(s)).slice(0, 500)}`
-                  ).join("\n");
-                }
+          // ---- Pre-seed dedup hashes from existing system messages (L1 summaries) ----
+          // Medium/High pressure tiers may have already injected summary messages;
+          // seed their hashes so L2/L3/L4 content won't duplicate them
+          if (_losslessClawAdapter?.connected && (tier === 'medium' || tier === 'high')) {
+            for (const msg of finalMessages) {
+              if (msg.role === 'system' && typeof msg.content === 'string') {
+                const h = quickHash(msg.content);
+                allSessionHashes.add(h);
               }
-            } catch (sumErr) {
-              logger?.debug?.("Summary injection failed (non-fatal)", { err: sumErr });
             }
           }
 
-          // S5-3: dedupInject with hash collision content-fallback
-          function dedupInject(s: string): void {
-            // First check: is this exact content already injected this round?
-            if (injections.includes(s)) return;
-            const h = quickHash(s);
-            // Hash-level dedup across rounds (may have false positives on collision)
-            if (allSessionHashes.has(h)) {
-              // Collision possible - double check with exact content match
-              // If the exact string is not in current injections, allow it
-              // (hash collision is rare with djb2 for unique section content)
-              return;
-            }
+          // S5-3: dedupPushMessage — hash-based, cross-round, dedups against both
+          //        previous rounds AND already-injected L1 summary messages above
+          // Layer priority (higher = harder to trim):
+          //   L1(summary)=0  <  L2(docs)=3  <  L3(graph)=4  <  L4(experience)=5
+          const injectedLayerTags: string[] = [];
+          const injectedBaseIndex = finalMessages.length;
+
+          function dedupPushMessage(content: string, layer: number): void {
+            const h = quickHash(content);
+            if (allSessionHashes.has(h)) return;
             allSessionHashes.add(h);
             currentRoundHashes.push(h);
-            injections.push(s);
+            finalMessages.push({ role: 'system', content });
+            injectedLayerTags.push(String(layer));
           }
 
-          // Layer 2: qmd search snippet results
+
+// Layer 4: Experience → system messages
+          if (expResults.length > 0) {
+            dedupPushMessage("## 💡 经验总结\n" + expResults.map((e: any) => `- [${e.experience.type}] ${e.experience.summary}`).join("\n"), 5);
+            for (const e of expResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
+          }
+
+// Layer 3: Neo4j knowledge graph → system messages
+          if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
+            dedupPushMessage("## 🔗 知识图谱\n" + graphResults.slice(0, retrievalLimits.graph).map((r: any) => `- ${r.content ?? r.id ?? ""}`).join("\n"), 4);
+          }
+
+// Layer 2: qmd search snippet results → system messages
           // S2-3+S2-5: Skip snippets when fullDocs already loaded (same files, redundant tokens)
           const hasFullDocs = Array.isArray(fullDocs) && fullDocs.length > 0;
           if (qmdResults && Array.isArray(qmdResults) && !hasFullDocs) {
@@ -871,16 +872,15 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 : '';
               return `- ${r.content ?? ""}${citationTag}`;
             }).join("\n");
-            dedupInject("## 📄 记忆文件\n" + qmdItems);
+            dedupPushMessage("## 📄 记忆文件\n" + qmdItems, 3);
           }
 
-          // Batch-enriched full document content
+// Batch-enriched full document content → system messages
           if (Array.isArray(fullDocs) && fullDocs.length > 0) {
             const docBlock = fullDocs
               .filter(Boolean)
               .slice(0, retrievalLimits.qmd)
               .map((doc: string) => {
-                // S2: head-tail truncation using maxContextChars.low as doc limit
                 const docLimit = resolvedCtx.maxContextChars.low;
                 if (doc.length > docLimit) {
                   const headLen = Math.floor(docLimit * 0.6);
@@ -891,23 +891,33 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               })
               .join("\n\n---\n\n");
             if (docBlock) {
-              dedupInject("## 📄 完整文档已加载\n" + docBlock);
+              dedupPushMessage("## 📄 完整文档已加载\n" + docBlock, 3);
             }
           }
 
-          // Layer 3: Neo4j knowledge graph
-          if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
-            dedupInject("## 🔗 知识图谱\n" + graphResults.slice(0, retrievalLimits.graph).map((r: any) => `- ${r.content ?? r.id ?? ""}`).join("\n"));
-          }
-
-          // Layer 4: Experience
-          if (expResults.length > 0) {
-            dedupInject("## 💡 经验总结\n" + expResults.map((e: any) => `- [${e.experience.type}] ${e.experience.summary}`).join("\n"));
-            for (const e of expResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
+// ---- Inject lossless-claw summaries as system messages (if recent compaction occurred) ----
+          if (_losslessClawAdapter?.connected) {
+            try {
+              const convStore = _losslessClawAdapter.rawEngine?.getConversationStore?.();
+              if (convStore) {
+                const recentSummaries = typeof convStore.getRecentSummaries === 'function'
+                  ? convStore.getRecentSummaries(sessionKey, 3)
+                  : [];
+                if (Array.isArray(recentSummaries) && recentSummaries.length > 0) {
+                  const summaryText = recentSummaries.map((s: any, i: number) =>
+                    `- [摘要${i+1}] ${(s?.content ?? s?.summary ?? String(s)).slice(0, 500)}`
+                  ).join("\n");
+                  dedupPushMessage("## 📋 历史摘要\n" + summaryText, 0);
+                }
+              }
+            } catch (sumErr) {
+              logger?.debug?.("Summary injection failed (non-fatal)", { err: sumErr });
+            }
           }
 
           // ==================================================================
-          // 3. Tool guidance — use SDK buildMemorySystemPromptAddition
+          // 3. Tool guidance — SDK buildMemorySystemPromptAddition → systemPromptAddition
+          //    (Correct home: meta-instructions about recall tools, not content data)
           // ==================================================================
           {
             const sdkGuidance = buildMemorySystemPromptAddition({
@@ -915,34 +925,43 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               citationsMode,
             });
             if (sdkGuidance) {
-              dedupInject(sdkGuidance);
+              systemPromptAddition = "\n# Tool Guidance\n" + sdkGuidance;
             }
           }
 
-          // Prepend summary injection if available
-          if (summaryInjection) {
-            injections.unshift(summaryInjection);
-          }
-          if (injections.length > 0) {
-            systemPromptAddition = "\n# Injected Context\n" + injections.join("\n\n");
-
           // ==================================================================
-          // Final: apply total control trim if Window Monitor enabled
+                    // ==================================================================
+          // Final: Priority-based token budget trim (protect L4 > L3 > L2 > L1)
           // ==================================================================
-          if (systemPromptAddition && wm) {
-            removedSections = [];
-            const trimmed = applyTotalControl(systemPromptAddition, maxContextChars, removedSections);
-            if (trimmed !== systemPromptAddition) {
-              logger?.debug?.(
-                `[wm] total control: ${systemPromptAddition.length} -> ${trimmed.length} chars (tier=${tier})`
-              );
-              systemPromptAddition = trimmed;
+          if (wm && injectedLayerTags.length > 0) {
+            const totalTokensAfterInjection = estimateTokensFromMessages(finalMessages);
+            const budgetCeiling = contextWindow * 0.85;
+            if (totalTokensAfterInjection > budgetCeiling) {
+              let trimmed = 0;
+              while (estimateTokensFromMessages(finalMessages) > budgetCeiling && injectedLayerTags.length > 0) {
+                let worstIdx = -1;
+                let worstPriority = Infinity;
+                for (let j = 0; j < injectedLayerTags.length; j++) {
+                  const p = Number(injectedLayerTags[j]);
+                  if (p < worstPriority) {
+                    worstPriority = p;
+                    worstIdx = j;
+                  }
+                }
+                if (worstIdx < 0) break;
+                const msgIdx = injectedBaseIndex + worstIdx;
+                finalMessages.splice(msgIdx, 1);
+                injectedLayerTags.splice(worstIdx, 1);
+                trimmed++;
+              }
+              if (trimmed > 0) {
+                logger?.debug?.(`[wm] priority-trimmed ${trimmed} injected message(s), remaining layers: [${injectedLayerTags.join(",")}]`);
+              }
             }
-          }
-
           }
 
         } catch (err) {
+
           const e = err instanceof Error ? err : new Error(String(err));
           logger?.warn?.("assemble: retrieval failed", { err: e.message, stack: e.stack, name: e.name });
         }
@@ -950,10 +969,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // Pass through messages as-is (lossless-claw style, no normalization needed)
         // SDK handles content format natively; estimateTokensFromMessages supports both string and array content
         try {
-          const additionTokens = systemPromptAddition ? estimateTokensFromText(systemPromptAddition) - 1 : 0;
+          // Tokens: injected system messages are now part of finalMessages,
+          // so estimateTokensFromMessages covers them. systemPromptAddition only has tool guidance (small).
+          const totalInjectedTokens = estimateTokensFromMessages(finalMessages);
           return {
             messages: finalMessages,
-            estimatedTokens: finalEstimate + additionTokens,
+            estimatedTokens: totalInjectedTokens,
             systemPromptAddition: systemPromptAddition || undefined,
             promptAuthority: typeof systemPromptAddition == "string" && systemPromptAddition.length > 0 ? "preassembly_may_overflow" : "assembled",
           };
