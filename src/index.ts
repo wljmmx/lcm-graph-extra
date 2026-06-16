@@ -143,56 +143,73 @@ function applyTotalControl(
 // ---------------------------------------------------------------------------
 
 /** Extract available tool names from params.availableTools (Set or array). */
+/** Extract available tool names from assemble params. No hardcoded fallback. */
 function extractAvailableTools(params: any): string[] {
-  const tools = params.availableTools;
-  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get_documents","lcmg_maintain"];
+  const tools = params?.availableTools;
+  if (!tools) return [];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
   return [];
 }
 
-/** Check if a tool category is available among the runtime tools. */
+/** Exact tool name sets per category — derived from contracts.tools. */
+const TOOL_CATEGORIES: Record<string, ReadonlySet<string>> = {
+  graph: new Set(["lcmg_search", "lcmg_pin", "lcmg_import"]),
+  experience: new Set(["lcmg_experience_report"]),
+  qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
+  maintenance: new Set(["lcmg_maintain", "lcmg_diagnose"]),
+  lifecycle: new Set(["lcmg_backup", "lcmg_restore", "lcmg_sync"]),
+};
+
+/** Check if a tool category is available (exact match, no fallback). */
 function hasToolCategory(availableTools: string[], category: string): boolean {
-  switch (category) {
-    case "graph":
-      return availableTools.some(t => t.includes("lcmg_search") || t.includes("graph"));
-    case "experience":
-      return availableTools.some(t => t.includes("experience"));
-    case "qmd":
-      return availableTools.some(t => t.includes("qmd") || t.includes("memory"));
-    default:
-      return false;
+  const exactNames = TOOL_CATEGORIES[category];
+  if (!exactNames) return false;
+  return availableTools.some(t => exactNames.has(t));
+}
+
+function listActiveCategories(availableTools: string[]): string[] {
+  const active: string[] = [];
+  for (const [cat, names] of Object.entries(TOOL_CATEGORIES)) {
+    if (availableTools.some(t => names.has(t))) {
+      active.push(cat);
+    }
   }
+  return active;
 }
 
 /** Build tool guidance section for systemPromptAddition. */
 function buildToolGuidance(availableTools: string[]): string {
-  const hasGraph = hasToolCategory(availableTools, "graph");
-  const hasExperience = hasToolCategory(availableTools, "experience");
-  const hasQmd = hasToolCategory(availableTools, "qmd");
-  const lines: string[] = [];
-  lines.push("## 🛠️ 可用检索工具");
-  if (hasQmd) {
-    lines.push("- ✅ **记忆文件搜索** — 可通过 lcm-search/qmd 查询记忆文件");
-  } else {
-    lines.push("- ⏭️ **记忆文件搜索** — 已自动注入相关上下文（无需手动搜索）");
+  const activeCategories = listActiveCategories(availableTools);
+  if (activeCategories.length === 0 && availableTools.length === 0) {
+    return "";
   }
-  if (hasGraph) {
-    lines.push("- ✅ **知识图谱查询** — 可通过 graph-search 查询实体关系");
-  } else {
-    lines.push("- ⏭️ **知识图谱查询** — 已自动注入相关实体（无需手动查询）");
+
+  const categoryLabels: Record<string, { label: string; desc: string }> = {
+    graph: { label: "知识图谱", desc: "实体关系查询" },
+    experience: { label: "经验检索", desc: "历史解决方案检索" },
+    qmd: { label: "记忆文件", desc: "QMD 文档管理" },
+    maintenance: { label: "系统维护", desc: "健康检查与修复" },
+    lifecycle: { label: "生命周期", desc: "备份/恢复/同步" },
+  };
+
+  const lines = ["## [Available Tools]"];
+  for (const cat of Object.keys(TOOL_CATEGORIES)) {
+    const info = categoryLabels[cat];
+    if (!info) continue;
+    if (activeCategories.includes(cat)) {
+      lines.push("- [OK] **" + info.label + "** -- " + info.desc);
+    } else {
+      lines.push("- [AUTO] **" + info.label + "** -- auto-injected, no manual call needed");
+    }
   }
-  if (hasExperience) {
-    lines.push("- ✅ **经验检索** — 可通过 experience-search 查找历史经验");
-  } else {
-    lines.push("- ⏭️ **经验检索** — 已自动注入相关经验（无需手动搜索）");
+
+  if (availableTools.length === 0) {
+    lines.push("\n> Tip: no lcm-graph-extra tools available, context auto-injected.");
   }
-  if (!hasGraph && !hasExperience && !hasQmd) {
-    lines.push("\n> 💡 提示：已根据上下文自动注入相关知识，如需更多信息可直接询问。");
-  }
+
   return lines.join("\n");
 }
-
 export default definePluginEntry({
   id: "lcm-graph-extra",
   name: "LCM Graph Extra",
