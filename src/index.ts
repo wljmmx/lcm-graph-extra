@@ -896,7 +896,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
 
 // ---- Inject lossless-claw summaries as system messages (if recent compaction occurred) ----
-          if (_losslessClawAdapter?.connected) {
+          // Only inject recent summaries for low/proactive tier;
+          // medium/high already have DAG summaryMsgs in finalMessages head.
+          if (_losslessClawAdapter?.connected && tier === 'low') {
             try {
               const convStore = _losslessClawAdapter.rawEngine?.getConversationStore?.();
               if (convStore) {
