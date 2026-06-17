@@ -857,7 +857,7 @@ export function registerOperationalTools(api: any): void {
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
         // Full GmConfig — all required fields
         const cfg = {
-          neo4j: config,
+          neo4j: resolveNeo4jConfig(getPluginNeo4jConfig()),
           compactTurnCount: 10,
           recallMaxNodes: 10,
           recallMaxDepth: 2,
