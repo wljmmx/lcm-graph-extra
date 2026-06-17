@@ -143,13 +143,36 @@ function applyTotalControl(
 // ---------------------------------------------------------------------------
 
 /** Extract available tool names from params.availableTools (Set or array). */
-/** Extract available tool names from assemble params. No hardcoded fallback. */
+/** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
 function extractAvailableTools(params: any): string[] {
-  const tools = params?.availableTools;
-  if (!tools) return [];
+  const tools = params.availableTools;
+  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get_documents","lcmg_maintain"];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
   return [];
+}
+
+/** Self-registered tool names — mirrors openclaw.plugin.json contracts.tools. */
+const SELF_REGISTERED_TOOLS = new Set([
+  "lcmg_search", "lcmg_pin", "lcmg_import",
+  "lcmg_experience_report",
+  "lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get",
+  "lcmg_maintain", "lcmg_diagnose",
+  "lcmg_backup", "lcmg_restore", "lcmg_sync",
+]);
+
+/** Tool category to tool name mapping. */
+const TOOL_CATEGORIES_SELF: Record<string, Set<string>> = {
+  graph: new Set(["lcmg_search"]),
+  experience: new Set(["lcmg_experience_report"]),
+  qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
+};
+
+/** Check if a category tool is self-registered (independent of Tool Search). */
+function hasSelfCategory(category: string): boolean {
+  const names = TOOL_CATEGORIES_SELF[category];
+  if (!names) return false;
+  return [...names].some(n => SELF_REGISTERED_TOOLS.has(n));
 }
 
 /** Exact tool name sets per category — derived from contracts.tools. */
@@ -709,11 +732,12 @@ function getSessionDedup(sessionKey: string) {
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
-              // L3: Neo4j knowledge graph — skip if no graph tool available
+              // L3: Neo4j knowledge graph — skip if not self-registered
               (async () => {
                 const t0 = Date.now();
                 try {
-                  if (!hasGraphTool) {
+                  const selfHasGraph = hasSelfCategory("graph");
+                  if (!selfHasGraph) {
                     logger?.debug?.("[lcm-graph-extra] L3 graph search skipped (no graph tool)");
                     return { results: [], ms: 0 };
                   }
@@ -724,11 +748,12 @@ function getSessionDedup(sessionKey: string) {
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
-              // L4: Experience search — skip if no experience tool available
+              // L4: Experience search — skip if not self-registered
               (async () => {
                 const t0 = Date.now();
                 try {
-                  if (!hasExperienceTool) {
+                  const selfHasExp = hasSelfCategory("experience");
+                  if (!selfHasExp) {
                     logger?.debug?.("[lcm-graph-extra] L4 experience search skipped (no experience tool)");
                     return { results: [], ms: 0 };
                   }
