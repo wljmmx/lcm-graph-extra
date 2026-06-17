@@ -22,7 +22,8 @@
       "lcmg_sync",
       "lcmg_qmd_status",
       "lcmg_get_document",
-      "lcmg_batch_get"
+      "lcmg_batch_get",
+      "lcmg_maintain"
     ]
   },
   "toolMetadata": {

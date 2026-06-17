@@ -36,16 +36,41 @@ function openDb() {
   return new DatabaseSync(LCM_DB);
 }
 
+// ---------------------------------------------------------------------------
+// Neo4j connection pool — single shared driver, per-call sessions only
+// ---------------------------------------------------------------------------
+let _neo4jDriver: any = null;
+let _neo4jDriverReady: Promise<any> | null = null;
+
+async function getNeo4jDriver(): Promise<any> {
+  if (_neo4jDriver) return _neo4jDriver;
+  if (_neo4jDriverReady) return _neo4jDriverReady;
+  _neo4jDriverReady = (async () => {
+    const neo4j = await import("neo4j-driver").then((m) => m.default);
+    const config = resolveNeo4jConfig(getPluginNeo4jConfig());
+    if (!config || !config.uri) throw new Error("Neo4j not configured");
+    _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+    _neo4jDriverReady = null;
+    return _neo4jDriver;
+  })();
+  return _neo4jDriverReady;
+}
+
 async function neo4jSession() {
-  const neo4j = await import("neo4j-driver").then((m) => m.default);
-  const config = resolveNeo4jConfig(getPluginNeo4jConfig());
-  const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+  const driver = await getNeo4jDriver();
   return { driver, session: driver.session() };
 }
 
 async function closeNeo4j(driver: any, session: any) {
-  try { await session.close(); } catch { /* */ }
-  try { await driver.close(); } catch { /* */ }
+  try { await session.close(); } catch {}
+}
+
+export async function closeNeo4jDriver(): Promise<void> {
+  if (_neo4jDriver) {
+    try { await _neo4jDriver.close(); } catch {}
+    _neo4jDriver = null;
+    _neo4jDriverReady = null;
+  }
 }
 
 export function registerOperationalTools(api: any): void {
@@ -817,9 +842,7 @@ export function registerOperationalTools(api: any): void {
     parameters: Type.Object({}),
     async execute() {
       try {
-        const config = resolveNeo4jConfig(getPluginNeo4jConfig());
-        const neo4j = await import("neo4j-driver").then((m) => m.default);
-        const driver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+        const driver = await getNeo4jDriver();
         const { createRequire } = await import("node:module");
         const _req = createRequire(import.meta.url);
         const GM_PRO_PATH = process.env.GM_PRO_PATH
@@ -834,7 +857,7 @@ export function registerOperationalTools(api: any): void {
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
         // Full GmConfig — all required fields
         const cfg = {
-          neo4j: config,
+          neo4j: resolveNeo4jConfig(getPluginNeo4jConfig()),
           compactTurnCount: 10,
           recallMaxNodes: 10,
           recallMaxDepth: 2,
@@ -844,8 +867,6 @@ export function registerOperationalTools(api: any): void {
           pagerankIterations: 20,
         };
         const result = await gm.runMaintenance(driver, cfg);
-        await driver.close();
-
         const lines = [];
         lines.push("# Graph Maintenance Report");
         lines.push("");

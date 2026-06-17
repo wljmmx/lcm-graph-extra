@@ -294,7 +294,10 @@ export class GraphAdapter {
     return results;
   }
 
-  async searchExperience(query: string, limit?: number): Promise<RetrievalResult[]> {
+  async searchExperience(
+    query: string,
+    options?: { context?: any; limit?: number },
+  ): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     // Allow retry if connection previously failed
     if (this._connectFailed && !this.mod) {
@@ -302,29 +305,52 @@ export class GraphAdapter {
         this._connectRetryCount++;
         this.resetConnectFlag();
       } else {
-        this.logger?.warn?.(`[lcm-graph-extra] searchExperience: max retries (${this.maxRetries}) reached, skipping`);
+        this.logger?.warn(`[lcm-graph-extra] searchExperience: max retries (${this.maxRetries}) reached, skipping`);
         return [];
       }
     }
     const m2 = this.mod ?? await this.connect().then(() => this.mod);
     if (!m2) return [];
-    const rl = limit ?? this.config.searchLimit;
+    const rl = options?.limit ?? this.config.searchLimit;
+    const ctx = options?.context;
     try {
       const nodes = await m2.searchNodes(this.driver, query, rl * 3);
       const events = (nodes ?? []).filter((n: any) => (n.type ?? n.labels?.[0]) === 'EVENT');
+
+      // 场景优先级加权排序
+      const ranked = events.map((evt: any) => {
+        let scenarioBonus = 0;
+        let techBonus = 0;
+        const evtTags = evt.properties?.tags ?? {};
+
+        if (ctx?.scenario) {
+          for (const s of ctx.scenario) {
+            if ((evtTags.scenario ?? []).includes(s)) scenarioBonus += 0.15;
+          }
+        }
+        if (ctx?.techStack) {
+          for (const t of ctx.techStack) {
+            if ((evtTags.techStack ?? []).includes(t)) techBonus += 0.1;
+          }
+        }
+        const urgencyBoost = (evtTags.severity === 'critical' && ctx?.urgency > 0.5) ? 0.2 : 0;
+
+        return { ...evt, boostedScore: (Number(evt.properties?.pagerank ?? 0.5)) + scenarioBonus + techBonus + urgencyBoost };
+      }).sort((a: any, b: any) => b.boostedScore - a.boostedScore);
+
       const out: RetrievalResult[] = [];
-      for (const evt of events.slice(0, rl)) {
+      for (const evt of ranked.slice(0, rl)) {
         const name = evt.name ?? evt.properties?.name ?? '';
         const desc = evt.description ?? evt.properties?.description ?? '';
         const edges = await this.mod!.getEdgesForNodes(this.driver, [evt.id]);
         const sols = (edges ?? []).filter((e: any) => e.type === 'SOLVED_BY');
-        let text = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
-        for (const s of sols) text += `\n- ${s.targetName ?? 'Unknown'}`;
+        let expText = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
+        for (const s of sols) expText += `\n- ${s.targetName ?? 'Unknown'}`;
         out.push({
           id: createHash('sha256').update(`exp:${evt.id ?? name}`).digest('hex').slice(0, 16),
-          content: text, source: 'graph' as RetrievalSource,
+          content: expText, source: 'graph' as RetrievalSource,
           type: 'definition' as RetrievalType,
-          score: 0.8 + Math.random() * 0.15,
+          score: Math.min(0.8 + (ranked.indexOf(evt) < rl / 2 ? 0.15 : 0.05), 1),
           metadata: { experience: true, problemName: name, solutionCount: sols.length, updatedAt: evt.updatedAt ?? evt.properties?.updatedAt ?? 0 },
         });
       }

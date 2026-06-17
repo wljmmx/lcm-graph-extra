@@ -88,6 +88,18 @@ export const PluginConfigSchema = z.object({
   // CLI fallback (QmdClient) — 可选
   cliTimeout: z.number().int().positive().default(30_000),
   cliFallbackSearchType: z.enum(['search', 'query']).default('search'),
+
+  // Distillation schedule — controls how often PENDING experiences are distilled (seconds)
+  distillationIntervalMs: z.number().int().positive().default(2 * 60 * 60 * 1000),
+
+  // Triplet extraction timeout (milliseconds, default 8s)
+  tripletTimeoutMs: z.number().int().positive().default(8000),
+
+  // Distillation LLM — use OpenClaw hooks proxy by default
+  distillationLlm: z.object({
+    provider: z.enum(['openclaw_hooks', 'openai', 'ollama', 'custom']).default('openclaw_hooks'),
+    model: z.string().default('ollama/qwen3.6:27b'),
+  }).optional(),
 }).passthrough();
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;
@@ -238,6 +250,8 @@ export const DEFAULT_CONFIG: PluginConfig = {
   experience: { enabled: true, triggers: ["correction", "failure", "fix_success", "explicit_save"], summaryMode: "async", relevanceThreshold: 0.6 },
   cliTimeout: 30_000,
   cliFallbackSearchType: 'search',
+  distillationIntervalMs: 2 * 60 * 60 * 1000,
+  tripletTimeoutMs: 8000,
 };
 
 // --- Validate ---
