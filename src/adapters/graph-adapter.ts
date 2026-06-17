@@ -129,12 +129,12 @@ export class GraphAdapter {
         const gmCfg: Record<string, any> = {
           neo4j: this.neo4jConfig,
           compactTurnCount: 10,
-          recallMaxNodes: 10,
+          recallMaxNodes: 8,
           recallMaxDepth: 2,
           freshTailCount: 5,
           dedupThreshold: 0.90,
           pagerankDamping: 0.85,
-          pagerankIterations: 20,
+          pagerankIterations: 15,
         };
         this._recaller = new mod.Recaller(this.driver, gmCfg);
         this._gmConfig = gmCfg;
@@ -613,7 +613,7 @@ export class GraphAdapter {
       // gm-pro personalizedPageRank(driver, seedIds[], candidateIds[], GmConfig): PPRResult { scores: Map }
       const cfg = {
         pagerankDamping: 0.85,
-        pagerankIterations: 20,
+        pagerankIterations: 15,
       };
       const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
       // gm-pro returns PPRResult with scores Map
@@ -672,12 +672,12 @@ export class GraphAdapter {
       const cfg: Record<string, any> = {
         neo4j: this.neo4jConfig,
         compactTurnCount: 10,
-        recallMaxNodes: 10,
+        recallMaxNodes: 8,
         recallMaxDepth: 2,
         freshTailCount: 5,
         dedupThreshold: 0.90,
         pagerankDamping: 0.85,
-        pagerankIterations: 20,
+        pagerankIterations: 15,
       };
       this.logger?.info?.('[graph-adapter] triggering maintenance pipeline');
       const result = await this.mod.runMaintenance(this.driver, cfg);
