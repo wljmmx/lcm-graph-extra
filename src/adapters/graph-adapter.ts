@@ -134,7 +134,7 @@ export class GraphAdapter {
           freshTailCount: 5,
           dedupThreshold: 0.90,
           pagerankDamping: 0.85,
-          pagerankIterations: 15,
+          pagerankIterations: 12,
         };
         this._recaller = new mod.Recaller(this.driver, gmCfg);
         this._gmConfig = gmCfg;
@@ -613,7 +613,7 @@ export class GraphAdapter {
       // gm-pro personalizedPageRank(driver, seedIds[], candidateIds[], GmConfig): PPRResult { scores: Map }
       const cfg = {
         pagerankDamping: 0.85,
-        pagerankIterations: 15,
+        pagerankIterations: 12,
       };
       const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
       // gm-pro returns PPRResult with scores Map
@@ -677,7 +677,7 @@ export class GraphAdapter {
         freshTailCount: 5,
         dedupThreshold: 0.90,
         pagerankDamping: 0.85,
-        pagerankIterations: 15,
+        pagerankIterations: 12,
       };
       this.logger?.info?.('[graph-adapter] triggering maintenance pipeline');
       const result = await this.mod.runMaintenance(this.driver, cfg);
