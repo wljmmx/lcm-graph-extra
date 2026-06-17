@@ -610,7 +610,7 @@ function getSessionDedup(sessionKey: string) {
                   const summaryMsgs = convSummaries.map((s) => ({
                     role: 'user', content: s.content, token_count: s.tokenCount,
                   }));
-                  finalMessages = [...summaryMsgs, ...messages];
+                  finalMessages = summaryMsgs;
                 }
 
                 // Use hasUncompressedMessages to confirm there are messages needing compression
@@ -634,10 +634,15 @@ function getSessionDedup(sessionKey: string) {
                   ]);
                   const freshSummaries = getConversationSummaries(conversationId);
                   if (freshSummaries.length > 0) {
-                    finalMessages = trimSummariesToBudget(
+                    const trimmedSummaryMsgs = trimSummariesToBudget(
                       freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                       resolvedCtx.compactTokenBudget * maxSummaryRatio,
                     ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
+                    // Preserve last user message for context
+                    const lastOriginalMsg = messages.at(-1);
+                    finalMessages = lastOriginalMsg
+                      ? [...trimmedSummaryMsgs, lastOriginalMsg]
+                      : trimmedSummaryMsgs;
                   } else {
                     writeCompactionDebt(
                       conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
@@ -1021,10 +1026,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         try {
           // Tokens: injected system messages are now part of finalMessages,
           // so estimateTokensFromMessages covers them. systemPromptAddition only has tool guidance (small).
-          const totalInjectedTokens = estimateTokensFromMessages(finalMessages);
+          const messageTokens = estimateTokensFromMessages(finalMessages);
+          let additionTokens = 0;
+          if (typeof systemPromptAddition === "string" && systemPromptAddition.length > 0) {
+            additionTokens = estimateTokensFromText(systemPromptAddition);
+          }
           return {
             messages: finalMessages,
-            estimatedTokens: totalInjectedTokens,
+            estimatedTokens: messageTokens + additionTokens,
             systemPromptAddition: systemPromptAddition || undefined,
             promptAuthority: typeof systemPromptAddition == "string" && systemPromptAddition.length > 0 ? "preassembly_may_overflow" : "assembled",
           };
