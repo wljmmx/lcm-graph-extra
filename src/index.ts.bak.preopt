@@ -876,46 +876,48 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
           }
 
-          // S5-3: Inject L2/L3/L4 into systemPromptAddition (not finalMessages)
+          // S5-3: dedupPushMessage — hash-based, cross-round, dedups against both
+          //        previous rounds AND already-injected L1 summary messages above
           // Layer priority (higher = harder to trim):
           //   L1(summary)=0  <  L2(docs)=3  <  L3(graph)=4  <  L4(experience)=5
-          const sections: { label: string; body: string; layer: number }[] = [];
+          const injectedLayerTags: string[] = [];
+          const injectedBaseIndex = finalMessages.length;
 
-          function addSection(label: string, body: string, layer: number): void {
-            if (!body) return;
-            const h = quickHash(label + body);
+          function dedupPushMessage(content: string, layer: number): void {
+            const h = quickHash(content);
             if (allSessionHashes.has(h)) return;
             allSessionHashes.add(h);
             currentRoundHashes.push(h);
-            sections.push({ label, body, layer });
+            finalMessages.push({ role: 'user', content });
+            injectedLayerTags.push(String(layer));
           }
 
-          // Layer 4: Experience
+
+// Layer 4: Experience → system messages
           if (expResults.length > 0) {
-            const expBody = expResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
-            addSection('## \ud83d\udca1 经验总结', expBody, 5);
+            dedupPushMessage("## 💡 经验总结\n" + expResults.map((e: any) => `- [${e.experience.type}] ${e.experience.summary}`).join("\n"), 5);
             for (const e of expResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
           }
 
-          // Layer 3: Neo4j knowledge graph
+// Layer 3: Neo4j knowledge graph → system messages
           if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
-            const graphBody = graphResults.slice(0, retrievalLimits.graph).map((r: any) => '- ' + (r.content ?? r.id ?? '')).join('\n');
-            addSection('## \ud83d\udd17 知识图谱', graphBody, 4);
+            dedupPushMessage("## 🔗 知识图谱\n" + graphResults.slice(0, retrievalLimits.graph).map((r: any) => `- ${r.content ?? r.id ?? ""}`).join("\n"), 4);
           }
 
-          // Layer 2: qmd search snippet results
+// Layer 2: qmd search snippet results → system messages
+          // S2-3+S2-5: Skip snippets when fullDocs already loaded (same files, redundant tokens)
           const hasFullDocs = Array.isArray(fullDocs) && fullDocs.length > 0;
           if (qmdResults && Array.isArray(qmdResults) && !hasFullDocs) {
             const qmdItems = qmdResults.slice(0, retrievalLimits.qmd).map((r: any, i: number) => {
               const citationTag = citationsMode === 'always' || citationsMode === 'auto'
-                ? ' [src:' + String(i+1) + ']'
+                ? ` [src:${i+1}]`
                 : '';
-              return '- ' + (r.content ?? '') + citationTag;
-            }).join('\n');
-            addSection('## \ud83d\udcc4 记忆文件', qmdItems, 3);
+              return `- ${r.content ?? ""}${citationTag}`;
+            }).join("\n");
+            dedupPushMessage("## 📄 记忆文件\n" + qmdItems, 3);
           }
 
-          // Batch-enriched full document content
+// Batch-enriched full document content → system messages
           if (Array.isArray(fullDocs) && fullDocs.length > 0) {
             const docBlock = fullDocs
               .filter(Boolean)
@@ -925,17 +927,19 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 if (doc.length > docLimit) {
                   const headLen = Math.floor(docLimit * 0.6);
                   const tailLen = docLimit - headLen;
-                  return doc.slice(0, headLen) + '\n...[中间内容已截断]...\n' + doc.slice(-tailLen);
+                  return doc.slice(0, headLen) + "\n...[中间内容已截断]...\n" + doc.slice(-tailLen);
                 }
                 return doc;
               })
-              .join('\n\n---\n\n');
+              .join("\n\n---\n\n");
             if (docBlock) {
-              addSection('## \ud83d\udcc4 完整文档已加载', docBlock, 3);
+              dedupPushMessage("## 📄 完整文档已加载\n" + docBlock, 3);
             }
           }
 
-          // Layer 1: lossless-claw summaries (low tier only)
+// ---- Inject lossless-claw summaries as system messages (if recent compaction occurred) ----
+          // Only inject recent summaries for low/proactive tier;
+          // medium/high already have DAG summaryMsgs in finalMessages head.
           if (_losslessClawAdapter?.connected && tier === 'low') {
             try {
               const convStore = _losslessClawAdapter.rawEngine?.getConversationStore?.();
@@ -945,71 +949,61 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   : [];
                 if (Array.isArray(recentSummaries) && recentSummaries.length > 0) {
                   const summaryText = recentSummaries.map((s: any, i: number) =>
-                    '- [摘要' + String(i+1) + '] ' + '(s?.content ?? s?.summary ?? String(s)).slice(0, 500)'
-                  ).join('\n');
-                  addSection('## \ud83d\udccb 历史摘要', summaryText, 0);
+                    `- [摘要${i+1}] ${(s?.content ?? s?.summary ?? String(s)).slice(0, 500)}`
+                  ).join("\n");
+                  dedupPushMessage("## 📋 历史摘要\n" + summaryText, 0);
                 }
               }
             } catch (sumErr) {
-              logger?.debug?.('Summary injection failed (non-fatal)', { err: sumErr });
+              logger?.debug?.("Summary injection failed (non-fatal)", { err: sumErr });
             }
           }
 
           // ==================================================================
-          // 3. Build systemPromptAddition: Tool Guidance + injected sections
+          // 3. Tool guidance — SDK buildMemorySystemPromptAddition → systemPromptAddition
+          //    (Correct home: meta-instructions about recall tools, not content data)
           // ==================================================================
           {
             const sdkGuidance = buildMemorySystemPromptAddition({
               availableTools: new Set(availableTools),
               citationsMode,
             });
-            let addition = '';
             if (sdkGuidance) {
-              addition += '\n# Tool Guidance\n' + sdkGuidance;
+              systemPromptAddition = "\n# Tool Guidance\n" + sdkGuidance;
             }
-            for (const sec of sections) {
-              addition += '\n---\n' + sec.label + '\n' + sec.body;
-            }
-            systemPromptAddition = addition || '';
           }
 
           // ==================================================================
+                    // ==================================================================
           // Final: Priority-based token budget trim (protect L4 > L3 > L2 > L1)
-          // Trim from sections array, then rebuild systemPromptAddition
           // ==================================================================
-          if (wm && sections.length > 0) {
-            const estimateTotal = () => estimateTokensFromMessages(finalMessages) + Math.floor(systemPromptAddition.length / 4);
+          if (wm && injectedLayerTags.length > 0) {
+            const totalTokensAfterInjection = estimateTokensFromMessages(finalMessages);
             const budgetCeiling = contextWindow * 0.85;
-            let trimmed = 0;
-            while (estimateTotal() > budgetCeiling && sections.length > 0) {
-              let worstIdx = -1;
-              let worstLayer = Infinity;
-              for (let j = 0; j < sections.length; j++) {
-                if (sections[j].layer < worstLayer) {
-                  worstLayer = sections[j].layer;
-                  worstIdx = j;
+            if (totalTokensAfterInjection > budgetCeiling) {
+              let trimmed = 0;
+              while (estimateTokensFromMessages(finalMessages) > budgetCeiling && injectedLayerTags.length > 0) {
+                let worstIdx = -1;
+                let worstPriority = Infinity;
+                for (let j = 0; j < injectedLayerTags.length; j++) {
+                  const p = Number(injectedLayerTags[j]);
+                  if (p < worstPriority) {
+                    worstPriority = p;
+                    worstIdx = j;
+                  }
                 }
+                if (worstIdx < 0) break;
+                const msgIdx = injectedBaseIndex + worstIdx;
+                finalMessages.splice(msgIdx, 1);
+                injectedLayerTags.splice(worstIdx, 1);
+                trimmed++;
               }
-              if (worstIdx < 0) break;
-              sections.splice(worstIdx, 1);
-              trimmed++;
-              const sdkGuidance2 = buildMemorySystemPromptAddition({
-                availableTools: new Set(availableTools),
-                citationsMode,
-              });
-              let rebuilt = '';
-              if (sdkGuidance2) {
-                rebuilt += '\n# Tool Guidance\n' + sdkGuidance2;
+              if (trimmed > 0) {
+                logger?.debug?.(`[wm] priority-trimmed ${trimmed} injected message(s), remaining layers: [${injectedLayerTags.join(",")}]`);
               }
-              for (const sec of sections) {
-                rebuilt += '\n---\n' + sec.label + '\n' + sec.body;
-              }
-              systemPromptAddition = rebuilt || '';
-            }
-            if (trimmed > 0) {
-              logger?.debug?.('[wm] priority-trimmed ' + String(trimmed) + ' injected section(s), remaining: ' + sections.map(function(s) { return s.label; }).join(','));
             }
           }
+
         } catch (err) {
 
           const e = err instanceof Error ? err : new Error(String(err));
