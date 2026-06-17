@@ -168,7 +168,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
       }
       }
     } else {
-      logger?.debug?.("compaction: LosslessClawAdapter not connected, skipping DAG compact");
+      logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");
     }
   } catch (err) {
     const errMsg = typeof err === "string" ? err : (err as Error).message ?? "unknown";

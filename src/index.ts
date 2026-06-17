@@ -1204,7 +1204,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               }
             }
           } else {
-            logger?.debug?.("compact: LosslessClawAdapter not connected, DAG compaction skipped");
+            logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");
           }
 
           // --- Promise.race + 30s timeout: onCompaction hook (backup + Neo4j marker) ---
