@@ -22,8 +22,9 @@
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -31,6 +32,8 @@ import { dirname, join } from 'node:path';
 
 /** OpenClaw 内部 CE 注册表全局单例的 Symbol key */
 const CONTEXT_ENGINE_REGISTRY_STATE = Symbol.for('openclaw.contextEngineRegistryState');
+/** lossless-claw shared-init global state key */
+const SHARED_INIT_STATE = Symbol.for('@martian-engineering/lossless-claw/shared-init');
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -92,6 +95,34 @@ interface LosslessClawEngine {
   dispose?(): Promise<void>;
   getConversationStore?(): any;
   getSummaryStore?(): any;
+}
+
+
+/** Minimal wrapper that delegates to lossless-claw's inner engine.
+ * Used when we access the engine via shared-init rather than factory registry. */
+class MemorySupplementCtxEngine implements LosslessClawEngine {
+  constructor(private inner: any) {}
+  async bootstrap(params: any): Promise<any> {
+    return this.inner.bootstrap?.(params) ?? {};
+  }
+  ingest(params: any): Promise<{ ingested: boolean }> {
+    return this.inner.ingest?.(params) ?? Promise.resolve({ ingested: false });
+  }
+  async ingestBatch(params: any): Promise<{ ingestedCount: number }> {
+    return this.inner.ingestBatch?.(params) ?? { ingestedCount: 0 };
+  }
+  compact(params: any): Promise<any> {
+    return this.inner.compact?.(params);
+  }
+  async assemble(params: any): Promise<any> {
+    return this.inner.assemble?.(params) ?? {};
+  }
+  async afterTurn(params: any): Promise<void> {
+    await this.inner.afterTurn?.(params);
+  }
+  async dispose(): Promise<void> {
+    this.inner.dispose?.();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +429,91 @@ export class LosslessClawAdapter {
       }
     } catch {
       // Symbol 方式失败，走 Fallback
+    }
+
+    // ── Shared State: 直接通过 lossless-claw 的 globalThis Symbol shared-init 获取 engine ──
+    // 如果 lossless-claw 插件已被 OpenClaw 加载（即使非活跃 CE），shared state 里就有引擎实例。
+    // 这比走 factory registry 更直接——类似于 GraphAdapter 直连 Neo4j 而不是经过 plugin SDK。
+    try {
+      const sharedStore: Map<string, any> | undefined =
+        (globalThis as any)[SHARED_INIT_STATE];
+      if (sharedStore instanceof Map) {
+        // Find any entry (lossless-claw uses db path as key)
+        for (const init of sharedStore.values()) {
+          const engine = init.getCachedEngine?.();
+          if (engine) {
+            return async () => new MemorySupplementCtxEngine(engine);
+          }
+          // Engine not ready yet, try waitForEngine
+          const waitFn = init.waitForEngine;
+          if (typeof waitFn === 'function') {
+            return async () => {
+              const e = await waitFn();
+              return new MemorySupplementCtxEngine(e);
+            };
+          }
+        }
+      }
+    } catch {
+      // shared state not available, continue
+    }
+
+    // ── Direct FS: 扫描 projects/ 找 lossless-claw dist，import 触发初始化 ──
+    try {
+      const projectsDir = join(homedir(), '.openclaw', 'npm', 'projects');
+      const entries = await readdir(projectsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidatePath = join(
+          projectsDir,
+          entry.name,
+          'node_modules',
+          '@martian-engineering',
+          'lossless-claw',
+          'dist',
+          'index.js',
+        );
+        try {
+          await stat(candidatePath);
+          const lcModule = await import(pathToFileURL(candidatePath).href);
+          // dist/index.js default export is the plugin entry with register()
+          const pluginEntry = lcModule.default;
+          if (pluginEntry && typeof pluginEntry.register === 'function') {
+            const mockApi: Record<string, any> = {
+              getConfig: () => ({}),
+              getRuntimeInfo: () => ({ version: 'mock', mode: 'direct-fs' }),
+              registerContextEngine: (_id: string, _fn: Function) => {},
+              registerTool: () => {},
+              registerCommand: () => {},
+              on: () => {},
+            };
+            pluginEntry.register(mockApi);
+
+            // Re-check shared state after plugin init
+            const retryShared: Map<string, any> | undefined =
+              (globalThis as any)[SHARED_INIT_STATE];
+            if (retryShared instanceof Map) {
+              for (const init of retryShared.values()) {
+                const engine = init.getCachedEngine?.();
+                if (engine) {
+                  return async () => new MemorySupplementCtxEngine(engine);
+                }
+                const waitFn = init.waitForEngine;
+                if (typeof waitFn === 'function') {
+                  return async () => {
+                    const e = await waitFn();
+                    return new MemorySupplementCtxEngine(e);
+                  };
+                }
+              }
+            }
+          }
+        } catch {
+          // candidate not found or import failed
+        }
+      }
+    } catch {
+      // projects dir scan failed, fall through to Fallback
     }
 
     // ── Fallback: 文件系统 Registry 发现 ──
