@@ -116,6 +116,8 @@ export const WindowMonitorConfigSchema = z.object({
   highPressureThreshold: z.number().default(0.85),
   mediumPressureThreshold: z.number().default(0.70),
   proactiveThreshold: z.number().default(0.65),
+  // System prompt overhead: SOUL.md, USER.md, AGENTS.md, MEMORY.md, system instructions
+  systemPromptOverheadTokens: z.number().int().default(17_000),
   // 256K上下文适配（翻倍）
   compactTokenBudget: z.number().default(114_688),
   // High-pressure emergency compaction settings

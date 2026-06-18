@@ -513,7 +513,9 @@ function getSessionDedup(sessionKey: string) {
           const providerModelCtx = _modelRegistry ? _modelRegistry[modelFullId] : undefined;
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
-          const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
+          const overheadTokens = wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0;
+          const effectiveTokenCount = estimatedTokens + overheadTokens;
+          const tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
           tier = 'low';
           retrievalLimits = resolvedCtx.retrievalLimits;
@@ -553,7 +555,7 @@ function getSessionDedup(sessionKey: string) {
           if (tokenRatio > 0.65 && !needsCompact) {
               logger?.warn?.(
                 "window monitor: token ratio above 0.65, triggering async pre-compaction",
-                { tokenRatio: Number(tokenRatio.toFixed(3)), estimatedTokens, contextWindow },
+                { tokenRatio: Number(tokenRatio.toFixed(3)), effectiveTokenCount, estimatedTokens, overheadTokens, contextWindow },
               );
             // Fire-and-forget pre-compaction to reduce context before it gets worse
             if (_losslessClawAdapter?.connected) {
@@ -567,7 +569,7 @@ function getSessionDedup(sessionKey: string) {
                   sessionKey: preCompactSessionKey,
                   sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                   force: true,
-                  currentTokenCount: estimatedTokens,
+                  currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'preventive',
                 }).catch(() => {});
               }
@@ -601,7 +603,7 @@ function getSessionDedup(sessionKey: string) {
                 // Medium: fire-and-forget compact, assemble summaries + all raw msgs, write debt if needed
                 _losslessClawAdapter.compact({
                   sessionId: conversationId, sessionKey, sessionFile, force: true,
-                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: estimatedTokens,
+                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
                 }).catch(() => {});
 
@@ -616,7 +618,7 @@ function getSessionDedup(sessionKey: string) {
                 const hasPendingUncompressed = hasUncompressedMessages(conversationId);
                 if (rawCount > dedupLimit || hasPendingUncompressed) {
                   writeCompactionDebt(
-                    conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                    conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                     'medium_pressure_uncompressed_' + rawCount + '_exceeds_' + dedupLimit,
                   );
                 }
@@ -626,7 +628,7 @@ function getSessionDedup(sessionKey: string) {
                   await Promise.race([
                     _losslessClawAdapter.compact({
                       sessionId: conversationId, sessionKey, sessionFile, force: true,
-                      tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: estimatedTokens,
+                      tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                       compactionTarget: 'threshold',
                     }),
                     new Promise((_, r) => setTimeout(() => r(new Error('Compact timeout')), compactTimeout)),
@@ -644,26 +646,26 @@ function getSessionDedup(sessionKey: string) {
                       : trimmedSummaryMsgs;
                   } else {
                     writeCompactionDebt(
-                      conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                    conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                       'high_pressure_no_summary_after_compact',
                     );
                   }
                 } catch (err) {
                   logger?.warn?.('High pressure compact failed, writing debt', err);
                   writeCompactionDebt(
-                    conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                    conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                     'high_pressure_compact_failed',
                   );
                 }
               } else {
                 // Low pressure but needsCompact: write debt + fire-and-forget
                 writeCompactionDebt(
-                  conversationId, resolvedCtx.compactTokenBudget, estimatedTokens,
+                    conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                   'proactive_' + tier + '_pressure',
                 );
                 _losslessClawAdapter.compact({
                   sessionId: conversationId, sessionKey, sessionFile, force: true,
-                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: estimatedTokens,
+                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
                 }).catch(() => {});
               }
@@ -675,7 +677,7 @@ function getSessionDedup(sessionKey: string) {
             const cid = getConversationId(sk);
             if (cid != null) {
               writeCompactionDebt(
-                cid, resolvedCtx.compactTokenBudget, estimatedTokens,
+                cid, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                 'proactive_' + tier + '_pressure_no_adapter',
               );
             }
@@ -825,7 +827,7 @@ function getSessionDedup(sessionKey: string) {
           // ---- Metrics log ----
           // Final token estimate based on actual messages being returned
           const finalEstimate = estimateTokensFromMessages(finalMessages);
-logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | tier=${tier}`, {
+logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${finalEstimate}+${wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0}(messages+overhead)/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | tier=${tier}`, {
   elapsed: Date.now() - assembleStart,
   init_ms: initMs,
   parallel_ms: parallelMs,
