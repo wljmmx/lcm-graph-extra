@@ -260,7 +260,7 @@ const DEDUP_TTL_MS = 60 * 60 * 1000;
 const sessionDedupCache = new Map<string, { window: string[][]; maxRounds: number; lastAccess: number }>();
 const dedupAccessOrder: string[] = [];
 let MAX_DEDUP_ROUNDS = 24;  // S5-2: updated from config during init()
-let _lastAdditionTokens = 0;  // cached additionTokens from previous assemble round
+let _sessionOverheadCache = new Map<string, number>();  // per-session cached additionTokens for tier estimation
 
 function evictStaleDedup(): void {
   const now = Date.now();
@@ -480,6 +480,7 @@ function getSessionDedup(sessionKey: string) {
         let graphResults: any = [];
         let expResults: any = [];
         let removedSections: { label: string; chars: number }[] = [];
+        let _overheadCacheKey = "";
 
         try {
           const initStart = Date.now();
@@ -526,7 +527,8 @@ function getSessionDedup(sessionKey: string) {
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
           // Factor in systemPromptAddition overhead from previous round
-          const overheadTokens = _lastAdditionTokens;
+          _overheadCacheKey = (params as any).sessionKey ?? (params as any).conversationId ?? "default";
+          const overheadTokens = _sessionOverheadCache.get(_overheadCacheKey) ?? 0;
           const effectiveTokenCount = estimatedTokens + overheadTokens;
           const tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
@@ -1048,8 +1050,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (typeof systemPromptAddition === "string" && systemPromptAddition.length > 0) {
             additionTokens = estimateTokensFromText(systemPromptAddition);
           }
-          // Cache for next-round tier estimation
-          _lastAdditionTokens = additionTokens;
+          // Cache for next-round tier estimation (per-session)
+          _sessionOverheadCache.set(_overheadCacheKey, additionTokens);
           return {
             messages: finalMessages,
             estimatedTokens: messageTokens + additionTokens,
