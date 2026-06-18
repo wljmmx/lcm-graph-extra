@@ -260,6 +260,7 @@ const DEDUP_TTL_MS = 60 * 60 * 1000;
 const sessionDedupCache = new Map<string, { window: string[][]; maxRounds: number; lastAccess: number }>();
 const dedupAccessOrder: string[] = [];
 let MAX_DEDUP_ROUNDS = 24;  // S5-2: updated from config during init()
+let _lastAdditionTokens = 0;  // cached additionTokens from previous assemble round
 
 function evictStaleDedup(): void {
   const now = Date.now();
@@ -524,9 +525,9 @@ function getSessionDedup(sessionKey: string) {
           }
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
-          // Use estimatedTokens directly for pressure gating (no overhead inflation)
-          // const overheadTokens = wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0;
-          const effectiveTokenCount = estimatedTokens;
+          // Factor in systemPromptAddition overhead from previous round
+          const overheadTokens = _lastAdditionTokens;
+          const effectiveTokenCount = estimatedTokens + overheadTokens;
           const tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
           tier = 'low';
@@ -839,7 +840,7 @@ function getSessionDedup(sessionKey: string) {
           // ---- Metrics log ----
           // Final token estimate based on actual messages being returned
           const finalEstimate = estimateTokensFromMessages(finalMessages);
-logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | tier=${tier}`, {
+logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | overhead=${overheadTokens} | effectiveTokenCount=${effectiveTokenCount} | msgCount=${msgCount} | tier=${tier}`, {
   elapsed: Date.now() - assembleStart,
   init_ms: initMs,
   parallel_ms: parallelMs,
@@ -856,6 +857,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
   doc_count: fullDocs?.length ?? 0,
   // Context budget
   tokenRatio: Number(tokenRatio.toFixed(3)),
+  overheadTokens,
+  effectiveTokenCount,
+  msgCount,
   finalEstimate,
   contextWindow,
   tier: tier,
@@ -1044,6 +1048,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (typeof systemPromptAddition === "string" && systemPromptAddition.length > 0) {
             additionTokens = estimateTokensFromText(systemPromptAddition);
           }
+          // Cache for next-round tier estimation
+          _lastAdditionTokens = additionTokens;
           return {
             messages: finalMessages,
             estimatedTokens: messageTokens + additionTokens,
