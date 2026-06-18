@@ -140,7 +140,7 @@ export function writeCompactionDebt(
  */
 /**
  * Estimate tokens from text using a Chinese-aware heuristic.
- * Formula: (CJK chars / 1.5) + (non-CJK chars / 4.0) + 1
+ * Formula: max(1, ceil(CJK chars / 1.5 + non-CJK chars / 4.0))
  */
 export function estimateTokensFromText(text: string): number {
   let cjkCount = 0;
@@ -160,7 +160,7 @@ export function estimateTokensFromText(text: string): number {
       nonCjkCount++;
     }
   }
-  return Math.ceil(cjkCount / 1.5 + nonCjkCount / 4.0) + 1;
+  return Math.max(1, Math.ceil(cjkCount / 1.5 + nonCjkCount / 4.0));
 }
 
 export function estimateTokensFromMessages(messages: any[]): number {
@@ -174,9 +174,11 @@ export function estimateTokensFromMessages(messages: any[]): number {
       if (typeof c === 'string') {
         total += estimateTokensFromText(c);
       } else if (Array.isArray(c)) {
+        // Batch all text parts into a single string to avoid per-part inflation
         const textParts = c.filter((p: any) => p.type === 'text' && typeof p.text === 'string');
-        for (const tp of textParts) {
-          total += estimateTokensFromText(tp.text);
+        const combined = textParts.map((tp: any) => tp.text).join('');
+        if (combined.length > 0) {
+          total += estimateTokensFromText(combined);
         }
       } else {
         total += estimateTokensFromText(String(c));

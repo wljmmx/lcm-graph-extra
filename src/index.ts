@@ -510,7 +510,18 @@ function getSessionDedup(sessionKey: string) {
           const msgCount = messages.length;
           estimatedTokens = estimateTokensFromMessages(messages);
           const modelFullId = typeof params.model === "string" ? params.model : "";
-          const providerModelCtx = _modelRegistry ? _modelRegistry[modelFullId] : undefined;
+          // Exact match first, then fuzzy fallback if registry key not found
+          let providerModelCtx = _modelRegistry ? _modelRegistry[modelFullId] : undefined;
+          if (providerModelCtx === undefined && _modelRegistry && modelFullId) {
+            const shortId = modelFullId.includes('/') ? modelFullId.split('/').pop() : modelFullId;
+            for (const [key, val] of Object.entries(_modelRegistry)) {
+              if (key.endsWith(shortId)) {
+                providerModelCtx = val;
+                logger?.debug?.("model context fallback: " + modelFullId + " -> " + key + " (" + val + ")");
+                break;
+              }
+            }
+          }
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
           const overheadTokens = wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0;
