@@ -375,12 +375,12 @@ function getSessionDedup(sessionKey: string) {
           const cfg = JSON.parse(readFileSync(defaultConfigPath, "utf8"));
           const modelRegistry: Record<string, number> = {};
           const providers = cfg?.models?.providers ?? {};
-          for (const [, providerDef] of Object.entries(providers)) {
+          for (const [providerKey, providerDef] of Object.entries(providers)) {
             const provider = providerDef as any;
             if (Array.isArray(provider.models)) {
               for (const m of provider.models) {
                 if (m.contextWindow && typeof m.contextWindow === "number") {
-                  modelRegistry[m.id] = m.contextWindow;
+                  modelRegistry[providerKey + "/" + m.id] = m.contextWindow;
                 }
               }
             }
@@ -510,8 +510,7 @@ function getSessionDedup(sessionKey: string) {
           const msgCount = messages.length;
           estimatedTokens = estimateTokensFromMessages(messages);
           const modelFullId = typeof params.model === "string" ? params.model : "";
-          const modelName = modelFullId.includes("/") ? modelFullId.split("/").pop()! : modelFullId;
-          const providerModelCtx = _modelRegistry ? _modelRegistry[modelName] : undefined;
+          const providerModelCtx = _modelRegistry ? _modelRegistry[modelFullId] : undefined;
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
           const tokenRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
