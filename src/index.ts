@@ -524,8 +524,9 @@ function getSessionDedup(sessionKey: string) {
           }
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
           const contextWindow = resolvedCtx.contextWindow;
-          const overheadTokens = wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0;
-          const effectiveTokenCount = estimatedTokens + overheadTokens;
+          // Use estimatedTokens directly for pressure gating (no overhead inflation)
+          // const overheadTokens = wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0;
+          const effectiveTokenCount = estimatedTokens;
           const tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
           tier = 'low';
@@ -566,7 +567,7 @@ function getSessionDedup(sessionKey: string) {
           if (tokenRatio > 0.65 && !needsCompact) {
               logger?.warn?.(
                 "window monitor: token ratio above 0.65, triggering async pre-compaction",
-                { tokenRatio: Number(tokenRatio.toFixed(3)), effectiveTokenCount, estimatedTokens, overheadTokens, contextWindow },
+                { tokenRatio: Number(tokenRatio.toFixed(3)), effectiveTokenCount, estimatedTokens, contextWindow },
               );
             // Fire-and-forget pre-compaction to reduce context before it gets worse
             if (_losslessClawAdapter?.connected) {
@@ -838,7 +839,7 @@ function getSessionDedup(sessionKey: string) {
           // ---- Metrics log ----
           // Final token estimate based on actual messages being returned
           const finalEstimate = estimateTokensFromMessages(finalMessages);
-logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | tokens=${finalEstimate}+${wm ? (wm.systemPromptOverheadTokens ?? 17_000) : 0}(messages+overhead)/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | tier=${tier}`, {
+logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | tier=${tier}`, {
   elapsed: Date.now() - assembleStart,
   init_ms: initMs,
   parallel_ms: parallelMs,
