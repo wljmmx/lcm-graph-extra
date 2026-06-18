@@ -3,11 +3,15 @@
  *
  * Resolves credentials with fallback priority:
  *   1. Plugin config (config.neo4j)
- *   2. Environment variables (NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD)
- *   3. Sensible defaults
+ *   2. openclaw.json plugins.entries.lcm-graph-extra.config.neo4j
+ *   3. Environment variables (NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD)
+ *   4. Sensible defaults
  *
  * Eliminates hardcoded credentials in source code.
  */
+
+import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 
 export interface Neo4jConnectionConfig {
   uri: string;
@@ -21,6 +25,35 @@ export interface Neo4jSearchConfig {
 }
 
 /**
+ * Try to load neo4j config from openclaw.json entries section.
+ */
+function loadFromOpenclawJson(): { uri?: string; user?: string; password?: string } | null {
+  try {
+    const path = `${homedir()}/.openclaw/openclaw.json`;
+    if (!existsSync(path)) return null;
+    const data = JSON.parse(readFileSync(path, 'utf8'));
+    const entries = data?.plugins?.entries || data?.entries || {};
+    const neo4j = entries['lcm-graph-extra']?.config?.neo4j;
+    if (neo4j && typeof neo4j === 'object') {
+      return { uri: neo4j.uri, user: neo4j.user, password: neo4j.password };
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+// Cache the entries-loaded config
+let _entriesCache: { uri?: string; user?: string; password?: string } | null = null;
+
+function getEntriesConfig(): { uri?: string; user?: string; password?: string } | null {
+  if (_entriesCache === null) {
+    _entriesCache = loadFromOpenclawJson();
+  }
+  return _entriesCache;
+}
+
+/**
  * Resolve Neo4j connection credentials from config/env/defaults.
  */
 export function resolveNeo4jConfig(
@@ -28,18 +61,27 @@ export function resolveNeo4jConfig(
 ): Neo4jConnectionConfig {
   const neo4jSection = (pluginConfig?.neo4j ?? {}) as Record<string, unknown>;
 
+  // Only trust plugin config if it has a non-empty URI
+  const pluginUri = (neo4jSection.uri as string) || '';
+  
+  // Try entries config if plugin config doesn't have valid URI
+  const entriesConfig = getEntriesConfig();
+  
   const uri =
-    (neo4jSection.uri as string) ||
+    (pluginUri && !pluginUri.includes('localhost') ? pluginUri : undefined) ||
+    entriesConfig?.uri ||
     process.env.NEO4J_URI ||
     "bolt://localhost:7687";
 
   const user =
     (neo4jSection.user as string) ||
+    entriesConfig?.user ||
     process.env.NEO4J_USER ||
     "neo4j";
 
   const password =
     (neo4jSection.password as string) ||
+    entriesConfig?.password ||
     process.env.NEO4J_PASSWORD ||
     "";
 

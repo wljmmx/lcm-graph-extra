@@ -73,8 +73,40 @@ export async function closeNeo4jDriver(): Promise<void> {
   }
 }
 
+/**
+ * Try to merge neo4j config from entries if not present in api.config.
+ * OpenClaw may place plugin config under entries instead of plugins,
+ * so we read openclaw.json and merge it in.
+ */
+function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
+  const config = (api.config || {}) as Record<string, unknown>;
+  // If neo4j already present AND has a valid URI, use as-is
+  if (config && 'neo4j' in config && (config.neo4j as any)?.uri) {
+    return config;
+  }
+  // Always try to load from openclaw.json entries as final source of truth
+  const openclawPath = join(homedir(), '.openclaw/openclaw.json');
+  if (existsSync(openclawPath)) {
+    try {
+      const raw = readFileSync(openclawPath, 'utf8');
+      const data = JSON.parse(raw);
+      // Check plugins.entries first, then top-level entries
+      const entriesSection = (data.plugins?.entries || data.entries || {});
+      const lcmConfig = entriesSection['lcm-graph-extra']?.config;
+      if (lcmConfig && 'neo4j' in lcmConfig && lcmConfig.neo4j.uri) {
+        const merged = { ...config, ...lcmConfig };
+        console.log('[lcm-graph-extra] Neo4j config loaded from entries:', merged.neo4j.uri);
+        return merged;
+      }
+    } catch (e) {
+      console.warn('[lcm-graph-extra] Failed to read openclaw.json:', e);
+    }
+  }
+  return config;
+}
+
 export function registerOperationalTools(api: any): void {
-  _pluginNeo4jConfig = (api.config || {}) as Record<string, unknown>;
+  _pluginNeo4jConfig = mergeEntriesNeo4jConfig(api) as Record<string, unknown>;
   // ===================================================================
   // 1. lcmg_experience_report
   // ===================================================================
