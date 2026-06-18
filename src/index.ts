@@ -514,7 +514,7 @@ function getSessionDedup(sessionKey: string) {
           const modelFullId = typeof params.model === "string" ? params.model : "";
           // Exact match first, then fuzzy fallback if registry key not found
           let providerModelCtx = _modelRegistry ? _modelRegistry[modelFullId] : undefined;
-          logger?.debug?.(`[DEBUG] tokenBudget=${tokenBudget}, estimatedTokens=${estimatedTokens}, model=${modelFullId}`);
+          logger.info(`[TOKEN-BUDGET] tokenBudget=${tokenBudget}, estimatedTokens=${estimatedTokens}, model=${modelFullId}`);
           if (providerModelCtx === undefined && _modelRegistry && modelFullId) {
             const shortId = modelFullId.includes('/') ? modelFullId.split('/').pop() : modelFullId;
             for (const [key, val] of Object.entries(_modelRegistry)) {
