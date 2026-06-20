@@ -1200,7 +1200,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (_adapterConnected) {
             try {
               const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
-                setTimeout(() => reject(new Error('compact: 30s timeout reached')), 300_000);
+                setTimeout(() => reject(new Error('compact: 300s timeout reached')), (api.config?.compactDagTimeoutMs ?? 300_000));
               });
               const abortOnCompact = signal
                 ? new Promise((_, reject) => {
@@ -1232,7 +1232,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // --- Promise.race + 300s (5min) timeout: onCompaction hook (backup + Neo4j marker) ---
           try {
             const hookTimeout = new Promise((_, reject) => {
-              setTimeout(() => reject(new Error('onCompaction: 30s timeout reached')), 300_000);
+              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), (api.config?.compactHookTimeoutMs ?? 300_000));
             });
             const abortOnHook = signal
               ? new Promise((_, reject) => {
