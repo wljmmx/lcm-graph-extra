@@ -606,7 +606,7 @@ function getSessionDedup(sessionKey: string) {
               : '';
             const conversationId = getConversationId(sessionKey);
             if (conversationId != null) {
-              const compactTimeout = parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '300000') || 300_000;
+              const compactTimeout = parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS) || ((wm as any)?.compactTimeout) ?? 300_000;
               const maxSummaryRatio = (wm as any)?.maxSummaryTokenRatio ?? 0.45;
               const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
 
@@ -1201,7 +1201,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (_adapterConnected) {
             try {
               const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
-                setTimeout(() => reject(new Error('compact: 300s timeout reached')), (typeof process !== 'undefined' ? parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '300000') : 300_000));
+                setTimeout(() => reject(new Error('compact: 300s timeout reached')), parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS) || 300_000);
               });
               const abortOnCompact = signal
                 ? new Promise((_, reject) => {
@@ -1233,7 +1233,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // --- Promise.race + 300s (5min) timeout: onCompaction hook (backup + Neo4j marker) ---
           try {
             const hookTimeout = new Promise((_, reject) => {
-              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), (typeof process !== 'undefined' ? parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '300000') : 300_000));
+              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS) || 300_000);
             });
             const abortOnHook = signal
               ? new Promise((_, reject) => {
