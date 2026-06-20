@@ -233,6 +233,10 @@ function buildToolGuidance(availableTools: string[]): string {
 
   return lines.join("\n");
 }
+// Compaction timeout constants (milliseconds)
+const COMPACT_DAG_TIMEOUT_MS = 300_000; // 5 minutes
+const COMPACT_HOOK_TIMEOUT_MS = 300_000; // 5 minutes
+
 export default definePluginEntry({
   id: "lcm-graph-extra",
   name: "LCM Graph Extra",
@@ -1200,7 +1204,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (_adapterConnected) {
             try {
               const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
-                setTimeout(() => reject(new Error('compact: 300s timeout reached')), (api.config?.compactDagTimeoutMs ?? 300_000));
+                setTimeout(() => reject(new Error('compact: 300s timeout reached')), COMPACT_DAG_TIMEOUT_MS);
               });
               const abortOnCompact = signal
                 ? new Promise((_, reject) => {
@@ -1232,7 +1236,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // --- Promise.race + 300s (5min) timeout: onCompaction hook (backup + Neo4j marker) ---
           try {
             const hookTimeout = new Promise((_, reject) => {
-              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), (api.config?.compactHookTimeoutMs ?? 300_000));
+              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), COMPACT_HOOK_TIMEOUT_MS);
             });
             const abortOnHook = signal
               ? new Promise((_, reject) => {

@@ -94,11 +94,7 @@ export const PluginConfigSchema = z.object({
 
   // Triplet extraction timeout (milliseconds, default 8s)
   tripletTimeoutMs: z.number().int().positive().default(8000),
-  // Compaction DAG timeout (milliseconds, default 5 minutes)
-  compactDagTimeoutMs: z.number().int().positive().default(300_000),
 
-  // Compaction onCompaction hook timeout (milliseconds, default 5 minutes)
-  compactHookTimeoutMs: z.number().int().positive().default(300_000),
 
   // Distillation LLM — use OpenClaw hooks proxy by default
   distillationLlm: z.object({
@@ -259,8 +255,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   cliFallbackSearchType: 'search',
   distillationIntervalMs: 2 * 60 * 60 * 1000,
   tripletTimeoutMs: 8000,
-  compactDagTimeoutMs: 300_000,
-  compactHookTimeoutMs: 300_000,
 };
 
 // --- Validate ---
