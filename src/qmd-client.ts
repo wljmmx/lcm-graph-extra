@@ -65,7 +65,7 @@ interface McpToolsCallResponse {
 // ---------------------------------------------------------------------------
 
 const DEFAULTS = {
-  mcpBaseUrl: "http://127.0.0.1:8081",
+  mcpBaseUrl: "http://127.0.0.1:8082",
   mcpTimeout: 5000,
   cliTimeout: 30_000,
   cliFallbackSearchType: 'search',
