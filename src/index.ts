@@ -1229,6 +1229,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               ]);
               // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
               summaryContent = compactResult?.result?.summary || compactResult?.summary;
+              // Preserve adapter's actionTaken/compacted flag for accurate success detection
+              const adapterCompacted = compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
             } catch (ceErr) {
               const msg = String(ceErr);
               if (msg.includes('aborted')) {
@@ -1292,7 +1294,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
 
           const tokensBefore = params.currentTokenCount ?? 0;
-          const compacted = !!summaryContent;
+          // Check adapter's actionTaken OR summary content (race condition: DB write may lag)
+          const compacted = !!summaryContent || adapterCompacted;
           return {
             ok: true,
             compacted,
