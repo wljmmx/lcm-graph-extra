@@ -544,10 +544,11 @@ function getSessionDedup(sessionKey: string) {
             maxContextChars = Math.min(maxContextChars, Math.floor(tokenBudget * 4));
           }
           const _wmConvId = getConversationId(typeof params.sessionKey === "string" ? params.sessionKey : (typeof params.session_id === "string" ? params.session_id : ""));
+          let uncompressedMsgs = -1;
           let needsCompact = false;
 
           if (wm) {
-            const uncompressedMsgs = _wmConvId != null ? getUncompressedMessageCount(_wmConvId) : -1;
+            uncompressedMsgs = _wmConvId != null ? getUncompressedMessageCount(_wmConvId) : -1;
             const activeMsgCount = uncompressedMsgs >= 0 ? uncompressedMsgs : msgCount;
             tier = determinePressureTier(activeMsgCount, tokenRatio, {
               dedupRounds: wm.dedupRounds ?? 24,
@@ -849,7 +850,7 @@ function getSessionDedup(sessionKey: string) {
           // ---- Metrics log ----
           // Final token estimate based on actual messages being returned
           const finalEstimate = estimateTokensFromMessages(finalMessages);
-logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | overhead=${overheadTokens} | effectiveTokenCount=${effectiveTokenCount} | msgCount=${msgCount} | tier=${tier}`, {
+logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | overhead=${overheadTokens} | effectiveTokenCount=${effectiveTokenCount} | msgCount=${msgCount} | uncomp=${uncompressedMsgs} | tier=${tier}`, {
   elapsed: Date.now() - assembleStart,
   init_ms: initMs,
   parallel_ms: parallelMs,
