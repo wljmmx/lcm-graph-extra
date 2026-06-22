@@ -324,13 +324,13 @@ function getSessionDedup(sessionKey: string) {
         const { ExperienceStorage } = await import("./experience/index.js");
 
         // -- QMD 全局配置 (来自 memory.qmd) --
-        const qmdConfig = api.config?.retrieval?.qmd ?? {};
+        const qmdConfig = api.pluginConfig?.retrieval?.qmd ?? {};
         const qmdBaseUrl = typeof qmdConfig.mcpEndpoint === 'string'
           ? qmdConfig.mcpEndpoint.replace(/\/mcp$/, '')
           : undefined;
 
         // -- 插件自有参数 (来自 plugins.lcm-graph-extra) --
-        const pluginConfig = api.config ?? {};
+        const pluginConfig = api.pluginConfig ?? {};
         const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? 'search';
         const cliTimeout = pluginConfig.cliTimeout ?? 30_000;
 
@@ -357,16 +357,16 @@ function getSessionDedup(sessionKey: string) {
         // S1-1: Initialize Merger for entity-level cross-engine dedup
         const { Merger } = await import("./merger.js");
         merger = new Merger({
-          maxResults: (api.config?.retrieval?.limits ?? {}).qmd
-            ? (api.config.retrieval.limits.qmd + (api.config.retrieval.limits.graph ?? 5))
+          maxResults: (api.pluginConfig?.retrieval?.limits ?? {}).qmd
+            ? (api.pluginConfig.retrieval.limits.qmd + (api.pluginConfig.retrieval.limits.graph ?? 5))
             : 10,
           fuzzyMatchThreshold: 0.85,
           decayHalfLifeDays: 30,
         });
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
-        // WindowMonitor config is at api.config.lcmMonitor (not nested under plugins.entries)
-        if (api.config?.lcmMonitor?.dedupRounds) {
-          MAX_DEDUP_ROUNDS = api.config.lcmMonitor.dedupRounds;
+        // WindowMonitor config is at api.pluginConfig.lcmMonitor (not nested under plugins.entries)
+        if (api.pluginConfig?.lcmMonitor?.dedupRounds) {
+          MAX_DEDUP_ROUNDS = api.pluginConfig.lcmMonitor.dedupRounds;
         }
 
         // Read provider model context window from openclaw.json
@@ -505,7 +505,7 @@ function getSessionDedup(sessionKey: string) {
           // ==================================================================
           // 1. Window Monitor — pressure check + tier determination
           // ==================================================================
-          const wmConfig = api.config?.lcmMonitor;
+          const wmConfig = api.pluginConfig?.lcmMonitor;
           logger?.info?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
           const wm = wmConfig?.enabled !== false ? wmConfig : null;
           const messages = params.messages ?? [];
@@ -1156,7 +1156,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 apiKey: runtimeLlm.apiKey || process.env.OPENAI_API_KEY || '',
                 baseURL: runtimeLlm.baseURL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
               }
-            : api.config?.llm || {
+            : api.pluginConfig?.llm || {
                 apiKey: process.env.OPENAI_API_KEY || '',
                 baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
@@ -1167,7 +1167,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             const tripletStart = Date.now();
             Promise.race([
               graphAdapter.extractAndUpsertFromTurn(llmConfig, autoSummary ? `${userContent}\n\n[Compaction Context]\n${autoSummary}` : userContent, assistantContent),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('Triplet extraction timeout')), (api.config?.tripletTimeoutMs ?? 8000)))
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Triplet extraction timeout')), (api.pluginConfig?.tripletTimeoutMs ?? 8000)))
             ]).then(result => {
               const tripletMs = Date.now() - tripletStart;
               if (result && (result.nodes > 0 || result.edges > 0)) {
@@ -1520,7 +1520,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         }
         
         // --- 3. Experience distillation (scheduled async, default every 2h) ---
-        const distillIntervalMs = api.config?.distillationIntervalMs ?? 2 * 60 * 60 * 1000;
+        const distillIntervalMs = api.pluginConfig?.distillationIntervalMs ?? 2 * 60 * 60 * 1000;
         if (expStore && typeof expStore.fetchPending === "function") {
           const elapsed = Date.now() - lastDistillationRun;
           if (elapsed >= distillIntervalMs) {
