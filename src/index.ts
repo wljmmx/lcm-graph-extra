@@ -506,7 +506,7 @@ function getSessionDedup(sessionKey: string) {
           // 1. Window Monitor — pressure check + tier determination
           // ==================================================================
           const wmConfig = api.config?.windowMonitor;
-          logger?.debug?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
+          logger?.info?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
           const wm = wmConfig?.enabled !== false ? wmConfig : null;
           const messages = params.messages ?? [];
           // Respect tokenBudget from params if provided (overrides window monitor budget)
