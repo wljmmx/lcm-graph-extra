@@ -548,7 +548,7 @@ function getSessionDedup(sessionKey: string) {
 
           if (wm) {
             const uncompressedMsgs = _wmConvId != null ? getUncompressedMessageCount(_wmConvId) : -1;
-            const activeMsgCount = uncompressedMsgs > 0 ? uncompressedMsgs : msgCount;
+            const activeMsgCount = uncompressedMsgs >= 0 ? uncompressedMsgs : msgCount;
             tier = determinePressureTier(activeMsgCount, tokenRatio, {
               dedupRounds: wm.dedupRounds ?? 24,
               highPressureThreshold: wm.highPressureThreshold ?? 0.85,
