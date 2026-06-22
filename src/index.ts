@@ -1211,6 +1211,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
           // --- Promise.race + 300s (5min) timeout: trigger lossless-claw DAG compaction asynchronously ---
           let summaryContent: string | undefined;
+          let adapterCompacted = false;
           if (_adapterConnected) {
             try {
               const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
@@ -1230,7 +1231,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
               summaryContent = compactResult?.result?.summary || compactResult?.summary;
               // Preserve adapter's actionTaken/compacted flag for accurate success detection
-              const adapterCompacted = compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
+              adapterCompacted = compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
             } catch (ceErr) {
               const msg = String(ceErr);
               if (msg.includes('aborted')) {
