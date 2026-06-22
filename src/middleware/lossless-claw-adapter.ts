@@ -443,6 +443,7 @@ export class LosslessClawAdapter {
     compacted: boolean;
     reason?: string;
     summaryId?: string;
+    summary?: string;
     error?: string;
     result?: any;
     exhausted?: boolean;
@@ -450,7 +451,48 @@ export class LosslessClawAdapter {
     if (!this._connected || !this.engine) {
       throw new Error('LosslessClawAdapter: not connected, cannot compact');
     }
-    return this.engine.compact(params);
+
+    // Call lossless-claw's compact engine
+    const lcResult = await this.engine.compact(params);
+
+    // Map lossless-claw CompactionResult to lcm-graph-extra expected format:
+    // lcm-graph-extra checks: compactResult?.result?.summary || compactResult?.summary
+    // lossless-claw returns: { actionTaken, createdSummaryId, condensed, ... }
+    // We need to fetch the summary content if compaction was successful
+    let summaryContent: string | undefined;
+    if (lcResult.actionTaken && lcResult.createdSummaryId) {
+      try {
+        const convStore = this.engine.getConversationStore?.();
+        if (convStore) {
+          const summaries = await convStore.listSummaries?.(params.sessionId, 1);
+          if (summaries?.length > 0) {
+            summaryContent = summaries[0].content;
+          }
+        }
+      } catch {
+        // Fallback: use summary ID as indicator
+      }
+    }
+
+    return {
+      ok: true,
+      compacted: lcResult.actionTaken === true,
+      reason: lcResult.authFailure
+        ? 'auth failure during compaction'
+        : lcResult.actionTaken
+          ? 'compaction completed'
+          : 'compaction attempted but no summary produced',
+      summaryId: lcResult.createdSummaryId,
+      summary: summaryContent,
+      result: {
+        actionTaken: lcResult.actionTaken,
+        tokensBefore: lcResult.tokensBefore,
+        tokensAfter: lcResult.tokensAfter,
+        condensed: lcResult.condensed,
+        createdSummaryId: lcResult.createdSummaryId,
+        summary: summaryContent,
+      },
+    };
   }
 
   // ── 销毁 ──
