@@ -352,6 +352,74 @@ export class LosslessClawAdapter {
     }
   }
 
+  // ── Auto-bootstrap guard ──
+
+  /**
+   * 确保当前 conversation 已完成 bootstrap。
+   * 如果未 bootstrap（如 Gateway 重启后），自动触发 bootstrap。
+   * 幂等操作——已 bootstrap 的 conversation 不重复执行。
+   */
+  async ensureBootstrapped(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    messages?: any[];
+  }): Promise<{ bootstrapped: boolean; importedMessages: number }> {
+    if (!this._connected || !this.engine) {
+      return { bootstrapped: false, importedMessages: 0 };
+    }
+
+    // Step 1: 检查是否已 bootstrap（通过 getConversationStore）
+    const convStore = this.engine.getConversationStore?.();
+    if (convStore) {
+      try {
+        const existing = await convStore.getConversationForSession?.({
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+        });
+        if (existing && existing.bootstrapped_at) {
+          // Already bootstrapped, no-op
+          return { bootstrapped: true, importedMessages: 0 };
+        }
+      } catch {
+        // Fallback: 直接调用 bootstrap（幂等）
+      }
+    }
+
+    // Step 2: 未 bootstrap，自动触发
+    if (typeof this.engine.bootstrap !== 'function') {
+      return { bootstrapped: false, importedMessages: 0 };
+    }
+
+    try {
+      const normalizedMessages = (params.messages ?? []).map((msg) => {
+        if (Array.isArray(msg.content)) {
+          return {
+            ...msg,
+            content: msg.content
+              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .join('\n'),
+          };
+        }
+        if (typeof msg.content !== 'string') {
+          return { ...msg, content: String(msg.content ?? '') };
+        }
+        return msg;
+      });
+
+      const normalizedParams = {
+        ...params,
+        messages: normalizedMessages,
+      };
+
+      const result = await this.engine.bootstrap(normalizedParams);
+      return result ?? { bootstrapped: false, importedMessages: 0 };
+    } catch {
+      return { bootstrapped: false, importedMessages: 0 };
+    }
+  }
+
   // ── 核心能力：DAG 压缩 ──
 
   /**

@@ -1081,6 +1081,19 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             return;
           }
 
+        // === Auto-bootstrap: ensure conversation has bootstrapped_at before afterTurn ===
+        // If lossless-claw bootstrap was skipped (e.g., Gateway restart), transcript reconcile
+        // will fail (hasOverlap=false) and all messages will be discarded.
+        // Auto-trigger bootstrap here to ensure message persistence works.
+        if (_losslessClawAdapter?.ensureBootstrapped) {
+          try {
+            await _losslessClawAdapter.ensureBootstrapped(params);
+            logger?.debug?.('[lcm-graph-extra] auto-bootstrap ensured for conversation');
+          } catch (e: any) {
+            logger?.warn?.('[lcm-graph-extra] auto-bootstrap failed, continuing afterTurn anyway', { err: e.message });
+          }
+        }
+
         const lcAfterTurnStart = Date.now();
         try {
           await _losslessClawAdapter?.afterTurn?.(params);
