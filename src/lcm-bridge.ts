@@ -276,6 +276,29 @@ export function getConversationSummaries(conversationId: number): Array<{
 }
 
 /**
+ * Count messages not yet covered by any summary.
+ * Returns the number of uncompressed (pending compaction) messages.
+ */
+export function getUncompressedMessageCount(conversationId: number): number {
+  try {
+    const db = getDb();
+    if (!db) return -1;
+
+    // Count messages whose created_at is NOT within any summary range
+    const row = db.prepare(
+      "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ? " +
+      "AND created_at > (SELECT MAX(latest_at) FROM summaries WHERE conversation_id = ?)",
+    ).get(conversationId, conversationId);
+
+    try { db.close(); } catch { /* ignore */ }
+
+    return row?.cnt ?? 0;
+  } catch {
+    return -1;
+  }
+}
+
+/**
  * Check if there are messages not yet covered by summaries.
  * Returns true if there appear to be uncompressed messages.
  */

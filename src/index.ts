@@ -41,6 +41,7 @@ import {
   estimateTokensFromText,
   getConversationSummaries,
   hasUncompressedMessages,
+  getUncompressedMessageCount,
   trimSummariesToBudget,
 } from "./lcm-bridge.js";
 /** Simple string hash for cross-turn dedup */
@@ -542,10 +543,13 @@ function getSessionDedup(sessionKey: string) {
           if (tokenBudget != null && typeof tokenBudget === 'number') {
             maxContextChars = Math.min(maxContextChars, Math.floor(tokenBudget * 4));
           }
+          const _wmConvId = getConversationId(typeof params.sessionKey === "string" ? params.sessionKey : (typeof params.session_id === "string" ? params.session_id : ""));
           let needsCompact = false;
 
           if (wm) {
-            tier = determinePressureTier(msgCount, tokenRatio, {
+            const uncompressedMsgs = _wmConvId != null ? getUncompressedMessageCount(_wmConvId) : -1;
+            const activeMsgCount = uncompressedMsgs > 0 ? uncompressedMsgs : msgCount;
+            tier = determinePressureTier(activeMsgCount, tokenRatio, {
               dedupRounds: wm.dedupRounds ?? 24,
               highPressureThreshold: wm.highPressureThreshold ?? 0.85,
               mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
@@ -561,7 +565,7 @@ function getSessionDedup(sessionKey: string) {
               high: wm?.maxContextChars?.high ?? 1_600,
             });
 
-            needsCompact = shouldTriggerCompact(msgCount, tokenRatio, {
+            needsCompact = shouldTriggerCompact(activeMsgCount, tokenRatio, {
               dedupRounds: wm.dedupRounds ?? 24,
               proactiveThreshold: wm.proactiveThreshold ?? 0.65,
             });
