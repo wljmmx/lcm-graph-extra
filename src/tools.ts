@@ -20,7 +20,7 @@ import { resolveNeo4jConfig } from './config/neo4j-helper';
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
 
 // Module-level QMD URL helper
-let _pluginQmdUrl = "http://127.0.0.1:8082";
+let _pluginQmdUrl = "http://127.0.0.1:8081";
 
 function getQmdBaseUrl() {
   return _pluginQmdUrl;
