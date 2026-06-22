@@ -364,9 +364,9 @@ function getSessionDedup(sessionKey: string) {
           decayHalfLifeDays: 30,
         });
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
-        // WindowMonitor config is at api.config.windowMonitor (not nested under plugins.entries)
-        if (api.config?.windowMonitor?.dedupRounds) {
-          MAX_DEDUP_ROUNDS = api.config.windowMonitor.dedupRounds;
+        // WindowMonitor config is at api.config.lcmMonitor (not nested under plugins.entries)
+        if (api.config?.lcmMonitor?.dedupRounds) {
+          MAX_DEDUP_ROUNDS = api.config.lcmMonitor.dedupRounds;
         }
 
         // Read provider model context window from openclaw.json
@@ -505,7 +505,7 @@ function getSessionDedup(sessionKey: string) {
           // ==================================================================
           // 1. Window Monitor — pressure check + tier determination
           // ==================================================================
-          const wmConfig = api.config?.windowMonitor;
+          const wmConfig = api.config?.lcmMonitor;
           logger?.info?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
           const wm = wmConfig?.enabled !== false ? wmConfig : null;
           const messages = params.messages ?? [];

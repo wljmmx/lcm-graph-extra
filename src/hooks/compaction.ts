@@ -87,15 +87,15 @@ function resolveBackupDir(instance: PluginInstance): string {
 export async function onCompaction(instance: PluginInstance): Promise<void> {
   const logger = instance.logger;
 
-  // --- compaction config (fallback to windowMonitor) ---------------------
+  // --- compaction config (fallback to lcmMonitor) ---------------------
   const rawCompConfig = instance.config.compaction;
-  const windowMonitor = instance.config.windowMonitor;
+  const lcmMonitor = instance.config.lcmMonitor;
 
-  // If compaction config is empty/missing, fall back to windowMonitor
+  // If compaction config is empty/missing, fall back to lcmMonitor
   const compConfig = (
     rawCompConfig && Object.keys(rawCompConfig).length > 0
       ? rawCompConfig
-      : windowMonitor || {}
+      : lcmMonitor || {}
   );
 
   if (compConfig?.enabled === false) {
@@ -149,7 +149,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
         sessionId,
         sessionKey,
         sessionFile,
-        tokenBudget: (windowMonitor as any)?.compactTokenBudget ?? (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget ?? Math.floor(((windowMonitor as any)?.contextWindow ?? (compConfig as any)?.contextWindow ?? 131072) * 0.45),
+        tokenBudget: (lcmMonitor as any)?.compactTokenBudget ?? (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget ?? Math.floor(((lcmMonitor as any)?.contextWindow ?? (compConfig as any)?.contextWindow ?? 131072) * 0.45),
         force: (compConfig as any)?.force ?? true,
         currentTokenCount: undefined,
         customInstructions: (compConfig as any)?.customInstructions,
