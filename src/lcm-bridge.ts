@@ -287,7 +287,7 @@ export function getUncompressedMessageCount(conversationId: number): number {
     // Count messages whose created_at is NOT within any summary range
     const row = db.prepare(
       "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ? " +
-      "AND created_at > (SELECT MAX(latest_at) FROM summaries WHERE conversation_id = ?)",
+      "AND created_at > (SELECT COALESCE(MAX(latest_at),0) FROM summaries WHERE conversation_id = ?)",
     ).get(conversationId, conversationId);
 
     try { db.close(); } catch { /* ignore */ }
