@@ -1231,7 +1231,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
               summaryContent = compactResult?.result?.summary || compactResult?.summary;
               // Preserve adapter's actionTaken/compacted flag for accurate success detection
-              adapterCompacted = compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
+              // ActionTaken may be false even if summary was created (no DAG reduction needed)
+              // Use createdSummaryId as the authoritative indicator of compaction success
+              adapterCompacted = !!compactResult?.createdSummaryId || compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
             } catch (ceErr) {
               const msg = String(ceErr);
               if (msg.includes('aborted')) {
