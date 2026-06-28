@@ -69,8 +69,9 @@ function mapEntityType(raw: string): string {
 
 function mapEdgeType(raw: string): string {
   const t = raw.toUpperCase();
-  if (['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH'].includes(t)) return t;
+  if (['USED_SKILL','SOLVED_BY','REQUIRES','PATCHES','CONFLICTS_WITH','RELATES_TO'].includes(t)) return t;
   if (['RELATED_TO','REFERENCES','USES'].includes(t)) return 'USED_SKILL';
+  if (['RELATES','CROSS_REFERENCE','CONNECTS'].includes(t)) return 'RELATES_TO';
   if (['FIXES','RESOLVES','SOLVES'].includes(t)) return 'SOLVED_BY';
   if (['DEPENDS_ON','NEEDS','PREREQUISITE'].includes(t)) return 'REQUIRES';
   if (['REPLACES','SUPERSEDES','UPDATES'].includes(t)) return 'PATCHES';
