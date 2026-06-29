@@ -1238,6 +1238,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             return { ok: false, compacted: false, reason: 'aborted' };
           }
 
+          // FIX: ensure adapter + deps are initialized before compacting
+          await ensureInitialized();
+
         try {
           // Non-blocking compaction strategy:
           // 1. Fire-and-forget the heavy DAG/LLM summarization to background
