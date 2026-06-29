@@ -483,6 +483,7 @@ function getSessionDedup(sessionKey: string) {
         let expResults: any = [];
         let removedSections: { label: string; chars: number }[] = [];
         let _overheadCacheKey = "";
+        let contextWindow = 0;
 
         try {
           const initStart = Date.now();
@@ -529,7 +530,7 @@ function getSessionDedup(sessionKey: string) {
             }
           }
           const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
-          const contextWindow = resolvedCtx.contextWindow;
+          contextWindow = resolvedCtx.contextWindow;
           // Factor in systemPromptAddition overhead from previous round
           _overheadCacheKey = (params as any).sessionKey ?? (params as any).conversationId ?? "default";
           const overheadTokens = _sessionOverheadCache.get(_overheadCacheKey) ?? 0;
@@ -1068,6 +1069,16 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
           // Cache for next-round tier estimation (per-session)
           _sessionOverheadCache.set(_overheadCacheKey, additionTokens);
+          // P0: Final hard-truncation safety net
+          {
+            var te=messageTokens+additionTokens;
+            if(contextWindow>0&&te>contextWindow*0.85){
+              var bf:any[]=[...finalMessages];
+              var sn=bf.filter(function(m){return m.role==='system';}).length;
+              while(bf.length>sn+1){var d=bf.findIndex(function(m){return m.role!=='system';});if(d<0)break;bf.splice(d,1);if(estimateTokensFromMessages(bf)+additionTokens<=contextWindow*0.85){finalMessages=bf;break;}}
+              logger?.warn?.('[wm] P0 final hard truncation',{before:te,budget:Math.floor(contextWindow*0.85)});
+            }
+          }
           return {
             messages: finalMessages,
             estimatedTokens: messageTokens + additionTokens,
@@ -1077,6 +1088,15 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         } catch (finalErr) {
           const fe = finalErr instanceof Error ? finalErr : new Error(String(finalErr));
           logger?.error?.("assemble: return error", { err: fe.message, stack: fe.stack });
+          // P0: Final hard-truncation safety net (error path)
+          {
+            var et=estimateTokensFromMessages(finalMessages);
+            if(contextWindow>0&&et>contextWindow*0.85){
+              var eb:any[]=[...finalMessages];
+              var es=eb.filter(function(m){return m.role==='system';}).length;
+              while(eb.length>es+1){var d2=eb.findIndex(function(m){return m.role!=='system';});if(d2<0)break;eb.splice(d2,1);if(estimateTokensFromMessages(eb)<=contextWindow*0.85){finalMessages=eb;break;}}
+            }
+          }
           return {
             messages: finalMessages,
             estimatedTokens: estimateTokensFromMessages(finalMessages),
