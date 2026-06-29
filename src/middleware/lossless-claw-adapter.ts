@@ -455,12 +455,15 @@ export class LosslessClawAdapter {
     // Call lossless-claw's compact engine
     const lcResult = await this.engine.compact(params);
 
-    // Map lossless-claw CompactionResult to lcm-graph-extra expected format:
-    // lcm-graph-extra checks: compactResult?.result?.summary || compactResult?.summary
-    // lossless-claw returns: { actionTaken, createdSummaryId, condensed, ... }
-    // We need to fetch the summary content if compaction was successful
+    // Map CompactResult (openclaw-bridge) to lcm-graph-extra expected format:
+    // engine returns: { ok, compacted, reason, result: { tokensBefore, tokensAfter, details } }
+    // adapter must forward this correctly so index.ts handler can detect success
+    const actionTaken = lcResult.compacted === true;
+    const createdSummaryId = lcResult.summaryId;
+    const tokensInfo = lcResult.result ?? {};
+
     let summaryContent: string | undefined;
-    if (lcResult.actionTaken && lcResult.createdSummaryId) {
+    if (actionTaken && createdSummaryId) {
       try {
         const convStore = this.engine.getConversationStore?.();
         if (convStore) {
@@ -475,21 +478,18 @@ export class LosslessClawAdapter {
     }
 
     return {
-      ok: true,
-      compacted: lcResult.actionTaken === true,
-      reason: lcResult.authFailure
-        ? 'auth failure during compaction'
-        : lcResult.actionTaken
-          ? 'compaction completed'
-          : 'compaction attempted but no summary produced',
-      summaryId: lcResult.createdSummaryId,
+      ok: lcResult.ok !== false,
+      compacted: actionTaken,
+      reason: lcResult.reason || (actionTaken ? 'compaction completed' : 'compaction attempted but no summary produced'),
+      summaryId: createdSummaryId,
+      createdSummaryId,
       summary: summaryContent,
       result: {
-        actionTaken: lcResult.actionTaken,
-        tokensBefore: lcResult.tokensBefore,
-        tokensAfter: lcResult.tokensAfter,
-        condensed: lcResult.condensed,
-        createdSummaryId: lcResult.createdSummaryId,
+        actionTaken,
+        tokensBefore: tokensInfo.tokensBefore ?? 0,
+        tokensAfter: tokensInfo.tokensAfter ?? 0,
+        condensed: false,
+        createdSummaryId,
         summary: summaryContent,
       },
     };

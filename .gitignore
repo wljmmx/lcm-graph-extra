@@ -8,3 +8,4 @@ dist/
 test/perf/*-results.json
 test/perf/REPORT-latest.md
 test/perf/CE-report.md
+src/index.ts.bak.*
