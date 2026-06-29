@@ -1076,7 +1076,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               var bf:any[]=[...finalMessages];
               var sn=bf.filter(function(m){return m.role==='system';}).length;
               while(bf.length>sn+1){var d=bf.findIndex(function(m){return m.role!=='system';});if(d<0)break;bf.splice(d,1);if(estimateTokensFromMessages(bf)+additionTokens<=contextWindow*0.85){finalMessages=bf;break;}}
-              logger?.warn?.('[wm] P0 final hard truncation',{before:te,budget:Math.floor(contextWindow*0.85)});
+              // Fallback: if while loop exited without hitting budget target, assign stripped bf anyway
+              if(estimateTokensFromMessages(finalMessages)+additionTokens>contextWindow*0.85){finalMessages=bf;}
             }
           }
           return {
@@ -1095,6 +1096,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               var eb:any[]=[...finalMessages];
               var es=eb.filter(function(m){return m.role==='system';}).length;
               while(eb.length>es+1){var d2=eb.findIndex(function(m){return m.role!=='system';});if(d2<0)break;eb.splice(d2,1);if(estimateTokensFromMessages(eb)<=contextWindow*0.85){finalMessages=eb;break;}}
+              // Fallback: if while loop exited without hitting budget target, assign stripped eb anyway
+              if(estimateTokensFromMessages(finalMessages)>contextWindow*0.85){finalMessages=eb;}
             }
           }
           return {
@@ -1243,13 +1246,13 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
 
-          // --- Promise.race + 300s (5min) timeout: trigger lossless-claw DAG compaction asynchronously ---
+          // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---
           let summaryContent: string | undefined;
           let adapterCompacted = false;
           if (_adapterConnected) {
             try {
               const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
-                setTimeout(() => reject(new Error('compact: 300s timeout reached')), (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') as number) || 300_000);
+                setTimeout(() => reject(new Error('compact: 300s timeout reached')), (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') as number) || 900_000);
               });
               const abortOnCompact = signal
                 ? new Promise((_, reject) => {
@@ -1282,10 +1285,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");
           }
 
-          // --- Promise.race + 300s (5min) timeout: onCompaction hook (backup + Neo4j marker) ---
+          // --- Promise.race + 900s (15min) timeout: onCompaction hook (backup + Neo4j marker) ---
           try {
             const hookTimeout = new Promise((_, reject) => {
-              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') as number) || 300_000);
+              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') as number) || 900_000);
             });
             const abortOnHook = signal
               ? new Promise((_, reject) => {
@@ -1333,10 +1336,22 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const tokensBefore = params.currentTokenCount ?? 0;
           // Check adapter's actionTaken OR summary content (race condition: DB write may lag)
           const compacted = !!summaryContent || adapterCompacted;
+          // FIX: if not compacted, return ok: false so SDK retries instead of considering it done
+          if (!compacted) {
+            return {
+              ok: false,
+              compacted: false,
+              reason: 'DAG compaction did not produce a summary — session tokens unchanged, will retry',
+              result: {
+                tokensBefore,
+                tokensAfter: tokensBefore,
+              },
+            };
+          }
           return {
             ok: true,
             compacted,
-            reason: compacted ? 'compaction completed' : 'compaction attempted but no summary produced',
+            reason: 'compaction completed',
             result: {
               tokensBefore,
               // After compaction, the summary replaces the original messages
