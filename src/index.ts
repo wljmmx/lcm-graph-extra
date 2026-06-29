@@ -977,7 +977,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   : [];
                 if (Array.isArray(recentSummaries) && recentSummaries.length > 0) {
                   const summaryText = recentSummaries.map((s: any, i: number) =>
-                    '- [摘要' + String(i+1) + '] ' + '(s?.content ?? s?.summary ?? String(s)).slice(0, 500)'
+                    '- [摘要' + String(i+1) + '] '  + (s?.content ?? s?.summary ?? String(s)).slice(0, 500)
                   ).join('\n');
                   addSection('## \ud83d\udccb 历史摘要', summaryText, 0);
                 }
@@ -1003,6 +1003,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               addition += '\n---\n' + sec.label + '\n' + sec.body;
             }
             systemPromptAddition = addition || '';
+          // Apply total control: priority-based truncation to prevent overflow
+          if (systemPromptAddition.length > maxContextChars) { systemPromptAddition = applyTotalControl(systemPromptAddition, maxContextChars, removedSections); }
           }
 
           // ==================================================================
@@ -1041,6 +1043,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (trimmed > 0) {
               logger?.debug?.('[wm] priority-trimmed ' + String(trimmed) + ' injected section(s), remaining: ' + sections.map(function(s) { return s.label; }).join(','));
             }
+
+          // Hard guard: final budget enforcement after priority trim
+          if (systemPromptAddition.length > maxContextChars) {
+            systemPromptAddition = applyTotalControl(systemPromptAddition, maxContextChars);
+            logger?.warn?.('[wm] Hard truncation after priority trim');
+          }
           }
         } catch (err) {
 
