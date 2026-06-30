@@ -1189,8 +1189,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const llmConfig = runtimeLlm?.model
             ? {
                 model: runtimeLlm.model,
-                apiKey: runtimeLlm.apiKey || process.env.OPENAI_API_KEY || '',
-                baseURL: runtimeLlm.baseURL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+                apiKey: runtimeLlm.apiKey || '',
+                baseURL: runtimeLlm.baseURL || 'https://api.openai.com/v1',
               }
             : api.pluginConfig?.llm || {
                 apiKey: process.env.OPENAI_API_KEY || '',
@@ -1441,9 +1441,16 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     let hbDedupCleanupCounter = 0;  // Clean dedup cache every 15 heartbeats (~75min)
     // Distillation helpers
 
+    function isOllamaModel(model: string): boolean {
+      return model.startsWith('ollama/') || model.startsWith('ollama-256k/') || model.includes(':latest') || !model.includes('/');
+    }
+
     function resolveDistillationLlm(apiRef: any) {
       const runtimeLlm = apiRef.runtimeContext?.llm;
-      if (runtimeLlm?.model) return { model: runtimeLlm.model, apiKey: runtimeLlm.apiKey || '', baseURL: runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1' };
+      // Session model is local Ollama → reuse it to avoid GPU model swapping
+      if (runtimeLlm?.model && isOllamaModel(runtimeLlm.model)) {
+        return { model: runtimeLlm.model, apiKey: runtimeLlm.apiKey || '', baseURL: runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1' };
+      }
       const dLlm = (apiRef.config as any)?.distillationLlm;
       if (dLlm?.provider === 'openclaw_hooks') return { model: dLlm.model || 'ollama/qwen3.6:27b', apiKey: '', baseURL: 'http://127.0.0.1:18789/v1' };
       return { model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini', apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '', baseURL: process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1' };

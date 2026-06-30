@@ -652,11 +652,13 @@ export class GraphAdapter {
   }
 
   private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string }): ((system: string, user: string) => Promise<string>) | null {
-    if (!config?.apiKey) return null;
+    if (!config?.model && !config?.apiKey) return null;
     const baseUrl = (config.baseURL || 'https://api.openai.com/v1').replace(/\/+$/, '');
     const model = config.model || 'gpt-4o-mini';
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (config.apiKey) headers['Authorization'] = 'Bearer ' + config.apiKey;
     return async (system, user) => {
-      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.apiKey }, body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 }), signal: AbortSignal.timeout(30000) });
+      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 }), signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error('LLM ' + res.status);
       const data = await res.json();
       return (data as any)?.choices?.[0]?.message?.content ?? '';
