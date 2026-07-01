@@ -142,7 +142,7 @@ export class GraphAdapter {
 
         // Set embedding function for community generalized recall
         try {
-          const model = process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
+          const model = process.env.GM_EMBED_MODEL || "qwen3.5-embedding-cpu";
           const baseURL = process.env.GM_EMBED_BASE_URL || "http://192.168.50.5:11434/v1";
           const dimensions = 1024;
           if (mod.createEmbedFn) {
