@@ -706,6 +706,25 @@ function getSessionDedup(sessionKey: string) {
               );
             }
           }
+          // ── Async-compaction fallback: use existing summaries if available ──
+          if (finalMessages === messages && _losslessClawAdapter?.connected) {
+            const _sessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+              : typeof params.session_id === 'string' ? params.session_id : '';
+            const _convId = getConversationId(_sessionKey);
+            if (_convId != null) {
+              const _existingSummaries = getConversationSummaries(_convId);
+              if (_existingSummaries.length > 0) {
+                const _summaryMsgs = _existingSummaries.map((s) => ({
+                  role: 'user', content: s.content, token_count: s.tokenCount,
+                }));
+                const _lastOriginalMsg = messages.at(-1);
+                finalMessages = _lastOriginalMsg
+                  ? [..._summaryMsgs, _lastOriginalMsg]
+                  : _summaryMsgs;
+              }
+            }
+          }
+
 // Extract query text from params.prompt (SDK field for retrieval queries), fallback to last message content
           const lastMsg = params.messages?.at(-1);
           let qmdQuery = typeof params.prompt === 'string' && params.prompt
@@ -1050,6 +1069,49 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             systemPromptAddition = applyTotalControl(systemPromptAddition, maxContextChars);
             logger?.warn?.('[wm] Hard truncation after priority trim');
           }
+          }
+          // ── Cleanup: strip reasoning/thinking from assistant messages ──
+          finalMessages = finalMessages.map((msg: any) => {
+            if (msg?.role === 'assistant') {
+              const cleaned = { ...msg };
+              delete cleaned.reasoning;
+              delete cleaned.thinking;
+              delete cleaned.reasoning_content;
+              if (Array.isArray(cleaned.content)) {
+                cleaned.content = cleaned.content.filter(
+                  (p: any) => p?.type !== 'thinking' && p?.type !== 'reasoning'
+                );
+              }
+              return cleaned;
+            }
+            return msg;
+          });
+          // ── Dedup: remove consecutive identical messages (guard against DAG double-storage) ──
+          {
+            const _deduped: any[] = [];
+            const _extractText = (c: any): string => {
+              if (typeof c === 'string') return c;
+              if (Array.isArray(c)) return c.map((item: any) => typeof item === 'string' ? item : (item?.text ?? '')).join('');
+              return String(c ?? '');
+            };
+            for (const _msg of finalMessages) {
+              const _last = _deduped[_deduped.length - 1];
+              if (_last && _last.role === _msg.role && _extractText(_last.content) === _extractText(_msg.content)) {
+                continue;
+              }
+              _deduped.push(_msg);
+            }
+            if (_deduped.length < finalMessages.length) {
+              logger?.debug?.('[assemble] removed ' + String(finalMessages.length - _deduped.length) + ' consecutive duplicate message(s)');
+              finalMessages = _deduped;
+            }
+          }
+          // ── Local model: inject available tool names into systemPromptAddition ──
+          if (typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
+              && availableTools.length > 0 && !systemPromptAddition.includes('## 当前可用工具')) {
+            const toolSection = '\n\n## 当前可用工具\n' +
+              availableTools.map((t: string) => '- `' + t + '`').join('\n');
+            systemPromptAddition += toolSection;
           }
         } catch (err) {
 
