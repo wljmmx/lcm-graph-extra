@@ -142,11 +142,11 @@ export class GraphAdapter {
 
         // Set embedding function for community generalized recall
         try {
-          const model = process.env.GM_EMBED_MODEL || "qwen3.5-embedding-cpu";
+          const model = process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
           const baseURL = process.env.GM_EMBED_BASE_URL || "http://192.168.50.5:11434/v1";
           const dimensions = 1024;
           if (mod.createEmbedFn) {
-            const embedFn = mod.createEmbedFn({ model, baseURL, dimensions });
+            const embedFn = mod.createEmbedFn({ model, baseURL, dimensions, options: { num_gpu: 0 } });
             this._recaller.setEmbedFn(embedFn);
             this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model });
           } else {
