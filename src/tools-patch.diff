@@ -1,0 +1,121 @@
+--- a/tools.ts
++++ b/tools.ts
+@@ -875,46 +875,56 @@
+-  // ===================================================================
+-  // 12. lcmg_maintain - Trigger graph maintenance pipeline
+-  // ===================================================================
+-  api.registerTool({
+-    name: "lcmg_maintain",
+-    description: "Trigger knowledge graph maintenance: dedup, PageRank, community detection.",
+-    parameters: Type.Object({}),
+-    async execute() {
+-      try {
+-        const driver = await getNeo4jDriver();
+-        const { createRequire } = await import("node:module");
+-        const _req = createRequire(import.meta.url);
+-        const GM_PRO_PATH = process.env.GM_PRO_PATH
+-          || (() => {
+-              try {
+-                const resolved = _req.resolve("@openclaw/graph-memory-pro/dist/index.js");
+-                return resolved.endsWith("/dist/index.js") ? resolved.slice(0, -14) : resolved;
+-              } catch { return undefined; }
+-            })()
+-          || "/home/wljmmx/.openclaw/extensions/graph-memory-pro";
+-
+-        const gm = await import(GM_PRO_PATH + "/dist/index.js");
+-        // Full GmConfig — all required fields
+-        const cfg = {
+-          neo4j: resolveNeo4jConfig(getPluginNeo4jConfig()),
+-          compactTurnCount: 10,
+-          recallMaxNodes: 10,
+-          recallMaxDepth: 2,
+-          freshTailCount: 5,
+-          dedupThreshold: 0.90,
+-          pagerankDamping: 0.85,
+-          pagerankIterations: 20,
+-        };
+-        const result = await gm.runMaintenance(driver, cfg);
+-        const lines = [];
+-        lines.push("# Graph Maintenance Report");
+-        lines.push("");
+-        lines.push("Duration: " + (result?.durationMs ?? 0) + "ms");
+-        lines.push("Dedup merged: " + (result?.dedup?.mergedCount ?? 0) + " nodes");
+-        lines.push("PageRank top: " + (result?.pagerank?.topK?.length ?? 0) + " nodes");
+-        lines.push("Communities detected: " + (result?.community?.communities?.size ?? 0));
+-        lines.push("Community summaries: " + (result?.communitySummaries ?? 0));
+-        lines.push("");
+-        lines.push("[OK] Maintenance complete.");
+-
+-        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+-      } catch (e) {
+-        const msg = e instanceof Error ? e.message : String(e);
+-        return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], isError: true };
+-      }
+-    },
+-  });
++  // ===================================================================
++  // 12. lcmg_maintain - Trigger graph maintenance pipeline
++  // ===================================================================
++  api.registerTool({
++    name: "lcmg_maintain",
++    description: "Trigger knowledge graph maintenance: dedup, PageRank, community detection.",
++    parameters: Type.Object({}),
++    async execute() {
++      try {
++        const session = neo4j.session();
++        const start = Date.now();
++        const results: string[] = [];
++
++        // 1. Dedup: find and merge duplicate nodes by name
++        const dedupResult = await session.run(`
++          MATCH (n:Task|Skill|Event)
++          WHERE n.name IS NOT NULL
++          WITH n.name AS name, collect(n) AS nodes
++          WHERE size(nodes) > 1
++          UNWIND nodes AS node
++          WITH name, nodes[0] AS keep, node
++          WHERE node.id <> keep.id
++          MATCH (k {id: keep.id})
++          OPTIONAL MATCH (node)-[r]->(target)
++          MERGE (k)-[nr:CONTAINS]->(target)
++          SET nr.weight = COALESCE(nr.weight, 0) + COALESCE(r.weight, 0)
++          WITH node, keep
++          DETACH DELETE node
++          RETURN count(*) AS merged
++        `);
++        const mergedCount = Number(dedupResult.records[0]?.get('merged') ?? 0);
++        results.push(`Dedup merged: ${mergedCount} nodes`);
++
++        // 2. PageRank via Cypher's built-in
++        const pagerankResult = await session.run(`
++          CALL gds.pageRank.stream('myGraph')
++          YIELD nodeId, score
++          RETURN gds.util.asNode(nodeId).id AS id, score
++          ORDER BY score DESC LIMIT 20
++        `);
++        const topK = pagerankResult.records.length;
++        results.push(`PageRank top: ${topK} nodes`);
++
++        // 3. Community detection via GDS
++        const communityResult = await session.run(`
++          CALL gds.louvain.stream('myGraph')
++          YIELD nodeId, communityId
++          RETURN count(DISTINCT communityId) AS communities
++        `);
++        const communityCount = Number(communityResult.records[0]?.get('communities') ?? 0);
++        results.push(`Communities detected: ${communityCount}`);
++
++        const duration = Date.now() - start;
++        results.unshift(`# Graph Maintenance Report`, ``);
++        results.push(``);
++        results.push(`Duration: ${duration}ms`);
++        results.push(`[OK] Maintenance complete.`);
++
++        await session.close();
++        return { content: [{ type: "text" as const, text: results.join("\n") }] };
++      } catch (e) {
++        const msg = e instanceof Error ? e.message : String(e);
++        return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], isError: true };
++      }
++    },
++  });

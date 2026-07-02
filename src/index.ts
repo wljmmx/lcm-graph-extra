@@ -54,6 +54,8 @@ function quickHash(s: string): string {
   return h.toString(36);
 }
 
+import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 
 function applyTotalControl(
   injected: string,
@@ -1254,7 +1256,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 apiKey: runtimeLlm.apiKey || '',
                 baseURL: runtimeLlm.baseURL || 'https://api.openai.com/v1',
               }
-            : api.pluginConfig?.llm || {
+            : api.pluginConfig?.llm || (() => {
+          try {
+            const p = homedir() + '/.openclaw/openclaw.json';
+            if (!existsSync(p)) return undefined;
+            const d = JSON.parse(readFileSync(p, 'utf8'));
+            return d?.plugins?.entries?.['graph-memory-pro']?.config?.llm;
+          } catch { return undefined }
+        })() || {
                 apiKey: process.env.OPENAI_API_KEY || '',
                 baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',

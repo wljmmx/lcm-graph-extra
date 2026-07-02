@@ -111,6 +111,7 @@ export interface EmbeddingPluginConfig {
   baseURL?: string;
   model?: string;
   dimensions?: number;
+  keepAlive?: string;
 }
 
 export function resolveEmbeddingConfig(
@@ -122,6 +123,7 @@ export function resolveEmbeddingConfig(
   const model = (embeddingSection.model as string) || process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
   const baseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434/v1";
   const dimensions = (embeddingSection.dimensions as number) ?? 1024;
+  const keepAlive = (embeddingSection.keepAlive as string) || "1h";
 
-  return { model, baseURL, dimensions };
+  return { model, baseURL, dimensions, keepAlive };
 }
