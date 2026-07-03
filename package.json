@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/lcm-graph-extra",
-  "version": "2.1.7",
+  "version": "2.1.8",
   "description": "OpenClaw ContextEngine plugin: coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
   "type": "module",
   "main": "./dist/index.js",
@@ -49,8 +49,7 @@
   "dependencies": {
     "neo4j-driver": "^6.0.1",
     "pino": "^9.0.0",
-    "typebox": "1.1.39",
-    "zod": "^3.24.0"
+    "typebox": "1.1.39"
   },
   "peerDependencies": {
     "openclaw": "*"

@@ -237,12 +237,12 @@ function buildToolGuidance(availableTools: string[]): string {
   return lines.join("\n");
 }
 
-export default definePluginEntry({
+const pluginEntry: any = definePluginEntry({
   id: "lcm-graph-extra",
   name: "LCM Graph Extra",
   description: "Coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
-  configSchema: buildJsonPluginConfigSchema(PluginConfigSchema),
-  register(api: any) {
+  configSchema: buildJsonPluginConfigSchema(PluginConfigSchema as any),
+  register(api: any): void {
     const logger = api.logger;
 
     // -----------------------------------------------------------------------
@@ -312,7 +312,7 @@ function getSessionDedup(sessionKey: string) {
       initPromise = (async () => {
       try {
         tracker = new UsageTracker(logger);
-        _losslessClawAdapter = new LosslessClawAdapter();
+        _losslessClawAdapter = new LosslessClawAdapter(logger);
         // P1-2 fix: await connection and log result
         try {
           const adapterConnected = await _losslessClawAdapter.connect();
@@ -411,7 +411,7 @@ function getSessionDedup(sessionKey: string) {
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.1.7",
+        version: "2.1.8",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         hostRequirements: {
@@ -596,7 +596,7 @@ function getSessionDedup(sessionKey: string) {
                   sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                   force: true,
                   currentTokenCount: effectiveTokenCount,
-                  compactionTarget: 'preventive',
+                  compactionTarget: 'threshold',
                 }).catch(() => {});
               }
             }
@@ -992,7 +992,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // Layer 1: lossless-claw summaries (low tier only)
           if (_losslessClawAdapter?.connected && tier === 'low') {
             try {
-              const convStore = _losslessClawAdapter.rawEngine?.getConversationStore?.();
+              const convStore = _losslessClawAdapter.getConversationStore?.();
               if (convStore) {
                 const recentSummaries = typeof convStore.getRecentSummaries === 'function'
                   ? convStore.getRecentSummaries(sessionKey, 3)
@@ -1197,7 +1197,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
         const lcAfterTurnStart = Date.now();
         try {
-          await _losslessClawAdapter?.afterTurn?.(params);
+          await _losslessClawAdapter?.afterTurn?.({
+            ...params,
+            prePromptMessageCount: params.prePromptMessageCount ?? 0,
+          });
         } catch { /* non-fatal */ }
         const lcAfterTurnMs = Date.now() - lcAfterTurnStart;
 
@@ -1452,18 +1455,19 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           let bytesFreed = 0;
           let rewrittenEntries = 0;
 
-          // 1. Delegate to lossless-claw engine.maintain if connected
+          // 1. Delegate to lossless-claw adapter.maintain if connected
           if (_losslessClawAdapter?.connected) {
             try {
-              const lcResult = await _losslessClawAdapter.rawEngine?.maintain?.({
+              const lcResult = await _losslessClawAdapter.maintain({
                 sessionId: params.sessionId ?? params.session_id ?? '',
+                sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                 sessionKey: params.sessionKey ?? '',
                 runtimeContext: {},
               });
               if (lcResult) {
-                changed = lcResult.changed ?? false;
+                changed = changed || (lcResult.changed ?? false);
                 bytesFreed += lcResult.bytesFreed ?? 0;
-                rewrittenEntries = lcResult.rewrittenEntries ?? 0;
+                rewrittenEntries += lcResult.rewrittenEntries ?? 0;
               }
             } catch (lcErr) {
               logger?.debug?.("maintain: lossless-claw delegate failed (non-fatal)", { err: lcErr });
@@ -1703,6 +1707,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
   },
 });
 
+export default pluginEntry;
+
 // -----------------------------------------------------------------------
 // Backward-compatible named exports
 // -----------------------------------------------------------------------
@@ -1730,4 +1736,4 @@ export type {
 } from './experience/types.js';
 
 
-export const VERSION = '2.1.7';
+export const VERSION = '2.1.8';

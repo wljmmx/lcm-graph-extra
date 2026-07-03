@@ -2,7 +2,7 @@
   "id": "lcm-graph-extra",
   "name": "LCM Graph Extra",
   "description": "Dual-engine retrieval context engine: coordinates lossless-claw + qmd + graph-memory-pro for enhanced context assembly",
-  "version": "2.1.7",
+  "version": "2.1.8",
   "kind": "context-engine",
   "requiresPlugins": [
     "lossless-claw"

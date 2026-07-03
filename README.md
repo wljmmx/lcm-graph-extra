@@ -1,4 +1,4 @@
-# lcm-graph-extra v2.1.7
+# lcm-graph-extra v2.1.8
 
 **OpenClaw Context Engine 插件** -- 四层检索上下文注入引擎
 
