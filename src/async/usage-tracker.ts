@@ -16,6 +16,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { Logger } from '../utils/logger.js';
+import { resolveLogger } from '../utils/logger.js';
 
 // ─── Path resolution ─────────────────────────────────────────
 
@@ -54,11 +56,11 @@ class TokenCounter {
   private queue: Array<{ text: string; model: string; resolve: (r: TokenCountResult) => void }> = [];
   private ready = false;
   private initDone = false;
-  private logger: any;
+  private logger: Logger;
   private exitCount = 0;
 
-  constructor(logger: any = console) {
-    this.logger = logger;
+  constructor(logger?: Logger) {
+    this.logger = resolveLogger(logger);
   }
 
   async init(): Promise<void> {
@@ -233,11 +235,11 @@ class TokenCounter {
 
 class UsageDb {
   private db: any = null;
-  private logger: any;
+  private logger: Logger;
   private ready = false;
 
-  constructor(logger: any = console) {
-    this.logger = logger;
+  constructor(logger?: Logger) {
+    this.logger = resolveLogger(logger);
   }
 
   async init(): Promise<void> {
@@ -367,10 +369,10 @@ export class UsageTracker {
   private db: UsageDb;
   private counter: TokenCounter;
   private initPromise: Promise<void> | null = null;
-  private logger: any;
+  private logger: Logger;
 
-  constructor(logger?: Console) {
-    this.logger = logger || console;
+  constructor(logger?: Logger) {
+    this.logger = resolveLogger(logger);
     this.db = new UsageDb(this.logger);
     this.counter = new TokenCounter(this.logger);
     this.initPromise = this.lazyInit();

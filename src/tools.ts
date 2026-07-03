@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
+import { getGlobalLogger } from './utils/logger.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -105,11 +106,11 @@ function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
       const lcmConfig = entriesSection['lcm-graph-extra']?.config;
       if (lcmConfig && 'neo4j' in lcmConfig && lcmConfig.neo4j.uri) {
         const merged = { ...config, ...lcmConfig };
-        console.log('[lcm-graph-extra] Neo4j config loaded from entries:', merged.neo4j.uri);
+        getGlobalLogger().info('[lcm-graph-extra] Neo4j config loaded from entries', { uri: merged.neo4j.uri });
         return merged;
       }
     } catch (e) {
-      console.warn('[lcm-graph-extra] Failed to read openclaw.json:', e);
+      getGlobalLogger().warn('[lcm-graph-extra] Failed to read openclaw.json', { err: String(e) });
     }
   }
   return config;
@@ -910,17 +911,11 @@ export function registerOperationalTools(api: any): void {
     async execute() {
       try {
         const driver = await getNeo4jDriver();
-        const { createRequire } = await import("node:module");
-        const _req = createRequire(import.meta.url);
-        const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
-        const GM_PRO_PATH = process.env.GM_PRO_PATH
-          || (() => {
-              try {
-                const resolved = _req.resolve("@openclaw/graph-memory-pro/dist/index.js");
-                return resolved.endsWith("/dist/index.js") ? resolved.slice(0, -14) : resolved;
-              } catch { return undefined; }
-            })()
-          || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
+        // P3-3: 复用 graph-adapter 的统一路径解析（去除重复逻辑），并记录实际路径
+        const { resolveGmProPath } = await import("./adapters/graph-adapter.js");
+        const _resolved = resolveGmProPath();
+        getGlobalLogger().info('[lcm-graph-extra] lcmg_diagnose loading graph-memory-pro', { path: _resolved.path, source: _resolved.source });
+        const GM_PRO_PATH = _resolved.path;
 
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
         // P2-17: 用 buildGmConfig 统一构建，保留工具的特殊 override

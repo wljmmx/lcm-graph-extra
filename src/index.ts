@@ -27,6 +27,7 @@ import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { withCircuitBreaker } from "./circuit-breaker.js";
 import { resolveContextProfile, PluginConfigSchema } from "./config.js";
+import { setGlobalLogger, adaptLogger, createLogger } from "./utils/logger.js";
 
 import {
   type PressureInfo,
@@ -56,6 +57,7 @@ function quickHash(s: string): string {
 
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 function applyTotalControl(
   injected: string,
@@ -245,6 +247,10 @@ const pluginEntry: any = definePluginEntry({
   configSchema: buildJsonPluginConfigSchema(PluginConfigSchema as any),
   register(api: any): void {
     const logger = api.logger;
+    // P3-B1: 注入全局 logger，供 retrieval-gateway、qmd-client、tools 等无注入路径的模块使用。
+    // 宿主 api.logger 通常是 pino 实例；用 adaptLogger 适配为统一 Logger 接口。
+    // 若宿主未注入 logger，降级到 createLogger()（按 LOG_LEVEL 环境变量控制级别）。
+    setGlobalLogger(logger ? adaptLogger(logger) : createLogger());
 
     // -----------------------------------------------------------------------
     // Lazy singleton instances — created once, reused across all assemble calls
@@ -1569,7 +1575,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         const text = data?.choices?.[0]?.message?.content;
         if (!text) return null;
         const parsed = JSON.parse(text);
-        return { id: 'exp_dist_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: parsed.relevanceScore ?? 0.5, createdAt: new Date(), matchCount: 0 };
+        return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: parsed.relevanceScore ?? 0.5, createdAt: new Date(), matchCount: 0 };
       } catch { clearTimeout(timer); return null; }
     }
 

@@ -15,10 +15,6 @@ describe('GraphAdapter', () => {
     const a = new GraphAdapter(nc, ac);
     expect(await a.search('t')).toEqual([]);
   });
-  it('processFeedback returns zeros', async () => {
-    const a = new GraphAdapter(nc, ac);
-    expect(await a.processFeedback()).toEqual({ processed: 0, updatedNodes: 0 });
-  });
   it('health false when not connected', async () => {
     const a = new GraphAdapter(nc, ac);
     expect(await a.health()).toBe(false);

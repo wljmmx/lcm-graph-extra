@@ -25,6 +25,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readdir, readFile, stat, realpath } from 'node:fs/promises';
 import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
+import type { Logger } from '../utils/logger.js';
+import { resolveLogger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -154,11 +156,11 @@ export class LosslessClawAdapter {
   private _connecting: Promise<boolean> | null = null;
   private _initError: string | null = null;
 
-  /** 日志器 */
-  private logger?: any;
+  /** 日志器 (P3-B2: 类型 any → Logger，缺失时降级到 globalLogger) */
+  private logger: Logger;
 
-  constructor(logger?: any) {
-    this.logger = logger;
+  constructor(logger?: Logger) {
+    this.logger = resolveLogger(logger);
   }
 
   // ── 状态只读属性 ──
@@ -652,7 +654,7 @@ export class LosslessClawAdapter {
     Promise<((ctx: any) => Promise<LosslessClawEngine>) | null>
   {
     // ── Primary: globalThis Symbol 方式 ──
-    console.debug("[lcm] path 1/4: Primary Symbol registry");
+    this.logger.debug("[lcm] path 1/4: Primary Symbol registry");
     try {
       const state: Record<string, any> | undefined =
         (globalThis as any)[CONTEXT_ENGINE_REGISTRY_STATE];
@@ -665,9 +667,9 @@ export class LosslessClawAdapter {
     } catch {
       // Symbol 方式失败，走 Fallback
     }
-      console.debug("[lcm] _discoverCEFactory: path 1/4 FAILED (Symbol registry)");
+      this.logger.debug("[lcm] _discoverCEFactory: path 1/4 FAILED (Symbol registry)");
 
-    console.debug("[lcm] path 2/4: Shared State");
+    this.logger.debug("[lcm] path 2/4: Shared State");
     // ── Shared State: 直接通过 lossless-claw 的 globalThis Symbol shared-init 获取 engine ──
     // 如果 lossless-claw 插件已被 OpenClaw 加载（即使非活跃 CE），shared state 里就有引擎实例。
     // 这比走 factory registry 更直接——类似于 GraphAdapter 直连 Neo4j 而不是经过 plugin SDK。
@@ -691,11 +693,11 @@ export class LosslessClawAdapter {
           }
         }
       }
-      console.debug("[lcm] _discoverCEFactory: path 2/4 FAILED (Shared State)");
+      this.logger.debug("[lcm] _discoverCEFactory: path 2/4 FAILED (Shared State)");
     } catch {
       // shared state not available, continue
     }
-    console.debug("[lcm] path 3/4: Direct FS scan");
+    this.logger.debug("[lcm] path 3/4: Direct FS scan");
 
     // ── Direct FS: 扫描 projects/ 找 lossless-claw dist，import 触发初始化 ──
     // P0-4 SEC-2: 加路径白名单校验。任何能写入 ~/.openclaw/npm/projects/*/node_modules
@@ -726,7 +728,7 @@ export class LosslessClawAdapter {
             realpath(projectsDir),
           ]);
           if (!realCandidate.startsWith(realProjectsDir + sep) && realCandidate !== realProjectsDir) {
-            console.debug(`[lcm] _discoverCEFactory: reject path escaping projectsDir: ${candidatePath}`);
+            this.logger.debug(`[lcm] _discoverCEFactory: reject path escaping projectsDir: ${candidatePath}`);
             continue;
           }
           await stat(candidatePath);
@@ -769,7 +771,7 @@ export class LosslessClawAdapter {
       }
     } catch {
       // projects dir scan failed, fall through to Fallback
-    console.debug("[lcm] path 4/4: Fallback registry");
+    this.logger.debug("[lcm] path 4/4: Fallback registry");
     }
 
     // ── Fallback: 文件系统 Registry 发现 ──
@@ -816,11 +818,11 @@ export class LosslessClawAdapter {
     const factory = getFactory('lossless-claw');
 
     if (typeof factory !== 'function') {
-      console.debug("[lcm] _discoverCEFactory: path 4/4 FAILED, factory not a function");
+      this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FAILED, factory not a function");
       return null;
     }
 
-    console.debug("[lcm] _discoverCEFactory: path 4/4 FOUND factory");
+    this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FOUND factory");
     return factory as (ctx: any) => Promise<LosslessClawEngine>;
   }
 }

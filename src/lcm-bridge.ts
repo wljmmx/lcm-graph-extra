@@ -263,14 +263,15 @@ export function getConversationSummaries(conversationId: number): Array<{
   tokenCount: number;
   earliestAt: string | null;
 }> {
+  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally，防止 prepare 抛错时连接泄漏
+  let db: any = null;
   try {
-    const db = getDb();
+    db = getDb();
     if (!db) return [];
     const rows = db.prepare(
       "SELECT summary_id, content, token_count, earliest_at " +
       "FROM summaries WHERE conversation_id = ? ORDER BY earliest_at ASC",
     ).all(conversationId) as Array<Record<string, unknown>>;
-    try { db.close(); } catch { /* ignore */ }
     return (rows ?? []).map((r: any) => ({
       summaryId: r.summary_id as string,
       content: r.content as string,
@@ -279,6 +280,8 @@ export function getConversationSummaries(conversationId: number): Array<{
     }));
   } catch {
     return [];
+  } finally {
+    if (db) { try { db.close(); } catch { /* already closed or close failed */ } }
   }
 }
 
@@ -287,8 +290,10 @@ export function getConversationSummaries(conversationId: number): Array<{
  * Returns the number of uncompressed (pending compaction) messages.
  */
 export function getUncompressedMessageCount(conversationId: number): number {
+  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally
+  let db: any = null;
   try {
-    const db = getDb();
+    db = getDb();
     if (!db) return -1;
 
     // Count messages whose created_at is NOT within any summary range
@@ -297,11 +302,11 @@ export function getUncompressedMessageCount(conversationId: number): number {
       "AND created_at > (SELECT COALESCE(MAX(latest_at),0) FROM summaries WHERE conversation_id = ?)",
     ).get(conversationId, conversationId);
 
-    try { db.close(); } catch { /* ignore */ }
-
     return row?.cnt ?? 0;
   } catch {
     return -1;
+  } finally {
+    if (db) { try { db.close(); } catch { /* already closed or close failed */ } }
   }
 }
 
@@ -310,28 +315,30 @@ export function getUncompressedMessageCount(conversationId: number): number {
  * Returns true if there appear to be uncompressed messages.
  */
 export function hasUncompressedMessages(conversationId: number): boolean {
+  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally
+  let db: any = null;
   try {
-    const db = getDb();
+    db = getDb();
     if (!db) return true;
-    
+
     // Count total tokens in raw messages for this conversation
     const msgRow = db.prepare(
       "SELECT COALESCE(SUM(token_count), 0) as t FROM messages WHERE conversation_id = ?",
     ).get(conversationId) as { t: number } | undefined;
     const msgTokens = msgRow?.t ?? 0;
-    
+
     // Count total tokens in summaries for this conversation
     const sumRow = db.prepare(
       "SELECT COALESCE(SUM(token_count), 0) as t FROM summaries WHERE conversation_id = ?",
     ).get(conversationId) as { t: number } | undefined;
     const summaryTokens = sumRow?.t ?? 0;
-    
-    try { db.close(); } catch { /* ignore */ }
-    
+
     // If summary tokens are a small fraction of message tokens, there's likely uncompressed content
     return msgTokens > 0 && summaryTokens < msgTokens * 0.3;
   } catch {
     return true;
+  } finally {
+    if (db) { try { db.close(); } catch { /* already closed or close failed */ } }
   }
 }
 
@@ -359,8 +366,5 @@ export function trimSummariesToBudget(
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
-
-export const __test__ = {
-  LCM_DB_PATH,
-  getDb,
-};
+// P3-8: 原 __test__ 导出（LCM_DB_PATH, getDb）无任何测试引用，属死代码，已收敛移除。
+// 如未来测试需要内部钩子，应通过 vitest 的 vi.mock 或独立 test-utils 模块注入，而非污染生产导出。

@@ -7,6 +7,8 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { Logger } from './utils/logger.js';
+import { resolveLogger } from './utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +46,8 @@ export interface QmdClientOptions {
   cliTimeout?: number;
   pingInterval?: number;
   cliFallbackSearchType?: 'search' | 'vsearch';
+  /** P3-B3: 注入统一 logger；未提供时降级到 globalLogger。 */
+  logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +87,8 @@ export class QmdClient {
   private readonly cliTimeout: number;
   private readonly cliFallbackSearchType: string;
   private readonly pingInterval: number;
+  /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
+  private readonly logger: Logger;
 
   /** null = undetermined, true = MCP可用, false = MCP不可用 */
   private mcpAvailable: boolean | null = null;
@@ -94,6 +100,7 @@ export class QmdClient {
     this.cliTimeout = opts.cliTimeout ?? DEFAULTS.cliTimeout;
     this.cliFallbackSearchType = opts.cliFallbackSearchType ?? DEFAULTS.cliFallbackSearchType;
     this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
+    this.logger = resolveLogger(opts.logger);
   }
 
   // ===================== public API =======================================
@@ -114,13 +121,13 @@ export class QmdClient {
         this.scheduleRecovery();
         const _mcpErr = (err as Error).message;
         if (_mcpErr.includes("circuit breaker")) {
-          console.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
+          this.logger.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
         } else if (_mcpErr.includes("HTTP")) {
-          console.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
+          this.logger.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
         } else if (_mcpErr.includes("empty response")) {
-          console.warn("[qmd-client] MCP query returned no results, falling back to CLI");
+          this.logger.warn("[qmd-client] MCP query returned no results, falling back to CLI");
         } else {
-          console.warn("[qmd-client] MCP query failed, falling back to CLI:", _mcpErr);
+          this.logger.warn("[qmd-client] MCP query failed, falling back to CLI", { err: _mcpErr });
         }
       }
     }
@@ -443,7 +450,7 @@ export class QmdClient {
         if (ok) {
           this.mcpAvailable = true;
           this.clearRecovery();
-          console.info("[qmd-client] MCP recovered, switching back");
+          this.logger.info("[qmd-client] MCP recovered, switching back");
         } else {
           this.scheduleRecovery(); // retry
         }

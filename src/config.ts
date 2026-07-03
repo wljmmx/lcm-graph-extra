@@ -1,6 +1,7 @@
 import { Type, Static } from 'typebox';
 import { Value } from 'typebox/value';
 import { resolve } from 'path';
+import { getGlobalLogger } from './utils/logger.js';
 
 export const BackupConfigSchema = Type.Object({
   enabled: Type.Boolean({ default: true }),
@@ -317,15 +318,29 @@ function isValidUrl(url: string): boolean {
   }
 }
 
+/**
+ * 深拷贝 DEFAULT_CONFIG。P3-4: 原先使用 `{ ...DEFAULT_CONFIG }` 浅拷贝，
+ * 导致嵌套对象（如 experience）与 DEFAULT_CONFIG 共享引用，
+ * 调用方修改返回值会污染全局默认配置。改用 structuredClone 彻底隔离。
+ */
+function cloneDefaultConfig(): PluginConfig {
+  return structuredClone(DEFAULT_CONFIG);
+}
+
 export async function loadConfig(filePath?: string): Promise<PluginConfig> {
-  if (!filePath) return { ...DEFAULT_CONFIG };
+  if (!filePath) return cloneDefaultConfig();
   const fs = await import('fs/promises');
   try {
     const raw = await fs.readFile(filePath, 'utf-8');
     const parsed = JSON.parse(raw);
     return validateConfig(parsed);
-  } catch {
-    return { ...DEFAULT_CONFIG };
+  } catch (err) {
+    // P3-4: 原先静默吞错，现记录告警便于排查配置加载失败
+    getGlobalLogger().warn('[lcm-graph-extra] loadConfig failed, falling back to DEFAULT_CONFIG', {
+      filePath,
+      err: String(err),
+    });
+    return cloneDefaultConfig();
   }
 }
 

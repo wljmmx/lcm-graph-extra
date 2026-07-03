@@ -8,7 +8,7 @@ vi.mock('./qmd-client', () => ({
   QmdClient: vi.fn(() => ({ query: vi.fn().mockResolvedValue([]), ping: vi.fn().mockResolvedValue(true), get: vi.fn(), multiGet: vi.fn() })),
 }));
 vi.mock('./adapters/graph-adapter', () => ({
-  GraphAdapter: vi.fn(() => ({ search: vi.fn().mockResolvedValue([]), searchExperience: vi.fn().mockResolvedValue([]), health: vi.fn().mockResolvedValue(false), processFeedback: vi.fn().mockResolvedValue({ processed:0, updatedNodes:0 }) })),
+  GraphAdapter: vi.fn(() => ({ search: vi.fn().mockResolvedValue([]), searchExperience: vi.fn().mockResolvedValue([]), health: vi.fn().mockResolvedValue(false) })),
 }));
 
 const mc: MergerConfig = { maxResults: 10, fuzzyMatchThreshold: 0.85, decayHalfLifeDays: 30 };

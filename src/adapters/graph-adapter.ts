@@ -14,6 +14,8 @@ import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
 import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
+import type { Logger } from '../utils/logger.js';
+import { resolveLogger } from '../utils/logger.js';
 
 
 class LRUCache<K, V> {
@@ -44,16 +46,32 @@ export interface GraphAdapterConfig {
 
 const _gmpRequire = createRequire(import.meta.url);
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
-const GM_PRO_PATH = process.env.GM_PRO_PATH
-  || (() => {
-      try {
-        const resolved = _gmpRequire.resolve('@openclaw/graph-memory-pro/dist/index.js');
-        return resolved.endsWith('/dist/index.js') ? resolved.slice(0, -14) : resolved;
-      } catch {
-        return undefined;
-      }
-    })()
-  || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
+
+/**
+ * P3-3: 解析 graph-memory-pro 模块路径（单一来源，去除 graph-adapter / tools 重复逻辑）。
+ *
+ * 解析优先级：
+ *   1. 环境变量 GM_PRO_PATH
+ *   2. require.resolve('@openclaw/graph-memory-pro/dist/index.js') —— 取其目录
+ *   3. 回退到 ${OPENCLAW_DIR}/extensions/graph-memory-pro
+ *
+ * 返回 { path, source } 供调用方记录实际使用的路径与来源。
+ */
+export function resolveGmProPath(): { path: string; source: 'env' | 'require' | 'fallback' } {
+  if (process.env.GM_PRO_PATH) {
+    return { path: process.env.GM_PRO_PATH, source: 'env' };
+  }
+  try {
+    const resolved = _gmpRequire.resolve('@openclaw/graph-memory-pro/dist/index.js');
+    const dir = resolved.endsWith('/dist/index.js') ? resolved.slice(0, -'/dist/index.js'.length) : resolved;
+    return { path: dir, source: 'require' };
+  } catch {
+    return { path: `${OPENCLAW_DIR}/extensions/graph-memory-pro`, source: 'fallback' };
+  }
+}
+
+const _GM_PRO_RESOLVED = resolveGmProPath();
+const GM_PRO_PATH = _GM_PRO_RESOLVED.path;
 
 /**
  * P2-17: 统一 GmConfig 默认值。原代码在 connect/runMaintenance 等 4 处重复硬编码
@@ -124,7 +142,7 @@ export class GraphAdapter {
   private readonly reconnectCooldownMs = 60_000;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
-  private logger: any;
+  private logger: Logger;
   private _recaller: any = null;
   private _gmConfig: Record<string, any> = {};
   private _embedFn: any = null;
@@ -132,14 +150,16 @@ export class GraphAdapter {
 
   private searchCache = new LRUCache(50, 300 * 1000);
 
-  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: any) {
+  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: Logger) {
     this.neo4jConfig = neo4jConfig;
     this.config = config;
-    this.logger = logger;
+    this.logger = resolveLogger(logger);
   }
 
   async connect(): Promise<boolean> {
     try {
+      // P3-3: 记录实际使用的 graph-memory-pro 路径与解析来源
+      this.logger?.info?.('[graph-adapter] loading graph-memory-pro', { path: GM_PRO_PATH, source: _GM_PRO_RESOLVED.source });
       const mod = await import(`${GM_PRO_PATH}/dist/index.js`);
       this.mod = mod;
       this.driver = mod.getDriver?.() ?? null;
@@ -176,12 +196,12 @@ export class GraphAdapter {
             this.logger?.warn?.('[graph-adapter] createEmbedFn not available, community recall disabled');
           }
         } catch (embedErr) {
-          this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller:', embedErr);
+          this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller', { err: embedErr });
         }
 
         this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
       } catch (initErr) {
-        this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes:', initErr);
+        this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes', { err: initErr });
         this._recaller = null;
       }
 
@@ -248,7 +268,7 @@ export class GraphAdapter {
           nodes = recallResult.nodes ?? [];
           this.logger?.debug?.('[graph-adapter] Recaller returned', { nodeCount: nodes.length });
         } catch (recallErr) {
-          this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back:', recallErr);
+          this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back', { err: recallErr });
         }
       }
 
@@ -352,10 +372,12 @@ export class GraphAdapter {
       await this.connect();
     }
     if (!this.mod) return [];
+    // P3-9 GMR-3: 捕获到局部常量，跨 await 保持非空收窄，消除后续 this.mod! 非空断言
+    const mod = this.mod;
     const rl = options?.limit ?? this.config.searchLimit;
     const ctx = options?.context;
     try {
-      const nodes = await this.mod.searchNodes(this.driver, query, rl * 3);
+      const nodes = await mod.searchNodes(this.driver, query, rl * 3);
       const events = (nodes ?? []).filter((n: any) => (n.type ?? n.labels?.[0]) === 'EVENT');
 
       // 场景优先级加权排序
@@ -383,7 +405,7 @@ export class GraphAdapter {
       for (const evt of ranked.slice(0, rl)) {
         const name = evt.name ?? evt.properties?.name ?? '';
         const desc = evt.description ?? evt.properties?.description ?? '';
-        const edges = await this.mod!.getEdgesForNodes(this.driver, [evt.id]);
+        const edges = await mod.getEdgesForNodes(this.driver, [evt.id]);
         const sols = (edges ?? []).filter((e: any) => e.type === 'SOLVED_BY');
         let expText = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
         for (const s of sols) expText += `\n- ${s.targetName ?? 'Unknown'}`;
@@ -547,7 +569,7 @@ export class GraphAdapter {
       for (const e of entities) {
         if (!e.name?.trim()) continue;
         const t = mapEntityType(e.type), nid = makeNodeId(e.name, t);
-        const existing = await this.mod!.findById(this.driver, nid);
+        const existing = await m3.findById(this.driver, nid);
         if (existing) {
           const ec = existing.properties?.content ?? '';
           if (ec.trim() !== (e.content ?? '').trim()) {
@@ -563,7 +585,7 @@ export class GraphAdapter {
               continue;
             } else if (decision === 'replace_with_new') {
               // Full replacement with new content
-              await this.mod!.upsertNode(this.driver, {
+              await m3.upsertNode(this.driver, {
                 id: nid, type: t, name: e.name.trim(),
                 description: (e.description ?? '').slice(0, 500),
                 content: (e.content ?? '').slice(0, 2000),
@@ -576,7 +598,7 @@ export class GraphAdapter {
             } else if (decision === 'merge_both') {
               // Merge existing + new content
               const mergedContent = (ec.trim() || '') + '\n---\n' + ((e.content ?? '').trim() || '');
-              await this.mod!.upsertNode(this.driver, {
+              await m3.upsertNode(this.driver, {
                 id: nid, type: t, name: e.name.trim(),
                 description: (e.description ?? '').slice(0, 500),
                 content: mergedContent.slice(0, 2000),
@@ -590,7 +612,7 @@ export class GraphAdapter {
           }
         }
         // No conflict or no decision path matched - standard upsert
-        await this.mod!.upsertNode(this.driver, {
+        await m3.upsertNode(this.driver, {
           id: nid, type: t, name: e.name.trim(),
           description: (e.description ?? '').slice(0, 500),
           content: (e.content ?? '').slice(0, 2000),
@@ -603,7 +625,7 @@ export class GraphAdapter {
       for (const rel of relations) {
         if (!rel.from?.trim() || !rel.to?.trim()) continue;
         const mt = mapEdgeType(rel.type);
-        await this.mod!.upsertEdge(this.driver, {
+        await m3.upsertEdge(this.driver, {
           id: makeNodeId(rel.from + '-' + rel.to, mt), type: mt,
           fromId: makeNodeId(rel.from, 'TASK'), toId: makeNodeId(rel.to, 'TASK'),
           instruction: (rel.instruction ?? '').slice(0, 500),
@@ -614,10 +636,7 @@ export class GraphAdapter {
     return { upserted: uc, conflicts: cc };
   }
 
-  async processFeedback(): Promise<{ processed: number; updatedNodes: number }> {
-    return { processed: 0, updatedNodes: 0 };
-  }
-
+  // P3-9 GMR-4: processFeedback 已移除 —— 空实现（恒返回 0）且无任何生产代码调用，属死代码。
   
   /**
    * Run raw Cypher query (for experience storage layer).

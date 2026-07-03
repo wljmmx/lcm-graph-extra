@@ -17,6 +17,8 @@ import { Merger, type MergerConfig } from './merger.js';
 import { ExperienceStorage } from './experience/storage.js';
 import { TagRegistry } from './experience/tag-registry.js';
 import { inferQueryContext, buildExperienceFilters } from './context-inference.js';
+import type { Logger } from './utils/logger.js';
+import { resolveLogger } from './utils/logger.js';
 
 export interface PerformanceStats {
   searches: number;
@@ -33,6 +35,8 @@ export class RetrievalGateway {
   private experienceStorage: ExperienceStorage;
   private tagRegistry: TagRegistry;
   private lastQuery = '';
+  /** P3-B4: 统一 logger（从全局单例解析），替换 console.* */
+  private readonly logger: Logger = resolveLogger();
 
   // Performance monitoring
   public stats: Record<string, PerformanceStats> = {
@@ -208,7 +212,7 @@ export class RetrievalGateway {
       s.lastQueryTime = duration;
 
       if (duration > this.slowSearchThresholdMs) {
-        console.warn(`[lcm-graph-extra] Slow ${engine} search: ${duration.toFixed(0)}ms`);
+        this.logger.warn(`[lcm-graph-extra] Slow ${engine} search: ${duration.toFixed(0)}ms`);
       }
       return results;
     } catch (err) {
@@ -218,7 +222,7 @@ export class RetrievalGateway {
         s.failures++;
         s.lastQueryTime = duration;
       }
-      console.error(`[lcm-graph-extra] ${engine} search failed (${duration.toFixed(0)}ms): ${err}`);
+      this.logger.error(`[lcm-graph-extra] ${engine} search failed (${duration.toFixed(0)}ms)`, { err: String(err) });
       return [] as RetrievalResult[];
     }
   }
@@ -236,9 +240,8 @@ export class RetrievalGateway {
     return lines.join('\n');
   }
 
-  async processFeedback(): Promise<{ processed: number; updatedNodes: number }> {
-    return this.graphAdapter.processFeedback();
-  }
+  // P3-9 GMR-4: processFeedback 已移除 —— 委托到 graphAdapter.processFeedback()，
+  // 但后者为空实现且无生产调用，整条链路属死代码。
 
   getLastQuery(): string {
     return this.lastQuery;

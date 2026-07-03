@@ -105,13 +105,38 @@ export function markDebtRunning(conversationId: number, dbPath?: string): boolea
   }
 }
 
+/**
+ * 清除债务：将 pending=0, running=0。
+ * P3-5: 原先 reason 参数被接收但从未写入数据库（死参数）。
+ * 现将 reason 写入 reason 列，保留清账原因便于审计。
+ */
 export function clearDebt(conversationId: number, reason?: string, dbPath?: string): boolean {
   const db = openDb(dbPath);
   if (!db) return false;
   try {
     db.prepare(
-      "UPDATE conversation_compaction_maintenance SET pending = 0, running = 0, updated_at = datetime('now') WHERE conversation_id = ?"
-    ).run(conversationId);
+      "UPDATE conversation_compaction_maintenance SET pending = 0, running = 0, reason = ?, updated_at = datetime('now') WHERE conversation_id = ?"
+    ).run(reason ?? 'cleared', conversationId);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * P3-5: 标记债务处理失败 —— 重置 running=0 但保留 pending=1，使其可在下次轮询重试。
+ * 原先失败时直接 clearDebt（pending=0），导致失败的工作被静默丢弃、永不重试。
+ * 现改为保留 pending 状态以便重试，并将失败原因写入 reason 列留痕。
+ */
+export function markDebtFailed(conversationId: number, reason: string, dbPath?: string): boolean {
+  const db = openDb(dbPath);
+  if (!db) return false;
+  try {
+    db.prepare(
+      "UPDATE conversation_compaction_maintenance SET running = 0, reason = ?, updated_at = datetime('now') WHERE conversation_id = ? AND pending = 1"
+    ).run(reason, conversationId);
     return true;
   } catch {
     return false;
@@ -229,8 +254,9 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     _apiContext.logger?.error?.("debt-manager: failed to process debt " + debt.conversationId, { err: msg });
-    // Clear even on failure to prevent infinite retry loops
-    clearDebt(debt.conversationId, "failed: " + msg.slice(0, 200));
+    // P3-5: 失败不清账 —— 保留 pending=1 以便下次轮询重试，仅重置 running=0 并记录原因。
+    // 原先直接 clearDebt 会静默丢弃失败的工作，永不重试。
+    markDebtFailed(debt.conversationId, "failed: " + msg.slice(0, 200));
   } finally {
     activeJobs.delete(debt.conversationId);
   }

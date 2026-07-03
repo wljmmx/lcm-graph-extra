@@ -7,7 +7,7 @@
  * logs the conflict for traceability, and determines which version to keep.
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, statSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -36,13 +36,20 @@ export interface ConflictRecord {
 }
 
 export class ConflictLogger {
+  /** P3-2: 内存中保留的最大冲突记录数，超出后丢弃最旧的（防止长生命周期内存泄漏） */
+  private static readonly MAX_IN_MEMORY = 1000;
+  /** P3-2: 单个日志文件大小上限（10MB），超出后轮转 */
+  private static readonly MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
   private logPath: string;
+  private rotatedPath: string;
   private conflicts: ConflictRecord[] = [];
 
   constructor(basePath?: string) {
     const dir = basePath ?? join(homedir(), '.openclaw', 'lcm-graph-extra', 'logs');
     mkdirSync(dir, { recursive: true });
     this.logPath = join(dir, 'conflicts.log');
+    this.rotatedPath = join(dir, 'conflicts.log.1');
   }
 
   /**
@@ -99,6 +106,10 @@ export class ConflictLogger {
     };
 
     this.conflicts.push(record);
+    // P3-2: 内存上限，超出后丢弃最旧的记录（环形缓冲语义）
+    if (this.conflicts.length > ConflictLogger.MAX_IN_MEMORY) {
+      this.conflicts.shift();
+    }
     this.writeLog(record);
 
     return resolution;
@@ -106,13 +117,32 @@ export class ConflictLogger {
 
   /**
    * Write a conflict record to the log file.
+   * P3-2: 文件超过 MAX_FILE_SIZE_BYTES 时轮转（conflicts.log → conflicts.log.1），
+   * 防止长生命周期下日志文件无限增长占满磁盘。
    */
   private writeLog(record: ConflictRecord): void {
     try {
+      this.maybeRotate();
       const line = JSON.stringify(record) + '\n';
       appendFileSync(this.logPath, line, 'utf-8');
     } catch {
       // Non-critical
+    }
+  }
+
+  /**
+   * P3-2: 若当前日志文件超过大小上限，将其重命名为 .1（覆盖旧备份），
+   * 后续写入会创建新的 conflicts.log。保留最近 1 份轮转备份。
+   */
+  private maybeRotate(): void {
+    try {
+      if (!existsSync(this.logPath)) return;
+      const stats = statSync(this.logPath);
+      if (stats.size >= ConflictLogger.MAX_FILE_SIZE_BYTES) {
+        renameSync(this.logPath, this.rotatedPath);
+      }
+    } catch {
+      // 轮转失败不影响主流程
     }
   }
 
