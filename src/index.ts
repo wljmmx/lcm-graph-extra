@@ -418,7 +418,7 @@ function getSessionDedup(sessionKey: string) {
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.1.8",
+        version: "2.1.9",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         hostRequirements: {
@@ -1766,4 +1766,4 @@ export type {
 } from './experience/types.js';
 
 
-export const VERSION = '2.1.8';
+export const VERSION = '2.1.9';
