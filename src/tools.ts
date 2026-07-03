@@ -47,6 +47,28 @@ function openDb() {
   return new DatabaseSync(LCM_DB);
 }
 
+/**
+ * SEC-5 M-11/M-12: 校验 backup/restore 路径必须在 ~/.openclaw 之下，
+ * 防止用户提供的路径穿越到任意文件系统位置。
+ */
+function validateBackupPath(p: string): string {
+  const allowedRoot = resolve(homedir(), '.openclaw');
+  const abs = resolve(p);
+  if (abs !== allowedRoot && !abs.startsWith(allowedRoot + sep)) {
+    throw new Error(`path must be under ${allowedRoot}`);
+  }
+  return abs;
+}
+
+/**
+ * SEC-L: 转义 FTS5 MATCH 查询字符串。
+ * FTS5 对 `"`、`*`、`(`、`)`、`-` 等字符有特殊语法含义，未转义会导致语法错误或意外匹配。
+ * 将整个查询用双引号包裹为短语，并转义内部双引号（"" 表示字面量 "）。
+ */
+function escapeFts5Query(q: string): string {
+  return '"' + q.replace(/"/g, '""') + '"';
+}
+
 // ---------------------------------------------------------------------------
 // Neo4j connection pool — single shared driver, per-call sessions only
 // ---------------------------------------------------------------------------
@@ -57,12 +79,19 @@ async function getNeo4jDriver(): Promise<any> {
   if (_neo4jDriver) return _neo4jDriver;
   if (_neo4jDriverReady) return _neo4jDriverReady;
   _neo4jDriverReady = (async () => {
-    const neo4j = await import("neo4j-driver").then((m) => m.default);
-    const config = resolveNeo4jConfig(getPluginNeo4jConfig());
-    if (!config || !config.uri) throw new Error("Neo4j not configured");
-    _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
-    _neo4jDriverReady = null;
-    return _neo4jDriver;
+    try {
+      const neo4j = await import("neo4j-driver").then((m) => m.default);
+      const config = resolveNeo4jConfig(getPluginNeo4jConfig());
+      if (!config || !config.uri) throw new Error("Neo4j not configured");
+      _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+      _neo4jDriverReady = null;
+      return _neo4jDriver;
+    } catch (e) {
+      // SEC-1 H-7: 初始化失败后必须重置 ready promise，
+      // 否则后续调用会永久锁定在 rejected promise 上，无法重试。
+      _neo4jDriverReady = null;
+      throw e;
+    }
   })();
   return _neo4jDriverReady;
 }
@@ -207,9 +236,16 @@ export function registerOperationalTools(api: any): void {
     }),
     async execute(_id: string, params: { outputPath?: string }) {
       const outDir = params.outputPath ?? join(homedir(), ".openclaw", "lcm-graph-extra", "backup");
-      mkdirSync(outDir, { recursive: true });
+      // SEC-5 M-11: 校验输出路径必须在 ~/.openclaw 之下，防止路径穿越
+      let safeOutDir: string;
+      try {
+        safeOutDir = validateBackupPath(outDir);
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+      mkdirSync(safeOutDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backupPath = join(outDir, `memory-full-backup-${stamp}.json`);
+      const backupPath = join(safeOutDir, `memory-full-backup-${stamp}.json`);
 
       const backup: Record<string, unknown> = {
         version: "2.0", createdAt: new Date().toISOString(),
@@ -234,8 +270,9 @@ export function registerOperationalTools(api: any): void {
       } catch { /* Neo4j unavailable */ }
 
       // lossless-claw DB
+      let db: any = null;
       try {
-        const db = openDb();
+        db = openDb();
         const convs = db.prepare("SELECT conversation_id, session_id, session_key FROM conversations ORDER BY conversation_id").all() as any[];
         for (const conv of convs) {
           const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq").all(conv.conversation_id) as any[];
@@ -244,8 +281,8 @@ export function registerOperationalTools(api: any): void {
             messages: msgs.map((m) => ({ seq: m.seq, role: m.role, content: (m.content ?? "").slice(0, 10000) })),
           });
         }
-        db.close();
       } catch { /* DB unavailable */ }
+      finally { if (db) { try { db.close(); } catch {} } }
 
       // Memory files
       try {
@@ -297,15 +334,22 @@ export function registerOperationalTools(api: any): void {
       dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default false)" })),
     }),
     async execute(_id: string, params: { backupPath: string; targets?: string; dryRun?: boolean }) {
-      if (!existsSync(params.backupPath)) {
-        return { content: [{ type: "text" as const, text: `Backup not found: ${params.backupPath}` }], isError: true };
+      // SEC-5 M-12: 校验备份路径必须在 ~/.openclaw 之下，防止路径穿越
+      let safeBackupPath: string;
+      try {
+        safeBackupPath = validateBackupPath(params.backupPath);
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
       }
-      const data = JSON.parse(readFileSync(params.backupPath, "utf-8"));
+      if (!existsSync(safeBackupPath)) {
+        return { content: [{ type: "text" as const, text: `Backup not found: ${safeBackupPath}` }], isError: true };
+      }
+      const data = JSON.parse(readFileSync(safeBackupPath, "utf-8"));
       const targets = params.targets ?? "all";
       const dryRun = params.dryRun ?? false;
       const report: string[] = [];
 
-      report.push(`Restore from: ${params.backupPath}`);
+      report.push(`Restore from: ${safeBackupPath}`);
       report.push(`Dry run: ${dryRun ? "YES" : "NO"}\n`);
 
       // Neo4j
@@ -329,8 +373,9 @@ export function registerOperationalTools(api: any): void {
 
       // lossless-claw DB
       if ((targets === "all" || targets === "lcm_only") && !dryRun) {
+        let db: any = null;
         try {
-          const db = openDb();
+          db = openDb();
           let msgCount = 0;
           const insertMsg = db.prepare("INSERT OR IGNORE INTO messages (conversation_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?)");
           for (const conv of (data.lcm as any)?.conversations ?? []) {
@@ -347,9 +392,9 @@ export function registerOperationalTools(api: any): void {
               msgCount++;
             }
           }
-          db.close();
           report.push(`✅ lossless-claw: Restored ${msgCount} messages`);
         } catch (e: any) { report.push(`❌ lossless-claw: ${e.message}`); }
+        finally { if (db) { try { db.close(); } catch {} } }
       }
 
       // Files
@@ -412,8 +457,9 @@ export function registerOperationalTools(api: any): void {
 
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {
+        let db: any = null;
         try {
-          const db = openDb();
+          db = openDb();
           const convs = db.prepare("SELECT conversation_id, session_id FROM conversations WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) ORDER BY conversation_id DESC LIMIT ?").all(limit) as any[];
           const { driver, session } = await neo4jSession();
           try {
@@ -428,9 +474,9 @@ export function registerOperationalTools(api: any): void {
               }
             }
           } finally { await closeNeo4j(driver, session); }
-          db.close();
           lines.push(`✅ Imported ${total} messages from lossless-claw DB`);
         } catch (e: any) { lines.push(`❌ lossless-claw import: ${e.message}`); }
+        finally { if (db) { try { db.close(); } catch {} } }
       }
 
       // 记忆文件导入
@@ -480,8 +526,9 @@ export function registerOperationalTools(api: any): void {
       p(H);
       p("1. lossless-claw (SQLite DAG)");
       p(H);
+      let db: any = null;
       try {
-        const db = openDb();
+        db = openDb();
         const msgs = db.prepare("SELECT COUNT(*) as c FROM messages").get().c;
         const sms = db.prepare("SELECT COUNT(*) as c FROM summaries").get().c;
         const ctx = db.prepare("SELECT COUNT(*) as c FROM context_items").get().c;
@@ -498,8 +545,8 @@ export function registerOperationalTools(api: any): void {
         const fts = db.prepare("SELECT COUNT(*) as c FROM messages_fts WHERE messages_fts MATCH 'test'").get().c;
         ok("FTS5 index", "searchable (test -> " + fts + " hits)");
         pass += 6;
-        db.close();
       } catch (e: any) { fail("lossless-claw", e.message); fails++; }
+      finally { if (db) { try { db.close(); } catch {} } }
 
       // 2. qmd
       sep();
@@ -510,17 +557,20 @@ export function registerOperationalTools(api: any): void {
         const r = await fetch(getQmdBaseUrl() + "/health", { signal: AbortSignal.timeout(2000) });
         ok("MCP 8081", "HTTP " + r.status); pass++;
       } catch { warn("MCP 8081", "unreachable"); warns++; }
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const c = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
-        if (await c.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        if (await qmd.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
         else { warn("QmdClient", "MCP down, running in CLI fallback mode"); warns++; }
-        const stat = await c.status();
+        const stat = await qmd.status();
         if (stat) { ok("Qmd status", stat.slice(0, 100).replace(/\n/g, " ")); pass++; }
         else { warn("Qmd status", "status() returned no data"); warns++; }
-        const r2 = await c.query({ searches: [{ type: "lex", query: "test" }], limit: 1 });
+        const r2 = await qmd.query({ searches: [{ type: "lex", query: "test" }], limit: 1 });
         ok("Search test", r2.length > 0 ? r2.length + " results" : "0 results (empty index)"); pass++;
       } catch (e: any) { warn("qmd", "unavailable: " + e.message); warns++; }
+      finally { if (qmd) { try { qmd.dispose(); } catch {} } }
 
       // 3. Neo4j
       sep();
@@ -601,19 +651,20 @@ export function registerOperationalTools(api: any): void {
 
       // --- lossless-claw FTS5 ---
       if (engines === "all" || engines === "lcm_only") {
+        let db: any = null;
         try {
-          const db = openDb();
+          db = openDb();
           const rows = db.prepare(
             `SELECT rowid, rank, substr(content, 1, 300) as preview FROM messages_fts
              WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?`
-          ).all(query, limit) as any[];
+          ).all(escapeFts5Query(query), limit) as any[];
           if (rows.length > 0) {
             results.push(`## 📇 lossless-claw (${rows.length} hits)`);
             for (const r of rows) results.push(`- [score ${r.rank.toFixed(2)}] ${r.preview}...`);
             results.push("");
           }
-          db.close();
         } catch (e: any) { results.push(`❌ lossless-claw search: ${e.message}\n`); }
+        finally { if (db) { try { db.close(); } catch {} } }
       }
 
       // --- qmd ---
@@ -726,13 +777,14 @@ export function registerOperationalTools(api: any): void {
       let orphanNodes = 0;
       let orphanedIds: string[] = [];
 
+      let db: any = null;
       try {
-        const db = openDb();
+        db = openDb();
         const convs = db.prepare("SELECT DISTINCT conversation_id FROM messages").all() as any[];
         lcmConvIds = new Set(convs.map((c: any) => c.conversation_id));
-        db.close();
         push(`  lossless-claw: ${convs.length} active conversations\n`);
       } catch (e: any) { push(`  ❌ lossless-claw: ${e.message}\n`); }
+      finally { if (db) { try { db.close(); } catch {} } }
 
       try {
         const { driver, session } = await neo4jSession();
@@ -745,18 +797,21 @@ export function registerOperationalTools(api: any): void {
           push(`  Neo4j: ${neo4jMsgNodes} ConversationMessage nodes\n`);
 
           // Check each for orphan (no matching session in lcm.db)
-          const db2 = openDb();
-          for (const rec of allMsgNodes.records) {
-            const sid = rec.get("sid") ?? "";
-            if (sid) {
-              const exists = db2.prepare("SELECT COUNT(*) AS c FROM conversations WHERE session_id = ?").get(sid) as any;
-              if (exists.c === 0) {
-                orphanNodes++;
-                orphanedIds.push(rec.get("id") ?? sid);
+          // SEC-3 H-6: db2 嵌套在 neo4j session 内，需独立 finally 清理
+          let db2: any = null;
+          try {
+            db2 = openDb();
+            for (const rec of allMsgNodes.records) {
+              const sid = rec.get("sid") ?? "";
+              if (sid) {
+                const exists = db2.prepare("SELECT COUNT(*) AS c FROM conversations WHERE session_id = ?").get(sid) as any;
+                if (exists.c === 0) {
+                  orphanNodes++;
+                  orphanedIds.push(rec.get("id") ?? sid);
+                }
               }
             }
-          }
-          db2.close();
+          } finally { if (db2) { try { db2.close(); } catch {} } }
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) { push(`  ❌ Neo4j: ${e.message}\n`); }
 
@@ -826,9 +881,11 @@ export function registerOperationalTools(api: any): void {
       "Calls the 'status' tool on QMD's MCP server.",
     parameters: Type.Object({}),
     async execute() {
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const [pingOk, statusText] = await Promise.all([
           qmd.ping().catch(() => false),
           qmd.status().catch(() => null),
@@ -844,6 +901,8 @@ export function registerOperationalTools(api: any): void {
         return { content: [{ type: "text" as const, text: lines.join("\n") }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      } finally {
+        if (qmd) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -859,9 +918,11 @@ export function registerOperationalTools(api: any): void {
       file: Type.String({ description: "File path or docid to retrieve" }),
     }),
     async execute(_id: string, params: { file: string }) {
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const content = await qmd.get(params.file);
         if (content) {
           return { content: [{ type: "text" as const, text: content }] };
@@ -869,6 +930,8 @@ export function registerOperationalTools(api: any): void {
         return { content: [{ type: "text" as const, text: `Document not found: ${params.file}` }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      } finally {
+        if (qmd) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -884,17 +947,21 @@ export function registerOperationalTools(api: any): void {
       pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
     }),
     async execute(_id: string, params: { pattern: string }) {
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const results = await qmd.multiGet(params.pattern);
         if (results.length === 0) {
           return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }] };
         }
-        const lines = results.map((doc, i) => `--- Document ${i + 1} ---\n${doc}`);
+        const lines = results.map((doc: string, i: number) => `--- Document ${i + 1} ---\n${doc}`);
         return { content: [{ type: "text" as const, text: lines.join("\n\n") }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      } finally {
+        if (qmd) { try { qmd.dispose(); } catch {} }
       }
     },
   });

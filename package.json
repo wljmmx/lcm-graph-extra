@@ -52,12 +52,15 @@
     "typebox": "1.1.39"
   },
   "peerDependencies": {
-    "openclaw": "*"
+    "openclaw": ">=2026.3.24-beta.2"
   },
   "peerDependenciesMeta": {
     "@openclaw/graph-memory-pro": {
       "optional": true
     }
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

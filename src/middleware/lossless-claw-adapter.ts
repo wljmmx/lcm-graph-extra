@@ -144,6 +144,36 @@ class MemorySupplementCtxEngine implements LosslessClawEngine {
 }
 
 // ---------------------------------------------------------------------------
+// 辅助函数
+// ---------------------------------------------------------------------------
+
+/**
+ * P2-2 H-14: 统一 message content 归一化逻辑。
+ * 修复前 ingest/ingestBatch/afterTurn/bootstrap/ensureBootstrapped/assemble 6 处
+ * 重复实现"数组 content → string"变换，filter 谓词、join 分隔符、兜底逐字符相同。
+ * 此处抽取为单一函数，归一化规则变更只需改一处。
+ *
+ * - 数组 content：仅保留 string 或带 text 字段的部分，按 '\n' 拼接
+ * - 非字符串 content（number/boolean/null/undefined 等）：String() 强制转换
+ * - 字符串 content：原样返回 msg（不创建新对象，保持引用相等）
+ *
+ * 非 text 类型（image/tool_use/tool_result 等）会被静默丢弃，与历史行为一致。
+ */
+function normalizeMessageContent<T extends { content?: unknown }>(msg: T): T {
+  if (Array.isArray(msg.content)) {
+    const normalized = (msg.content as any[])
+      .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+      .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
+      .join('\n');
+    return { ...msg, content: normalized };
+  }
+  if (typeof msg.content !== 'string') {
+    return { ...msg, content: String(msg.content ?? '') };
+  }
+  return msg;
+}
+
+// ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
@@ -235,18 +265,9 @@ export class LosslessClawAdapter {
       return { ingested: false };
     }
     try {
-      // Normalize message content before passing to lossless-claw engine
       const msg = params.message;
-      if (msg && Array.isArray(msg.content)) {
-        const normalizedContent = msg.content
-          .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-          .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-          .join('\n');
-        const normalizedParams = { ...params, message: { ...msg, content: normalizedContent } };
-        return await this.engine.ingest(normalizedParams);
-      }
-      if (msg && typeof msg.content !== 'string') {
-        const normalizedParams = { ...params, message: { ...msg, content: String(msg.content ?? '') } };
+      if (msg && (Array.isArray(msg.content) || typeof msg.content !== 'string')) {
+        const normalizedParams = { ...params, message: normalizeMessageContent(msg) };
         return await this.engine.ingest(normalizedParams);
       }
       return await this.engine.ingest(params);
@@ -271,21 +292,7 @@ export class LosslessClawAdapter {
     try {
       // Normalize messages before passing to lossless-claw engine
       // OpenClaw may pass content as arrays (rich text/images), but engine expects strings
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -314,21 +321,7 @@ export class LosslessClawAdapter {
     if (!this._connected || !this.engine) return;
     if (typeof this.engine.afterTurn !== 'function') return;
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -356,21 +349,7 @@ export class LosslessClawAdapter {
       return { bootstrapped: false, importedMessages: 0 };
     }
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -423,21 +402,7 @@ export class LosslessClawAdapter {
     }
 
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -558,21 +523,7 @@ export class LosslessClawAdapter {
       return { messages: params.messages ?? [], estimatedTokens: 0 };
     }
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,

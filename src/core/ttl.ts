@@ -3,6 +3,7 @@
 // ============================================================
 
 import { GraphMemoryManager } from './graph';
+import { DEFAULTS } from '../config/defaults.js';
 
 // ---------- Types ---------------------------------------------------------
 
@@ -140,7 +141,7 @@ export async function cleanupExpiredNodes(
  */
 export function applyWeightDecay(
   manager: GraphMemoryManager,
-  halfLifeDays: number = 45,
+  halfLifeDays: number = DEFAULTS.ttl.halfLifeDays,
   minWeight: number = 0.01
 ): void {
   if (halfLifeDays <= 0) return;

@@ -28,6 +28,7 @@ import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helpe
 import { withCircuitBreaker } from "./circuit-breaker.js";
 import { resolveContextProfile, PluginConfigSchema } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger } from "./utils/logger.js";
+import { DEFAULTS } from "./config/defaults.js";
 
 import {
   type PressureInfo,
@@ -127,7 +128,13 @@ function applyTotalControl(
     const candidates = sections.filter(s => s.priority === lowestPriority);
     for (const candidate of candidates) {
       if (result.length <= maxChars) break;
-      result = result.replace(candidate.content, '').replace(/\n{3,}/g, '\n\n').trim();
+      // SEC-L: 修复前用 result.replace(candidate.content, '') —— String.replace 首个出现
+      // 不一定是目标段（若段内容在多处重复会误删）。改为 indexOf 精确定位 + slice 移除。
+      const idx = result.indexOf(candidate.content);
+      if (idx !== -1) {
+        result = (result.slice(0, idx) + result.slice(idx + candidate.content.length))
+          .replace(/\n{3,}/g, '\n\n').trim();
+      }
       removedStats.push({ label: candidate.label, chars: candidate.content.length });
     }
   }
@@ -266,12 +273,64 @@ let expStore: any = null;
 let _modelRegistry: Record<string, number> | undefined;
     // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
 // Each session tracks hashes for up to 24 rounds of conversation
-const MAX_DEDUP_CAPACITY = 500;
-const DEDUP_TTL_MS = 60 * 60 * 1000;
+// P2-3 H-16: dedup 容量/TTL/轮次常量改接 DEFAULTS，单一来源，避免魔术数字散落。
+const MAX_DEDUP_CAPACITY = DEFAULTS.dedup.maxCapacity;
+const DEDUP_TTL_MS = DEFAULTS.dedup.ttlMs;
 const sessionDedupCache = new Map<string, { window: string[][]; maxRounds: number; lastAccess: number }>();
 const dedupAccessOrder: string[] = [];
-let MAX_DEDUP_ROUNDS = 24;  // S5-2: updated from config during init()
-let _sessionOverheadCache = new Map<string, number>();  // per-session cached additionTokens for tier estimation
+let MAX_DEDUP_ROUNDS = DEFAULTS.dedup.maxRounds;  // S5-2: updated from config during init()
+// P1-4 M-6: _sessionOverheadCache 加 LRU 淘汰。修复前是无界 Map，随 session 数线性增长。
+// 容量/TTL 与 sessionDedupCache 对齐，避免活跃 session 长期堆积。
+const MAX_OVERHEAD_CAPACITY = DEFAULTS.dedup.maxCapacity;
+const OVERHEAD_TTL_MS = DEFAULTS.dedup.ttlMs;
+const _sessionOverheadCache = new Map<string, { tokens: number; lastAccess: number }>();
+const _overheadAccessOrder: string[] = [];
+
+function evictStaleOverhead(): void {
+  const now = Date.now();
+  while (_overheadAccessOrder.length > 0) {
+    const key = _overheadAccessOrder[0];
+    const entry = _sessionOverheadCache.get(key);
+    if (!entry || (now - entry.lastAccess) > OVERHEAD_TTL_MS) {
+      _overheadAccessOrder.shift();
+      _sessionOverheadCache.delete(key);
+    } else {
+      break;
+    }
+  }
+  while (_sessionOverheadCache.size > MAX_OVERHEAD_CAPACITY) {
+    // SEC-L2: 修复前用 `shift()!` 非空断言，显式 if-break 更稳健。
+    const lru = _overheadAccessOrder.shift();
+    if (lru === undefined) break;
+    _sessionOverheadCache.delete(lru);
+  }
+}
+
+function touchOverhead(sessionKey: string): void {
+  const idx = _overheadAccessOrder.indexOf(sessionKey);
+  if (idx !== -1) _overheadAccessOrder.splice(idx, 1);
+  _overheadAccessOrder.push(sessionKey);
+}
+
+function getOverhead(sessionKey: string): number {
+  const entry = _sessionOverheadCache.get(sessionKey);
+  if (!entry) return 0;
+  entry.lastAccess = Date.now();
+  touchOverhead(sessionKey);
+  return entry.tokens;
+}
+
+function setOverhead(sessionKey: string, tokens: number): void {
+  const existing = _sessionOverheadCache.get(sessionKey);
+  if (existing) {
+    existing.tokens = tokens;
+    existing.lastAccess = Date.now();
+  } else {
+    evictStaleOverhead();
+    _sessionOverheadCache.set(sessionKey, { tokens, lastAccess: Date.now() });
+  }
+  touchOverhead(sessionKey);
+}
 
 function evictStaleDedup(): void {
   const now = Date.now();
@@ -288,7 +347,9 @@ function evictStaleDedup(): void {
     }
   }
   while (sessionDedupCache.size > MAX_DEDUP_CAPACITY) {
-    const lru = dedupAccessOrder.shift()!;
+    // SEC-L2: 修复前用 `shift()!` 非空断言，显式 if-break 更稳健。
+    const lru = dedupAccessOrder.shift();
+    if (lru === undefined) break;
     sessionDedupCache.delete(lru);
     evicted++;
   }
@@ -406,6 +467,8 @@ function getSessionDedup(sessionKey: string) {
         // Reset lock so next assemble retries instead of being permanently stuck
         initPromise = null;
         logger?.error?.("init: failed, will retry on next assemble", { err: (err as Error).message });
+        // SEC-4 H-10: rethrow 让调用方感知初始化失败，避免静默继续导致后续空指针/未初始化访问。
+        throw err;
       }
     })();
     return initPromise;
@@ -542,7 +605,7 @@ function getSessionDedup(sessionKey: string) {
           contextWindow = resolvedCtx.contextWindow;
           // Factor in systemPromptAddition overhead from previous round
           _overheadCacheKey = (params as any).sessionKey ?? (params as any).conversationId ?? "default";
-          const overheadTokens = _sessionOverheadCache.get(_overheadCacheKey) ?? 0;
+          const overheadTokens = getOverhead(_overheadCacheKey);
           const effectiveTokenCount = estimatedTokens + overheadTokens;
           const tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
@@ -1041,7 +1104,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // Trim from sections array, then rebuild systemPromptAddition
           // ==================================================================
           if (wm && sections.length > 0) {
-            const estimateTotal = () => estimateTokensFromMessages(finalMessages) + Math.floor(systemPromptAddition.length / 4);
+            // P0-4 H-5: finalMessages 在此循环内不变，把 estimateTokensFromMessages(finalMessages)
+            // 提到循环外只算一次。修复前 estimateTotal() 每次迭代都做 O(C) charCodeAt 全量遍历，
+            // S 个 section 时整体 O(S×C)，且 finalMessages 在高压下体量很大，纯属重复浪费。
+            const finalMsgTokens = estimateTokensFromMessages(finalMessages);
+            const estimateTotal = () => finalMsgTokens + Math.floor(systemPromptAddition.length / 4);
             const budgetCeiling = contextWindow * 0.85;
             let trimmed = 0;
             while (estimateTotal() > budgetCeiling && sections.length > 0) {
@@ -1139,7 +1206,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             additionTokens = estimateTokensFromText(systemPromptAddition);
           }
           // Cache for next-round tier estimation (per-session)
-          _sessionOverheadCache.set(_overheadCacheKey, additionTokens);
+          setOverhead(_overheadCacheKey, additionTokens);
           // P0: Final hard-truncation safety net
           // P2-15: 重写 minified 风格代码（var te=.../var bf/while splice）为可读形式。
           // 当总 token 超过 contextWindow 的 85% 时，从非 system 消息头部移除直到达标。
@@ -1343,7 +1410,15 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
 
           // FIX: ensure adapter + deps are initialized before compacting
-          await ensureInitialized();
+          // SEC-4 H-10: ensureInitialized 现会 rethrow，此处捕获并返回 init failed，
+          // 避免 compact 静默继续导致后续 _losslessClawAdapter 等空指针。
+          try {
+            await ensureInitialized();
+          } catch (initErr) {
+            const errMsg = initErr instanceof Error ? initErr.message : String(initErr);
+            logger?.error?.("compact: init failed", { err: errMsg });
+            return { ok: false, compacted: false, reason: 'init failed: ' + errMsg };
+          }
 
         try {
           // Non-blocking compaction strategy:
@@ -1357,19 +1432,26 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           let summaryContent: string | undefined;
           let adapterCompacted = false;
           if (_adapterConnected) {
+            // P0-3b H-4 + SEC-10 M-16: 捕获 timer/abort listener handle，finally 中清理，
+            // 避免高压超时后定时器与 abort listener 泄漏；并对未决的 timeout/abort promise 预吞 reject。
+            let compactTimer: ReturnType<typeof setTimeout> | undefined;
+            const compactTimeoutPromise = new Promise<never>((_, reject) => {
+              compactTimer = setTimeout(() => reject(new Error('compact: 300s timeout reached')), 300_000);
+            });
+            compactTimeoutPromise.catch(() => {});
+            let abortListener: (() => void) | null = null;
+            const abortOnCompact = signal ? new Promise<never>((_, reject) => {
+              if (signal.aborted) reject(new Error('compaction aborted'));
+              else {
+                abortListener = () => reject(new Error('compaction aborted'));
+                signal.addEventListener('abort', abortListener, { once: true });
+              }
+            }) : null;
+            if (abortOnCompact) abortOnCompact.catch(() => {});
             try {
-              const compactTimeout = new Promise<{ summary?: string }>((_, reject) => {
-                setTimeout(() => reject(new Error('compact: 300s timeout reached')), (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') as number) || 900_000);
-              });
-              const abortOnCompact = signal
-                ? new Promise((_, reject) => {
-                    if (signal.aborted) reject(new Error('compaction aborted'));
-                    else signal.addEventListener('abort', () => reject(new Error('compaction aborted')), { once: true });
-                  })
-                : null;
               const compactResult: any = await Promise.race([
                 _losslessClawAdapter.compact(params),
-                compactTimeout,
+                compactTimeoutPromise,
                 ...(abortOnCompact ? [abortOnCompact] : []),
               ]);
               // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
@@ -1387,22 +1469,31 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               } else {
                 logger?.warn?.("compact: background DAG compaction failed", { err: ceErr });
               }
+            } finally {
+              if (compactTimer !== undefined) clearTimeout(compactTimer);
+              if (abortListener && signal) { try { signal.removeEventListener('abort', abortListener); } catch {} }
             }
           } else {
             logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");
           }
 
           // --- Promise.race + 900s (15min) timeout: onCompaction hook (backup + Neo4j marker) ---
+          // P0-3b H-4 + SEC-10 M-16: 同 DAG compact 块，捕获 timer/abort listener handle 并在 finally 清理。
+          let hookTimer: ReturnType<typeof setTimeout> | undefined;
+          const hookTimeoutPromise = new Promise<never>((_, reject) => {
+            hookTimer = setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), 300_000);
+          });
+          hookTimeoutPromise.catch(() => {});
+          let hookAbortListener: (() => void) | null = null;
+          const abortOnHook = signal ? new Promise<never>((_, reject) => {
+            if (signal.aborted) reject(new Error('onCompaction aborted'));
+            else {
+              hookAbortListener = () => reject(new Error('onCompaction aborted'));
+              signal.addEventListener('abort', hookAbortListener, { once: true });
+            }
+          }) : null;
+          if (abortOnHook) abortOnHook.catch(() => {});
           try {
-            const hookTimeout = new Promise((_, reject) => {
-              setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') as number) || 900_000);
-            });
-            const abortOnHook = signal
-              ? new Promise((_, reject) => {
-                  if (signal.aborted) reject(new Error('onCompaction aborted'));
-                  else signal.addEventListener('abort', () => reject(new Error('onCompaction aborted')), { once: true });
-                })
-              : null;
             // Resolve memoryDir from params or api.config for onCompaction
             // Derive memoryDir from sessionFile provided by SDK (authoritative)
             const { resolveMemoryDir } = await import("./core/debt-manager.js");
@@ -1426,7 +1517,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 unregister: () => {},
                 _losslessClawAdapter: _losslessClawAdapter,
               }),
-              hookTimeout,
+              hookTimeoutPromise,
               ...(abortOnHook ? [abortOnHook] : []),
             ]);
           } catch (hookErr) {
@@ -1438,6 +1529,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             } else {
               logger?.warn?.("compact: onCompaction hook failed (non-fatal)", { err: hookErr });
             }
+          } finally {
+            if (hookTimer !== undefined) clearTimeout(hookTimer);
+            if (hookAbortListener && signal) { try { signal.removeEventListener('abort', hookAbortListener); } catch {} }
           }
 
           const tokensBefore = params.currentTokenCount ?? 0;
@@ -1540,7 +1634,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     //   2. qmd MCP health check
     //   3. (future) PENDING experience distillation
     // -------------------------------------------------------------------
-    const HB_INTERVAL_MS = 5 * 60 * 1000;
+    const HB_INTERVAL_MS = DEFAULTS.heartbeat.intervalMs;
     let hbTimer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | null = null;
     let lastDistillationRun = 0;
     let hbDedupCleanupCounter = 0;  // Clean dedup cache every 15 heartbeats (~75min)
@@ -1599,50 +1693,59 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       const t0 = Date.now();
       try {
         // --- 1. Compaction pressure check (scan .lossless/ directories) ---
+        // P2-4 M-8: 原 readdirSync/readFileSync/existsSync 同步阻塞事件循环；
+        // 且 sessionDir 在阈值检测与超限写 debt 两处各扫描一次。改为 fs/promises 异步，
+        // 并用 sessionDataCache 缓存 sessionDir 的 files 与解析结果，超限分支复用，不再二次扫描。
         try {
-          const { readdirSync, readFileSync, existsSync } = await import("node:fs");
+          const { readdir, readFile, stat } = await import("node:fs/promises");
           const { join } = await import("node:path");
-          const wsDir = process.env.OPENCLAW_WORKSPACE || 
-            (typeof api?.config?.workspace === "string" ? api.config.workspace : 
+          const dirExists = async (p: string): Promise<boolean> => {
+            try { const s = await stat(p); return s.isDirectory(); } catch { return false; }
+          };
+          const wsDir = process.env.OPENCLAW_WORKSPACE ||
+            (typeof api?.config?.workspace === "string" ? api.config.workspace :
              (typeof process?.cwd === "function" ? process.cwd() : null));
-          if (wsDir && existsSync) {
+          if (wsDir) {
             const losslessDir = join(wsDir, ".lossless");
-            
-            // pending messages count
+
+            // pending messages count + cache parsed session data for reuse
             let pendingMessages = 0;
             const sessionDir = join(losslessDir, "sessions");
-            if (existsSync(sessionDir)) {
-              const files = readdirSync(sessionDir).filter((f) => f.endsWith(".json"));
+            // sessionDataCache: 缓存 sessionDir 文件名与解析结果，超限写 debt 分支直接复用
+            const sessionDataCache: { file: string; data: any }[] = [];
+            if (await dirExists(sessionDir)) {
+              const files = (await readdir(sessionDir)).filter((f) => f.endsWith(".json"));
               for (const sf of files) {
                 try {
-                  const data = JSON.parse(readFileSync(join(sessionDir, sf), "utf8"));
+                  const data = JSON.parse(await readFile(join(sessionDir, sf), "utf8"));
                   pendingMessages += Array.isArray(data.messages) ? data.messages.length : 0;
+                  sessionDataCache.push({ file: sf, data });
                 } catch { /* skip */ }
               }
             }
-            
+
             // summary fragments count
             let summaryFragments = 0;
             const summaryDir = join(losslessDir, "summaries");
-            if (existsSync(summaryDir)) {
-              summaryFragments = readdirSync(summaryDir).filter((f) => f.endsWith(".json")).length;
+            if (await dirExists(summaryDir)) {
+              summaryFragments = (await readdir(summaryDir)).filter((f) => f.endsWith(".json")).length;
             }
-            
+
             // token ratio from debt files
             let maxTokenRatio = 0;
             const debtDir = join(losslessDir, "debt");
-            if (existsSync(debtDir)) {
-              const debtFiles = readdirSync(debtDir).filter((f) => f.endsWith(".json"));
+            if (await dirExists(debtDir)) {
+              const debtFiles = (await readdir(debtDir)).filter((f) => f.endsWith(".json"));
               for (const df of debtFiles) {
                 try {
-                  const debt = JSON.parse(readFileSync(join(debtDir, df), "utf8"));
+                  const debt = JSON.parse(await readFile(join(debtDir, df), "utf8"));
                   if (debt.currentTokenCount) {
                     maxTokenRatio = Math.max(maxTokenRatio, debt.currentTokenCount / 262144);
                   }
                 } catch { /* skip */ }
               }
             }
-            
+
             // Check thresholds
             const signals = [];
             if (pendingMessages >= 15) signals.push("pending_msgs>=" + pendingMessages);
@@ -1652,17 +1755,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               logger?.warn?.("heartbeat: pressure threshold(s) exceeded, writing debt for affected sessions", { signals });
               // writeCompactionDebt is already imported at top; use it directly
               try {
-                if (existsSync(sessionDir)) {
-                  const files = readdirSync(sessionDir).filter((f) => f.endsWith(".json"));
-                  for (const sf of files) {
-                    try {
-                      const data = JSON.parse(readFileSync(join(sessionDir, sf), "utf8"));
-                      const convId = getConversationId(data.sessionKey, String(data.sessionId || ''));
-                      if (!convId) continue;
-                      const tokenCount = Math.round((maxTokenRatio || 0.5) * 262144);
-                      writeCompactionDebt(convId, 114688, tokenCount, "hb_pressure_" + signals.length + "dims");
-                    } catch { /* skip bad session file */ }
-                  }
+                // 复用 sessionDataCache，不再二次扫描 sessionDir
+                for (const { data } of sessionDataCache) {
+                  try {
+                    const convId = getConversationId(data.sessionKey, String(data.sessionId || ''));
+                    if (!convId) continue;
+                    const tokenCount = Math.round((maxTokenRatio || 0.5) * 262144);
+                    writeCompactionDebt(convId, 114688, tokenCount, "hb_pressure_" + signals.length + "dims");
+                  } catch { /* skip bad session file */ }
                 }
               } catch (debtWriteErr) {
                 logger?.warn?.("heartbeat: debt write failed", { err: String(debtWriteErr) });

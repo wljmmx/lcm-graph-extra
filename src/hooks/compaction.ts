@@ -13,7 +13,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type { PluginInstance } from '../register';
-import { resolveNeo4jConfig } from '../config/neo4j-helper';
+// P2-6 H-12: resolveNeo4jConfig 已移除（step 3 死代码块删除后无引用）。
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -189,27 +189,13 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
       }
   }
   // --- step 3 — post-compaction entity extraction -------------------------
-  try {
-    const { GraphAdapter } = await import('../adapters/graph-adapter');
-    const adapter = new GraphAdapter(
-      resolveNeo4jConfig(undefined),
-      { enabled: true, searchLimit: 5 },
-    );
-    // 记录压缩事件到 Neo4j（用于跟踪）
-    await adapter.query(`
-      MERGE (e:CompactionEvent {id: $id})
-      ON CREATE SET
-        e.timestamp = timestamp(),
-        e.filesBackedUp = $files,
-        e.backupDir = $backupDir
-    `, {
-      id: `compact_${Date.now()}`,
-      files: fileCount,
-      backupDir,
-    });
-  } catch (err) {
-    logger?.warn?.('compaction: Neo4j event logging failed', { err });
-  }
+  // P2-6 H-12/H-15: 移除死代码块。原代码 `new GraphAdapter(...)` + `adapter.query(...)`
+  // 存在两个问题：
+  // 1. GraphAdapter 无 query 方法 → 调用必抛 TypeError，被 catch 静默吞掉，整块无副作用但也无效果。
+  // 2. 即便 query 存在，new GraphAdapter 绕过 index.ts 的单例 graphAdapter，
+  //    会创建第二个 Neo4j driver（连接池浪费 + 状态不同步）。
+  // CompactionEvent 记录功能从未生效，移除死代码比保留误导性调用更诚实。
+  // 若未来需要压缩事件追踪，应通过 index.ts 暴露的 graphAdapter 单例实现。
 
   // --- step 4 — record DAG snapshot marker ------------------------------
   try {

@@ -16,6 +16,8 @@ import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger } from '../utils/logger.js';
+// P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
+import { DEFAULTS } from '../config/defaults.js';
 
 
 class LRUCache<K, V> {
@@ -128,18 +130,28 @@ function makeNodeId(name: string, typeName: string): string {
 
 type GmModule = Record<string, any>;
 
+/** SEC-L: 简单字符串 hash（djb2 变体），用于 searchCache key 后缀防碰撞。 */
+function hashString(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
 export class GraphAdapter {
   public conflictLogger = new ConflictLogger();
   private mod: GmModule | null = null;
   private driver: any = null;
   private _connectFailed = false;
   private _connectRetryCount = 0;
-  private readonly maxRetries = 3;
+  // P2-3 H-16: 重试次数与冷却期改为引用 DEFAULTS.graph，避免魔术数字散落
+  private readonly maxRetries = DEFAULTS.graph.maxRetries;
   // P1-10 GMR-1: 连接失败冷却期。原代码 _connectFailed=true 后无自动恢复路径，
   // 一旦 graph-memory-pro 短暂不可用，L3/L4 永久降级直到插件重载。
   // 加 _lastFailTime + 冷却期（60s），冷却期满后自动重置允许重试。
   private _lastFailTime = 0;
-  private readonly reconnectCooldownMs = 60_000;
+  private readonly reconnectCooldownMs = DEFAULTS.graph.reconnectCooldownMs;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
   private logger: Logger;
@@ -148,7 +160,8 @@ export class GraphAdapter {
   private _embedFn: any = null;
   private _llm?: (system: string, user: string) => Promise<string>;
 
-  private searchCache = new LRUCache(50, 300 * 1000);
+  // P2-3 H-16: searchWithCache 的 LRU 容量与 TTL 改为引用 DEFAULTS.graph
+  private searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
 
   constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: Logger) {
     this.neo4jConfig = neo4jConfig;
@@ -311,23 +324,17 @@ export class GraphAdapter {
 
   /* @deprecated - cache-aware search wrapper */
   async searchWithCache(query: string, limit?: number): Promise<RetrievalResult[]> {
-    const key = `s:${query.slice(0,200).toLowerCase().trim()}`;
+    // SEC-L: 修复前 key 仅截断前 200 字符，超长查询（>200）会碰撞。
+    // 加 full-hash 后缀区分，前缀保留便于调试。
+    const fullHash = hashString(query.toLowerCase().trim());
+    const key = `s:${query.slice(0, 50).toLowerCase().trim()}:${fullHash}`;
     const cached = this.searchCache.get(key);
     if (cached) return cached as RetrievalResult[];
     let results = await this.search(query, limit);
     if (!Array.isArray(results)) results = [];
-    // PPR rerank (in case search() didn't have enough data)
-    const cacheNodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
-    if (cacheNodeIds.length >= 2) {
-      const pprScores = await this.rerankByPageRank(cacheNodeIds as string[]);
-      if (pprScores.size > 0) {
-        results.sort((a, b) => {
-          const sa = pprScores.get(a.metadata?.nodeId as string) ?? 0.5;
-          const sb = pprScores.get(b.metadata?.nodeId as string) ?? 0.5;
-          return sb - sa;
-        });
-      }
-    }
+    // PERF-M2 M-2: 移除重复 rerank。search() 内部已在 nodes.length >= 2 时执行过 rerankByPageRank，
+    // 此处重复调用纯属浪费。search() 未 rerank 的唯一情况是 nodes.length < 2，
+    // 此时原 length >= 2 守卫也会跳过，故可安全移除。
     // Community enrichment — batch findById via raw Cypher (avoids N round-trips)
     const nodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
     if (nodeIds.length > 0) {
@@ -401,12 +408,30 @@ export class GraphAdapter {
         return { ...evt, boostedScore: (Number(evt.properties?.pagerank ?? 0.5)) + scenarioBonus + techBonus + urgencyBoost };
       }).sort((a: any, b: any) => b.boostedScore - a.boostedScore);
 
+      // P1-1 M-1: 消除 N+1 —— 原代码 per-event 调用 getEdgesForNodes（共 rl 次往返），
+      // 改为一次性批量取所有 top events 的 edges，再在内存中按 source id 分组成 Map<eventId, edges[]>，
+      // 遍历 topEvents 时从 Map 取对应 edges。
+      const topEvents = ranked.slice(0, rl);
+      const topIds = topEvents.map((evt: any) => evt.id).filter(Boolean);
+      const rawEdges = topIds.length > 0 ? await mod.getEdgesForNodes(this.driver, topIds) : [];
+      const allEdges: any[] = rawEdges ?? [];
+      // 按 source id 分组（防御性多字段查找，兼容不同 edge 形态）
+      const edgesBySource = new Map<string, any[]>();
+      for (const e of allEdges) {
+        const srcId = e.fromId ?? e.sourceId ?? e.from ?? e.source;
+        if (!srcId) continue;
+        const list = edgesBySource.get(srcId) ?? [];
+        list.push(e);
+        edgesBySource.set(srcId, list);
+      }
+
       const out: RetrievalResult[] = [];
-      for (const evt of ranked.slice(0, rl)) {
+      for (const evt of topEvents) {
         const name = evt.name ?? evt.properties?.name ?? '';
         const desc = evt.description ?? evt.properties?.description ?? '';
-        const edges = await mod.getEdgesForNodes(this.driver, [evt.id]);
-        const sols = (edges ?? []).filter((e: any) => e.type === 'SOLVED_BY');
+        const edges = edgesBySource.get(evt.id) ?? [];
+        // 防御性多字段查找 type/label（兼容不同 edge 形态）
+        const sols = edges.filter((e: any) => (e.type ?? e.label) === 'SOLVED_BY');
         let expText = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
         for (const s of sols) expText += `\n- ${s.targetName ?? 'Unknown'}`;
         out.push({
@@ -461,18 +486,12 @@ export class GraphAdapter {
           };
         });
 
-        // First batch check which nodes already exist (to count conflicts)
-        const existingIds: string[] = [];
-        for (const n of nodeData) {
-          const record = await session.run(
-            'MATCH (n:' + n.label + ' { id: $id }) RETURN n',
-            { id: n.id },
-          );
-          if (record.records.length > 0) {
-            existingIds.push(n.id);
-            cc++;
-          }
-        }
+        // P1-2 M-1: 节点存在性检查改为单条 UNWIND（原 per-node N 次 MATCH 查询）
+        const existingResult = await session.run(
+          `UNWIND $nodes AS node MATCH (n { id: node.id }) RETURN collect(node.id) AS existingIds`,
+          { nodes: nodeData },
+        );
+        cc += (existingResult.records[0]?.get('existingIds') ?? []).length;
 
         // Batch MERGE all nodes
         const mergeLabels = new Set(nodeData.map((n) => n.label));
@@ -522,27 +541,28 @@ export class GraphAdapter {
         }
       }
 
-      // Batch upsert edges in a single session
+      // P1-2 M-1: 边 upsert 改为按 type 分组的 UNWIND MERGE
+      // （Cypher 关系类型不可参数化，故按 mapEdgeType 结果分组后逐组单条 UNWIND MERGE）
       if (validRelations.length > 0) {
+        const now = Date.now();
+        const edgesByType = new Map<string, any[]>();
         for (const rel of validRelations) {
           const mt = mapEdgeType(rel.type);
-          const fromId = makeNodeId(rel.from, 'TASK');
-          const toId = makeNodeId(rel.to, 'TASK');
-
+          const entry = {
+            fromId: makeNodeId(rel.from, 'TASK'),
+            toId: makeNodeId(rel.to, 'TASK'),
+            instruction: (rel.instruction ?? '').slice(0, 500),
+            weight: 1.0,
+            updatedAt: now,
+          };
+          const list = edgesByType.get(mt) ?? [];
+          list.push(entry);
+          edgesByType.set(mt, list);
+        }
+        for (const [mt, group] of edgesByType) {
           await session.run(
-            `MATCH (a { id: $fromId }), (b { id: $toId })
-             MERGE (a)-[r:${mt}]->(b)
-             SET r.instruction = $instruction,
-                 r.weight = $weight,
-                 r.updatedAt = $updatedAt
-             ON CREATE SET r.createdAt = $updatedAt`,
-            {
-              fromId,
-              toId,
-              instruction: (rel.instruction ?? '').slice(0, 500),
-              weight: 1.0,
-              updatedAt: Date.now(),
-            },
+            `UNWIND $edges AS edge MATCH (a { id: edge.fromId }), (b { id: edge.toId }) MERGE (a)-[r:${mt}]->(b) SET r.instruction = edge.instruction, r.weight = edge.weight, r.updatedAt = edge.updatedAt ON CREATE SET r.createdAt = edge.updatedAt`,
+            { edges: group },
           );
         }
       }

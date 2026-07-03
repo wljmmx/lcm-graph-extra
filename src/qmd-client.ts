@@ -405,7 +405,9 @@ export class QmdClient {
 
     // Pure lex -> qmd search
     if (hasLex && !hasVec && !hasHyde) {
-      const query = params.searches.find((s) => s.type === "lex")!.query;
+      // SEC-L: 修复前 `find(...).query!` 非空断言。虽然 hasLex 已确认存在，但显式检查更稳健。
+      const lexEntry = params.searches.find((s) => s.type === "lex");
+      const query = lexEntry?.query ?? "";
       const args = ["search", query, "-n", n, "--format", "json"];
       if (!withRerank) args.push("--no-rerank");
       return { cmd: "qmd", args };
@@ -413,7 +415,8 @@ export class QmdClient {
 
     // Pure vec -> qmd vsearch
     if (hasVec && !hasLex && !hasHyde) {
-      const query = params.searches.find((s) => s.type === "vec")!.query;
+      const vecEntry = params.searches.find((s) => s.type === "vec");
+      const query = vecEntry?.query ?? "";
       return { cmd: "qmd", args: ["vsearch", query, "-n", n, "--format", "json"] };
     }
 
@@ -434,7 +437,10 @@ export class QmdClient {
       lines.push(`${s.type}: ${s.query}`);
     }
 
-    const queryStr = lines.join("\\n");
+    // SEC M-15: 修复前 lines.join("\\n") 是字面量反斜杠+n（2 字符），
+    // 多检索 CLI fallback 收到 "lex:q\nvec:q" 单行文本而非多行，导致解析失败。
+    // 改为真实换行符 "\n"。
+    const queryStr = lines.join("\n");
     const args = ["query", queryStr, "-n", n, "--format", "json"];
     if (!withRerank) args.push("--no-rerank");
     return { cmd: "qmd", args };
@@ -465,5 +471,13 @@ export class QmdClient {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
     }
+  }
+
+  /**
+   * 释放客户端持有的资源（recoveryTimer 等）。
+   * SEC-2 H-8: 调用方应在 finally 块中调用以避免定时器泄漏。
+   */
+  dispose(): void {
+    this.clearRecovery();
   }
 }

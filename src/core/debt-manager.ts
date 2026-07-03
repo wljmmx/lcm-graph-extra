@@ -60,6 +60,57 @@ function openDb(dbPath?: string): any | null {
   }
 }
 
+// ─── Singleton DB Cache (P1-3 M-5) ─────────────────────
+// 单例 DB 连接 + prepared statement 缓存：避免每次 CRUD 都重新打开/关闭连接，
+// 并复用 prepared statement 以降低开销。
+
+const _debtDbCache = new Map<string, { db: any; stmts: Map<string, any> }>();
+
+function getDebtDb(dbPath?: string): any | null {
+  const resolved = dbPath ?? findDbPath();
+  if (!resolved) return null;
+  const cached = _debtDbCache.get(resolved);
+  if (cached) {
+    // 验证连接仍可用（文件可能被外部删除/替换）
+    try {
+      cached.db.prepare("SELECT 1").get();
+      return cached.db;
+    } catch {
+      try { cached.db.close(); } catch {}
+      _debtDbCache.delete(resolved);
+    }
+  }
+  const db = openDb(resolved);
+  if (!db) return null;
+  _debtDbCache.set(resolved, { db, stmts: new Map() });
+  return db;
+}
+
+function getDebtStmt(db: any, dbPath: string | undefined, key: string, sql: string): any | null {
+  const resolved = dbPath ?? findDbPath();
+  if (!resolved) return null;
+  const entry = _debtDbCache.get(resolved);
+  if (!entry) return null;
+  let stmt = entry.stmts.get(key);
+  if (!stmt) {
+    try {
+      stmt = db.prepare(sql);
+      entry.stmts.set(key, stmt);
+    } catch {
+      return null;
+    }
+  }
+  return stmt;
+}
+
+export function closeDebtDb(): void {
+  for (const [, entry] of _debtDbCache) {
+    try { entry.db.close(); } catch {}
+    entry.stmts.clear();
+  }
+  _debtDbCache.clear();
+}
+
 // ─── Debt CRUD ──────────────────────────────────────────
 
 /**
@@ -67,13 +118,14 @@ function openDb(dbPath?: string): any | null {
  * Higher currentTokenCount / tokenBudget = more urgent.
  */
 export function getPendingDebts(dbPath?: string): DebtRecord[] {
-  const db = openDb(dbPath);
+  const db = getDebtDb(dbPath);
   if (!db) return [];
 
   try {
-    return db.prepare(
-      "SELECT conversation_id as conversationId, pending, requested_at as requestedAt, reason, running, token_budget as tokenBudget, current_token_count as currentTokenCount, updated_at as updatedAt FROM conversation_compaction_maintenance WHERE pending = 1 AND running = 0 ORDER BY (CAST(current_token_count AS REAL) / NULLIF(token_budget, 0)) DESC, requested_at ASC LIMIT 10"
-    ).all().map((r: any) => ({
+    const stmt = getDebtStmt(db, dbPath, 'getPendingDebts',
+      "SELECT conversation_id as conversationId, pending, requested_at as requestedAt, reason, running, token_budget as tokenBudget, current_token_count as currentTokenCount, updated_at as updatedAt FROM conversation_compaction_maintenance WHERE pending = 1 AND running = 0 ORDER BY (CAST(current_token_count AS REAL) / NULLIF(token_budget, 0)) DESC, requested_at ASC LIMIT 10");
+    if (!stmt) return [];
+    return stmt.all().map((r: any) => ({
       conversationId: r.conversationId,
       pending: !!r.pending,
       requestedAt: r.requestedAt,
@@ -85,23 +137,20 @@ export function getPendingDebts(dbPath?: string): DebtRecord[] {
     }));
   } catch {
     return [];
-  } finally {
-    db.close();
   }
 }
 
 export function markDebtRunning(conversationId: number, dbPath?: string): boolean {
-  const db = openDb(dbPath);
+  const db = getDebtDb(dbPath);
   if (!db) return false;
   try {
-    db.prepare(
-      "UPDATE conversation_compaction_maintenance SET running = 1, updated_at = datetime('now') WHERE conversation_id = ? AND pending = 1"
-    ).run(conversationId);
+    const stmt = getDebtStmt(db, dbPath, 'markDebtRunning',
+      "UPDATE conversation_compaction_maintenance SET running = 1, updated_at = datetime('now') WHERE conversation_id = ? AND pending = 1");
+    if (!stmt) return false;
+    stmt.run(conversationId);
     return true;
   } catch {
     return false;
-  } finally {
-    db.close();
   }
 }
 
@@ -111,17 +160,16 @@ export function markDebtRunning(conversationId: number, dbPath?: string): boolea
  * 现将 reason 写入 reason 列，保留清账原因便于审计。
  */
 export function clearDebt(conversationId: number, reason?: string, dbPath?: string): boolean {
-  const db = openDb(dbPath);
+  const db = getDebtDb(dbPath);
   if (!db) return false;
   try {
-    db.prepare(
-      "UPDATE conversation_compaction_maintenance SET pending = 0, running = 0, reason = ?, updated_at = datetime('now') WHERE conversation_id = ?"
-    ).run(reason ?? 'cleared', conversationId);
+    const stmt = getDebtStmt(db, dbPath, 'clearDebt',
+      "UPDATE conversation_compaction_maintenance SET pending = 0, running = 0, reason = ?, updated_at = datetime('now') WHERE conversation_id = ?");
+    if (!stmt) return false;
+    stmt.run(reason ?? 'cleared', conversationId);
     return true;
   } catch {
     return false;
-  } finally {
-    db.close();
   }
 }
 
@@ -131,17 +179,16 @@ export function clearDebt(conversationId: number, reason?: string, dbPath?: stri
  * 现改为保留 pending 状态以便重试，并将失败原因写入 reason 列留痕。
  */
 export function markDebtFailed(conversationId: number, reason: string, dbPath?: string): boolean {
-  const db = openDb(dbPath);
+  const db = getDebtDb(dbPath);
   if (!db) return false;
   try {
-    db.prepare(
-      "UPDATE conversation_compaction_maintenance SET running = 0, reason = ?, updated_at = datetime('now') WHERE conversation_id = ? AND pending = 1"
-    ).run(reason, conversationId);
+    const stmt = getDebtStmt(db, dbPath, 'markDebtFailed',
+      "UPDATE conversation_compaction_maintenance SET running = 0, reason = ?, updated_at = datetime('now') WHERE conversation_id = ? AND pending = 1");
+    if (!stmt) return false;
+    stmt.run(reason, conversationId);
     return true;
   } catch {
     return false;
-  } finally {
-    db.close();
   }
 }
 
@@ -257,9 +304,9 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
     // P3-5: 失败不清账 —— 保留 pending=1 以便下次轮询重试，仅重置 running=0 并记录原因。
     // 原先直接 clearDebt 会静默丢弃失败的工作，永不重试。
     markDebtFailed(debt.conversationId, "failed: " + msg.slice(0, 200));
-  } finally {
-    activeJobs.delete(debt.conversationId);
   }
+  // SEC-7 M-13: activeJobs.delete 已移至调用方 pollAndDispatch 的 .finally 包装中，
+  // 以确保所有 settle 路径（含上方 !_onCompactionFn / markDebtRunning=false 早返回）都清理。
 }
 
 // ─── Poll & Dispatch ────────────────────────────────────
@@ -294,7 +341,11 @@ async function pollAndDispatch(): Promise<void> {
     if (dispatched >= slotsAvailable) break;
     if (activeJobs.has(debt.conversationId)) continue;
 
-    const promise = processSingleDebt(debt);
+    // SEC-7 M-13: 用 .finally 包装确保所有 settle 路径（含早返回）都清理 activeJobs。
+    // 修复前早返回路径（!_onCompactionFn / markDebtRunning=false）绕过内层 finally，
+    // 且调用方 activeJobs.set 在 processSingleDebt 之后，同步早返回会导致 delete 先于 set 执行 → 条目泄漏。
+    // .finally 回调在微任务中执行，保证 set 先于 delete。
+    const promise = processSingleDebt(debt).finally(() => activeJobs.delete(debt.conversationId));
     activeJobs.set(debt.conversationId, promise);
     dispatched++;
   }
@@ -304,7 +355,11 @@ async function pollAndDispatch(): Promise<void> {
     if (dispatched >= slotsAvailable) break;
     if (activeJobs.has(debt.conversationId)) continue;
 
-    const promise = processSingleDebt(debt);
+    // SEC-7 M-13: 用 .finally 包装确保所有 settle 路径（含早返回）都清理 activeJobs。
+    // 修复前早返回路径（!_onCompactionFn / markDebtRunning=false）绕过内层 finally，
+    // 且调用方 activeJobs.set 在 processSingleDebt 之后，同步早返回会导致 delete 先于 set 执行 → 条目泄漏。
+    // .finally 回调在微任务中执行，保证 set 先于 delete。
+    const promise = processSingleDebt(debt).finally(() => activeJobs.delete(debt.conversationId));
     activeJobs.set(debt.conversationId, promise);
     dispatched++;
   }

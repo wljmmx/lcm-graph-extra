@@ -2,30 +2,29 @@
  * lcm-graph-extra — Token Usage Tracker
  *
  * Asynchronous token usage tracking module.
- * Uses DeepSeek V3 BPE tokenizer via Python subprocess for accurate counting.
- * Falls back to estimation for non-DeepSeek models.
+ *
+ * TEST-3 H-20: 原设计通过 Python 子进程调用 DeepSeek V3 BPE tokenizer 精确计数，
+ * 但 token-counter.py 从未提交到仓库（existsSync 永远 false），Python 路径是死代码，
+ * 实际运行永远降级为估算模式。已移除 Python 子进程相关代码，统一走估算。
+ * 若未来需要精确计数，可改用 worker_threads 池 + js-tiktoken 等 JS 原生库实现。
  *
  * Design:
- * - Python child process started once, reused for all requests (line protocol)
  * - Events emitted at key lifecycle points, processed asynchronously
  * - Independent SQLite database for usage records
  * - Failure-tolerant: errors log and swallow, never block main flow
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger } from '../utils/logger.js';
 
 // ─── Path resolution ─────────────────────────────────────────
 
-const __dirname = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const WORKSPACE = resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'workspace', 'main');
 const DB_DIR = resolve(WORKSPACE, '.openclaw/tmp/usage-history');
 const DB_PATH = resolve(DB_DIR, 'token_usage.db');
-const PYTHON_COUNTER = resolve(__dirname, 'src', 'async', 'token-counter.py');
+// TEST-3 H-20: PYTHON_COUNTER 与 fileURLToPath/import.meta.url 已移除（token-counter.py 不存在，死代码）。
 
 interface TokenCountResult {
   chars: number;
@@ -47,169 +46,26 @@ interface UsageRecord {
   completedAt?: number;
 }
 
-// ─── Token Counter (Python subprocess) ──────────────────────
+// ─── Token Counter (estimation-only) ───────────────────────
+// TEST-3 H-20: 移除 Python 子进程实现，统一走估算。
+// 原设计的 spawn/pingWithTimeout/processBuffer/drainQueue/queue 全部是死代码
+// （token-counter.py 不存在，existsSync 永远 false，ready 永远 false）。
+// 简化为纯估算实现，消除 ChildProcess/queue/buffer 等无用状态。
 
 class TokenCounter {
-  private proc: ChildProcess | null = null;
-  private buffer = '';
-  private pendingResolver: ((result: TokenCountResult) => void) | null = null;
-  private queue: Array<{ text: string; model: string; resolve: (r: TokenCountResult) => void }> = [];
-  private ready = false;
-  private initDone = false;
   private logger: Logger;
-  private exitCount = 0;
 
   constructor(logger?: Logger) {
     this.logger = resolveLogger(logger);
   }
 
   async init(): Promise<void> {
-    if (this.initDone) return;
-    this.initDone = true;
-
-    if (!existsSync(PYTHON_COUNTER)) {
-      this.logger.warn('[usage-tracker] Token counter script not found, using estimation');
-      return;
-    }
-
-    try {
-      // P0-3 BUG-2: 移除 timeout: 10000。Node spawn 实际不识别该选项，但为防止
-      // 任何情况下长驻 Python tokenizer 被超时杀死（10s 后被 kill → 重连 → 再被 kill
-      // → exitCount>3 永久降级为估算），显式不传 timeout。
-      this.proc = spawn('python3', [PYTHON_COUNTER], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      this.proc.stdout?.on('data', (data: Buffer) => {
-        this.buffer += data.toString();
-        this.processBuffer();
-      });
-
-      this.proc.stderr?.on('data', (data: Buffer) => {
-        const msg = data.toString().trim();
-        if (msg) this.logger.warn(`[usage-tracker] stderr: ${msg}`);
-      });
-
-      this.proc.on('exit', (code) => {
-        this.exitCount = (this.exitCount || 0) + 1;
-        if (this.exitCount > 3) {
-          this.logger.warn(`[usage-tracker] Process exited ${this.exitCount} times, switching to estimation mode`);
-          this.proc = null;
-          this.ready = false;
-          this.initDone = true;
-          return;
-        }
-        const delay = Math.min(1000 * Math.pow(2, this.exitCount), 30000);
-        this.logger.warn(`[usage-tracker] Process exited (code ${code}), attempt ${this.exitCount}/3, reconnecting in ${delay/1000}s`);
-        this.proc = null;
-        this.ready = false;
-        this.initDone = false;
-        setTimeout(() => { this.initDone = false; this.init(); }, delay);
-      });
-
-      // Wait for ready via ping
-      await this.pingWithTimeout();
-      this.ready = true;
-      this.logger.info('[usage-tracker] Token counter ready');
-    } catch (err) {
-      this.logger.warn(`[usage-tracker] Token counter init failed: ${err}`);
-    }
-  }
-
-  private pingWithTimeout(): Promise<void> {
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        this.logger.warn('[usage-tracker] Ping timeout, using estimation');
-        resolve();
-      }, 3000);
-      
-      this.send({ action: 'ping' });
-      // Listen for response in next processBuffer call
-      const origProcess = this.processBuffer.bind(this);
-      let responded = false;
-      this.processBuffer = () => {
-        origProcess();
-        if (!responded && this.buffer.includes('"ok"')) {
-          responded = true;
-          clearTimeout(timeout);
-          this.processBuffer = origProcess;
-          resolve();
-        }
-      };
-    });
-  }
-
-  private processBuffer(): void {
-    const lines = this.buffer.split('\n');
-    this.buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const response = JSON.parse(line);
-        if (response.error) {
-          this.logger.warn(`[usage-tracker] Count error: ${response.error}`);
-          if (this.pendingResolver) {
-            const p = this.pendingResolver;
-            this.pendingResolver = null;
-            p({ chars: 0, tokens: 0, model: '' });
-          }
-          // P0-3 BUG-2: 错误响应后也需排空队列
-          this.drainQueue();
-          continue;
-        }
-        if (this.pendingResolver) {
-          const p = this.pendingResolver;
-          this.pendingResolver = null;
-          p({
-            chars: response.chars || 0,
-            tokens: response.tokens || 0,
-            model: response.model || '',
-            method: response.method,
-          });
-          // P0-3 BUG-2: 响应解析后消费队列中下一个请求，否则排队 Promise 永不 resolve
-          this.drainQueue();
-        }
-      } catch (e) {
-        // Incomplete JSON line
-      }
-    }
-  }
-
-  /**
-   * P0-3 BUG-2: 当 pendingResolver 被消费后，从队列中取下一个请求发送给 tokenizer。
-   * 原代码 processBuffer 解析响应后从不消费 queue，并发 count() 时排队 Promise 永不 resolve，
-   * 导致内存泄漏 + 调用方挂起。
-   */
-  private drainQueue(): void {
-    if (this.queue.length === 0) return;
-    if (this.pendingResolver) return; // 已有在途请求
-    const next = this.queue.shift();
-    if (!next) return;
-    if (!this.ready || !this.proc) {
-      // 进程已退出，回退估算
-      next.resolve(this.estimate(next.text, next.model));
-      // 递归排空剩余
-      this.drainQueue();
-      return;
-    }
-    this.pendingResolver = next.resolve;
-    this.send({ action: 'count', text: next.text, model: next.model });
+    // TEST-3 H-20: 无外部进程需启动。保留空实现以维持 UsageTracker.lazyInit 的调用契约。
+    this.logger.debug?.('[usage-tracker] Token counter ready (estimation mode)');
   }
 
   count(text: string, model: string): Promise<TokenCountResult> {
-    if (!this.ready || !this.proc) {
-      return Promise.resolve(this.estimate(text, model));
-    }
-
-    return new Promise((resolve) => {
-      if (this.pendingResolver) {
-        this.queue.push({ text, model, resolve });
-        return;
-      }
-      this.pendingResolver = resolve;
-      this.send({ action: 'count', text, model });
-    });
+    return Promise.resolve(this.estimate(text, model));
   }
 
   private estimate(text: string, model: string): TokenCountResult {
@@ -219,15 +75,8 @@ class TokenCounter {
     return { chars: text.length, tokens, model, method: 'estimate' };
   }
 
-  private send(data: unknown): void {
-    if (this.proc?.stdin?.writable) {
-      this.proc.stdin.write(JSON.stringify(data) + '\n');
-    }
-  }
-
   close(): void {
-    this.proc?.kill();
-    this.proc = null;
+    // TEST-3 H-20: 无外部进程需清理。
   }
 }
 

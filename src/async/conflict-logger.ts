@@ -10,6 +10,7 @@
 import { appendFileSync, mkdirSync, statSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { DEFAULTS } from '../config/defaults.js';
 
 export interface ConflictRecord {
   /** Entity name that conflicted */
@@ -37,7 +38,8 @@ export interface ConflictRecord {
 
 export class ConflictLogger {
   /** P3-2: 内存中保留的最大冲突记录数，超出后丢弃最旧的（防止长生命周期内存泄漏） */
-  private static readonly MAX_IN_MEMORY = 1000;
+  // P2-3 H-16: 集中到 DEFAULTS.conflict
+  private static readonly MAX_IN_MEMORY = DEFAULTS.conflict.maxInMemory;
   /** P3-2: 单个日志文件大小上限（10MB），超出后轮转 */
   private static readonly MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
