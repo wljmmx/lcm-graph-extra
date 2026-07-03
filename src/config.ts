@@ -101,7 +101,15 @@ export const PluginConfigSchema = z.object({
     provider: z.enum(['openclaw_hooks', 'openai', 'ollama', 'custom']).default('openclaw_hooks'),
     model: z.string().default('ollama/qwen3.6:27b'),
   }).optional(),
-}).passthrough();
+
+  // Embedding config for GraphAdapter
+  embedding: z.object({
+    apiKey: z.string().optional(),
+    baseURL: z.string().optional(),
+    model: z.string().optional(),
+    dimensions: z.number().optional(),
+    keepAlive: z.string().optional(),
+  }).optional(),}).passthrough();
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;
 export type ExperienceTrigger = z.infer<typeof ExperienceTriggerSchema>;
