@@ -13,9 +13,6 @@ import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.j
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
 import type { EmbeddingPluginConfig } from '../config/neo4j-helper.js';
-import type { EmbeddingPluginConfig } from '../config/neo4j-helper.js';
-import type { EmbeddingPluginConfig } from '../config/neo4j-helper.js';
-import type { EmbeddingPluginConfig } from '../config/neo4j-helper.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
 
 

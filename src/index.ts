@@ -24,7 +24,7 @@ import { registerOperationalTools, closeNeo4jDriver } from './tools.js';
 import { UsageTracker } from "./async/usage-tracker"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
-import { resolveNeo4jConfig } from "./config/neo4j-helper";
+import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { withCircuitBreaker } from "./circuit-breaker.js";
 import { resolveContextProfile } from "./config.js";
 
@@ -344,7 +344,7 @@ function getSessionDedup(sessionKey: string) {
         });
         graphAdapter = new GraphAdapter(
           resolveNeo4jConfig(pluginConfig),
-          { enabled: true, searchLimit: 5 },
+          { enabled: true, searchLimit: 5, embedding: resolveEmbeddingConfig(pluginConfig) ?? undefined },
           logger,
         );
 
