@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 // ─── Path resolution ─────────────────────────────────────────
 
 const __dirname = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
-const WORKSPACE = resolve(process.env.HOME || '/home/wljmmx', '.openclaw/workspace/main');
+const WORKSPACE = resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'workspace', 'main');
 const DB_DIR = resolve(WORKSPACE, '.openclaw/tmp/usage-history');
 const DB_PATH = resolve(DB_DIR, 'token_usage.db');
 const PYTHON_COUNTER = resolve(__dirname, 'src', 'async', 'token-counter.py');

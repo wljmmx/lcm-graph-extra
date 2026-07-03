@@ -82,7 +82,7 @@ async function run() {
   }, 3);
   
   const rpt = results.map(r => r.name + ': avg=' + r.avg.toFixed(2) + 'ms, min=' + r.min.toFixed(2) + 'ms, max=' + r.max.toFixed(2) + 'ms').join('\n');
-  fs.writeFileSync('/home/wljmmx/.openclaw/workspace/main/workfiles/lcm-graph-extra/test/perf/qmd-results.json', JSON.stringify(results, null, 2));
+  fs.writeFileSync(path.join(__dirname, 'qmd-results.json'), JSON.stringify(results, null, 2));
   console.log('Results saved.');
   console.log('\n' + rpt);
 }

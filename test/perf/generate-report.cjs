@@ -134,6 +134,6 @@ lines.push('4. **图查询引擎 (graph-memory-pro):** searchNodes平均5-10ms�
 lines.push('5. **整体吞吐:** 单次完整检索流水线约20-50ms（QMD+Neo4j并行+Rerank+Merger），256K上下文窗口下按P95计算可支持~40次/秒的检索吞吐。');
 lines.push('');
 
-fs.writeFileSync('/home/wljmmx/.openclaw/workspace/main/workfiles/lcm-graph-extra/test/perf/REPORT-latest.md', lines.join('\n'));
+fs.writeFileSync(path.join(__dirname, 'REPORT-latest.md'), lines.join('\n'));
 console.log('Final report written.');
 console.log(lines.join('\n'));

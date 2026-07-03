@@ -74,7 +74,7 @@ async function run() {
   }, 30);
 
   // Save results
-  fs.writeFileSync("/home/wljmmx/.openclaw/workspace/main/workfiles/lcm-graph-extra/test/perf/perf-results.json", JSON.stringify(results, null, 2));
+  fs.writeFileSync(path.join(__dirname, 'perf-results.json'), JSON.stringify(results, null, 2));
   console.log("\nResults saved.");
 }
 

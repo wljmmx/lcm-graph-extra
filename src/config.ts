@@ -248,7 +248,7 @@ export function resolveContextProfile(
  * Uses os.homedir() instead of requiring os module at ESM import scope.
  */
 export function getDefaultConfigPath(): string {
-  return process.env.HOME || process.env.USERPROFILE || "/home/wljmmx" + "/.openclaw/openclaw.json";
+  return resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'openclaw.json');
 }
 export const DEFAULT_CONFIG: PluginConfig = {
   summaryStrategy: 'strategy',

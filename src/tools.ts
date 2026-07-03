@@ -30,7 +30,7 @@ function getPluginNeo4jConfig(): Record<string, unknown> | undefined {
   return _pluginNeo4jConfig;
 }
 
-const LCM_DB = "/home/wljmmx/.openclaw/lcm.db";
+const LCM_DB = resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'lcm.db');
 // Neo4j credentials resolved at runtime via neo4j-helper
 // Neo4j user resolved at runtime via neo4j-helper
 // Neo4j credentials resolved at runtime via neo4j-helper

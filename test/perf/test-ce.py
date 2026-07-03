@@ -7,9 +7,10 @@ import re
 from datetime import datetime, timezone
 from collections import defaultdict
 
-SESSIONS_JSON = "/home/wljmmx/.openclaw/agents/main/sessions/sessions.json"
-SESSIONS_DIR = "/home/wljmmx/.openclaw/agents/main/sessions"
-OUT_DIR = "/home/wljmmx/.openclaw/workspace/main/workfiles/lcm-graph-extra/test-perf"
+OPENCLAW_DIR = os.environ.get('OPENCLAW_DIR', os.path.expanduser('~/.openclaw'))
+SESSIONS_JSON = os.environ.get('SESSIONS_JSON', os.path.join(OPENCLAW_DIR, 'agents', 'main', 'sessions', 'sessions.json'))
+SESSIONS_DIR = os.environ.get('SESSIONS_DIR', os.path.join(OPENCLAW_DIR, 'agents', 'main', 'sessions'))
+OUT_DIR = os.environ.get('OUT_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'test-perf'))
 
 results = []
 

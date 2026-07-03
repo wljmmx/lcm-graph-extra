@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
-const EXT = '/home/wljmmx/.openclaw/extensions/lcm-graph-extra';
+const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
+const EXT = process.env.LCM_EXT_PATH || `${OPENCLAW_DIR}/extensions/lcm-graph-extra`;
 
 async function run() {
   const results = [];
@@ -92,7 +93,7 @@ async function run() {
   await DRIVER.close();
   
   const rpt = results.map(r => r.name + ': avg=' + r.avg.toFixed(2) + 'ms, min=' + r.min.toFixed(2) + 'ms, max=' + r.max.toFixed(2) + 'ms').join('\n');
-  fs.writeFileSync('/home/wljmmx/.openclaw/workspace/main/workfiles/lcm-graph-extra/test/perf/cypher-results.json', JSON.stringify(results, null, 2));
+  fs.writeFileSync(path.join(__dirname, 'cypher-results.json'), JSON.stringify(results, null, 2));
   console.log('Results saved.');
   console.log('\n' + rpt);
 }

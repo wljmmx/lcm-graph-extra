@@ -26,7 +26,7 @@ import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { withCircuitBreaker } from "./circuit-breaker.js";
-import { resolveContextProfile } from "./config.js";
+import { resolveContextProfile, PluginConfigSchema } from "./config.js";
 
 import {
   type PressureInfo,

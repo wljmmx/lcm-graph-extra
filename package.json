@@ -53,8 +53,12 @@
     "zod": "^3.24.0"
   },
   "peerDependencies": {
-    "@openclaw/graph-memory-pro": "^2.1.0",
     "openclaw": "*"
+  },
+  "peerDependenciesMeta": {
+    "@openclaw/graph-memory-pro": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
