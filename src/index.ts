@@ -241,7 +241,7 @@ export default definePluginEntry({
   id: "lcm-graph-extra",
   name: "LCM Graph Extra",
   description: "Coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
-
+  configSchema: buildJsonPluginConfigSchema(PluginConfigSchema),
   register(api: any) {
     const logger = api.logger;
 
