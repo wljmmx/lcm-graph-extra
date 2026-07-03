@@ -157,28 +157,25 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
           workspaceDir: memoryDir,
         },
       });
-      // CompactionResult 的实际结构: { actionTaken, authFailure?, tokensBefore, tokensAfter, .. }
-      // - actionTaken === true  → compaction 实际执行了 summary 生成
-      // - actionTaken === false + authFailure === true  → LLM 认证失败，summary 未生成
-      // - actionTaken === false（无 authFailure）→ token 未超标或无 leaf chunk，正常跳过
-      const didCompact = compactResult.actionTaken === true;
-      const authFailed = compactResult.authFailure === true;
+      // CompactionResult 结构: { ok, compacted, reason, summaryId, summary, result: { actionTaken, tokensBefore, tokensAfter, condensed, createdSummaryId, summary }, exhausted }
+      const didCompact = compactResult.compacted === true;
+      const resultData = compactResult.result ?? {};
 
-      if (authFailed) {
-        logger?.warn?.("compaction: LLM auth failure — summary NOT generated, will retry next cycle", {
-          actionTaken: compactResult.actionTaken,
-          authFailure: compactResult.authFailure,
-        });
-      } else if (didCompact) {
+      if (didCompact) {
         logger?.info?.("compaction: lossless-claw DAG compact completed", {
-          actionTaken: compactResult.actionTaken,
-          tokensBefore: compactResult.tokensBefore,
-          tokensAfter: compactResult.tokensAfter,
-          condensed: compactResult.condensed,
-          createdSummaryId: compactResult.createdSummaryId,
+          compacted: compactResult.compacted,
+          tokensBefore: resultData.tokensBefore,
+          tokensAfter: resultData.tokensAfter,
+          condensed: resultData.condensed,
+          createdSummaryId: resultData.createdSummaryId,
+          summaryId: compactResult.summaryId,
+          exhausted: compactResult.exhausted,
         });
       } else {
-        logger?.info?.("compaction: lossless-claw — no action needed (tokens within budget or no leaf chunk)");
+        logger?.info?.("compaction: lossless-claw — no action needed", {
+          reason: compactResult.reason,
+          exhausted: compactResult.exhausted,
+        });
       }
     } else {
       logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");

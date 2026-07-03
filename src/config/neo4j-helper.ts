@@ -107,7 +107,7 @@ export function resolveNeo4jSearchConfig(
  * Resolve embedding config from plugin config or defaults.
  * Uses EmbeddingConfig type from graph-memory-pro for unified configuration.
  */
-import type { EmbeddingConfig } from '@openclaw/graph-memory-pro';
+import type { EmbeddingConfig } from '../types.js';
 
 export function resolveEmbeddingConfig(
   pluginConfig: Record<string, unknown> | undefined,

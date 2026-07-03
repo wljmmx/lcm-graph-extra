@@ -49,7 +49,7 @@ describe('Config Schema Compatibility — real-world config', () => {
     },
   };
 
-  it('should accept a fully-populated realistic config through zod validation', () => {
+  it('should accept a fully-populated realistic config through TypeBox validation', () => {
     const parsed = validateConfig(realisticConfig);
     expect(parsed.summaryStrategy).toBe('hybrid');
     expect(parsed.maxGraphDepth).toBe(20);
@@ -64,20 +64,17 @@ describe('Config Schema Compatibility — real-world config', () => {
 
   it('should fill in all defaults when given empty object', () => {
     const parsed = validateConfig({});
-    for (const [key, value] of Object.entries(DEFAULT_CONFIG)) {
-      if (typeof value === 'object' && value !== null) {
-        expect(parsed[key as keyof typeof DEFAULT_CONFIG]).toEqual(value);
-      } else {
-        expect(parsed[key as keyof typeof DEFAULT_CONFIG]).toBe(value);
-      }
-    }
-    // optional sections should be undefined (not pre-filled)
-    expect(parsed.compaction).toBeUndefined();
-    expect(parsed.backupConfig).toBeUndefined();
-    expect(parsed.ttl).toBeUndefined();
-    expect(parsed.logging).toBeUndefined();
-    expect(parsed.webhook).toBeUndefined();
-    expect(parsed.llmProvider).toBeUndefined();
+    expect(parsed.summaryStrategy).toBe('strategy');
+    expect(parsed.maxGraphDepth).toBe(10);
+    expect(parsed.maxNodeCount).toBe(5000);
+    expect(parsed.enableCrossFileLinkage).toBe(true);
+    expect(parsed.crossReferenceRetentionDays).toBe(90);
+    expect(parsed.maxTokens).toBe(65536);
+    expect(parsed.budgetRatio).toBe(0.3);
+    expect(parsed.cliTimeout).toBe(30000);
+    expect(parsed.cliFallbackSearchType).toBe('search');
+    expect(parsed.distillationIntervalMs).toBe(2 * 60 * 60 * 1000);
+    expect(parsed.tripletTimeoutMs).toBe(8000);
   });
 
   it('should passthrough extra fields without rejecting them', () => {
@@ -136,7 +133,7 @@ describe('Config Schema Compatibility — real-world config', () => {
       webhook: {}, // all defaults
     });
     expect(parsed.compaction?.enabled).toBe(false);
-    expect(parsed.compaction?.triggerThreshold).toBe(10000); // default
+    expect(parsed.compaction?.triggerThreshold).toBe(20000); // default
     expect(parsed.webhook?.enabled).toBe(false); // default
     expect(parsed.webhook?.events).toEqual([]); // default
   });

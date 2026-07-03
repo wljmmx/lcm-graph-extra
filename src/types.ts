@@ -4,6 +4,15 @@ export interface Neo4jConfig {
   password: string;
 }
 
+export interface EmbeddingConfig {
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+  dimensions?: number;
+  options?: Record<string, number | boolean | string>;
+  keepAlive?: string;
+}
+
 export type RetrievalSource = 'qmd' | 'graph';
 
 export type RetrievalType = 'raw' | 'definition' | 'relation';

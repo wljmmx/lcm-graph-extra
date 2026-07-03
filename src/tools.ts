@@ -12,7 +12,7 @@ const _lcmRequire = createRequire(import.meta.url);
 const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { join, basename } from "node:path";
+import { join, basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 

@@ -1,158 +1,185 @@
-import { z } from 'zod';
+import { Type, Static } from 'typebox';
+import { Value } from 'typebox/value';
+import { resolve } from 'path';
 
-// --- Backup 配置 ---
-export const BackupConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  retentionDays: z.number().int().positive().default(30),
-  maxBackups: z.number().int().positive().default(10),
-  intervalHours: z.number().positive().default(24),
-  backupDir: z.string().optional(),
+export const BackupConfigSchema = Type.Object({
+  enabled: Type.Boolean({ default: true }),
+  retentionDays: Type.Number({ default: 30 }),
+  maxBackups: Type.Number({ default: 10 }),
+  intervalHours: Type.Number({ default: 24 }),
+  backupDir: Type.Optional(Type.String()),
 });
 
-/** 经验提取触发场景 */
-export const ExperienceTriggerSchema = z.enum([
-  'correction', 'failure', 'fix_success', 'explicit_save',
+export const ExperienceTriggerSchema = Type.Union([
+  Type.Literal('correction'),
+  Type.Literal('failure'),
+  Type.Literal('fix_success'),
+  Type.Literal('explicit_save'),
 ]);
 
-/** 经验提取/总结配置 */
-export const ExperienceConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  triggers: z.array(ExperienceTriggerSchema).default([
-    'correction', 'failure', 'fix_success', 'explicit_save',
-  ]),
-  summaryMode: z.enum(['async', 'sync']).default('async'),
-  schedule: z.object({
-    dreaming: z.string().default('0 3 * * *'),
-    incremental: z.string().default('0 */12 * * *'),
-  }).optional(),
-  relevanceThreshold: z.number().min(0).max(1).default(0.6),
+export const ExperienceConfigSchema = Type.Object({
+  enabled: Type.Boolean({ default: true }),
+  triggers: Type.Array(ExperienceTriggerSchema, { default: ['correction', 'failure', 'fix_success', 'explicit_save'] }),
+  summaryMode: Type.Union([Type.Literal('async'), Type.Literal('sync')], { default: 'async' }),
+  schedule: Type.Optional(Type.Object({
+    dreaming: Type.String({ default: '0 3 * * *' }),
+    incremental: Type.String({ default: '0 */12 * * *' }),
+  })),
+  relevanceThreshold: Type.Number({ default: 0.6 }),
 });
 
-/** CE compaction 配置 — 兼容旧版字段 + 新增 mode */
-export const CompactionConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  mode: z.string().optional(),  // delegated-to-lossless-claw | self-managed
-  // 256K上下文适配（翻倍）
-  triggerThreshold: z.number().int().positive().default(20_000),
-  softThresholdTokens: z.number().int().positive().default(163_840),
-  keepRecentTokens: z.number().int().positive().default(131_072),
-}).passthrough();
-
-export const PluginConfigSchema = z.object({
-  // Summary strategy
-  summaryStrategy: z.enum(['strategy', 'hybrid', 'full']).default('strategy'),
-  maxGraphDepth: z.number().int().positive().default(10),
-  maxNodeCount: z.number().int().positive().default(5000),
-  enableCrossFileLinkage: z.boolean().default(true),
-  crossReferenceRetentionDays: z.number().int().positive().default(90),
-  // 256K上下文适配（翻倍）
-  maxTokens: z.number().int().positive().default(65_536),
-  budgetRatio: z.number().min(0).max(1).default(0.3),
-
-  // Compaction — 可选，兼容旧版字段
-  compaction: CompactionConfigSchema.optional(),
-
-  // 经验提取/总结（Layer 4）— 始终有默认值
-  experience: ExperienceConfigSchema.default({ enabled: true }),
-
-  // Backup — 可选
-  backupConfig: BackupConfigSchema.optional(),
-
-  // TTL — 可选
-  ttl: z.object({
-    enabled: z.boolean().default(true),
-    retentionDays: z.number().int().positive().default(90),
-    cleanupIntervalHours: z.number().positive().default(24),
-  }).optional(),
-
-  // Logging — 可选
-  logging: z.object({
-    level: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
-    file: z.string().optional(),
-  }).optional(),
-
-  // Webhook — 可选
-  webhook: z.object({
-    enabled: z.boolean().default(false),
-    url: z.string().url().optional(),
-    events: z.array(z.enum(['dag_update', 'compaction', 'backup', 'error'])).default([]),
-  }).optional(),
-
-  // LLM Provider — 可选
-  llmProvider: z.object({
-    provider: z.enum(['openclaw_hooks', 'openai', 'ollama', 'custom']).default('openclaw_hooks'),
-    model: z.string().default('default'),
-    maxTokens: z.number().int().positive().default(4096),
-  }).optional(),
-
-  // CLI fallback (QmdClient) — 可选
-  cliTimeout: z.number().int().positive().default(30_000),
-  cliFallbackSearchType: z.enum(['search', 'query']).default('search'),
-
-  // Distillation schedule — controls how often PENDING experiences are distilled (seconds)
-  distillationIntervalMs: z.number().int().positive().default(2 * 60 * 60 * 1000),
-
-  // Triplet extraction timeout (milliseconds, default 8s)
-  tripletTimeoutMs: z.number().int().positive().default(8000),
-
-
-  // Distillation LLM — use OpenClaw hooks proxy by default
-  distillationLlm: z.object({
-    provider: z.enum(['openclaw_hooks', 'openai', 'ollama', 'custom']).default('openclaw_hooks'),
-    model: z.string().default('ollama/qwen3.6:27b'),
-  }).optional(),
-
-  // Embedding config for GraphAdapter
-  embedding: z.object({
-    apiKey: z.string().optional(),
-    baseURL: z.string().optional(),
-    model: z.string().optional(),
-    dimensions: z.number().optional(),
-    keepAlive: z.string().optional(),
-  }).optional(),}).passthrough();
-
-export type PluginConfig = z.infer<typeof PluginConfigSchema>;
-export type ExperienceTrigger = z.infer<typeof ExperienceTriggerSchema>;
-
-// --- Default Config ---
-
-/** Window Monitor configuration schema (v2.1.5 - 256K context) */
-export const WindowMonitorConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  // 256K上下文适配
-  contextWindow: z.number().default(262_144),
-  dedupRounds: z.number().default(24),
-  highPressureThreshold: z.number().default(0.85),
-  mediumPressureThreshold: z.number().default(0.70),
-  proactiveThreshold: z.number().default(0.65),
-  // System prompt overhead: SOUL.md, USER.md, AGENTS.md, MEMORY.md, system instructions
-  systemPromptOverheadTokens: z.number().int().default(17_000),
-  // 256K上下文适配（翻倍）
-  compactTokenBudget: z.number().default(114_688),
-  // High-pressure emergency compaction settings
-  compactTimeout: z.number().default(60_000),
-  maxSummaryTokenRatio: z.number().default(0.45),
-  retrievalLimits: z.object({
-    low: z.object({ qmd: z.number().int().default(5), graph: z.number().int().default(5), exp: z.number().int().default(3) }),
-    medium: z.object({ qmd: z.number().int().default(3), graph: z.number().int().default(3), exp: z.number().int().default(1) }),
-    high: z.object({ qmd: z.number().int().default(1), graph: z.number().int().default(1), exp: z.number().int().default(0) }),
-  }).optional(),
-  // 256K上下文适配（翻倍）
-  maxContextChars: z.object({
-    low: z.number().int().default(12_000),
-    medium: z.number().int().default(6_000),
-    high: z.number().int().default(1_600),
-  }).optional(),
+export const CompactionConfigSchema = Type.Object({
+  enabled: Type.Boolean({ default: true }),
+  mode: Type.Optional(Type.String()),
+  triggerThreshold: Type.Number({ default: 20_000 }),
+  softThresholdTokens: Type.Number({ default: 163_840 }),
+  keepRecentTokens: Type.Number({ default: 131_072 }),
 });
 
-/**
- * Resolve context window configuration from provider model definition, user config, or defaults.
- *
- * Priority:
- *   1. providerModelContext — openclaw.json provider model definition
- *   2. wm (user-configured WindowMonitorConfig)
- *   3. default (262_144 = 256K)
- */
+export const PluginConfigSchema = Type.Object({
+  summaryStrategy: Type.Union([Type.Literal('strategy'), Type.Literal('hybrid'), Type.Literal('full')], { default: 'strategy' }),
+  maxGraphDepth: Type.Number({ default: 10, minimum: 1 }),
+  maxNodeCount: Type.Number({ default: 5000, minimum: 1 }),
+  enableCrossFileLinkage: Type.Boolean({ default: true }),
+  crossReferenceRetentionDays: Type.Number({ default: 90, minimum: 1, multipleOf: 1 }),
+  maxTokens: Type.Number({ default: 65_536, minimum: 1 }),
+  budgetRatio: Type.Number({ default: 0.3, minimum: 0, maximum: 1 }),
+
+  compaction: Type.Optional(CompactionConfigSchema),
+
+  experience: Type.Optional(ExperienceConfigSchema),
+
+  backupConfig: Type.Optional(BackupConfigSchema),
+
+  ttl: Type.Optional(Type.Object({
+    enabled: Type.Boolean({ default: true }),
+    retentionDays: Type.Number({ default: 90, minimum: 1 }),
+    cleanupIntervalHours: Type.Number({ default: 24, minimum: 1 }),
+  })),
+
+  logging: Type.Optional(Type.Object({
+    level: Type.Union([
+      Type.Literal('silent'),
+      Type.Literal('fatal'),
+      Type.Literal('error'),
+      Type.Literal('warn'),
+      Type.Literal('info'),
+      Type.Literal('debug'),
+      Type.Literal('trace'),
+    ], { default: 'info' }),
+    file: Type.Optional(Type.String()),
+  })),
+
+  webhook: Type.Optional(Type.Object({
+    enabled: Type.Boolean({ default: false }),
+    url: Type.Optional(Type.String()),
+    events: Type.Array(Type.Union([
+      Type.Literal('dag_update'),
+      Type.Literal('compaction'),
+      Type.Literal('backup'),
+      Type.Literal('error'),
+    ]), { default: [] }),
+  })),
+
+  llmProvider: Type.Optional(Type.Object({
+    provider: Type.Union([
+      Type.Literal('openclaw_hooks'),
+      Type.Literal('openai'),
+      Type.Literal('ollama'),
+      Type.Literal('custom'),
+    ], { default: 'openclaw_hooks' }),
+    model: Type.String({ default: 'default' }),
+    maxTokens: Type.Number({ default: 4096, minimum: 1 }),
+  })),
+
+  cliTimeout: Type.Number({ default: 30_000 }),
+  cliFallbackSearchType: Type.Union([Type.Literal('search'), Type.Literal('query')], { default: 'search' }),
+
+  distillationIntervalMs: Type.Number({ default: 2 * 60 * 60 * 1000 }),
+
+  tripletTimeoutMs: Type.Number({ default: 8000 }),
+
+  distillationLlm: Type.Optional(Type.Object({
+    provider: Type.Union([
+      Type.Literal('openclaw_hooks'),
+      Type.Literal('openai'),
+      Type.Literal('ollama'),
+      Type.Literal('custom'),
+    ], { default: 'openclaw_hooks' }),
+    model: Type.String({ default: 'ollama/qwen3.6:27b' }),
+  })),
+
+  embedding: Type.Optional(Type.Object({
+    apiKey: Type.Optional(Type.String()),
+    baseURL: Type.Optional(Type.String()),
+    model: Type.Optional(Type.String()),
+    dimensions: Type.Optional(Type.Number()),
+    keepAlive: Type.Optional(Type.String()),
+  })),
+
+  neo4j: Type.Optional(Type.Object({
+    uri: Type.String({ default: 'bolt://localhost:7687' }),
+    user: Type.String({ default: 'neo4j' }),
+    password: Type.String({ default: '' }),
+  })),
+
+  retrieval: Type.Optional(Type.Object({
+    qmd: Type.Optional(Type.Object({
+      mcpEndpoint: Type.Optional(Type.String()),
+    })),
+    limits: Type.Optional(Type.Object({
+      qmd: Type.Number({ default: 5, minimum: 1 }),
+      graph: Type.Number({ default: 5, minimum: 1 }),
+      exp: Type.Number({ default: 3, minimum: 0 }),
+    })),
+    graph: Type.Optional(Type.Object({
+      enabled: Type.Boolean({ default: true }),
+      searchLimit: Type.Number({ default: 5, minimum: 1 }),
+    })),
+  })),
+
+  lcmMonitor: Type.Optional(Type.Object({
+    enabled: Type.Boolean({ default: true }),
+    contextWindow: Type.Number({ default: 262_144, minimum: 1 }),
+    dedupRounds: Type.Number({ default: 24, minimum: 1 }),
+    highPressureThreshold: Type.Number({ default: 0.85, minimum: 0, maximum: 1 }),
+    mediumPressureThreshold: Type.Number({ default: 0.70, minimum: 0, maximum: 1 }),
+    proactiveThreshold: Type.Number({ default: 0.65, minimum: 0, maximum: 1 }),
+    systemPromptOverheadTokens: Type.Number({ default: 17_000, minimum: 0 }),
+    compactTokenBudget: Type.Number({ default: 114_688, minimum: 0 }),
+    compactTimeout: Type.Number({ default: 60_000, minimum: 0 }),
+    maxSummaryTokenRatio: Type.Number({ default: 0.45, minimum: 0, maximum: 1 }),
+    retrievalLimits: Type.Optional(Type.Object({
+      low: Type.Object({
+        qmd: Type.Number({ default: 5, minimum: 1 }),
+        graph: Type.Number({ default: 5, minimum: 1 }),
+        exp: Type.Number({ default: 3, minimum: 0 }),
+      }),
+      medium: Type.Object({
+        qmd: Type.Number({ default: 3, minimum: 1 }),
+        graph: Type.Number({ default: 3, minimum: 1 }),
+        exp: Type.Number({ default: 1, minimum: 0 }),
+      }),
+      high: Type.Object({
+        qmd: Type.Number({ default: 1, minimum: 1 }),
+        graph: Type.Number({ default: 1, minimum: 1 }),
+        exp: Type.Number({ default: 0, minimum: 0 }),
+      }),
+    })),
+    maxContextChars: Type.Optional(Type.Object({
+      low: Type.Number({ default: 12_000, minimum: 0 }),
+      medium: Type.Number({ default: 6_000, minimum: 0 }),
+      high: Type.Number({ default: 1_600, minimum: 0 }),
+    })),
+  })),
+});
+
+export type PluginConfig = Static<typeof PluginConfigSchema>;
+export type ExperienceTrigger = Static<typeof ExperienceTriggerSchema>;
+export type WindowMonitorConfig = Static<typeof WindowMonitorConfigSchema>;
+
+export const WindowMonitorConfigSchema = PluginConfigSchema.properties.lcmMonitor;
+
 export interface RetrievalLimits {
   qmd: number; graph: number; exp: number;
 }
@@ -189,67 +216,39 @@ export function defaultMaxContextChars(scale: number): ContextCharLimits {
   };
 }
 
-export const COMPACT_RATIO = 0.44; // compaction retains ~44% of context window
+export const COMPACT_RATIO = 0.44;
 
-/**
- * Resolve effective window/retrieval config for the current model.
- *
- * @param providerModelCtx - contextWindow from openclaw.json provider model definition
- * @param wm - optional user-configured WindowMonitorConfig from plugin config
- * @returns resolved window config with all parameters scaled proportionally
- */
 export function resolveContextProfile(
   providerModelCtx?: number,
-  wm?: z.infer<typeof WindowMonitorConfigSchema>,
+  wm?: WindowMonitorConfig,
 ): Pick<ResolvedWindowConfig, 'contextWindow' | 'compactTokenBudget' | 'retrievalLimits' | 'maxContextChars'> {
-  // Priority: provider model config > user wm config > fallback 256K
   const ctxWindow = providerModelCtx ?? wm?.contextWindow ?? 262_144;
   const base = 262_144;
   const scale = ctxWindow / base;
-  
-  // Level 1: Adaptive values computed from model's context window (primary)
+
   const adaptiveLimits = defaultRetrievalLimits(scale);
   const adaptiveChars = defaultMaxContextChars(scale);
 
-  // Level 2: User config as fallback if provided
-  // Level 3: Hardcoded 256K defaults as last resort (兜底)
   return {
     contextWindow: ctxWindow,
-    compactTokenBudget: Math.round(ctxWindow * COMPACT_RATIO)
-      ?? wm?.compactTokenBudget
-        ?? 114_688,
+    compactTokenBudget: Math.round(ctxWindow * COMPACT_RATIO) ?? wm?.compactTokenBudget ?? 114_688,
     retrievalLimits: {
-      qmd: adaptiveLimits.qmd
-        ?? wm?.retrievalLimits?.low?.qmd
-          ?? 5,
-      graph: adaptiveLimits.graph
-        ?? wm?.retrievalLimits?.low?.graph
-          ?? 5,
-      exp: adaptiveLimits.exp
-        ?? wm?.retrievalLimits?.low?.exp
-          ?? 3,
+      qmd: adaptiveLimits.qmd ?? wm?.retrievalLimits?.low?.qmd ?? 5,
+      graph: adaptiveLimits.graph ?? wm?.retrievalLimits?.low?.graph ?? 5,
+      exp: adaptiveLimits.exp ?? wm?.retrievalLimits?.low?.exp ?? 3,
     },
     maxContextChars: {
-      low: adaptiveChars.low
-        ?? wm?.maxContextChars?.low
-          ?? 12_000,
-      medium: adaptiveChars.medium
-        ?? wm?.maxContextChars?.medium
-          ?? 6_000,
-      high: adaptiveChars.high
-        ?? wm?.maxContextChars?.high
-          ?? 1_600,
+      low: adaptiveChars.low ?? wm?.maxContextChars?.low ?? 12_000,
+      medium: adaptiveChars.medium ?? wm?.maxContextChars?.medium ?? 6_000,
+      high: adaptiveChars.high ?? wm?.maxContextChars?.high ?? 1_600,
     },
   };
 }
 
-/**
- * Get the default config file path to openclaw.json.
- * Uses os.homedir() instead of requiring os module at ESM import scope.
- */
 export function getDefaultConfigPath(): string {
   return resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'openclaw.json');
 }
+
 export const DEFAULT_CONFIG: PluginConfig = {
   summaryStrategy: 'strategy',
   maxGraphDepth: 10,
@@ -258,40 +257,74 @@ export const DEFAULT_CONFIG: PluginConfig = {
   crossReferenceRetentionDays: 90,
   maxTokens: 65_536,
   budgetRatio: 0.3,
-  experience: { enabled: true, triggers: ["correction", "failure", "fix_success", "explicit_save"], summaryMode: "async", relevanceThreshold: 0.6 },
+  experience: { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 },
   cliTimeout: 30_000,
   cliFallbackSearchType: 'search',
   distillationIntervalMs: 2 * 60 * 60 * 1000,
   tripletTimeoutMs: 8000,
 };
 
-// --- Validate ---
 export function validateConfig(input: unknown): PluginConfig {
+  const withDefaults = Value.Default(PluginConfigSchema, input);
+  const config = withDefaults as PluginConfig;
+
+  if (!config.compaction) config.compaction = { enabled: true, triggerThreshold: 20_000, softThresholdTokens: 163_840, keepRecentTokens: 131_072 };
+  if (!config.backupConfig) config.backupConfig = { enabled: true, retentionDays: 30, maxBackups: 10, intervalHours: 24 };
+  if (!config.ttl) config.ttl = { enabled: true, retentionDays: 90, cleanupIntervalHours: 24 };
+  if (!config.webhook) config.webhook = { enabled: false, events: [] };
+  if (!config.llmProvider) config.llmProvider = { provider: 'openclaw_hooks', model: 'default', maxTokens: 4096 };
+  if (!config.embedding) config.embedding = {};
+  if (!config.experience) config.experience = { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 };
+  if (!config.logging) config.logging = { level: 'info' };
+  if (!config.retrieval) config.retrieval = {};
+  if (!config.retrieval?.limits) config.retrieval.limits = { qmd: 5, graph: 5, exp: 3 };
+  if (!config.retrieval?.graph) config.retrieval.graph = { enabled: true, searchLimit: 5 };
+  if (!config.lcmMonitor) config.lcmMonitor = {
+    enabled: true, contextWindow: 262_144, dedupRounds: 24,
+    highPressureThreshold: 0.85, mediumPressureThreshold: 0.70,
+    proactiveThreshold: 0.65, systemPromptOverheadTokens: 17_000,
+    compactTokenBudget: 114_688, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45
+  };
+  if (!config.distillationLlm) config.distillationLlm = { provider: 'openclaw_hooks', model: 'ollama/qwen3.6:27b' };
+  if (!config.neo4j) config.neo4j = { uri: 'bolt://localhost:7687', user: 'neo4j', password: '' };
+
+  const result = Value.Errors(PluginConfigSchema, config);
+
+  if (config.webhook?.url && !isValidUrl(config.webhook.url)) {
+    result.push({ instancePath: '/webhook/url', message: 'must be a valid URL', keyword: 'format', params: {}, schemaPath: '#/properties/webhook/properties/url' } as any);
+  }
+
+  if (result.length > 0) {
+    const errorMessages = result.map((e: { instancePath: string; message: string }) => `${e.instancePath}: ${e.message}`).join('; ');
+    throw new Error(`Invalid plugin config: ${errorMessages}`);
+  }
+  return config;
+}
+
+function isValidUrl(url: string): boolean {
   try {
-    return PluginConfigSchema.parse(input);
-  } catch (err) {
-    throw new Error(`Invalid plugin config: ${(err as Error).message}`);
+    new URL(url);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-// --- Load Config ---
 export async function loadConfig(filePath?: string): Promise<PluginConfig> {
   if (!filePath) return { ...DEFAULT_CONFIG };
   const fs = await import('fs/promises');
-  const path = await import('path');
-  const resolved = path.resolve(filePath);
   try {
-    const raw = await fs.readFile(resolved, 'utf-8');
-    return validateConfig(JSON.parse(raw));
+    const raw = await fs.readFile(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return validateConfig(parsed);
   } catch {
     return { ...DEFAULT_CONFIG };
   }
 }
 
-// --- Validator ---
-export function isConfigValid(input: unknown): boolean {
+export function isConfigValid(config: unknown): boolean {
   try {
-    PluginConfigSchema.parse(input);
+    validateConfig(config);
     return true;
   } catch {
     return false;

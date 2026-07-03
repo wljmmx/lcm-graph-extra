@@ -71,12 +71,18 @@
 
 ---
 
-#### `compact({ sessionId, force })`
+#### `compact({ sessionId, force, tokenBudget, currentTokenCount, compactionTarget })`
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
 | `sessionId` | `string` | 会话 ID |
+| `sessionKey` | `string` (optional) | 会话密钥 |
+| `sessionFile` | `string` | 会话文件路径 |
 | `force` | `boolean` | 是否强制压缩 |
+| `tokenBudget` | `number` (optional) | token 预算 |
+| `currentTokenCount` | `number` (optional) | 当前 token 数 |
+| `compactionTarget` | `'budget' \| 'threshold'` | 压缩目标类型 |
+| `customInstructions` | `string` (optional) | 自定义指令 |
 
 操作：
 1. 计算未压缩 token 数
@@ -85,16 +91,103 @@
 
 **重要**: `ownsCompaction: true` — 关闭 OpenClaw 内置 auto-compaction
 
-返回: `{ ok: boolean, compacted: boolean, reason: string }`
+返回:
+```typescript
+{
+  ok: boolean;                          // 操作是否成功
+  compacted: boolean;                   // 是否实际执行了压缩
+  reason?: string;                      // 压缩结果说明
+  summaryId?: string;                   // 生成的摘要 ID
+  summary?: string;                     // 摘要内容
+  error?: string;                       // 错误信息（如有）
+  result?: {                            // 详细结果
+    actionTaken: boolean;
+    tokensBefore: number;
+    tokensAfter: number;
+    condensed: boolean;
+    createdSummaryId?: string;
+    summary?: string;
+  };
+  exhausted?: boolean;                  // 是否已用尽压缩空间
+}
+```
 
 ---
 
-#### `afterTurn({ sessionId, messages })`
+#### `afterTurn({ sessionId, messages, prePromptMessageCount })`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sessionId` | `string` | 会话 ID |
+| `sessionKey` | `string` (optional) | 会话密钥 |
+| `sessionFile` | `string` | 会话文件路径 |
+| `messages` | `unknown[]` | 当前会话消息 |
+| `prePromptMessageCount` | `number` | 前置 prompt 消息数量 |
+| `isHeartbeat` | `boolean` (optional) | 是否为心跳消息 |
+| `tokenBudget` | `number` (optional) | token 预算 |
 
 操作：
 - 每 10 轮 → `processFeedback()` 更新 Neo4j 实体权重
 - 每 50 轮 → `stateStore.cleanup()` 清理过期抽取状态
 - 每 100 轮 → 归档可清理的旧记忆
+- 委托给 lossless-claw 的 `afterTurn` 处理会话状态
+
+---
+
+#### `maintain({ sessionId, sessionFile })`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sessionId` | `string` | 会话 ID |
+| `sessionFile` | `string` | 会话文件路径 |
+| `sessionKey` | `string` (optional) | 会话密钥 |
+| `runtimeContext` | `Record<string, unknown>` (optional) | 运行时上下文 |
+
+操作：
+- 委托给 lossless-claw 的 `maintain` 执行后台维护
+- 包括 DAG 清理、碎片整理等操作
+
+返回:
+```typescript
+{
+  changed: boolean;           // 是否有变更
+  bytesFreed: number;        // 释放的字节数
+  rewrittenEntries: number;  // 重写的条目数
+  reason?: string;           // 操作说明
+}
+```
+
+---
+
+#### `assemble({ sessionId, messages, tokenBudget })`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sessionId` | `string` | 会话 ID |
+| `sessionKey` | `string` (optional) | 会话密钥 |
+| `messages` | `unknown[]` | 当前会话消息 |
+| `tokenBudget` | `number` (optional) | token 预算 |
+| `prompt` | `string` (optional) | 用户 prompt |
+| `model` | `string` (optional) | 使用的模型 |
+| `runtimeContext` | `Record<string, unknown>` (optional) | 运行时上下文 |
+
+操作：
+- 委托给 lossless-claw 的 `assemble` 组装会话上下文
+- 进行消息归一化和 token 估算
+
+返回:
+```typescript
+{
+  messages: unknown[];                           // 组装后的消息列表
+  estimatedTokens: number;                       // 估算的 token 数
+  systemPromptAddition?: string;                 // 系统提示词补充
+  contextProjection?: {
+    mode: "per_turn" | "thread_bootstrap";
+    epoch?: string;
+    fingerprint?: string;
+  };
+}
+```
 
 ---
 
@@ -184,7 +277,7 @@ interface LcmGraphExtraConfig {
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | `QmdAdapter` | `src/adapters/qmd-adapter.ts` | qmd CLI 搜索适配器 |
-| `GraphAdapter` | `src/adapters/graph-adapter.ts` | graph-memory-pro 桥接（Recaller + upsertEntities） |
+| `GraphAdapter` | `src/adapters/graph-adapter.ts` | graph-memory-pro 桥接（Recaller + upsertEntities + detectCommunities + mergeNodes） |
 | `RetrievalGateway` | `src/retrieval-gateway.ts` | 并行检索编排 + 经验检索 |
 | `Merger` | `src/merger.ts` | 实体级去重 + 衰减 + 排序 |
 | `EntityExtractor` | `src/entity-extractor.ts` | 实体名提取 + 归一化 + Levenshtein 匹配 |

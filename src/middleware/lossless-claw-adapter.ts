@@ -78,7 +78,12 @@ interface LosslessClawEngine {
     sessionKey?: string;
     sessionFile: string;
     messages: any[];
-    [key: string]: any;
+    prePromptMessageCount: number;
+    isHeartbeat?: boolean;
+    tokenBudget?: number;
+    currentTokenCount?: number;
+    runtimeContext?: Record<string, unknown>;
+    legacyCompactionParams?: Record<string, unknown>;
   }): Promise<void>;
   bootstrap?(params: {
     sessionId: string;
@@ -86,6 +91,20 @@ interface LosslessClawEngine {
     sessionFile?: string;
     messages?: any[];
   }): Promise<{ bootstrapped: boolean; importedMessages: number }>;
+  assemble?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    messages: any[];
+    tokenBudget?: number;
+    prompt?: string;
+    model?: string;
+    runtimeContext?: Record<string, unknown>;
+  }): Promise<{
+    messages: any[];
+    estimatedTokens: number;
+    systemPromptAddition?: string;
+    contextProjection?: { mode: "per_turn" | "thread_bootstrap"; epoch?: string; fingerprint?: string };
+  }>;
   maintain?(params: {
     sessionId: string;
     sessionFile: string;
@@ -114,9 +133,6 @@ class MemorySupplementCtxEngine implements LosslessClawEngine {
   compact(params: any): Promise<any> {
     return this.inner.compact?.(params);
   }
-  async assemble(params: any): Promise<any> {
-    return this.inner.assemble?.(params) ?? {};
-  }
   async afterTurn(params: any): Promise<void> {
     await this.inner.afterTurn?.(params);
   }
@@ -137,6 +153,13 @@ export class LosslessClawAdapter {
   private _connected = false;
   private _connecting: Promise<boolean> | null = null;
   private _initError: string | null = null;
+
+  /** 日志器 */
+  private logger?: any;
+
+  constructor(logger?: any) {
+    this.logger = logger;
+  }
 
   // ── 状态只读属性 ──
 
@@ -279,7 +302,12 @@ export class LosslessClawAdapter {
     sessionKey?: string;
     sessionFile: string;
     messages: any[];
-    [key: string]: any;
+    prePromptMessageCount?: number;
+    isHeartbeat?: boolean;
+    tokenBudget?: number;
+    currentTokenCount?: number;
+    runtimeContext?: Record<string, unknown>;
+    legacyCompactionParams?: Record<string, unknown>;
   }): Promise<void> {
     if (!this._connected || !this.engine) return;
     if (typeof this.engine.afterTurn !== 'function') return;
@@ -303,11 +331,12 @@ export class LosslessClawAdapter {
       const normalizedParams = {
         ...params,
         messages: normalizedMessages,
+        prePromptMessageCount: params.prePromptMessageCount ?? 0,
       };
 
       await this.engine.afterTurn(normalizedParams);
-    } catch {
-      // 非关键路径，忽略错误
+    } catch (err) {
+      this.logger?.warn?.('[lossless-claw-adapter] afterTurn failed', { err });
     }
   }
 
@@ -452,47 +481,142 @@ export class LosslessClawAdapter {
       throw new Error('LosslessClawAdapter: not connected, cannot compact');
     }
 
-    // Call lossless-claw's compact engine
-    const lcResult = await this.engine.compact(params);
+    try {
+      // Call lossless-claw's compact engine
+      const lcResult = await this.engine.compact(params);
 
-    // Map CompactResult (openclaw-bridge) to lcm-graph-extra expected format:
-    // engine returns: { ok, compacted, reason, result: { tokensBefore, tokensAfter, details } }
-    // adapter must forward this correctly so index.ts handler can detect success
-    const actionTaken = lcResult.compacted === true;
-    const createdSummaryId = lcResult.summaryId;
-    const tokensInfo = lcResult.result ?? {};
+      // Map CompactResult (openclaw-bridge) to lcm-graph-extra expected format:
+      // engine returns: { ok, compacted, reason, result: { tokensBefore, tokensAfter, details }, exhausted }
+      // adapter must forward this correctly so index.ts handler can detect success
+      const actionTaken = lcResult.compacted === true;
+      const createdSummaryId = lcResult.summaryId;
+      const tokensInfo = lcResult.result ?? {};
 
-    let summaryContent: string | undefined;
-    if (actionTaken && createdSummaryId) {
-      try {
-        const convStore = this.engine.getConversationStore?.();
-        if (convStore) {
-          const summaries = await convStore.listSummaries?.(params.sessionId, 1);
-          if (summaries?.length > 0) {
-            summaryContent = summaries[0].content;
+      let summaryContent: string | undefined;
+      if (actionTaken && createdSummaryId) {
+        try {
+          const convStore = this.engine.getConversationStore?.();
+          if (convStore) {
+            const summaries = await convStore.listSummaries?.(params.sessionId, 1);
+            if (summaries?.length > 0) {
+              summaryContent = summaries[0].content;
+            }
           }
+        } catch {
+          // Fallback: use summary ID as indicator
         }
-      } catch {
-        // Fallback: use summary ID as indicator
       }
-    }
 
-    return {
-      ok: lcResult.ok !== false,
-      compacted: actionTaken,
-      reason: lcResult.reason || (actionTaken ? 'compaction completed' : 'compaction attempted but no summary produced'),
-      summaryId: createdSummaryId,
-      createdSummaryId,
-      summary: summaryContent,
-      result: {
-        actionTaken,
-        tokensBefore: tokensInfo.tokensBefore ?? 0,
-        tokensAfter: tokensInfo.tokensAfter ?? 0,
-        condensed: false,
-        createdSummaryId,
+      return {
+        ok: lcResult.ok !== false,
+        compacted: actionTaken,
+        reason: lcResult.reason || (actionTaken ? 'compaction completed' : 'compaction attempted but no summary produced'),
+        summaryId: createdSummaryId,
         summary: summaryContent,
-      },
-    };
+        result: {
+          actionTaken,
+          tokensBefore: tokensInfo.tokensBefore ?? 0,
+          tokensAfter: tokensInfo.tokensAfter ?? 0,
+          condensed: false,
+          createdSummaryId,
+          summary: summaryContent,
+        },
+        exhausted: lcResult.exhausted,
+      };
+    } catch (err) {
+      this.logger?.error?.('[lossless-claw-adapter] compact failed', { err });
+      return {
+        ok: false,
+        compacted: false,
+        reason: (err as Error).message,
+        error: (err as Error).message,
+      };
+    }
+  }
+
+  /** 透传给 lossless-claw 的 assemble */
+  async assemble(params: {
+    sessionId: string;
+    sessionKey?: string;
+    messages: any[];
+    tokenBudget?: number;
+    prompt?: string;
+    model?: string;
+    runtimeContext?: Record<string, unknown>;
+  }): Promise<{
+    messages: any[];
+    estimatedTokens: number;
+    systemPromptAddition?: string;
+    contextProjection?: { mode: "per_turn" | "thread_bootstrap"; epoch?: string; fingerprint?: string };
+  }> {
+    if (!this._connected || !this.engine) {
+      return { messages: params.messages ?? [], estimatedTokens: 0 };
+    }
+    if (typeof this.engine.assemble !== 'function') {
+      return { messages: params.messages ?? [], estimatedTokens: 0 };
+    }
+    try {
+      const normalizedMessages = (params.messages ?? []).map((msg) => {
+        if (Array.isArray(msg.content)) {
+          return {
+            ...msg,
+            content: msg.content
+              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
+              .join('\n'),
+          };
+        }
+        if (typeof msg.content !== 'string') {
+          return { ...msg, content: String(msg.content ?? '') };
+        }
+        return msg;
+      });
+
+      const normalizedParams = {
+        ...params,
+        messages: normalizedMessages,
+      };
+
+      return await this.engine.assemble(normalizedParams);
+    } catch (err) {
+      this.logger?.warn?.('[lossless-claw-adapter] assemble failed', { err });
+      return { messages: params.messages ?? [], estimatedTokens: 0 };
+    }
+  }
+
+  /** 透传给 lossless-claw 的 maintain */
+  async maintain(params: {
+    sessionId: string;
+    sessionFile: string;
+    sessionKey?: string;
+    runtimeContext?: Record<string, unknown>;
+  }): Promise<{ changed: boolean; bytesFreed: number; rewrittenEntries: number; reason?: string }> {
+    if (!this._connected || !this.engine) {
+      return { changed: false, bytesFreed: 0, rewrittenEntries: 0 };
+    }
+    if (typeof this.engine.maintain !== 'function') {
+      return { changed: false, bytesFreed: 0, rewrittenEntries: 0 };
+    }
+    try {
+      return await this.engine.maintain(params);
+    } catch (err) {
+      this.logger?.warn?.('[lossless-claw-adapter] maintain failed', { err });
+      return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: (err as Error).message };
+    }
+  }
+
+  getConversationStore(): any {
+    if (!this._connected || !this.engine) {
+      return null;
+    }
+    return this.engine.getConversationStore?.();
+  }
+
+  getSummaryStore(): any {
+    if (!this._connected || !this.engine) {
+      return null;
+    }
+    return this.engine.getSummaryStore?.();
   }
 
   // ── 销毁 ──

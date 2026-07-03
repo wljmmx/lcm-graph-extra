@@ -15,7 +15,7 @@ describe('validateConfig', () => {
     expect(config.maxNodeCount).toBe(5000);
     expect(config.enableCrossFileLinkage).toBe(true);
     expect(config.crossReferenceRetentionDays).toBe(90);
-    expect(config.maxTokens).toBe(32768);
+    expect(config.maxTokens).toBe(65536);
     expect(config.budgetRatio).toBe(0.3);
   });
 
@@ -90,7 +90,7 @@ describe('DEFAULT_CONFIG', () => {
     expect(DEFAULT_CONFIG.maxNodeCount).toBe(5000);
     expect(DEFAULT_CONFIG.enableCrossFileLinkage).toBe(true);
     expect(DEFAULT_CONFIG.crossReferenceRetentionDays).toBe(90);
-    expect(DEFAULT_CONFIG.maxTokens).toBe(32768);
+    expect(DEFAULT_CONFIG.maxTokens).toBe(65536);
     expect(DEFAULT_CONFIG.budgetRatio).toBe(0.3);
   });
 

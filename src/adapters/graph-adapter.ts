@@ -12,7 +12,7 @@ import * as neo4jDriver from 'neo4j-driver';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
-import type { EmbeddingConfig } from '@openclaw/graph-memory-pro';
+import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
 
 
@@ -100,6 +100,8 @@ export class GraphAdapter {
   private logger: any;
   private _recaller: any = null;
   private _gmConfig: Record<string, any> = {};
+  private _embedFn: any = null;
+  private _llm?: (system: string, user: string) => Promise<string>;
 
   private searchCache = new LRUCache(50, 300 * 1000);
 
@@ -147,8 +149,8 @@ export class GraphAdapter {
         try {
           const ecfg = this.config.embedding;
           if (ecfg && mod.createEmbedFn) {
-            const embedFn = mod.createEmbedFn({ ...ecfg, options: { num_gpu: 0 } });
-            this._recaller.setEmbedFn(embedFn);
+            this._embedFn = mod.createEmbedFn({ ...ecfg });
+            this._recaller.setEmbedFn(this._embedFn);
             this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model: ecfg.model });
           } else if (!ecfg) {
             this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
@@ -185,18 +187,14 @@ export class GraphAdapter {
 
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
-    // Allow retry if connection previously failed
-    if (this._connectFailed && !this.mod) {
-      if (this._connectRetryCount < this.maxRetries) {
-        this._connectRetryCount++;
-        this.resetConnectFlag();
-      } else {
+    if (!this.mod) {
+      if (this._connectFailed && this._connectRetryCount >= this.maxRetries) {
         this.logger?.warn?.(`[lcm-graph-extra] search: max retries (${this.maxRetries}) reached, skipping`);
         return [];
       }
+      await this.connect();
     }
-    const m = this.mod ?? await this.connect().then(() => this.mod);
-    if (!m) return [];
+    if (!this.mod) return [];
     const rl = limit ?? this.config.searchLimit;
     try {
       let nodes: any[] = [];
@@ -214,7 +212,7 @@ export class GraphAdapter {
 
       // Fallback to simple searchNodes if no results
       if (nodes.length === 0) {
-        nodes = await m.searchNodes(this.driver, query, rl);
+        nodes = await this.mod.searchNodes(this.driver, query, rl);
       }
       // Rerank by PageRank if enough nodes
       let reranked = (nodes ?? []);
@@ -303,22 +301,18 @@ export class GraphAdapter {
     options?: { context?: any; limit?: number },
   ): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
-    // Allow retry if connection previously failed
-    if (this._connectFailed && !this.mod) {
-      if (this._connectRetryCount < this.maxRetries) {
-        this._connectRetryCount++;
-        this.resetConnectFlag();
-      } else {
+    if (!this.mod) {
+      if (this._connectFailed && this._connectRetryCount >= this.maxRetries) {
         this.logger?.warn(`[lcm-graph-extra] searchExperience: max retries (${this.maxRetries}) reached, skipping`);
         return [];
       }
+      await this.connect();
     }
-    const m2 = this.mod ?? await this.connect().then(() => this.mod);
-    if (!m2) return [];
+    if (!this.mod) return [];
     const rl = options?.limit ?? this.config.searchLimit;
     const ctx = options?.context;
     try {
-      const nodes = await m2.searchNodes(this.driver, query, rl * 3);
+      const nodes = await this.mod.searchNodes(this.driver, query, rl * 3);
       const events = (nodes ?? []).filter((n: any) => (n.type ?? n.labels?.[0]) === 'EVENT');
 
       // 场景优先级加权排序
@@ -670,8 +664,9 @@ export class GraphAdapter {
 
   /**
    * Trigger graph maintenance: deduplication, PageRank, community detection.
+   * @param llm - Optional LLM function for community summarization
    */
-  async runMaintenance(): Promise<any> {
+  async runMaintenance(llm?: (system: string, user: string) => Promise<string>): Promise<any> {
     if (!this.mod || !this.driver) return null;
     try {
       // Full GmConfig for runMaintenance
@@ -686,11 +681,12 @@ export class GraphAdapter {
         pagerankIterations: 12,
       };
       this.logger?.info?.('[graph-adapter] triggering maintenance pipeline');
-      const result = await this.mod.runMaintenance(this.driver, cfg);
+      const result = await this.mod.runMaintenance(this.driver, cfg, llm ?? this._llm ?? undefined, this._embedFn ?? undefined);
       this.logger?.info?.('[graph-adapter] maintenance completed', {
         durationMs: result?.durationMs,
         dedupMerged: result?.dedup?.mergedCount,
         communitiesDetected: result?.community?.communities?.size,
+        communitySummaries: result?.communitySummaries,
       });
       return result;
     } catch (err) {
@@ -713,5 +709,33 @@ async health(): Promise<boolean> {
       this.logger?.warn?.(`[graph-adapter] releaseDriver failed: ${relErr}`);
     }
     this.driver = null; this.mod = null;
+  }
+
+  async detectCommunities(maxIter = 50): Promise<{ labels: Map<string, string>; communities: Map<string, string[]>; count: number } | null> {
+    if (!this.mod || !this.driver) return null;
+    try {
+      const result = await this.mod.detectCommunities(this.driver, maxIter);
+      this.logger?.info?.('[graph-adapter] community detection completed', { count: result.count });
+      return result;
+    } catch (err) {
+      this.logger?.error?.('[graph-adapter] community detection failed', { err });
+      return null;
+    }
+  }
+
+  async mergeNodes(keepId: string, mergeId: string): Promise<boolean> {
+    if (!this.mod || !this.driver) return false;
+    try {
+      await this.mod.mergeNodes(this.driver, keepId, mergeId);
+      this.logger?.info?.('[graph-adapter] nodes merged', { keepId, mergeId });
+      return true;
+    } catch (err) {
+      this.logger?.error?.('[graph-adapter] merge nodes failed', { keepId, mergeId, err });
+      return false;
+    }
+  }
+
+  setLlm(llm: (system: string, user: string) => Promise<string>): void {
+    this._llm = llm;
   }
 }
