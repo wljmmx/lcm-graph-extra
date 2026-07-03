@@ -113,12 +113,26 @@ export function resolveEmbeddingConfig(
   pluginConfig: Record<string, unknown> | undefined,
 ): EmbeddingConfig | null {
   const embeddingSection = (pluginConfig?.embedding ?? {}) as Record<string, unknown>;
-  if (!embeddingSection) return null;
+  // P1-6 BUG-3: 原代码 `if (!embeddingSection) return null` 为死分支
+  // （`?? {}` 后永不 falsy）。改为：当 embedding section 完全为空且无环境变量时返回 null，
+  // 让调用方走默认 embedding 路径，避免返回无效配置误导。
+  const hasEmbeddingConfig =
+    Object.keys(embeddingSection).length > 0 ||
+    process.env.GM_EMBED_MODEL ||
+    process.env.GM_EMBED_BASE_URL ||
+    process.env.GM_EMBED_API_KEY;
+  if (!hasEmbeddingConfig) return null;
 
   const model = (embeddingSection.model as string) || process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
   const baseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434/v1";
   const dimensions = (embeddingSection.dimensions as number) ?? 1024;
   const keepAlive = (embeddingSection.keepAlive as string) || "1h";
+  // P1-6 BUG-3: 原返回对象丢失 apiKey 与 options，导致需要鉴权的远程 embedding 端点不可用。
+  const apiKey = (embeddingSection.apiKey as string) || process.env.GM_EMBED_API_KEY || undefined;
+  const options = (embeddingSection.options as Record<string, number | boolean | string>) || undefined;
 
-  return { model, baseURL, dimensions, keepAlive };
+  const result: EmbeddingConfig = { model, baseURL, dimensions, keepAlive };
+  if (apiKey) result.apiKey = apiKey;
+  if (options) result.options = options;
+  return result;
 }

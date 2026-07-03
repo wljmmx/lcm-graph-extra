@@ -22,8 +22,8 @@
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readdir, readFile, stat, realpath } from 'node:fs/promises';
+import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -698,11 +698,18 @@ export class LosslessClawAdapter {
     console.debug("[lcm] path 3/4: Direct FS scan");
 
     // ── Direct FS: 扫描 projects/ 找 lossless-claw dist，import 触发初始化 ──
+    // P0-4 SEC-2: 加路径白名单校验。任何能写入 ~/.openclaw/npm/projects/*/node_modules
+    // 的进程可注入任意代码并经 pluginEntry.register(mockApi) 执行。此处严格校验：
+    //   1) entry.name 必须是安全的目录名（无路径分隔符、无 ..）
+    //   2) realpath(candidatePath) 必须仍在 projectsDir 之下（防符号链接逃逸）
+    //   3) 候选路径必须严格匹配预期形状（@martian-engineering/lossless-claw/dist/index.js）
     try {
       const projectsDir = join(homedir(), '.openclaw', 'npm', 'projects');
       const entries = await readdir(projectsDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
+        // 安全目录名校验：仅允许 [A-Za-z0-9._-]
+        if (!/^[A-Za-z0-9._-]+$/.test(entry.name)) continue;
         const candidatePath = join(
           projectsDir,
           entry.name,
@@ -713,6 +720,15 @@ export class LosslessClawAdapter {
           'index.js',
         );
         try {
+          // realpath 校验，防止符号链接逃逸到 projectsDir 之外
+          const [realCandidate, realProjectsDir] = await Promise.all([
+            realpath(candidatePath),
+            realpath(projectsDir),
+          ]);
+          if (!realCandidate.startsWith(realProjectsDir + sep) && realCandidate !== realProjectsDir) {
+            console.debug(`[lcm] _discoverCEFactory: reject path escaping projectsDir: ${candidatePath}`);
+            continue;
+          }
           await stat(candidatePath);
           const lcModule = await import(pathToFileURL(candidatePath).href);
           // dist/index.js default export is the plugin entry with register()

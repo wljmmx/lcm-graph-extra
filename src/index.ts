@@ -145,11 +145,12 @@ function applyTotalControl(
 // Tool-aware retrieval strategy helpers
 // ---------------------------------------------------------------------------
 
-/** Extract available tool names from params.availableTools (Set or array). */
 /** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
 function extractAvailableTools(params: any): string[] {
   const tools = params.availableTools;
-  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get_documents","lcmg_maintain"];
+  // P2-14: 修复拼写错误 lcmg_batch_get_documents → lcmg_batch_get，
+  // 并补全遗漏的 lcmg_diagnose（与 SELF_REGISTERED_TOOLS 保持一致）。
+  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get","lcmg_maintain","lcmg_diagnose"];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
   return [];
@@ -1134,14 +1135,26 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // Cache for next-round tier estimation (per-session)
           _sessionOverheadCache.set(_overheadCacheKey, additionTokens);
           // P0: Final hard-truncation safety net
+          // P2-15: 重写 minified 风格代码（var te=.../var bf/while splice）为可读形式。
+          // 当总 token 超过 contextWindow 的 85% 时，从非 system 消息头部移除直到达标。
           {
-            var te=messageTokens+additionTokens;
-            if(contextWindow>0&&te>contextWindow*0.85){
-              var bf:any[]=[...finalMessages];
-              var sn=bf.filter(function(m){return m.role==='system';}).length;
-              while(bf.length>sn+1){var d=bf.findIndex(function(m){return m.role!=='system';});if(d<0)break;bf.splice(d,1);if(estimateTokensFromMessages(bf)+additionTokens<=contextWindow*0.85){finalMessages=bf;break;}}
-              // Fallback: if while loop exited without hitting budget target, assign stripped bf anyway
-              if(estimateTokensFromMessages(finalMessages)+additionTokens>contextWindow*0.85){finalMessages=bf;}
+            const totalEst = messageTokens + additionTokens;
+            if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
+              const buffer: any[] = [...finalMessages];
+              const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+              while (buffer.length > systemCount + 1) {
+                const idx = buffer.findIndex((m: any) => m.role !== 'system');
+                if (idx < 0) break;
+                buffer.splice(idx, 1);
+                if (estimateTokensFromMessages(buffer) + additionTokens <= contextWindow * 0.85) {
+                  finalMessages = buffer;
+                  break;
+                }
+              }
+              // Fallback: if while loop exited without hitting budget target, assign stripped buffer anyway
+              if (estimateTokensFromMessages(finalMessages) + additionTokens > contextWindow * 0.85) {
+                finalMessages = buffer;
+              }
             }
           }
           return {
@@ -1154,14 +1167,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const fe = finalErr instanceof Error ? finalErr : new Error(String(finalErr));
           logger?.error?.("assemble: return error", { err: fe.message, stack: fe.stack });
           // P0: Final hard-truncation safety net (error path)
+          // P2-15: 重写 minified 风格代码为可读形式（与成功路径对称）
           {
-            var et=estimateTokensFromMessages(finalMessages);
-            if(contextWindow>0&&et>contextWindow*0.85){
-              var eb:any[]=[...finalMessages];
-              var es=eb.filter(function(m){return m.role==='system';}).length;
-              while(eb.length>es+1){var d2=eb.findIndex(function(m){return m.role!=='system';});if(d2<0)break;eb.splice(d2,1);if(estimateTokensFromMessages(eb)<=contextWindow*0.85){finalMessages=eb;break;}}
-              // Fallback: if while loop exited without hitting budget target, assign stripped eb anyway
-              if(estimateTokensFromMessages(finalMessages)>contextWindow*0.85){finalMessages=eb;}
+            const totalEst = estimateTokensFromMessages(finalMessages);
+            if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
+              const buffer: any[] = [...finalMessages];
+              const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+              while (buffer.length > systemCount + 1) {
+                const idx = buffer.findIndex((m: any) => m.role !== 'system');
+                if (idx < 0) break;
+                buffer.splice(idx, 1);
+                if (estimateTokensFromMessages(buffer) <= contextWindow * 0.85) {
+                  finalMessages = buffer;
+                  break;
+                }
+              }
+              // Fallback: if while loop exited without hitting budget target, assign stripped buffer anyway
+              if (estimateTokensFromMessages(finalMessages) > contextWindow * 0.85) {
+                finalMessages = buffer;
+              }
             }
           }
           return {

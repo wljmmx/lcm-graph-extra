@@ -16,21 +16,8 @@
 
 ### 生命周期钩子
 
-#### `bootstrap({ sessionId })`
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `sessionId` | `string` | 会话 ID |
-
-初始化操作：
-- 连接 LCM DB（`lcm-store.ts`）
-- 连接 Neo4j（`graph-adapter.ts`）
-- 检查 qmd CLI 可用性
-- 恢复持久化状态（`state-store.ts`）
-
-返回: `{ bootstrapped: boolean }`
-
----
+> 注：本插件实现 `ingest / assemble / afterTurn / compact / maintain / dispose` 六个钩子。
+> `bootstrap` 未单独实现，afterTurn 内部自动确保会话已 bootstrapped。
 
 #### `ingest({ sessionId, message, isHeartbeat })`
 
@@ -41,8 +28,8 @@
 | `isHeartbeat` | `boolean` | 是否为心跳消息 |
 
 操作：
-1. 写入 LCM DB（`lcmStore.insertMessage()`）
-2. [可选] 触发异步抽取（`scheduleExtraction()`）
+1. 写入 LCM DB（lossless-claw 适配器）
+2. [可选] 触发异步实体抽取
 
 返回: `{ ingested: boolean }`
 
@@ -213,10 +200,10 @@
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `name` | `string` (required) | 要标记的实体名 |
-| `type` | `string` (optional) | 实体类型 (SKILL/TASK/EVENT) |
+| `id` | `string` (required) | 要标记的节点 ID |
+| `unpin` | `boolean` (optional) | 设为 true 则取消标记（默认 false） |
 
-将指定实体标记为 `pinned: true`，不参与记忆衰减。
+将指定节点标记为 `pinned: true`，不参与 TTL 记忆衰减。
 
 ## 注册的钩子
 
@@ -281,12 +268,9 @@ interface LcmGraphExtraConfig {
 | `RetrievalGateway` | `src/retrieval-gateway.ts` | 并行检索编排 + 经验检索 |
 | `Merger` | `src/merger.ts` | 实体级去重 + 衰减 + 排序 |
 | `EntityExtractor` | `src/entity-extractor.ts` | 实体名提取 + 归一化 + Levenshtein 匹配 |
-| `LcmStore` | `src/lcm-store.ts` | LCM DB 读写 + 压缩信号 |
-| `TaskQueue` | `src/async/task-queue.ts` | 后台异步任务队列 |
-| `Extraction` | `src/async/extraction.ts` | LLM 实体抽取 + 熔断器 |
+| `LcmBridge` | `src/lcm-bridge.ts` | LCM DB 读写 + 压缩信号 |
 | `ConflictLogger` | `src/async/conflict-logger.ts` | 冲突消解 + 日志 |
-| `Summarizer` | `src/async/summarizer.ts` | 实体归纳总结（≥5条LLM摘要合并） |
-| `StateStore` | `src/async/state-store.ts` | 持久化抽取进度 |
+| `UsageTracker` | `src/async/usage-tracker.ts` | Token 用量追踪 + 成本统计 |
 
 ## 配置格式
 

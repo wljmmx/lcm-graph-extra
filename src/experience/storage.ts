@@ -55,6 +55,8 @@ const SEARCH_RELEVANT = `
          e.relevanceScore AS relevanceScore,
          e.createdAt AS createdAt,
          e.matchCount AS matchCount,
+         e.rawIds AS rawIds,
+         e.type AS type,
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity,
@@ -92,6 +94,8 @@ const SEARCH_BY_QUERY = `
          e.relevanceScore AS relevanceScore,
          e.createdAt AS createdAt,
          e.matchCount AS matchCount,
+         e.rawIds AS rawIds,
+         e.type AS type,
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity,
@@ -115,6 +119,8 @@ const SEARCH_BY_CONTEXT = `
          e.relevanceScore AS relevanceScore,
          e.createdAt AS createdAt,
          e.matchCount AS matchCount,
+         e.rawIds AS rawIds,
+         e.type AS type,
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity
@@ -258,7 +264,8 @@ export class ExperienceStorage {
              ELSE 0.0 END
          RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
                 e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
-                e.matchCount AS matchCount, e.tags_scenario AS tags_scenario,
+                e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
+                e.tags_scenario AS tags_scenario,
                 e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
                 e.tags_free AS tags_free,
                 queryMatch AS queryMatch
@@ -274,14 +281,15 @@ export class ExperienceStorage {
            + CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END
            + CASE WHEN size($queryFreeTags) > 0
              AND coalesce(e.tags_free, '') <> ''
-             THEN ANY(f IN split(coalesce(e.tags_free, ''), ',') 
+             THEN ANY(f IN split(coalesce(e.tags_free, ''), ',')
                 WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
                 ? 0.3
                 : 0.0
              ELSE 0.0 END
          RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
                 e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
-                e.matchCount AS matchCount, e.tags_scenario AS tags_scenario,
+                e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
+                e.tags_scenario AS tags_scenario,
                 e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
                 e.tags_free AS tags_free,
                 queryMatch AS queryMatch
@@ -376,6 +384,9 @@ interface ExperienceSearchRow {
   relevanceScore: number;
   createdAt: number;
   matchCount: number;
+  // P1-8 BUG-5: 原接口缺少 rawIds 和 type，导致 rowToDistilled 读回时丢失这两个字段
+  rawIds?: string;
+  type?: string;
   tags_scenario?: string;
   tags_techStack?: string;
   tags_severity?: string;
@@ -393,10 +404,12 @@ interface PendingRow {
 }
 
 function rowToDistilled(r: ExperienceSearchRow): DistilledExperience {
+  // P1-8 BUG-5: 原代码 rawIds:[] 恒空、type:'lesson' 硬编码，
+  // 尽管 saveDistilled 写入了 rawIds/type，读回时丢失。修复为从行读取并 split。
   return {
     id: r.id,
-    rawIds: [],
-    type: 'lesson',
+    rawIds: r.rawIds ? r.rawIds.split(',').filter(Boolean) : [],
+    type: (r.type as DistilledExperience['type']) ?? 'lesson',
     title: r.title,
     summary: r.summary,
     detail: r.detail,

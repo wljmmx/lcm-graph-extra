@@ -229,18 +229,22 @@ export function resolveContextProfile(
   const adaptiveLimits = defaultRetrievalLimits(scale);
   const adaptiveChars = defaultMaxContextChars(scale);
 
+  // P0-2 BUG-1: 修复 ?? 链失效死代码。
+  // 原代码 `Math.round(...) ?? wm?.x` 中 Math.round 永远返回 number，导致用户在
+  // lcmMonitor 中显式配置的 compactTokenBudget / retrievalLimits / maxContextChars 全部被忽略。
+  // 修复策略：用户显式配置优先 → 自适应默认 → 兜底常量。
   return {
     contextWindow: ctxWindow,
-    compactTokenBudget: Math.round(ctxWindow * COMPACT_RATIO) ?? wm?.compactTokenBudget ?? 114_688,
+    compactTokenBudget: wm?.compactTokenBudget ?? Math.round(ctxWindow * COMPACT_RATIO) ?? 114_688,
     retrievalLimits: {
-      qmd: adaptiveLimits.qmd ?? wm?.retrievalLimits?.low?.qmd ?? 5,
-      graph: adaptiveLimits.graph ?? wm?.retrievalLimits?.low?.graph ?? 5,
-      exp: adaptiveLimits.exp ?? wm?.retrievalLimits?.low?.exp ?? 3,
+      qmd: wm?.retrievalLimits?.low?.qmd ?? adaptiveLimits.qmd,
+      graph: wm?.retrievalLimits?.low?.graph ?? adaptiveLimits.graph,
+      exp: wm?.retrievalLimits?.low?.exp ?? adaptiveLimits.exp,
     },
     maxContextChars: {
-      low: adaptiveChars.low ?? wm?.maxContextChars?.low ?? 12_000,
-      medium: adaptiveChars.medium ?? wm?.maxContextChars?.medium ?? 6_000,
-      high: adaptiveChars.high ?? wm?.maxContextChars?.high ?? 1_600,
+      low: wm?.maxContextChars?.low ?? adaptiveChars.low,
+      medium: wm?.maxContextChars?.medium ?? adaptiveChars.medium,
+      high: wm?.maxContextChars?.high ?? adaptiveChars.high,
     },
   };
 }
@@ -301,10 +305,13 @@ export function validateConfig(input: unknown): PluginConfig {
   return config;
 }
 
+// SEC-3: webhook URL 仅允许 http/https scheme，防止 SSRF（file://、data:、gopher: 等）
+const ALLOWED_WEBHOOK_PROTOCOLS = new Set(['http:', 'https:']);
+
 function isValidUrl(url: string): boolean {
   try {
-    new URL(url);
-    return true;
+    const parsed = new URL(url);
+    return ALLOWED_WEBHOOK_PROTOCOLS.has(parsed.protocol);
   } catch {
     return false;
   }

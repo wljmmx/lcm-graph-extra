@@ -71,9 +71,11 @@ class TokenCounter {
     }
 
     try {
+      // P0-3 BUG-2: 移除 timeout: 10000。Node spawn 实际不识别该选项，但为防止
+      // 任何情况下长驻 Python tokenizer 被超时杀死（10s 后被 kill → 重连 → 再被 kill
+      // → exitCount>3 永久降级为估算），显式不传 timeout。
       this.proc = spawn('python3', [PYTHON_COUNTER], {
         stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 10000,
       });
 
       this.proc.stdout?.on('data', (data: Buffer) => {
@@ -150,6 +152,8 @@ class TokenCounter {
             this.pendingResolver = null;
             p({ chars: 0, tokens: 0, model: '' });
           }
+          // P0-3 BUG-2: 错误响应后也需排空队列
+          this.drainQueue();
           continue;
         }
         if (this.pendingResolver) {
@@ -161,11 +165,34 @@ class TokenCounter {
             model: response.model || '',
             method: response.method,
           });
+          // P0-3 BUG-2: 响应解析后消费队列中下一个请求，否则排队 Promise 永不 resolve
+          this.drainQueue();
         }
       } catch (e) {
         // Incomplete JSON line
       }
     }
+  }
+
+  /**
+   * P0-3 BUG-2: 当 pendingResolver 被消费后，从队列中取下一个请求发送给 tokenizer。
+   * 原代码 processBuffer 解析响应后从不消费 queue，并发 count() 时排队 Promise 永不 resolve，
+   * 导致内存泄漏 + 调用方挂起。
+   */
+  private drainQueue(): void {
+    if (this.queue.length === 0) return;
+    if (this.pendingResolver) return; // 已有在途请求
+    const next = this.queue.shift();
+    if (!next) return;
+    if (!this.ready || !this.proc) {
+      // 进程已退出，回退估算
+      next.resolve(this.estimate(next.text, next.model));
+      // 递归排空剩余
+      this.drainQueue();
+      return;
+    }
+    this.pendingResolver = next.resolve;
+    this.send({ action: 'count', text: next.text, model: next.model });
   }
 
   count(text: string, model: string): Promise<TokenCountResult> {

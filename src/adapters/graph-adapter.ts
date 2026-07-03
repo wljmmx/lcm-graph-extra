@@ -55,6 +55,28 @@ const GM_PRO_PATH = process.env.GM_PRO_PATH
     })()
   || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
 
+/**
+ * P2-17: 统一 GmConfig 默认值。原代码在 connect/runMaintenance 等 4 处重复硬编码
+ * compactTurnCount/recallMaxNodes/dedupThreshold/pagerankDamping 等参数，
+ * 易漂移且用户无法调优。集中到 DEFAULT_GM_CONFIG，buildGmConfig 附加 neo4j。
+ */
+const DEFAULT_GM_CONFIG = {
+  compactTurnCount: 10,
+  recallMaxNodes: 8,
+  recallMaxDepth: 2,
+  freshTailCount: 5,
+  dedupThreshold: 0.90,
+  pagerankDamping: 0.85,
+  pagerankIterations: 12,
+};
+
+function buildGmConfig(neo4jConfig: Neo4jConfig, overrides?: Partial<typeof DEFAULT_GM_CONFIG>): Record<string, any> {
+  return { neo4j: neo4jConfig, ...DEFAULT_GM_CONFIG, ...overrides };
+}
+
+// P2-17: 导出供 tools.ts 等其他模块复用，避免 GmConfig 重复硬编码
+export { DEFAULT_GM_CONFIG, buildGmConfig };
+
 /** Map node label to result type */
 function inferType(label: string): RetrievalType {
   const u = label.toUpperCase();
@@ -95,6 +117,11 @@ export class GraphAdapter {
   private _connectFailed = false;
   private _connectRetryCount = 0;
   private readonly maxRetries = 3;
+  // P1-10 GMR-1: 连接失败冷却期。原代码 _connectFailed=true 后无自动恢复路径，
+  // 一旦 graph-memory-pro 短暂不可用，L3/L4 永久降级直到插件重载。
+  // 加 _lastFailTime + 冷却期（60s），冷却期满后自动重置允许重试。
+  private _lastFailTime = 0;
+  private readonly reconnectCooldownMs = 60_000;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
   private logger: any;
@@ -131,17 +158,8 @@ export class GraphAdapter {
 
       // - Initialize Recaller (gm-pro dual-path recall) -
       try {
-        // Full GmConfig — all required fields for type safety
-        const gmCfg: Record<string, any> = {
-          neo4j: this.neo4jConfig,
-          compactTurnCount: 10,
-          recallMaxNodes: 8,
-          recallMaxDepth: 2,
-          freshTailCount: 5,
-          dedupThreshold: 0.90,
-          pagerankDamping: 0.85,
-          pagerankIterations: 12,
-        };
+        // P2-17: 用 buildGmConfig 统一构建，避免重复硬编码
+        const gmCfg: Record<string, any> = buildGmConfig(this.neo4jConfig);
         this._recaller = new mod.Recaller(this.driver, gmCfg);
         this._gmConfig = gmCfg;
 
@@ -167,13 +185,18 @@ export class GraphAdapter {
         this._recaller = null;
       }
 
+      // P1-10 GMR-1: 连接成功，重置失败计数与冷却时间
+      this._connectRetryCount = 0;
+      this._connectFailed = false;
+      this._lastFailTime = 0;
       return true;
     } catch (err) {
       this._connectRetryCount++;
       this.logger?.warn?.(`[graph-adapter] connect attempt ${this._connectRetryCount}/${this.maxRetries} failed: ${err}`);
       if (this._connectRetryCount >= this.maxRetries) {
         this._connectFailed = true;
-        this.logger?.error?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts`);
+        this._lastFailTime = Date.now();
+        this.logger?.error?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts, will retry in ${this.reconnectCooldownMs / 1000}s`);
       }
       return false;
     }
@@ -183,13 +206,32 @@ export class GraphAdapter {
   resetConnectFlag(): void {
     this._connectFailed = false;
     this._connectRetryCount = 0;
+    this._lastFailTime = 0;
+  }
+
+  /**
+   * P1-10 GMR-1: 检查连接失败冷却期是否已过。如果冷却期满，自动重置失败标记，允许重试。
+   * 返回 true 表示当前处于"失败锁定"状态（调用方应跳过），false 表示可以尝试 connect。
+   */
+  private _checkCooldownAndMaybeReset(): boolean {
+    if (!this._connectFailed) return false;
+    const elapsed = Date.now() - this._lastFailTime;
+    if (elapsed >= this.reconnectCooldownMs) {
+      this.logger?.info?.(`[graph-adapter] reconnect cooldown elapsed (${elapsed}ms), resetting failure flag for retry`);
+      this._connectFailed = false;
+      this._connectRetryCount = 0;
+      this._lastFailTime = 0;
+      return false;
+    }
+    return true; // 仍在冷却期，跳过
   }
 
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
-      if (this._connectFailed && this._connectRetryCount >= this.maxRetries) {
-        this.logger?.warn?.(`[lcm-graph-extra] search: max retries (${this.maxRetries}) reached, skipping`);
+      // P1-10 GMR-1: 用冷却期检查代替原永久失败逻辑
+      if (this._checkCooldownAndMaybeReset()) {
+        this.logger?.warn?.(`[lcm-graph-extra] search: in reconnect cooldown, skipping`);
         return [];
       }
       await this.connect();
@@ -302,8 +344,9 @@ export class GraphAdapter {
   ): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
-      if (this._connectFailed && this._connectRetryCount >= this.maxRetries) {
-        this.logger?.warn(`[lcm-graph-extra] searchExperience: max retries (${this.maxRetries}) reached, skipping`);
+      // P1-10 GMR-1: 用冷却期检查代替原永久失败逻辑
+      if (this._checkCooldownAndMaybeReset()) {
+        this.logger?.warn(`[lcm-graph-extra] searchExperience: in reconnect cooldown, skipping`);
         return [];
       }
       await this.connect();
@@ -608,11 +651,8 @@ export class GraphAdapter {
   async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
     if (!this.mod || nodeIds.length < 2) return new Map();
     try {
-      // gm-pro personalizedPageRank(driver, seedIds[], candidateIds[], GmConfig): PPRResult { scores: Map }
-      const cfg = {
-        pagerankDamping: 0.85,
-        pagerankIterations: 12,
-      };
+      // P2-17: 用 buildGmConfig 统一构建（PPR 只用 pagerank* 字段）
+      const cfg = buildGmConfig(this.neo4jConfig, { recallMaxNodes: undefined, recallMaxDepth: undefined, freshTailCount: undefined, dedupThreshold: undefined, compactTurnCount: undefined });
       const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
       // gm-pro returns PPRResult with scores Map
       return result.scores ?? new Map();
@@ -669,17 +709,8 @@ export class GraphAdapter {
   async runMaintenance(llm?: (system: string, user: string) => Promise<string>): Promise<any> {
     if (!this.mod || !this.driver) return null;
     try {
-      // Full GmConfig for runMaintenance
-      const cfg: Record<string, any> = {
-        neo4j: this.neo4jConfig,
-        compactTurnCount: 10,
-        recallMaxNodes: 8,
-        recallMaxDepth: 2,
-        freshTailCount: 5,
-        dedupThreshold: 0.90,
-        pagerankDamping: 0.85,
-        pagerankIterations: 12,
-      };
+      // P2-17: 用 buildGmConfig 统一构建
+      const cfg: Record<string, any> = buildGmConfig(this.neo4jConfig);
       this.logger?.info?.('[graph-adapter] triggering maintenance pipeline');
       const result = await this.mod.runMaintenance(this.driver, cfg, llm ?? this._llm ?? undefined, this._embedFn ?? undefined);
       this.logger?.info?.('[graph-adapter] maintenance completed', {

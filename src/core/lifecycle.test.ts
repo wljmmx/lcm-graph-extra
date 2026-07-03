@@ -321,25 +321,21 @@ describe('archiveDAG', () => {
     archiveDir = tmpDir('archiveOut');
   });
 
-  it('creates a .tar.gz archive file', async () => {
+  it('creates a .json.gz archive file', async () => {
     writeMd(dir, 'mem1', `# Memory\nImportant stuff. 2024-01-01T10:00`);
     const dag = createDAG(dir);
     const result = await archiveDAG(dag, archiveDir);
 
     expect(result.archivedAt).toBeDefined();
-    expect(result.path).toMatch(/\.tar\.gz$/);
+    // P1-12 FAIL-2: 扩展名改为 .json.gz（实际是 gzip 压缩的 JSON，非 tar）
+    expect(result.path).toMatch(/\.json\.gz$/);
     expect(fs.existsSync(result.path)).toBe(true);
 
-    // Verify it's a valid tar.gz by extracting
-    const extractDir = tmpDir('extract');
-    const { execSync } = await import('child_process');
-    execSync(`tar xzf "${result.path}" -C "${extractDir}"`);
-    const extracted = fs.readdirSync(extractDir);
-    expect(extracted.length).toBeGreaterThan(0);
-
-    // Extracted JSON should be parseable
-    const jsonFile = extracted.find(f => f.endsWith('.json')) || extracted[0];
-    const data = JSON.parse(fs.readFileSync(path.join(extractDir, jsonFile), 'utf-8'));
+    // Verify it's a valid gzip-compressed JSON by gunzipping
+    const zlib = await import('zlib');
+    const compressed = fs.readFileSync(result.path);
+    const decompressed = zlib.gunzipSync(compressed).toString('utf-8');
+    const data = JSON.parse(decompressed);
     expect(data.metadata).toBeDefined();
     expect(data.graphData).toBeDefined();
   });

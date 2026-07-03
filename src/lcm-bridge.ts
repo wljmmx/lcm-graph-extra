@@ -67,8 +67,10 @@ function getDb(): any {
  */
 export function getConversationId(sessionKey?: string, sessionId?: string): number | null {
   if (!sessionKey && !sessionId) return null;
+  // P1-9 BUG-6: 把 db 引用提到 try 外，close 移到 finally，防止 prepare 抛错时连接泄漏
+  let db: any = null;
   try {
-    const db = getDb();
+    db = getDb();
     if (!db) return null;
 
     let row: any = null;
@@ -82,10 +84,11 @@ export function getConversationId(sessionKey?: string, sessionId?: string): numb
         'SELECT conversation_id FROM conversations WHERE session_id = ? AND active = 1 ORDER BY conversation_id DESC LIMIT 1'
       ).get(sessionId);
     }
-    db.close();
     return row?.conversation_id ?? null;
   } catch {
     return null;
+  } finally {
+    if (db) { try { db.close(); } catch { /* already closed or close failed */ } }
   }
 }
 
@@ -93,16 +96,18 @@ export function getConversationId(sessionKey?: string, sessionId?: string): numb
  * 查询指定会话的消息数和总 token
  */
 export function getMessageStats(conversationId: number): { count: number; totalTokens: number } {
+  let db: any = null;
   try {
-    const db = getDb();
+    db = getDb();
     if (!db) return { count: 0, totalTokens: 0 };
     const row = db.prepare(
       'SELECT COUNT(*) as cnt, COALESCE(SUM(token_count), 0) as total_tok FROM messages WHERE conversation_id = ?'
     ).get(conversationId) as any;
-    db.close();
     return { count: row?.cnt ?? 0, totalTokens: row?.total_tok ?? 0 };
   } catch {
     return { count: 0, totalTokens: 0 };
+  } finally {
+    if (db) { try { db.close(); } catch { /* already closed or close failed */ } }
   }
 }
 
@@ -115,8 +120,9 @@ export function writeCompactionDebt(
   currentTokenCount: number,
   reason: string = 'proactive_lcm_graph_extra',
 ): boolean {
+  let db: any = null;
   try {
-    const db = getDb();
+    db = getDb();
     if (!db) return false;
 
     db.exec(
@@ -128,10 +134,11 @@ export function writeCompactionDebt(
       tokenBudget,
       currentTokenCount,
     );
-    db.close();
     return true;
   } catch {
     return false;
+  } finally {
+    if (db) { try { db.close(); } catch { /* already closed or close failed */ } }
   }
 }
 

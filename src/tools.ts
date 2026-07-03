@@ -11,8 +11,11 @@ import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
 const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
-import { execSync } from "node:child_process";
-import { join, basename, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 
@@ -351,15 +354,29 @@ export function registerOperationalTools(api: any): void {
       // Files
       if ((targets === "all" || targets === "files_only") && !dryRun) {
         try {
-          const memDir = join(homedir(), ".openclaw", "workspace", "main");
+          const memDir = resolve(join(homedir(), ".openclaw", "workspace", "main"));
           let fCount = 0;
+          let skipped = 0;
           for (const file of (data.files as any[]) ?? []) {
-            const fp = join(memDir, file.path);
-            mkdirSync(fp.substring(0, fp.lastIndexOf("/")), { recursive: true });
+            // P0-5 SEC-4: 路径穿越防护。备份 JSON 中的 file.path 不可信，
+            // 必须是相对路径且不含 ..，realpath 必须仍在 memDir 之下。
+            const relPath = file.path;
+            if (typeof relPath !== 'string' || relPath === '' || relPath.startsWith('/')) {
+              skipped++; continue;
+            }
+            if (relPath.includes('..') || relPath.includes('\0')) {
+              skipped++; continue;
+            }
+            const fp = resolve(join(memDir, relPath));
+            // 二次校验：resolve 后的绝对路径必须以 memDir 为前缀
+            if (fp !== memDir && !fp.startsWith(memDir + sep)) {
+              skipped++; continue;
+            }
+            mkdirSync(fp.substring(0, fp.lastIndexOf(sep)), { recursive: true });
             writeFileSync(fp, file.content, "utf-8");
             fCount++;
           }
-          report.push(`✅ Files: Restored ${fCount} files`);
+          report.push(`✅ Files: Restored ${fCount} files${skipped > 0 ? ` (skipped ${skipped} unsafe paths)` : ''}`);
         } catch (e: any) { report.push(`❌ Files: ${e.message}`); }
       }
 
@@ -601,11 +618,14 @@ export function registerOperationalTools(api: any): void {
       // --- qmd ---
       if (engines === "all" || engines === "qmd_only") {
         try {
-          const out = execSync(`qmd query "${query.replace(/"/g, '\\"')}"`, {
-            timeout: 15000, encoding: "utf-8",
-          });
+          // P0-1 SEC-1: use execFile (no shell) to prevent command injection
+          const { stdout } = await execFileAsync(
+            "qmd",
+            ["query", query, "--format", "json"],
+            { timeout: 15000, encoding: "utf-8" },
+          );
           // Parse qmd output — it returns lines
-          const qmdLines = out.split("\n").filter((l: string) => l.trim()).slice(0, limit);
+          const qmdLines = stdout.split("\n").filter((l: string) => l.trim()).slice(0, limit);
           if (qmdLines.length > 0) {
             results.push(`## 📄 qmd memory (${qmdLines.length} hits)`);
             for (const l of qmdLines) results.push(`- ${l}`);
@@ -686,11 +706,13 @@ export function registerOperationalTools(api: any): void {
         description: '"check" (default, read-only), "repair" (prune orphans + re-import)',
         default: "check",
       })),
-      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default true for check, false for repair)", default: true })),
+      // P0-5 SEC-4: dryRun 默认 true。原代码 repair 模式默认 false，用户不显式传 dryRun 时
+      // 直接执行 DETACH DELETE 批量删除。改为默认 true，强制用户显式 dryRun:false 才执行删除。
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default true). Set to false only after reviewing the dry-run report.", default: true })),
     }),
     async execute(_id: string, params: { mode?: string; dryRun?: boolean }) {
       const mode = params.mode ?? "check";
-      const isDryRun = params.dryRun ?? (mode === "check" ? true : false);
+      const isDryRun = params.dryRun ?? true;
       const lines: string[] = [];
       const push = (s: string) => lines.push(s);
 
@@ -763,21 +785,27 @@ export function registerOperationalTools(api: any): void {
       // --- Phase 3: Repair if requested ---
       if (mode === "repair" && !isDryRun && orphanNodes > 0) {
         push("\n## Phase 3: Repairing\n");
-        try {
-          const { driver, session } = await neo4jSession();
+        // P0-5 SEC-4: 删除数量上限保护，防止误删大量数据
+        const MAX_DELETE = 1000;
+        if (orphanNodes > MAX_DELETE) {
+          push(`  ❌ Aborted: ${orphanNodes} orphan nodes exceed safety limit (${MAX_DELETE}). Re-run with explicit smaller scope or contact admin.\n`);
+        } else {
           try {
-            for (const id of orphanedIds) {
-              await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
-            }
-            const deleted = orphanedIds.length;
-            // Also delete orphaned relationships
-            const relCleanup = await session.run(
-              `MATCH (n) WHERE NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage DELETE n`
-            );
-            const moreDeleted = 0; // batch delete already covered
-            push(`  ✅ Pruned ${deleted} orphan nodes, ${moreDeleted} additional via batch cleanup\n`);
-          } finally { await closeNeo4j(driver, session); }
-        } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
+            const { driver, session } = await neo4jSession();
+            try {
+              for (const id of orphanedIds) {
+                await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
+              }
+              const deleted = orphanedIds.length;
+              // Also delete orphaned relationships
+              const relCleanup = await session.run(
+                `MATCH (n) WHERE NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage DELETE n`
+              );
+              const moreDeleted = 0; // batch delete already covered
+              push(`  ✅ Pruned ${deleted} orphan nodes, ${moreDeleted} additional via batch cleanup\n`);
+            } finally { await closeNeo4j(driver, session); }
+          } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
+        }
       } else if (mode === "repair" && orphanNodes === 0) {
         push("\n## Phase 3: No repair needed — all consistent\n");
       } else if (mode === "repair" && isDryRun) {
@@ -895,17 +923,13 @@ export function registerOperationalTools(api: any): void {
           || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
 
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
-        // Full GmConfig — all required fields
-        const cfg = {
-          neo4j: resolveNeo4jConfig(getPluginNeo4jConfig()),
-          compactTurnCount: 10,
-          recallMaxNodes: 10,
-          recallMaxDepth: 2,
-          freshTailCount: 5,
-          dedupThreshold: 0.90,
-          pagerankDamping: 0.85,
-          pagerankIterations: 20,
-        };
+        // P2-17: 用 buildGmConfig 统一构建，保留工具的特殊 override
+        // (recallMaxNodes:10, pagerankIterations:20 与 GraphAdapter 默认不同)
+        const { buildGmConfig } = await import("./adapters/graph-adapter.js");
+        const cfg = buildGmConfig(
+          resolveNeo4jConfig(getPluginNeo4jConfig()),
+          { recallMaxNodes: 10, pagerankIterations: 20 },
+        );
         const result = await gm.runMaintenance(driver, cfg);
         const lines = [];
         lines.push("# Graph Maintenance Report");
