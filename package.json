@@ -52,6 +52,10 @@
     "typebox": "1.1.39",
     "zod": "^3.24.0"
   },
+  "peerDependencies": {
+    "@openclaw/graph-memory-pro": "^2.1.0",
+    "openclaw": "*"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.61.1",

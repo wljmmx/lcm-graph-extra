@@ -22,17 +22,19 @@ async function run() {
   console.log('--- Native Cypher Performance Tests ---');
   
   const neo4j = require('neo4j-driver');
+  const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
+  const GM_PRO_PATH = process.env.GM_PRO_PATH || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
   const DRIVER = neo4j.driver('bolt://192.168.50.89:7687', neo4j.auth.basic('neo4j', 'pro-gm-2.1.0'));
   
   // Test Cypher query against real graph-memory-pro data
   await test('cypher:import-gm-mod', async () => {
-    const gm = await import(path.join('/home/wljmmx/.openclaw/extensions/graph-memory-pro/dist/index.js'));
+    const gm = await import(path.join(GM_PRO_PATH, 'dist/index.js'));
     return typeof gm.searchNodes;
   }, 1);
   
   // Use graph-memory-pro searchNodes directly
   let gmMod;
-  try { gmMod = await import(path.join('/home/wljmmx/.openclaw/extensions/graph-memory-pro/dist/index.js')); } catch(e) { console.log('GM import error:', e.message); }
+  try { gmMod = await import(path.join(GM_PRO_PATH, 'dist/index.js')); } catch(e) { console.log('GM import error:', e.message); }
   
   if (gmMod && gmMod.searchNodes) {
     await test('cypher:searchNodes-graph', async () => {

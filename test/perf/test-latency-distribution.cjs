@@ -23,9 +23,10 @@ const NEO4J_URI = process.env.NEO4J_URI || 'bolt://192.168.50.89:7687';
 const NEO4J_USER = process.env.NEO4J_USER || 'neo4j';
 const NEO4J_PASS = process.env.NEO4J_PASSWORD || 'pro-gm-2.1.0';
 const QMD_URL = process.env.QMD_URL || 'http://127.0.0.1:8081';
+const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
 const GMP_PATH = process.env.GM_PRO_PATH
   ? process.env.GM_PRO_PATH + '/dist/index.js'
-  : '/home/wljmmx/.openclaw/extensions/graph-memory-pro/dist/index.js';
+  : `${OPENCLAW_DIR}/extensions/graph-memory-pro/dist/index.js`;
 const GDS_GRAPH_NAME = process.env.GDS_GRAPH_NAME || 'gm-ppr-timestamp';
 
 async function test(name, fn, iters) {

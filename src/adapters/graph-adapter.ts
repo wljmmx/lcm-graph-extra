@@ -12,7 +12,7 @@ import * as neo4jDriver from 'neo4j-driver';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
-import type { EmbeddingPluginConfig } from '../config/neo4j-helper.js';
+import type { EmbeddingConfig } from '@openclaw/graph-memory-pro';
 import { acquireDriver, releaseDriver } from './connection-pool';
 
 
@@ -39,10 +39,11 @@ class LRUCache<K, V> {
 export interface GraphAdapterConfig {
   enabled: boolean;
   searchLimit: number;
-  embedding?: EmbeddingPluginConfig;
+  embedding?: EmbeddingConfig;
 }
 
 const _gmpRequire = createRequire(import.meta.url);
+const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
 const GM_PRO_PATH = process.env.GM_PRO_PATH
   || (() => {
       try {
@@ -52,7 +53,7 @@ const GM_PRO_PATH = process.env.GM_PRO_PATH
         return undefined;
       }
     })()
-  || '/home/wljmmx/.openclaw/extensions/graph-memory-pro';
+  || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
 
 /** Map node label to result type */
 function inferType(label: string): RetrievalType {
@@ -145,14 +146,12 @@ export class GraphAdapter {
         // Set embedding function for community generalized recall
         try {
           const ecfg = this.config.embedding;
-          const model = (ecfg?.model) || process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
-          const baseURL = (ecfg?.baseURL) || process.env.GM_EMBED_BASE_URL || "http://192.168.50.5:11434/v1";
-          const dimensions = (ecfg?.dimensions) ?? 1024;
-          const keepAlive = (ecfg?.keepAlive) || "1h";
-          if (mod.createEmbedFn) {
-            const embedFn = mod.createEmbedFn({ model, baseURL, dimensions, options: { num_gpu: 0 }, keepAlive });
+          if (ecfg && mod.createEmbedFn) {
+            const embedFn = mod.createEmbedFn({ ...ecfg, options: { num_gpu: 0 } });
             this._recaller.setEmbedFn(embedFn);
-            this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model });
+            this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model: ecfg.model });
+          } else if (!ecfg) {
+            this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
           } else {
             this.logger?.warn?.('[graph-adapter] createEmbedFn not available, community recall disabled');
           }

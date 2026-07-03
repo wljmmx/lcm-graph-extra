@@ -884,6 +884,7 @@ export function registerOperationalTools(api: any): void {
         const driver = await getNeo4jDriver();
         const { createRequire } = await import("node:module");
         const _req = createRequire(import.meta.url);
+        const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
         const GM_PRO_PATH = process.env.GM_PRO_PATH
           || (() => {
               try {
@@ -891,7 +892,7 @@ export function registerOperationalTools(api: any): void {
                 return resolved.endsWith("/dist/index.js") ? resolved.slice(0, -14) : resolved;
               } catch { return undefined; }
             })()
-          || "/home/wljmmx/.openclaw/extensions/graph-memory-pro";
+          || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
 
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
         // Full GmConfig — all required fields

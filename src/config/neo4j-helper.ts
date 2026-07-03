@@ -105,18 +105,13 @@ export function resolveNeo4jSearchConfig(
 
 /**
  * Resolve embedding config from plugin config or defaults.
+ * Uses EmbeddingConfig type from graph-memory-pro for unified configuration.
  */
-export interface EmbeddingPluginConfig {
-  apiKey?: string;
-  baseURL?: string;
-  model?: string;
-  dimensions?: number;
-  keepAlive?: string;
-}
+import type { EmbeddingConfig } from '@openclaw/graph-memory-pro';
 
 export function resolveEmbeddingConfig(
   pluginConfig: Record<string, unknown> | undefined,
-): EmbeddingPluginConfig | null {
+): EmbeddingConfig | null {
   const embeddingSection = (pluginConfig?.embedding ?? {}) as Record<string, unknown>;
   if (!embeddingSection) return null;
 
