@@ -17,7 +17,7 @@
  */
 
 // @ts-ignore - plugin-sdk types only available at runtime
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 // @ts-ignore - plugin-sdk types only available at runtime
 import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
 import { registerOperationalTools, closeNeo4jDriver } from './tools.js';
