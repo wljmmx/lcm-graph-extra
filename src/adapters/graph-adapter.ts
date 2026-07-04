@@ -292,8 +292,13 @@ export class GraphAdapter {
       if (nodes.length === 0) {
         nodes = await this.mod.searchNodes(this.driver, query, rl);
       }
-      // Rerank by PageRank if enough nodes
-      let reranked = (nodes ?? []);
+      // G-10: 过滤被主动遗忘（hard mode）标记为 superseded 的节点。
+      // searchNodes / Recaller 来自外部 graph-memory-pro 模块，无法注入 WHERE 条件，
+      // 因此在返回结果上做后置过滤。节点属性可能挂在 n.properties 上。
+      let reranked = (nodes ?? []).filter((n: any) => {
+        const st = n?.state ?? n?.properties?.state;
+        return st !== 'superseded';
+      });
       if (reranked.length >= 2) {
         const nodeIds = reranked.map((n: any) => n.id).filter(Boolean);
         if (nodeIds.length >= 2) {
@@ -388,7 +393,12 @@ export class GraphAdapter {
     const ctx = options?.context;
     try {
       const nodes = await mod.searchNodes(this.driver, query, rl * 3);
-      const events = (nodes ?? []).filter((n: any) => (n.type ?? n.labels?.[0]) === 'EVENT');
+      // G-10: 排除被主动遗忘（superseded）的节点
+      const events = (nodes ?? []).filter((n: any) => {
+        if ((n.type ?? n.labels?.[0]) !== 'EVENT') return false;
+        const st = n?.state ?? n?.properties?.state;
+        return st !== 'superseded';
+      });
 
       // 场景优先级加权排序
       const ranked = events.map((evt: any) => {

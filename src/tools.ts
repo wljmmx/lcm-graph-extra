@@ -76,6 +76,131 @@ function escapeFts5Query(q: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// S-8': Time range parsing + LLM summary helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * S-8': 解析时间范围参数。
+ * 支持格式：
+ *   - ISO 8601: "2024-01-01", "2024-01-01T00:00:00Z"
+ *   - 相对时间: "7d" (7天前), "24h" (24小时前), "30m" (30分钟前)
+ *   - 中文: "本周", "今天", "昨天"
+ * 返回 { fromTs, toTs } 毫秒时间戳（Neo4j timestamp() 同单位）
+ */
+function parseTimeRange(from?: string, to?: string): { fromTs: number | null; toTs: number | null } {
+  const now = Date.now();
+  const parseOne = (val: string | undefined, isFrom: boolean): number | null => {
+    if (!val || !val.trim()) return null;
+    const v = val.trim().toLowerCase();
+
+    // 相对时间: "7d", "24h", "30m"
+    const relMatch = v.match(/^(\d+)([dhm])$/);
+    if (relMatch) {
+      const num = parseInt(relMatch[1], 10);
+      const unit = relMatch[2];
+      const ms = unit === 'd' ? num * 24 * 60 * 60 * 1000 : unit === 'h' ? num * 60 * 60 * 1000 : num * 60 * 1000;
+      return isFrom ? now - ms : now;
+    }
+
+    // 中文关键词
+    if (v === '今天' || v === 'today') return isFrom ? new Date(now).setHours(0, 0, 0, 0) : now;
+    if (v === '昨天' || v === 'yesterday') {
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      return isFrom ? y.setHours(0, 0, 0, 0) : y.setHours(23, 59, 59, 999);
+    }
+    if (v === '本周' || v === 'this week') {
+      const d = new Date(now);
+      const day = d.getDay() || 7; // Sunday=0 → 7
+      d.setDate(d.getDate() - day + 1); // Monday
+      return isFrom ? d.setHours(0, 0, 0, 0) : now;
+    }
+    if (v === '本月' || v === 'this month') {
+      const d = new Date(now);
+      d.setDate(1);
+      return isFrom ? d.setHours(0, 0, 0, 0) : now;
+    }
+
+    // ISO 8601 / Date string
+    const parsed = Date.parse(val);
+    if (!isNaN(parsed)) return parsed;
+
+    return null;
+  };
+
+  return {
+    fromTs: parseOne(from, true),
+    toTs: parseOne(to, false),
+  };
+}
+
+/**
+ * S-8': 用 LLM 生成经验回顾的自然语言摘要。
+ * 失败时回退到简单的文本摘要。
+ */
+async function generateExperienceSummary(records: any[], usedExperienceNodes: boolean, timeFilter: { fromTs: number | null; toTs: number | null }): Promise<string> {
+  // 提取经验数据
+  const experiences = records.slice(0, 30).map((rec: any) => ({
+    name: rec.get("e.name") ?? "Unknown",
+    type: usedExperienceNodes ? (rec.get("e.communityId") ?? "lesson") : "event",
+    desc: (rec.get("e.description") ?? "").slice(0, 200),
+    seen: rec.get("e.validatedCount") ?? 0,
+    confidence: ((Number(rec.get("e.pagerank") ?? 0)) * 100).toFixed(0) + "%",
+  }));
+
+  const total = records.length;
+  const fromStr = timeFilter.fromTs ? new Date(timeFilter.fromTs).toLocaleDateString() : "beginning";
+  const toStr = timeFilter.toTs ? new Date(timeFilter.toTs).toLocaleDateString() : "now";
+
+  // 尝试调用 LLM 生成摘要（如果有配置）
+  try {
+    const llmCfg = _pluginNeo4jConfig?.distillationLlm || _pluginNeo4jConfig?.llm;
+    const model = (llmCfg as any)?.model;
+    const apiKey = (llmCfg as any)?.apiKey || '';
+    const baseURL = (llmCfg as any)?.baseURL || 'http://127.0.0.1:18789/v1';
+    if (model) {
+      const expList = experiences.map((e, i) => `${i + 1}. [${e.type}] ${e.name} (${e.confidence}, seen ${e.seen}) - ${e.desc}`).join('\n');
+      const prompt = `Based on the following ${total} experiences (time range: ${fromStr} to ${toStr}), write a concise natural language summary in the user's language. Group by theme, highlight key lessons learned, and note patterns. Keep it under 500 words.\n\nExperiences:\n${expList}`;
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+      const resp = await fetch(baseURL + '/chat/completions', {
+        method: 'POST', headers,
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.4, max_tokens: 800 }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (resp.ok) {
+        const data: any = await resp.json();
+        const text = data?.choices?.[0]?.message?.content;
+        if (text?.trim()) return `## 经验回顾摘要\n\n**时间范围**: ${fromStr} → ${toStr}\n**总数**: ${total} 条经验\n\n${text.trim()}`;
+      }
+    }
+  } catch { /* LLM unavailable, fall back to text summary */ }
+
+  // 回退：简单的文本摘要
+  const lines: string[] = [`## 经验回顾摘要`, ``, `**时间范围**: ${fromStr} → ${toStr}`, `**总数**: ${total} 条经验`, ``];
+
+  // 按类型分组
+  const byType: Record<string, typeof experiences> = {};
+  for (const e of experiences) {
+    const t = e.type || "other";
+    if (!byType[t]) byType[t] = [];
+    byType[t].push(e);
+  }
+
+  for (const [type, exps] of Object.entries(byType)) {
+    lines.push(`### ${type} (${exps.length} 条)`);
+    for (const e of exps.slice(0, 5)) {
+      lines.push(`- ${e.name} (${e.confidence}) — ${e.desc.slice(0, 100)}`);
+    }
+    if (exps.length > 5) lines.push(`- ... 及其他 ${exps.length - 5} 条`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Neo4j connection pool — single shared driver, per-call sessions only
 // ---------------------------------------------------------------------------
 let _neo4jDriver: any = null;
@@ -158,29 +283,88 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_experience_report",
-    description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown. default limit=20. tag filters by community label. " +
+    description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown, summary (LLM natural language summary). default limit=20. tag filters by community label. S-8': supports from/to time range filtering (ISO 8601 or natural language like '7d', '24h')." +
       "Searches for EVENT nodes with SOLVED_BY relationships and formats as a report.",
     parameters: Type.Object({
-      format: Type.Optional(Type.String({ description: 'Output: "text", "json", "markdown"', default: "text" })),
+      format: Type.Optional(Type.String({ description: 'Output: "text", "json", "markdown", "summary"', default: "text" })),
       limit: Type.Optional(Type.Number({ description: "Max experiences (default 20)", minimum: 1, maximum: 100 })),
       tag: Type.Optional(Type.String({ description: "Filter by community tag" })),
+      from: Type.Optional(Type.String({ description: "S-8': Start time (ISO 8601 or relative like '7d', '24h', '2024-01-01')" })),
+      to: Type.Optional(Type.String({ description: "S-8': End time (ISO 8601 or relative, default now)" })),
+      type: Type.Optional(Type.String({ description: "S-8': Filter by experience type (lesson|failure|correction|fix|best_practice)" })),
     }),
-    async execute(_id: string, params: { format?: string; limit?: number; tag?: string }) {
+    async execute(_id: string, params: { format?: string; limit?: number; tag?: string; from?: string; to?: string; type?: string }) {
       const format = params.format ?? "text";
       const limitParam = params.limit ?? 20;
       const { driver, session } = await neo4jSession();
       try {
-        let query = `MATCH (e:EVENT)
-          OPTIONAL MATCH (e)-[r:SOLVED_BY]->(fix:SKILL)
-          WITH e, collect({fix: fix, relation: r}) AS solutions
-          WHERE size(solutions) > 0 AND ANY(s IN solutions WHERE s.fix IS NOT NULL)`;
-        if (params.tag) query += ` AND e.communityId = $tag`;
-        query += ` RETURN e.id, e.name, e.description, e.pagerank, e.validatedCount, e.communityId, solutions
-          ORDER BY e.pagerank DESC, e.validatedCount DESC LIMIT $limit`;
+        // S-8': 解析时间范围参数
+        const timeFilter = parseTimeRange(params.from, params.to);
+        const typeFilter = params.type?.trim();
 
-        const result = await session.run(query, { limit: neo4jDriver.int(Math.trunc(limitParam)) as any, tag: params.tag ?? "" });
-        if (result.records.length === 0) {
+        // 构建查询 —— 支持 EVENT 和 EXPERIENCE 双类型
+        // EVENT: 图谱事件节点（原逻辑），EXPERIENCE: 经验层节点（S-8' 新增）
+        const conditions: string[] = [];
+        const queryParams: Record<string, any> = {
+          limit: neo4jDriver.int(Math.trunc(limitParam)) as any,
+          tag: params.tag ?? "",
+        };
+
+        if (params.tag) conditions.push("e.communityId = $tag");
+        if (typeFilter) {
+          conditions.push("e.type = $expType");
+          queryParams.expType = typeFilter;
+        }
+        if (timeFilter.fromTs) {
+          conditions.push("coalesce(e.createdAt, e.updatedAt, 0) >= $fromTs");
+          queryParams.fromTs = neo4jDriver.int(timeFilter.fromTs) as any;
+        }
+        if (timeFilter.toTs) {
+          conditions.push("coalesce(e.createdAt, e.updatedAt, 0) <= $toTs");
+          queryParams.toTs = neo4jDriver.int(timeFilter.toTs) as any;
+        }
+
+        const whereClause = conditions.length > 0 ? " AND " + conditions.join(" AND ") : "";
+
+        // 优先查 EXPERIENCE 节点（经验层），无结果时回退到 EVENT 节点
+        let result: any;
+        let usedExperienceNodes = false;
+
+        try {
+          const expQuery = `MATCH (e:EXPERIENCE)
+            WHERE e.status = 'DISTILLED'
+            AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())${whereClause}
+            OPTIONAL MATCH (e)-[r:RELATED_TO]->(related:EXPERIENCE)
+            WITH e, collect(DISTINCT related.id) AS relatedIds
+            RETURN e.id AS \`e.id\`, e.title AS \`e.name\`, e.summary AS \`e.description\`,
+                   e.relevanceScore AS \`e.pagerank\`, e.matchCount AS \`e.validatedCount\`,
+                   e.type AS \`e.communityId\`, e.createdAt AS createdAt,
+                   [ {fix: null, relation: null} ] AS solutions,
+                   relatedIds AS relatedIds
+            ORDER BY e.relevanceScore DESC, e.matchCount DESC LIMIT $limit`;
+          result = await session.run(expQuery, queryParams);
+          if (result.records.length > 0) usedExperienceNodes = true;
+        } catch { /* EXPERIENCE label may not exist, fall through to EVENT */ }
+
+        if (!usedExperienceNodes) {
+          let query = `MATCH (e:EVENT)
+            OPTIONAL MATCH (e)-[r:SOLVED_BY]->(fix:SKILL)
+            WITH e, collect({fix: fix, relation: r}) AS solutions
+            WHERE size(solutions) > 0 AND ANY(s IN solutions WHERE s.fix IS NOT NULL)`;
+          query += whereClause;
+          query += ` RETURN e.id, e.name, e.description, e.pagerank, e.validatedCount, e.communityId, solutions
+            ORDER BY e.pagerank DESC, e.validatedCount DESC LIMIT $limit`;
+          result = await session.run(query, queryParams);
+        }
+
+        if (!result || result.records.length === 0) {
           return { content: [{ type: "text" as const, text: "No experiences found." }] };
+        }
+
+        // S-8': summary 格式 —— LLM 生成自然语言摘要
+        if (format === "summary") {
+          const summaryText = await generateExperienceSummary(result.records, usedExperienceNodes, timeFilter);
+          return { content: [{ type: "text" as const, text: summaryText }] };
         }
 
         if (format === "json") {
@@ -188,7 +372,7 @@ export function registerOperationalTools(api: any): void {
             id: rec.get("e.id"), name: rec.get("e.name"),
             confidence: (Number(rec.get("e.pagerank") ?? 0) * 100).toFixed(0) + "%",
             occurrences: rec.get("e.validatedCount"),
-            solutions: (rec.get("solutions") as any[])
+            solutions: usedExperienceNodes ? [] : (rec.get("solutions") as any[])
               .filter((s: any) => s.fix)
               .map((s: any) => ({ name: s.fix.properties.name, instruction: s.relation?.properties?.instruction })),
           }));
@@ -196,12 +380,18 @@ export function registerOperationalTools(api: any): void {
         }
 
         const lines: string[] = [format === "markdown" ? "# Experience Report\n" : "Experience Report\n"];
+        // S-8': 时间范围标签
+        if (timeFilter.fromTs || timeFilter.toTs) {
+          const fromStr = timeFilter.fromTs ? new Date(timeFilter.fromTs).toLocaleDateString() : "beginning";
+          const toStr = timeFilter.toTs ? new Date(timeFilter.toTs).toLocaleDateString() : "now";
+          lines.push(`Time range: ${fromStr} → ${toStr}\n`);
+        }
         for (const rec of result.records) {
           const name = rec.get("e.name") ?? "Unknown";
           const conf = ((Number(rec.get("e.pagerank") ?? 0)) * 100).toFixed(0);
           const seen = rec.get("e.validatedCount") ?? 0;
           const desc = rec.get("e.description") ?? "";
-          const sols: any[] = (rec.get("solutions") ?? []).filter((s: any) => s.fix);
+          const sols: any[] = usedExperienceNodes ? [] : (rec.get("solutions") ?? []).filter((s: any) => s.fix);
           if (format === "markdown") {
             lines.push(`## ${name}`);
             lines.push(`- Confidence: ${conf}% | Occurrences: ${seen}`);
@@ -624,10 +814,48 @@ export function registerOperationalTools(api: any): void {
         }
       } catch { warn("Circuit breaker", "not loaded"); warns++; }
 
-      // 5. Summary
+      // 5. Health Metrics (N-4)
       sep();
       p(H);
-      p("5. Summary");
+      p("5. Health Metrics (N-4)");
+      p(H);
+      try {
+        const { healthMetrics } = await import('./health-metrics.js');
+        const latest = healthMetrics.getLatest();
+        if (latest) {
+          const ago = Math.round((Date.now() - latest.timestamp) / 60000);
+          ok("Last snapshot", ago + " min ago");
+          ok("Pending msgs", String(latest.pendingMessages));
+          ok("Summary frags", String(latest.summaryFragments));
+          ok("Token ratio", latest.maxTokenRatio.toFixed(3));
+          if (latest.lastAssembleMs > 0) {
+            ok("Last assemble", latest.lastAssembleMs + "ms (L2:" + latest.lastL2Ms + "ms L3:" + latest.lastL3Ms + "ms L4:" + latest.lastL4Ms + "ms)");
+          }
+          if (latest.tierLow + latest.tierMedium + latest.tierHigh > 0) {
+            ok("Tier distribution", "low:" + latest.tierLow + " med:" + latest.tierMedium + " high:" + latest.tierHigh);
+          }
+          pass++;
+        } else {
+          warn("Health metrics", "no snapshots yet (heartbeat may not have run)");
+          warns++;
+        }
+
+        // 从 lcm.db 读取历史趋势
+        const dbRows = healthMetrics.readFromDb(5);
+        if (dbRows.length > 0) {
+          p("  Recent history:");
+          for (const r of dbRows.slice(0, 5)) {
+            const ts = new Date(r.ts).toLocaleTimeString();
+            p("    " + ts + " | msgs:" + r.pending_msgs + " frags:" + r.summary_frags + " ratio:" + r.token_ratio.toFixed(3) +
+              " | cb:" + (r.cb_lcm_ok ? "✓" : "✗") + (r.cb_qmd_ok ? "✓" : "✗") + (r.cb_neo4j_ok ? "✓" : "✗"));
+          }
+        }
+      } catch (e: any) { warn("Health metrics", "collection failed: " + e.message); warns++; }
+
+      // 6. Summary
+      sep();
+      p(H);
+      p("6. Summary");
       p(H);
       p("  Pass: " + pass + "  Warnings: " + warns + "  Failures: " + fails);
       p(fails === 0 ? "  Status: OK" : "  Status: DEGRADED (" + fails + " issues)");
@@ -769,6 +997,103 @@ export function registerOperationalTools(api: any): void {
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Pin error: ${e.message}` }], isError: true };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 7.5 lcmg_forget — G-10: 主动遗忘命令（与 lcmg_pin 反向）
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_forget",
+    description: "Actively forget/supersede a knowledge graph node or experience. mode=soft: reduce relevanceScore/pagerank (node stays searchable but deprioritized). mode=hard: mark node as 'superseded' (excluded from search results, retained for audit). " +
+      "G-10: Use when a piece of knowledge is outdated or incorrect and should be deprioritized or removed from active recall.",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "Node ID to forget" })),
+      query: Type.Optional(Type.String({ description: "Query to find nodes to forget (if id not provided)" })),
+      mode: Type.Optional(Type.String({ description: "'soft' (default): reduce weight. 'hard': mark as superseded", default: "soft" })),
+      confirm: Type.Optional(Type.Boolean({ description: "Required true for hard mode (safety check)", default: false })),
+    }),
+    async execute(_id: string, params: { id?: string; query?: string; mode?: string; confirm?: boolean }) {
+      const mode = params.mode ?? "soft";
+      const isHard = mode === "hard";
+
+      // Safety: hard mode requires explicit confirmation
+      if (isHard && params.confirm !== true) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "❌ Hard forget requires confirm=true. This is a safety check to prevent accidental data loss.",
+          }],
+        };
+      }
+
+      try {
+        const { driver, session } = await neo4jSession();
+        try {
+          let nodeIds: string[] = [];
+
+          if (params.id) {
+            // Single node by ID
+            nodeIds = [params.id];
+          } else if (params.query) {
+            // Search for nodes by query
+            const searchResult = await session.run(
+              `MATCH (n) WHERE (n.name CONTAINS $q OR n.description CONTAINS $q OR n.title CONTAINS $q OR n.summary CONTAINS $q)
+               AND NOT n.pinned = true
+               RETURN n.id AS id LIMIT 10`,
+              { q: params.query },
+            );
+            nodeIds = searchResult.records.map((r: any) => r.get("id")).filter(Boolean);
+            if (nodeIds.length === 0) {
+              return { content: [{ type: "text" as const, text: "No matching nodes found (pinned nodes are protected)." }] };
+            }
+          } else {
+            return { content: [{ type: "text" as const, text: "Provide either id or query parameter." }], isError: true };
+          }
+
+          let affected = 0;
+          if (isHard) {
+            // Hard: mark as superseded (excluded from search, retained for audit)
+            const result = await session.run(
+              `UNWIND $ids AS nodeId
+               MATCH (n {id: nodeId})
+               WHERE NOT n.pinned = true
+               SET n.state = 'superseded',
+                   n.supersededAt = timestamp(),
+                   n.relevanceScore = 0,
+                   n.pagerank = 0
+               RETURN count(n) AS cnt`,
+              { ids: nodeIds },
+            );
+            affected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
+          } else {
+            // Soft: reduce weight (relevanceScore * 0.3, pagerank * 0.3)
+            const result = await session.run(
+              `UNWIND $ids AS nodeId
+               MATCH (n {id: nodeId})
+               WHERE NOT n.pinned = true
+               SET n.relevanceScore = coalesce(n.relevanceScore, 0.5) * 0.3,
+                   n.pagerank = coalesce(n.pagerank, 0.5) * 0.3,
+                   n.forgottenAt = timestamp()
+               RETURN count(n) AS cnt`,
+              { ids: nodeIds },
+            );
+            affected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
+          }
+
+          const modeText = isHard ? "hard-forgotten (superseded)" : "soft-forgotten (weight reduced)";
+          return {
+            content: [{
+              type: "text" as const,
+              text: affected > 0
+                ? `✅ ${affected} node(s) ${modeText}.\nIDs: ${nodeIds.slice(0, 5).join(", ")}${nodeIds.length > 5 ? ` ... (+${nodeIds.length - 5})` : ""}\n${isHard ? "Nodes are retained for audit but excluded from search." : "Nodes remain searchable but deprioritized."}`
+                : `⚠️ No nodes affected (they may be pinned or not found).`,
+            }],
+          };
+        } finally { await closeNeo4j(driver, session); }
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `❌ Forget error: ${e.message}` }], isError: true };
       }
     },
   });

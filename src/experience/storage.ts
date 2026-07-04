@@ -45,6 +45,7 @@ const UPSERT_DISTILLED = `
 const SEARCH_RELEVANT = `
   MATCH (e:${LABEL})
   WHERE e.status = 'DISTILLED'
+    AND (e.state IS NULL OR e.state <> 'superseded')
     AND e.relevanceScore >= $minScore
     AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
   RETURN e.id AS id,
@@ -72,6 +73,7 @@ const SEARCH_RELEVANT = `
 const SEARCH_BY_CONTEXT = `
   MATCH (e:${LABEL})
   WHERE e.status = 'DISTILLED'
+    AND (e.state IS NULL OR e.state <> 'superseded')
     AND toLower(e.context) CONTAINS toLower($keyword)
     AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
   RETURN e.id AS id,
@@ -94,6 +96,18 @@ const SEARCH_BY_CONTEXT = `
 const INCREMENT_MATCH_COUNT = `
   MATCH (e:${LABEL} {id: $id})
   SET e.matchCount = coalesce(e.matchCount, 0) + 1
+`;
+
+// G-8: LLM 异步验证回路 —— 更新 qualityScore + 调整 relevanceScore
+const UPDATE_QUALITY_SCORE = `
+  MATCH (e:${LABEL} {id: $id})
+  SET e.qualityScore = $qualityScore,
+      e.relevanceScore = CASE
+        WHEN $delta > 0 THEN least(coalesce(e.relevanceScore, 0.5) + $delta, 1.0)
+        WHEN $delta < 0 THEN greatest(coalesce(e.relevanceScore, 0.5) + $delta, 0.3)
+        ELSE coalesce(e.relevanceScore, 0.5)
+      END,
+      e.lastValidatedAt = timestamp()
 `;
 
 /**
@@ -266,6 +280,7 @@ export class ExperienceStorage {
     const filterClause = hasFilters ? `\n           ${SEARCH_QUERY_TAG_FILTER}` : '';
     const actualCypher = `MATCH (e:${LABEL})
          WHERE e.status = 'DISTILLED'
+           AND (e.state IS NULL OR e.state <> 'superseded')
            AND e.relevanceScore >= $minScore
            AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())${projectFilter}${filterClause}
          ${SEARCH_QUERY_TAIL}`;
@@ -321,6 +336,21 @@ export class ExperienceStorage {
    */
   async incrementMatchCount(id: string): Promise<void> {
     await this.adapter.query(INCREMENT_MATCH_COUNT, { id });
+  }
+
+  /**
+   * G-8: LLM 异步验证回路 —— 更新经验质量分数并调整相关性。
+   *
+   * @param id 经验 ID
+   * @param qualityScore LLM 判定的质量分数 [0, 1]
+   * @param delta relevanceScore 调整量（正值=成功召回+0.05，负值=无效召回-0.05）
+   */
+  async updateQualityScore(id: string, qualityScore: number, delta: number): Promise<void> {
+    await this.adapter.query(UPDATE_QUALITY_SCORE, {
+      id,
+      qualityScore: Math.max(0, Math.min(1, qualityScore)),
+      delta,
+    });
   }
 
   /**
