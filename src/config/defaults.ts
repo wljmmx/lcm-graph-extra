@@ -20,6 +20,14 @@ export const DEFAULTS = {
   /** 心跳调度（index.ts runHeartbeat） */
   heartbeat: {
     intervalMs: 5 * 60 * 1000, // 5min
+    /** P2-9: 压力检测阈值（原 index.ts 中散落的魔术数字集中化） */
+    pressure: {
+      pendingMessagesThreshold: 15,   // 待压缩消息数 ≥ 此值触发债务
+      summaryFragmentsThreshold: 8,   // 摘要碎片数 ≥ 此值触发债务
+      maxTokenRatio: 0.65,            // 当前 token / 上下文窗口 > 此值触发债务
+      contextWindowChars: 262_144,    // 默认上下文窗口（字符数）
+      tokenBudget: 114_688,           // 默认 token 预算 ≈ 112K（128K 窗口的 ~90%）
+    },
   },
 
   /** 检索网关超时与慢查询阈值（retrieval-gateway.ts） */

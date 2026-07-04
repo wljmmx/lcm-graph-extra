@@ -59,6 +59,8 @@ function quickHash(s: string): string {
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+// P0-1: 静态导入经验提取函数，供 afterTurn 中直接调用。
+import { detectExperienceTrigger, extractRawExperience } from './experience/index.js';
 
 function applyTotalControl(
   injected: string,
@@ -1386,6 +1388,32 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               logger?.warn?.('afterTurn: triplet extraction skipped (async)', { err: err.message });
             });
           }
+
+          // P0-1: 接入经验提取管道。修复前 detectExperienceTrigger/extractRawExperience
+          // 虽已实现并 re-export，但 afterTurn 从未调用，导致 PENDING 队列恒空，
+          // 蒸馏心跳（step 3）永远空转，L4 经验层完全不可用。
+          // 现在在每轮结束后检测触发条件，命中则写入 PENDING 原始经验节点，供后续蒸馏消费。
+          if (expStore && typeof detectExperienceTrigger === 'function') {
+            try {
+              const sessionId = String(params.sessionId ?? params.session_id ?? 'unknown');
+              // 对最近一轮的每条消息做触发检测（user/assistant/toolResult 均可能触发）
+              const recent = recentMessages.length > 0 ? recentMessages : msgs.slice(-2);
+              for (const msg of recent) {
+                try {
+                  const trigger = detectExperienceTrigger(msg, priorMessages);
+                  if (!trigger) continue;
+                  const raw = extractRawExperience(trigger, msg, sessionId);
+                  // saveRaw 是 async，但此处 fire-and-forget，不阻塞 afterTurn
+                  expStore.saveRaw(raw).catch((saveErr: any) => {
+                    logger?.warn?.('[afterTurn] experience saveRaw failed', { err: String(saveErr) });
+                  });
+                  logger?.debug?.(`[afterTurn] experience extracted: source=${trigger}, id=${raw.id}`);
+                } catch { /* single message extraction failure, non-fatal */ }
+              }
+            } catch (expErr) {
+              logger?.warn?.('[afterTurn] experience extraction pipeline failed (non-fatal)', { err: String(expErr) });
+            }
+          }
         // Track response tokens (non-blocking)
         try {
           const model = params.model ?? "unknown";
@@ -1632,12 +1660,21 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // Heartbeat - periodic async maintenance (every 5 minutes)
     //   1. Compaction pressure check + predictive pre-compaction
     //   2. qmd MCP health check
-    //   3. (future) PENDING experience distillation
+    //   3. Experience distillation (every ~2h)
+    //   4. Neo4j TTL weight decay + expired cleanup (every ~24h)
+    //   5. Debt table reconcile — orphan/tombstone cleanup (every ~24h)
     // -------------------------------------------------------------------
     const HB_INTERVAL_MS = DEFAULTS.heartbeat.intervalMs;
     let hbTimer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | null = null;
     let lastDistillationRun = 0;
     let hbDedupCleanupCounter = 0;  // Clean dedup cache every 15 heartbeats (~75min)
+    // P0-2: TTL 清理节流。默认 24h 一次（与 DEFAULT_TTL_CONFIG.cleanupIntervalHours 对齐）。
+    let lastTtlRun = 0;
+    const TTL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    // P0-3: 债务表对账节流。默认 24h 一次，与 TTL 同 cadence。
+    // 清理孤儿债务（会话已删除）与 7 天前墓碑，防止 conversation_compaction_maintenance 无限增长。
+    let lastDebtReconcileRun = 0;
+    const DEBT_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
     // Distillation helpers
 
     function isOllamaModel(model: string): boolean {
@@ -1656,7 +1693,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     }
 
     async function distillOne(raw: { id: string; source: string; context: string; detail: string }, llm: { model: string; apiKey: string; baseURL: string }): Promise<any | null> {
-      const prompt = 'Summarize the following experience into a concise lesson.' + '\nSource: ' + raw.source + '\nContext: ' + raw.context + '\nDetail: ' + raw.detail + '\nReturn a JSON with: title, summary, type (lesson|failure|correction|fix|best_practice), relevanceScore (0-1). Return ONLY JSON.';
+      // P1-4: prompt 增加 tags 字段，让 LLM 同时产出多维度标签（scenario/techStack/severity/freeTags）。
+      // 修复前蒸馏不产生任何 tags，saveDistilled 的 tags 参数恒 undefined，标签检索无数据可用。
+      const prompt = 'Summarize the following experience into a concise lesson.' + '\nSource: ' + raw.source + '\nContext: ' + raw.context + '\nDetail: ' + raw.detail
+        + '\nReturn a JSON with: title, summary, type (lesson|failure|correction|fix|best_practice), relevanceScore (0-1),'
+        + ' scenario (array, subset of: bug-fix|feature-dev|code-review|config-debug|deployment|performance-opt|security-audit|refactor),'
+        + ' techStack (array, subset of: frontend|backend|devops|database|mobile|ai-ml|infrastructure|general),'
+        + ' severity (one of: critical|major|minor), freeTags (array of short strings).'
+        + ' Return ONLY JSON.';
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 15_000);
       try {
@@ -1669,7 +1713,34 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         const text = data?.choices?.[0]?.message?.content;
         if (!text) return null;
         const parsed = JSON.parse(text);
-        return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: parsed.relevanceScore ?? 0.5, createdAt: new Date(), matchCount: 0 };
+        // P1-4: 校验并收敛 tags，防止 LLM 返回非法值写入 Neo4j。
+        const SCENARIO_SET = new Set(['bug-fix', 'feature-dev', 'code-review', 'config-debug', 'deployment', 'performance-opt', 'security-audit', 'refactor']);
+        const TECH_SET = new Set(['frontend', 'backend', 'devops', 'database', 'mobile', 'ai-ml', 'infrastructure', 'general']);
+        const SEVERITY_SET = new Set(['critical', 'major', 'minor']);
+        const filterArr = (v: any, allowed: Set<string>): string[] | undefined => {
+          if (!Array.isArray(v)) return undefined;
+          const out = v.map(String).filter((x) => allowed.has(x));
+          return out.length > 0 ? out : undefined;
+        };
+        let severity: 'critical' | 'major' | 'minor' | undefined;
+        if (typeof parsed.severity === 'string' && SEVERITY_SET.has(parsed.severity)) severity = parsed.severity as any;
+        let freeTags: string[] | undefined;
+        if (Array.isArray(parsed.freeTags)) {
+          const ft = parsed.freeTags.map(String).filter((s: string) => s.trim().length > 0 && s.length <= 40).slice(0, 10);
+          freeTags = ft.length > 0 ? ft : undefined;
+        }
+        const tags = (parsed.scenario || parsed.techStack || severity || freeTags)
+          ? {
+              scenario: filterArr(parsed.scenario, SCENARIO_SET) as any,
+              techStack: filterArr(parsed.techStack, TECH_SET) as any,
+              severity,
+              freeTags,
+            }
+          : undefined;
+        // 校验 relevanceScore 范围 [0,1]，越界回退 0.5
+        let rs = typeof parsed.relevanceScore === 'number' ? parsed.relevanceScore : 0.5;
+        if (!isFinite(rs) || rs < 0) rs = 0; else if (rs > 1) rs = 1;
+        return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: rs, createdAt: new Date(), matchCount: 0, tags };
       } catch { clearTimeout(timer); return null; }
     }
 
@@ -1747,10 +1818,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
 
             // Check thresholds
+            // P2-9: 阈值与窗口预算改引用 DEFAULTS.heartbeat.pressure，消除魔术数字
+            const P = DEFAULTS.heartbeat.pressure;
             const signals = [];
-            if (pendingMessages >= 15) signals.push("pending_msgs>=" + pendingMessages);
-            if (summaryFragments >= 8) signals.push("summary_frags>=" + summaryFragments);
-            if (maxTokenRatio > 0.65) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
+            if (pendingMessages >= P.pendingMessagesThreshold) signals.push("pending_msgs>=" + pendingMessages);
+            if (summaryFragments >= P.summaryFragmentsThreshold) signals.push("summary_frags>=" + summaryFragments);
+            if (maxTokenRatio > P.maxTokenRatio) signals.push("token_ratio>" + maxTokenRatio.toFixed(3));
             if (signals.length > 0) {
               logger?.warn?.("heartbeat: pressure threshold(s) exceeded, writing debt for affected sessions", { signals });
               // writeCompactionDebt is already imported at top; use it directly
@@ -1760,8 +1833,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   try {
                     const convId = getConversationId(data.sessionKey, String(data.sessionId || ''));
                     if (!convId) continue;
-                    const tokenCount = Math.round((maxTokenRatio || 0.5) * 262144);
-                    writeCompactionDebt(convId, 114688, tokenCount, "hb_pressure_" + signals.length + "dims");
+                    const tokenCount = Math.round((maxTokenRatio || 0.5) * P.contextWindowChars);
+                    writeCompactionDebt(convId, P.tokenBudget, tokenCount, "hb_pressure_" + signals.length + "dims");
                   } catch { /* skip bad session file */ }
                 }
               } catch (debtWriteErr) {
@@ -1793,6 +1866,50 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             });
           }
         }
+
+        // --- 4. P0-2: Neo4j-backed TTL weight decay + expired cleanup (every ~24h) ---
+        // 修复前 TTL 调度器从未启动，节点永不衰减/过期，lcmg_pin 的豁免语义无意义。
+        // 现在在心跳中按 24h 节流运行 Neo4j 原生 Cypher 衰减与清理。
+        if (graphAdapter && typeof graphAdapter.query === "function") {
+          const ttlElapsed = Date.now() - lastTtlRun;
+          if (ttlElapsed >= TTL_INTERVAL_MS) {
+            lastTtlRun = Date.now();
+            (async () => {
+              try {
+                const { applyNeo4jWeightDecay, cleanupNeo4jExpiredNodes, DEFAULT_TTL_CONFIG } = await import("./core/ttl.js");
+                const decayed = await applyNeo4jWeightDecay(graphAdapter);
+                const deleted = await cleanupNeo4jExpiredNodes(graphAdapter, DEFAULT_TTL_CONFIG);
+                if (decayed > 0 || deleted > 0) {
+                  logger?.info?.(`heartbeat: TTL applied (decayed=${decayed}, deleted=${deleted})`);
+                }
+              } catch (ttlErr) {
+                logger?.warn?.("heartbeat: TTL cleanup failed (non-fatal)", { err: String(ttlErr) });
+              }
+            })().catch(() => { /* swallowed */ });
+          }
+        }
+
+        // --- 5. P0-3: 债务表对账清理 (every ~24h) ---
+        // 删除孤儿债务（会话已删除但债务行残留）与 7 天前墓碑（pending=0/running=0），
+        // 防止 conversation_compaction_maintenance 表无限增长导致 getPendingDebts 查询退化。
+        {
+          const reconcileElapsed = Date.now() - lastDebtReconcileRun;
+          if (reconcileElapsed >= DEBT_RECONCILE_INTERVAL_MS) {
+            lastDebtReconcileRun = Date.now();
+            (async () => {
+              try {
+                const { reconcileDebtTable } = await import("./core/debt-manager.js");
+                const r = reconcileDebtTable();
+                if (r.orphaned > 0 || r.tombstones > 0) {
+                  logger?.info?.(`heartbeat: debt table reconciled (orphans=${r.orphaned}, tombstones=${r.tombstones})`);
+                }
+              } catch (reconcileErr) {
+                logger?.warn?.("heartbeat: debt reconcile failed (non-fatal)", { err: String(reconcileErr) });
+              }
+            })().catch(() => { /* swallowed */ });
+          }
+        }
+
         try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
 
         // Periodic dedup cache cleanup (every 15 heartbeats)

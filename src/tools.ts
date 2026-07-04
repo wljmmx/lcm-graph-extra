@@ -11,10 +11,6 @@ import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
 const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
 import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
@@ -607,7 +603,8 @@ export function registerOperationalTools(api: any): void {
           if (ec > 0) ok("EXPERIENCE", ec + " nodes"); else warn("EXPERIENCE", "0 (no extractions yet)"); (ec > 0 ? pass++ : warns++);
           const pin = await session.run("MATCH (n {pinned: true}) RETURN count(n) AS c");
           const pc = pin.records[0].get("c").toNumber();
-          if (pc > 0) ok("Pinned", pc + " nodes"); pass++;
+          // P1-7: pass++ 原在 if 块外，pinned=0 时仍递增 pass 导致计数虚高。移入 else 分支。
+          if (pc > 0) { ok("Pinned", pc + " nodes"); pass++; }
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) { fail("Neo4j", e.message); fails++; }
 
@@ -681,22 +678,39 @@ export function registerOperationalTools(api: any): void {
       }
 
       // --- qmd ---
+      // P2-10: 改用 QmdClient（MCP 优先 + CLI 降级 + 熔断器），与其他 qmd 工具保持一致。
+      // 旧实现直接 execFile("qmd", ["query", ...]) 绕过 QmdClient 的 MCP 通道、
+      // 熔断器、统一日志和 session 管理，导致：(1) 失去 MCP 性能优势；
+      // (2) MCP 故障时无法自动降级到 CLI；(3) 与 retrieval-gateway 行为不一致。
       if (engines === "all" || engines === "qmd_only") {
+        let qmd: any = null;
         try {
-          // P0-1 SEC-1: use execFile (no shell) to prevent command injection
-          const { stdout } = await execFileAsync(
-            "qmd",
-            ["query", query, "--format", "json"],
-            { timeout: 15000, encoding: "utf-8" },
-          );
-          // Parse qmd output — it returns lines
-          const qmdLines = stdout.split("\n").filter((l: string) => l.trim()).slice(0, limit);
-          if (qmdLines.length > 0) {
-            results.push(`## 📄 qmd memory (${qmdLines.length} hits)`);
-            for (const l of qmdLines) results.push(`- ${l}`);
+          const { QmdClient } = await import("./qmd-client.js");
+          qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+          const qmdResults = await qmd.query({
+            searches: [
+              { type: "lex", query },
+              { type: "vec", query },
+            ],
+            limit,
+            rerank: true,
+          });
+          if (qmdResults.length > 0) {
+            results.push(`## 📄 qmd memory (${qmdResults.length} hits)`);
+            for (const r of qmdResults) {
+              const title = r.title || r.file || r.docid || "(untitled)";
+              const score = typeof r.score === "number" ? r.score.toFixed(2) : "0.00";
+              const snippet = (r.snippet || "").replace(/\s+/g, " ").slice(0, 200);
+              const lineTag = r.line ? `:${r.line}` : "";
+              results.push(`- [score ${score}] ${title}${lineTag} — ${snippet}`);
+            }
             results.push("");
           }
-        } catch { /* qmd CLI fallback, silent */ }
+        } catch (e: any) {
+          results.push(`❌ qmd search: ${e?.message ?? String(e)}\n`);
+        } finally {
+          if (qmd) { try { qmd.dispose(); } catch {} }
+        }
       }
 
       // --- Neo4j ---
@@ -866,9 +880,13 @@ export function registerOperationalTools(api: any): void {
                 await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
               }
               const deleted = orphanedIds.length;
-              // Also delete orphaned relationships
+              // P1-6: 批量清理查询逻辑修复。
+              // 原查询 `NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage`
+              // 中，子查询用同一 label 匹配同 id，节点自身即满足 EXISTS，NOT EXISTS 恒为 false，导致清理永远 0 删除。
+              // 正确语义：删除那些 id 在 lossless-claw 会话消息表中已不存在的 ConversationMessage 节点。
+              // 此处 orphanedIds 已在上面逐个删除，批量清理作为补充：删除剩余无任何关系的孤立 ConversationMessage。
               const relCleanup = await session.run(
-                `MATCH (n) WHERE NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage DELETE n`
+                `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
               );
               // P1-AUDIT: 批量清理结果从 Neo4j result summary 中提取实际删除数，
               // 修复前硬编码 moreDeleted=0，用户无法知道额外清理了多少节点。
@@ -988,7 +1006,7 @@ export function registerOperationalTools(api: any): void {
   // ===================================================================
   api.registerTool({
     name: "lcmg_maintain",
-    description: "Trigger knowledge graph maintenance: dedup, PageRank, community detection.",
+    description: "Trigger knowledge graph maintenance: dedup, PageRank, community detection. Also reconciles the compaction debt table (deletes orphaned debts for deleted conversations and tombstones older than 7 days).",
     parameters: Type.Object({}),
     async execute() {
       try {
@@ -1016,6 +1034,21 @@ export function registerOperationalTools(api: any): void {
         lines.push("PageRank top: " + (result?.pagerank?.topK?.length ?? 0) + " nodes");
         lines.push("Communities detected: " + (result?.community?.communities?.size ?? 0));
         lines.push("Community summaries: " + (result?.communitySummaries ?? 0));
+
+        // P0-3: 顺带对账债务表 —— 删除孤儿债务与过期墓碑，避免表无限增长。
+        // lcmg_maintain 是手动维护入口，应覆盖债务表清理而不仅是图分析。
+        try {
+          const { reconcileDebtTable } = await import("./core/debt-manager.js");
+          const r = reconcileDebtTable();
+          lines.push("");
+          lines.push("Debt table reconciled:");
+          lines.push("  Orphans deleted: " + r.orphaned);
+          lines.push("  Tombstones deleted: " + r.tombstones);
+        } catch (debtErr) {
+          lines.push("");
+          lines.push("Debt reconcile skipped: " + (debtErr instanceof Error ? debtErr.message : String(debtErr)));
+        }
+
         lines.push("");
         lines.push("[OK] Maintenance complete.");
 

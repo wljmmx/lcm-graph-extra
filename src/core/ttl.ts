@@ -206,3 +206,89 @@ export function startCleanupScheduler(
     stop() { clearInterval(timer); },
   };
 }
+
+// ---------- Neo4j-backed TTL (runtime path) --------------------------------
+
+/**
+ * Neo4j 图谱适配器最小接口约定（仅用到 query 方法）。
+ * 避免直接 import GraphAdapter 形成循环依赖。
+ */
+export interface Neo4jTtlAdapter {
+  query<T = Record<string, unknown>>(cypher: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]>;
+}
+
+/**
+ * P0-2: 在 Neo4j 上执行权重衰减。
+ *
+ * 原有 `applyWeightDecay` 只作用于内存 GraphMemoryManager，而持久化节点存放在 Neo4j，
+ * 内存图在每次检索后才临时加载，进程退出即丢失。因此节点权重永不衰减，TTL 过期判断
+ * 失效，`lcmg_pin` 的豁免语义也无意义。
+ *
+ * 本函数直接在 Neo4j 上用 Cypher 批量衰减：
+ *   weight = max(minWeight, weight * 0.5 ^ (daysSinceUpdate / halfLifeDays))
+ * 跳过 pinned=true 的节点（pinnedExempt=true 时）与无 weight 属性的节点。
+ */
+export async function applyNeo4jWeightDecay(
+  adapter: Neo4jTtlAdapter,
+  halfLifeDays: number = DEFAULTS.ttl.halfLifeDays,
+  minWeight: number = 0.01,
+  pinnedExempt: boolean = true,
+): Promise<number> {
+  if (halfLifeDays <= 0) return 0;
+  try {
+    const exemptClause = pinnedExempt ? 'AND NOT n.pinned = true' : '';
+    // 用 Neo4j 的 duration 计算天数差，避免客户端时区问题
+    const result = await adapter.query(
+      `MATCH (n) WHERE n.weight IS NOT NULL AND n.updatedAt IS NOT NULL ${exemptClause}
+       WITH n, n.weight AS w, n.updatedAt AS ua,
+            duration.inseconds(datetime(ua), datetime()).seconds AS secs
+       WHERE secs > 0
+       SET n.weight = CASE
+         WHEN w * power(0.5, (secs / 86400.0) / $halfLifeDays) < $minWeight
+         THEN $minWeight
+         ELSE w * power(0.5, (secs / 86400.0) / $halfLifeDays)
+       END
+       RETURN count(n) AS c`,
+      { halfLifeDays, minWeight },
+    );
+    const row = result?.[0] as { c?: { toNumber?: () => number } | number } | undefined;
+    const c = (row?.c as any)?.toNumber ? (row?.c as any).toNumber() : (row?.c as number) ?? 0;
+    return typeof c === 'number' ? c : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * P0-2: 在 Neo4j 上清理过期节点。
+ *
+ * 删除同时满足以下条件的节点：
+ *   1. updatedAt 早于 retentionDays 天前
+ *   2. weight < minWeight
+ *   3. （pinnedExempt=true 时）非 pinned
+ *
+ * 返回删除的节点数。注意：DETACH DELETE 会一并删除关联边。
+ */
+export async function cleanupNeo4jExpiredNodes(
+  adapter: Neo4jTtlAdapter,
+  config: TTLConfig = DEFAULT_TTL_CONFIG,
+): Promise<number> {
+  if (!config.enabled) return 0;
+  try {
+    const exemptClause = config.pinnedExempt ? 'AND NOT n.pinned = true' : '';
+    const result = await adapter.query(
+      `MATCH (n) WHERE n.updatedAt IS NOT NULL ${exemptClause}
+       WITH n, datetime(n.updatedAt) AS ua, datetime() AS now
+       WHERE duration.inseconds(ua, now).seconds > $retentionSecs
+         AND (coalesce(n.weight, 1.0) < $minWeight)
+       DETACH DELETE n
+       RETURN count(n) AS c`,
+      { retentionSecs: config.retentionDays * 86400, minWeight: config.minWeight },
+    );
+    const row = result?.[0] as { c?: { toNumber?: () => number } | number } | undefined;
+    const c = (row?.c as any)?.toNumber ? (row?.c as any).toNumber() : (row?.c as number) ?? 0;
+    return typeof c === 'number' ? c : 0;
+  } catch {
+    return 0;
+  }
+}

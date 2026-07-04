@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
 
 // P2-AUDIT: 默认 tokenBudget ≈ 112K（128K 上下文窗口的 ~90%），
 // 集中定义避免魔术数字散落。
@@ -36,9 +37,15 @@ export const DEFAULT_SCHEDULER_CONFIG: Required<DebtSchedulerConfig> = {
 // ─── DB Utilities ───────────────────────────────────────
 
 function findDbPath(): string | null {
-  const home = process.env.HOME || "";
+  // P2-8: 用 homedir() 替换 process.env.HOME，与 tools.ts / lcm-bridge.ts 保持一致。
+  // homedir() 在 Linux 优先读 /etc/passwd，更稳健；且 Windows 下回退 USERPROFILE。
+  const home = homedir() || process.env.HOME || "";
   const candidates: (string | undefined)[] = [
     process.env.OPENCLAW_DB_PATH,
+    // P0-3: lcm.db 必须作为首选文件候选 —— writeCompactionDebt (lcm-bridge.ts) 实际
+    // 将 conversation_compaction_maintenance 写入 lcm.db。修复前 findDbPath 只查
+    // sessions.db / gateway.db，导致债务调度器读取了错误的数据库，永远找不到债务。
+    path.join(home, ".openclaw", "lcm.db"),
     path.join(home, ".openclaw", "sessions.db"),
     path.join(home, ".openclaw", "gateway.db"),
   ];
@@ -113,6 +120,85 @@ export function closeDebtDb(): void {
     entry.stmts.clear();
   }
   _debtDbCache.clear();
+}
+
+/**
+ * P1-5: 重置 stale running=1 债务。
+ *
+ * 问题背景：进程异常退出时，正在执行的债务其 running=1 标记不会被清除。
+ * 重启后这些债务会永久卡在 running=1 状态，既不会被 pollAndDispatch 重新拾取
+ * （getPendingDebts 查询条件是 running=0），也无法被清理，形成"僵尸债务"。
+ *
+ * 本函数在 scheduler 启动时调用，将所有 running=1 的债务重置为 running=0，
+ * 使其重新进入待处理队列。
+ */
+export function resetStaleRunning(dbPath?: string): number {
+  const db = getDebtDb(dbPath);
+  if (!db) return 0;
+  try {
+    const stmt = getDebtStmt(db, dbPath, 'resetStaleRunning',
+      "UPDATE conversation_compaction_maintenance SET running = 0, updated_at = datetime('now') WHERE running = 1");
+    if (!stmt) return 0;
+    const result = stmt.run();
+    return (result?.changes ?? 0) as number;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * P0-3: 对账清理债务表，防止无限增长与孤儿堆积。
+ *
+ * 问题背景：
+ * 1. 孤儿债务 —— 会话被删除后，conversation_compaction_maintenance 中对应行仍
+ *    保留 pending=1。原先靠 onCompaction 隐式 no-op 才被 clearDebt 静默清账，
+ *    是脆弱不变式（任何让 onCompaction 抛错的改动都会变成无限重试）。
+ * 2. 墓碑堆积 —— clearDebt 只设 pending=0/running=0，从不 DELETE，表无限增长，
+ *    getPendingDebts 的 LIMIT 10 排序查询会扫越来越多行。
+ *
+ * 本函数：
+ * - 删除孤儿债务（conversation_id 在 conversations 表中已不存在）
+ * - 删除 7 天前的墓碑债务（pending=0, running=0, updated_at < now - 7 days）
+ *
+ * 非关键维护操作：任何异常都静默返回已完成的计数，不影响调度器主循环。
+ */
+export interface ReconcileResult {
+  orphaned: number;
+  tombstones: number;
+}
+
+export function reconcileDebtTable(dbPath?: string): ReconcileResult {
+  const db = getDebtDb(dbPath);
+  if (!db) return { orphaned: 0, tombstones: 0 };
+  const result: ReconcileResult = { orphaned: 0, tombstones: 0 };
+  try {
+    // 检查 conversations 表是否存在（避免在全新/空库上抛错）
+    const tableCheck = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'"
+    ).get() as { name: string } | undefined;
+    if (tableCheck) {
+      // 删除孤儿债务：conversation_id 在 conversations 表中已不存在
+      const orphanStmt = getDebtStmt(db, dbPath, 'reconcileDelOrphans',
+        "DELETE FROM conversation_compaction_maintenance " +
+        "WHERE conversation_id NOT IN (SELECT conversation_id FROM conversations)");
+      if (orphanStmt) {
+        const r = orphanStmt.run();
+        result.orphaned = (r?.changes ?? 0) as number;
+      }
+    }
+    // 删除 7 天前的墓碑债务（已清账但仍占用行）
+    const tombStmt = getDebtStmt(db, dbPath, 'reconcileDelTombstones',
+      "DELETE FROM conversation_compaction_maintenance " +
+      "WHERE pending = 0 AND running = 0 " +
+      "AND datetime(updated_at) < datetime('now', '-7 days')");
+    if (tombStmt) {
+      const r = tombStmt.run();
+      result.tombstones = (r?.changes ?? 0) as number;
+    }
+  } catch {
+    // 静默失败 —— 对账是非关键维护操作
+  }
+  return result;
 }
 
 // ─── Debt CRUD ──────────────────────────────────────────
@@ -392,6 +478,20 @@ export async function startScheduler(
 
   // Stop old timer if exists
   stopScheduler();
+
+  // P1-5: 启动时重置 stale running=1 债务，防止进程重启后僵尸债务永久卡住。
+  const staleReset = resetStaleRunning();
+  if (staleReset > 0) {
+    apiContext.logger?.info?.(`debt-manager: reset ${staleReset} stale running debt(s) on startup`);
+  }
+
+  // P0-3: 启动时对账清理债务表 —— 删除孤儿债务与过期墓碑，防止表无限增长。
+  const reconciled = reconcileDebtTable();
+  if (reconciled.orphaned > 0 || reconciled.tombstones > 0) {
+    apiContext.logger?.info?.(
+      `debt-manager: reconciled debt table on startup (orphans=${reconciled.orphaned}, tombstones=${reconciled.tombstones})`
+    );
+  }
 
   const pollMs = _config.pollIntervalMs ?? DEFAULT_SCHEDULER_CONFIG.pollIntervalMs;
 
