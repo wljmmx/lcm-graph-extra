@@ -2218,8 +2218,17 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }),
           getHealthLatest: () => healthMetrics.getLatest(),
         };
-        snapshotServerStop = startDashboardSnapshotServer({ port, host, providers }).stop;
-        logger?.info?.(`[lcm-graph-extra] dashboard snapshot server listening on ${host}:${port}`);
+        const snapshotHandle = startDashboardSnapshotServer({ port, host, providers });
+        snapshotServerStop = snapshotHandle.stop;
+        // 启动是异步的（含端口探测 + listen），不能立即 log "listening"。
+        // 用一个延迟检查：500ms 后读取 handle.started 判断最终状态。
+        setTimeout(() => {
+          if (snapshotHandle.started) {
+            logger?.info?.(`[lcm-graph-extra] dashboard snapshot server listening on ${host}:${port}`);
+          } else {
+            logger?.warn?.(`[lcm-graph-extra] dashboard snapshot server NOT started on ${host}:${port}: ${snapshotHandle.failureReason || 'unknown reason'} (non-fatal, plugin continues)`);
+          }
+        }, 600);
       }
     } catch (snapErr) {
       logger?.warn?.('[lcm-graph-extra] dashboard snapshot server failed to start (non-fatal)', { err: String(snapErr) });
