@@ -1,0 +1,169 @@
+<script setup lang="ts">
+/**
+ * OperationLog —— 维护操作日志区（模块 4）。
+ *
+ * - 接收 logs 数组（已按时间倒序，新操作在前）
+ * - 每条日志展示：时间 + 工具名 + 状态 tag + 耗时 + 结果/错误（NCollapse 可展开）
+ * - 父组件负责裁剪到最近 20 条；本组件只做展示
+ *
+ * 日志形态（与 MaintainView 的 OperationLogEntry 类型对齐）：
+ *   { id, tool, params, status, result?, error?, ts, durationMs }
+ */
+import { computed } from 'vue';
+import {
+  NCard,
+  NList,
+  NListItem,
+  NTag,
+  NSpace,
+  NEmpty,
+  NCollapse,
+  NCollapseItem,
+  NText,
+} from 'naive-ui';
+
+export interface OperationLogEntry {
+  id: number;
+  tool: string;
+  params: Record<string, unknown>;
+  status: 'success' | 'error' | 'running';
+  result?: unknown;
+  error?: string;
+  ts: number;
+  durationMs?: number;
+}
+
+const props = defineProps<{
+  logs: OperationLogEntry[];
+}>();
+
+// 反向副本用于"旧的在下"的视觉顺序展示（父组件传入已倒序，这里直接展示）
+const displayLogs = computed(() => props.logs);
+
+/** 时间格式化为 HH:mm:ss */
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
+/** 状态 tag 类型 */
+function statusType(s: OperationLogEntry['status']): 'success' | 'error' | 'info' {
+  if (s === 'success') return 'success';
+  if (s === 'error') return 'error';
+  return 'info';
+}
+
+function statusLabel(s: OperationLogEntry['status']): string {
+  if (s === 'success') return '成功';
+  if (s === 'error') return '失败';
+  return '执行中';
+}
+
+/** 把 params / result 序列化为可读字符串 */
+function prettyJson(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+/** 耗时格式化：<1s 显示 ms，否则显示 s */
+function fmtDuration(ms?: number): string {
+  if (ms === undefined || ms === null) return '';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+</script>
+
+<template>
+  <NCard title="操作日志（最近 20 条）" size="small">
+    <NEmpty
+      v-if="displayLogs.length === 0"
+      size="small"
+      description="暂无操作记录"
+      style="padding: 12px 0"
+    />
+    <NList v-else bordered clickable>
+      <NListItem v-for="log in displayLogs" :key="log.id">
+        <NSpace align="center" :size="8" wrap>
+          <NText depth="3" class="log-time">{{ fmtTime(log.ts) }}</NText>
+          <NText class="log-tool">{{ log.tool }}</NText>
+          <NTag :type="statusType(log.status)" size="small">
+            {{ statusLabel(log.status) }}
+          </NTag>
+          <NText v-if="log.durationMs !== undefined" depth="3" class="log-duration">
+            {{ fmtDuration(log.durationMs) }}
+          </NText>
+        </NSpace>
+
+        <!-- 错误信息：直接展示（红色），无需展开 -->
+        <div v-if="log.error" class="log-section">
+          <NText type="error" class="log-section-label">错误：</NText>
+          <pre class="log-pre log-error">{{ log.error }}</pre>
+        </div>
+
+        <!-- 可展开：参数 + 结果（错误已直接展示，不重复） -->
+        <NCollapse
+          v-if="(log.params && Object.keys(log.params).length > 0) || (log.result !== undefined && log.result !== null)"
+          class="log-collapse"
+          :default-expanded-names="[]"
+        >
+          <NCollapseItem title="详情" name="detail">
+            <div v-if="log.params && Object.keys(log.params).length > 0" class="log-section">
+              <NText depth="3" class="log-section-label">参数：</NText>
+              <pre class="log-pre">{{ prettyJson(log.params) }}</pre>
+            </div>
+            <div v-if="log.result !== undefined && log.result !== null" class="log-section">
+              <NText depth="3" class="log-section-label">结果：</NText>
+              <pre class="log-pre">{{ prettyJson(log.result) }}</pre>
+            </div>
+          </NCollapseItem>
+        </NCollapse>
+      </NListItem>
+    </NList>
+  </NCard>
+</template>
+
+<style scoped>
+.log-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.log-tool {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+.log-duration {
+  font-size: 12px;
+}
+.log-collapse {
+  margin-top: 4px;
+}
+.log-section {
+  margin-bottom: 6px;
+}
+.log-section-label {
+  font-size: 12px;
+}
+.log-pre {
+  margin: 2px 0 0 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow: auto;
+}
+.log-error {
+  color: #d03050;
+  background: rgba(208, 48, 80, 0.06);
+}
+</style>

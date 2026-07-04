@@ -250,6 +250,28 @@ export class CascadeManager {
   reset(): void {
     this.arms.clear();
   }
+
+  /**
+   * 返回当前 arms 数量（供 dashboard 只读访问）。
+   */
+  getArmsCount(): number {
+    return this.arms.size;
+  }
+
+  /**
+   * 返回 top 10 arms 快照（按 alpha+beta 降序），sample 用当前 betaSample 实时计算。
+   * 供 dashboard /internal/snapshot 只读访问，不修改内部状态。
+   */
+  getArmsSnapshot(): Array<{ armKey: string; alpha: number; beta: number; sample: number }> {
+    const entries = Array.from(this.arms.entries());
+    entries.sort((a, b) => (b[1].alpha + b[1].beta) - (a[1].alpha + a[1].beta));
+    return entries.slice(0, 10).map(([armKey, arm]) => ({
+      armKey,
+      alpha: arm.alpha,
+      beta: arm.beta,
+      sample: this.betaSample(arm.alpha, arm.beta),
+    }));
+  }
 }
 
 // 全局单例

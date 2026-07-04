@@ -20,7 +20,9 @@
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 // @ts-ignore - plugin-sdk types only available at runtime
 import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
-import { registerOperationalTools, closeNeo4jDriver } from './tools.js';
+import { registerOperationalToolsWithDashboard, closeNeo4jDriver, type DashboardToolContext } from './tools.js';
+import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboard-snapshot.js';
+import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
@@ -340,6 +342,10 @@ const pluginEntry: any = definePluginEntry({
 let merger: any = null;
 let expStore: any = null;
 let _modelRegistry: Record<string, number> | undefined;
+    // Dashboard 快照服务停止函数（register 时启动，dispose 时调用）；null 表示未启动
+    let snapshotServerStop: (() => Promise<void>) | null = null;
+    // 最近一次 assemble 的检索 query，供 dashboard /internal/snapshot 只读访问
+    let lastRetrievalQuery: string = '';
     // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
 // Each session tracks hashes for up to 24 rounds of conversation
 // P2-3 H-16: dedup 容量/TTL/轮次常量改接 DEFAULTS，单一来源，避免魔术数字散落。
@@ -882,6 +888,8 @@ function getSessionDedup(sessionKey: string) {
               qmdQuery = textPart?.text ?? "";
             }
           }
+          // 记录最近一次 assemble 的检索 query，供 dashboard /internal/snapshot 只读访问
+          lastRetrievalQuery = qmdQuery;
 
           // ---- Parallel Phase 1: L2 + L3 + L4 all fire together (with per-layer timing) ----
           const parallelStart = Date.now();
@@ -2023,6 +2031,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // Stop debt scheduler and heartbeat timers on dispose
         (async () => { try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {} })()
         if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+        // 关闭 dashboard 快照 HTTP 服务（幂等，可多次调用）
+        if (snapshotServerStop) {
+          const stopFn = snapshotServerStop;
+          snapshotServerStop = null;
+          stopFn().catch(() => {});
+        }
         // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
         tracker?.close?.();
@@ -2033,10 +2047,103 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         qmdClient = null;
         graphAdapter = null;
         expStore = null;
+        lastRetrievalQuery = '';
       },
     }));
 
-    registerOperationalTools(api);
+    // -------------------------------------------------------------------
+    // Dashboard 工具上下文 + 快照服务
+    // 注入 register() 闭包内的单例引用，供 lcmg_distill / lcmg_compact / lcmg_reset_breaker
+    // 三个 MCP 工具手动触发维护操作。所有回调延迟访问闭包变量，确保 dispose 后安全。
+    // -------------------------------------------------------------------
+    const dashboardContext: DashboardToolContext = {
+      expStore: undefined, // expStore 在闭包内延迟访问，由 runDistillation 回调内部读取
+      runDistillation: async (limit: number) => {
+        // 包装内部 runDistillation(expStoreRef, apiRef, log, limit?)，延迟读取 expStore 当前值
+        const storeRef = expStore;
+        if (!storeRef) throw new Error('expStore not initialized');
+        await runDistillation(storeRef, api, logger, limit);
+        return { limit };
+      },
+      triggerCompact: async (conversationId?: number) => {
+        // 写入 compact 债务（若指定会话）并立即触发调度器处理
+        const { triggerNow } = await import('./core/debt-manager.js');
+        if (conversationId != null) {
+          const P = DEFAULTS.heartbeat.pressure;
+          writeCompactionDebt(conversationId, P.tokenBudget, P.tokenBudget, 'dashboard_manual_trigger');
+        }
+        await triggerNow();
+        return true;
+      },
+      resetBreaker: (name: string) => {
+        // 仅 neo4j 需要额外重置 graphAdapter 连接标志（circuit-breaker 状态由 tools.ts 内重置）
+        try {
+          if (name === 'neo4j') {
+            graphAdapter?.resetConnectFlag?.();
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    };
+
+    registerOperationalToolsWithDashboard(api, dashboardContext);
+
+    // -------------------------------------------------------------------
+    // Dashboard /internal/snapshot 快照服务（默认 :7423 仅 127.0.0.1）
+    // 端口规划：dashboard 后端 :7421 / 前端 dev :7422 / 插件 snapshot :7423
+    // 聚合 cascadeManager / userProfile / graphAdapter / debt / retrieval / health 内存态
+    // providers 全部用函数形式延迟访问闭包变量，每次请求读取最新状态
+    // -------------------------------------------------------------------
+    try {
+      const dashCfg = (api.config as any)?.dashboardSnapshot;
+      const enabled = dashCfg?.enabled !== false; // 默认启用，显式 false 关闭
+      if (enabled) {
+        const port = dashCfg?.port ?? 7423;
+        const host = dashCfg?.host ?? '127.0.0.1';
+        const providers: SnapshotProviders = {
+          getCascadeSnapshot: () => ({
+            armsCount: cascadeManager.getArmsCount(),
+            topArms: cascadeManager.getArmsSnapshot(),
+            // confidenceThreshold 为私有字段，用 any 读取（只读访问，不修改内部状态）
+            confidenceThreshold: (cascadeManager as any).confidenceThreshold ?? 0.7,
+          }),
+          getUserProfile: () => ({
+            techStack: userProfile.getTopTechStack(5),
+            scenario: userProfile.getTopScenario(5),
+            language: userProfile.getLanguage(),
+          }),
+          getGraphAdapterState: () => {
+            // graphAdapter 可能为 null（未初始化）或已 dispose；用 any 读取私有连接状态
+            const a = graphAdapter as any;
+            if (!a) return { connected: false, connectFailed: false };
+            return {
+              connected: !!a.driver,
+              connectFailed: !!a._connectFailed,
+            };
+          },
+          getDebtStats: () => {
+            // getSchedulerStats 是同步函数，读取当前调度器状态
+            try {
+              return getSchedulerStats();
+            } catch {
+              return { running: 0, pendingCount: 0, pollIntervalMs: 60000, maxConcurrent: 2 };
+            }
+          },
+          getRetrievalState: () => ({
+            lastQuery: lastRetrievalQuery,
+            // 无全局 gateway 单例，perfSummary 暂返回空串（dashboard 显示为空）
+            perfSummary: '',
+          }),
+          getHealthLatest: () => healthMetrics.getLatest(),
+        };
+        snapshotServerStop = startDashboardSnapshotServer({ port, host, providers }).stop;
+        logger?.info?.(`[lcm-graph-extra] dashboard snapshot server listening on ${host}:${port}`);
+      }
+    } catch (snapErr) {
+      logger?.warn?.('[lcm-graph-extra] dashboard snapshot server failed to start (non-fatal)', { err: String(snapErr) });
+    }
     // -------------------------------------------------------------------
     // Heartbeat - periodic async maintenance (every 5 minutes)
     //   1. Compaction pressure check + predictive pre-compaction
@@ -2138,9 +2245,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       } catch { clearTimeout(timer); return null; }
     }
 
-    async function runDistillation(expStoreRef: any, apiRef: any, log: any): Promise<void> {
+    async function runDistillation(expStoreRef: any, apiRef: any, log: any, limit?: number): Promise<void> {
       try {
-        const pending = await expStoreRef.fetchPending(5);
+        // limit 控制单批拉取数量，默认 5（与历史行为一致），dashboard lcmg_distill 可传入更大值
+        const fetchLimit = limit && limit > 0 ? limit : 5;
+        const pending = await expStoreRef.fetchPending(fetchLimit);
         if (!pending.length) return;
         log?.info?.('distillation: processing ' + String(pending.length) + ' pending');
         const llm = resolveDistillationLlm(apiRef);

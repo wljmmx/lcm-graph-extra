@@ -257,4 +257,92 @@ describe('CascadeManager', () => {
       expect(cascadeManager).toBeInstanceOf(CascadeManager);
     });
   });
+
+  describe('getArmsCount', () => {
+    it('空 manager 返回 0', () => {
+      expect(mgr.getArmsCount()).toBe(0);
+    });
+
+    it('返回当前 arms 数量', () => {
+      // thompsonRerank 创建 arm（>3 才采样）
+      const results = Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, score: 0.5 }));
+      mgr.thompsonRerank(results, 's');
+      expect(mgr.getArmsCount()).toBe(5);
+    });
+
+    it('不同 scenario 的 arm 分别计数', () => {
+      const results = Array.from({ length: 4 }, (_, i) => ({ id: `r${i}`, score: 0.5 }));
+      mgr.thompsonRerank(results, 'scene-1');
+      mgr.thompsonRerank(results, 'scene-2');
+      expect(mgr.getArmsCount()).toBe(8);
+    });
+  });
+
+  describe('getArmsSnapshot', () => {
+    it('空 manager 返回空数组', () => {
+      expect(mgr.getArmsSnapshot()).toEqual([]);
+    });
+
+    it('返回 armKey/alpha/beta/sample 字段', () => {
+      const results = Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, matchCount: i, score: 0.5 }));
+      mgr.thompsonRerank(results, 's');
+      const snap = mgr.getArmsSnapshot();
+      expect(snap.length).toBe(5);
+      for (const arm of snap) {
+        expect(arm).toHaveProperty('armKey');
+        expect(arm).toHaveProperty('alpha');
+        expect(arm).toHaveProperty('beta');
+        expect(arm).toHaveProperty('sample');
+        expect(typeof arm.alpha).toBe('number');
+        expect(typeof arm.beta).toBe('number');
+        expect(typeof arm.sample).toBe('number');
+        expect(arm.sample).toBeGreaterThanOrEqual(0);
+        expect(arm.sample).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('最多返回 10 个 arm（top 10）', () => {
+      // 创建 15 个 arm
+      const results = Array.from({ length: 15 }, (_, i) => ({ id: `r${i}`, score: 0.5 }));
+      mgr.thompsonRerank(results, 's');
+      const snap = mgr.getArmsSnapshot();
+      expect(snap.length).toBe(10);
+    });
+
+    it('按 alpha+beta 降序排列', () => {
+      // 通过 recordFeedback 制造不同 alpha/beta
+      const results = Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, score: 0.5 }));
+      mgr.thompsonRerank(results, 's');
+      // r0 成功多次（alpha 增大）
+      for (let i = 0; i < 5; i++) mgr.recordFeedback(CascadeManager.makeArmKey('s', 'r0'), true);
+      // r1 失败多次（beta 增大）
+      for (let i = 0; i < 3; i++) mgr.recordFeedback(CascadeManager.makeArmKey('s', 'r1'), false);
+
+      const snap = mgr.getArmsSnapshot();
+      // r0: alpha=6, beta=1, sum=7; r1: alpha=1, beta=4, sum=5; 其余 alpha=1, beta=1, sum=2
+      // r0 应排第一
+      expect(snap[0].armKey).toBe('s:r0');
+      // 和应递减
+      for (let i = 1; i < snap.length; i++) {
+        const prevSum = snap[i - 1].alpha + snap[i - 1].beta;
+        const currSum = snap[i].alpha + snap[i].beta;
+        expect(prevSum).toBeGreaterThanOrEqual(currSum);
+      }
+    });
+
+    it('armKey 格式为 scenario:id', () => {
+      const results = Array.from({ length: 4 }, (_, i) => ({ id: `r${i}`, score: 0.5 }));
+      mgr.thompsonRerank(results, 'bug-fix');
+      const snap = mgr.getArmsSnapshot();
+      expect(snap[0].armKey).toMatch(/^bug-fix:r\d+$/);
+    });
+
+    it('不修改内部 arms 状态（只读）', () => {
+      const results = Array.from({ length: 5 }, (_, i) => ({ id: `r${i}`, score: 0.5 }));
+      mgr.thompsonRerank(results, 's');
+      const sizeBefore = mgr.getArmsCount();
+      mgr.getArmsSnapshot();
+      expect(mgr.getArmsCount()).toBe(sizeBefore);
+    });
+  });
 });

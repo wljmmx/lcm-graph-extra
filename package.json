@@ -3,6 +3,7 @@
   "version": "2.1.9",
   "description": "OpenClaw ContextEngine plugin: coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
   "type": "module",
+  "workspaces": ["packages/*"],
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

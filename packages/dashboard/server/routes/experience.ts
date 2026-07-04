@@ -1,0 +1,363 @@
+/**
+ * 经验管理路由（模块 2）。
+ *
+ * - GET /api/experience/list                —— 列表查询（直读 Neo4j，分页 + 过滤）
+ * - GET /api/experience/:id                 —— 单条详情
+ * - GET /api/experience/relations/:id       —— RELATED_TO 邻接子图（供 ECharts Graph）
+ * - GET /api/experience/:id/quality-history —— qualityScore 历史（MVP 单点）
+ * - POST /api/mcp/invoke                    —— 写操作统一走 MCP（lcmg_forget / lcmg_pin）
+ *
+ * 设计原则：只读 Neo4j，写操作走 MCP。前端通过 POST /api/mcp/invoke 触发遗忘/固定。
+ */
+import type { FastifyInstance } from 'fastify';
+import { runReadQuery, toNumber, splitTag } from '../lib/neo4j';
+import { invokeMcpTool } from '../lib/mcp';
+
+// ---------------------------------------------------------------------------
+// 类型定义（与 src/api/experience.ts 对齐）
+// ---------------------------------------------------------------------------
+
+export interface ExperienceItem {
+  id: string;
+  title: string;
+  summary: string;
+  type: string;
+  status: string;
+  state: string | null;
+  relevanceScore: number;
+  qualityScore: number | null;
+  matchCount: number;
+  createdAt: number;
+  lastValidatedAt: number | null;
+  tags: { scenario: string[]; techStack: string[]; severity: string; free: string[] };
+  projectName: string;
+}
+
+export interface ExperienceListResponse {
+  total: number;
+  items: ExperienceItem[];
+}
+
+export interface ExperienceDetail extends ExperienceItem {
+  context: string;
+  detail: string;
+  source: string;
+  sessionId: string;
+}
+
+export interface ExperienceGraph {
+  nodes: Array<{ id: string; name: string; type: string; pagerank: number }>;
+  edges: Array<{ source: string; target: string; type: string }>;
+}
+
+export interface QualityHistoryPoint {
+  qualityScore: number | null;
+  timestamp: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Cypher 查询
+// ---------------------------------------------------------------------------
+
+const LIST_CYPHER = `
+MATCH (e:EXPERIENCE)
+WHERE ($status = 'all' OR e.status = $status)
+  AND (e.state IS NULL OR e.state <> 'superseded')
+  AND ($type IS NULL OR e.type = $type)
+  AND ($from IS NULL OR coalesce(e.createdAt, 0) >= $from)
+  AND ($to IS NULL OR coalesce(e.createdAt, 0) <= $to)
+  AND ($tag IS NULL OR e.communityId = $tag)
+  AND ($projectName IS NULL OR toLower(e.projectName) = toLower($projectName))
+RETURN e.id AS id, e.title AS title, e.summary AS summary, e.type AS type,
+       e.status AS status, e.state AS state, e.relevanceScore AS relevanceScore,
+       e.qualityScore AS qualityScore, e.matchCount AS matchCount,
+       e.createdAt AS createdAt, e.lastValidatedAt AS lastValidatedAt,
+       e.tags_scenario AS tags_scenario, e.tags_techStack AS tags_techStack,
+       e.tags_severity AS tags_severity, e.tags_free AS tags_free,
+       e.projectName AS projectName
+ORDER BY e.createdAt DESC
+SKIP $offset LIMIT $limit
+`;
+
+const COUNT_CYPHER = `
+MATCH (e:EXPERIENCE)
+WHERE ($status = 'all' OR e.status = $status)
+  AND (e.state IS NULL OR e.state <> 'superseded')
+  AND ($type IS NULL OR e.type = $type)
+  AND ($from IS NULL OR coalesce(e.createdAt, 0) >= $from)
+  AND ($to IS NULL OR coalesce(e.createdAt, 0) <= $to)
+  AND ($tag IS NULL OR e.communityId = $tag)
+  AND ($projectName IS NULL OR toLower(e.projectName) = toLower($projectName))
+RETURN count(e) AS total
+`;
+
+const DETAIL_CYPHER = `
+MATCH (e:EXPERIENCE {id: $id})
+RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
+       e.context AS context, e.source AS source, e.sessionId AS sessionId,
+       e.type AS type, e.status AS status, e.state AS state,
+       e.relevanceScore AS relevanceScore, e.qualityScore AS qualityScore,
+       e.matchCount AS matchCount, e.createdAt AS createdAt,
+       e.lastValidatedAt AS lastValidatedAt,
+       e.tags_scenario AS tags_scenario, e.tags_techStack AS tags_techStack,
+       e.tags_severity AS tags_severity, e.tags_free AS tags_free,
+       e.projectName AS projectName
+`;
+
+const RELATIONS_CYPHER = `
+MATCH (e:EXPERIENCE {id: $id})-[r:RELATED_TO]-(n)
+RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
+       coalesce(n.pagerank, 0) AS pagerank,
+       type(r) AS relType, startNode(r).id AS source, endNode(r).id AS target
+`;
+
+const QUALITY_HISTORY_CYPHER = `
+MATCH (e:EXPERIENCE {id: $id})
+RETURN e.qualityScore AS qualityScore, e.lastValidatedAt AS lastValidatedAt
+`;
+
+// ---------------------------------------------------------------------------
+// 行 → API 响应映射
+// ---------------------------------------------------------------------------
+
+interface RawListRow {
+  id: string;
+  title: string;
+  summary: string;
+  type: string;
+  status: string;
+  state: string | null;
+  relevanceScore: number;
+  qualityScore: number | null;
+  matchCount: number;
+  createdAt: number;
+  lastValidatedAt: number | null;
+  tags_scenario: string;
+  tags_techStack: string;
+  tags_severity: string;
+  tags_free: string;
+  projectName: string;
+}
+
+interface RawDetailRow extends RawListRow {
+  detail: string;
+  context: string;
+  source: string;
+  sessionId: string;
+}
+
+/** 把 Neo4j record 转成 list item（处理 Integer / tags 拆分） */
+function rowToItem(r: RawListRow): ExperienceItem {
+  return {
+    id: r.id,
+    title: r.title ?? '',
+    summary: r.summary ?? '',
+    type: r.type ?? 'lesson',
+    status: r.status ?? 'PENDING',
+    state: r.state ?? null,
+    relevanceScore: toNumber(r.relevanceScore) ?? 0,
+    qualityScore: toNumber(r.qualityScore),
+    matchCount: toNumber(r.matchCount) ?? 0,
+    createdAt: toNumber(r.createdAt) ?? 0,
+    lastValidatedAt: toNumber(r.lastValidatedAt),
+    tags: {
+      scenario: splitTag(r.tags_scenario),
+      techStack: splitTag(r.tags_techStack),
+      severity: typeof r.tags_severity === 'string' ? r.tags_severity : '',
+      free: splitTag(r.tags_free),
+    },
+    projectName: r.projectName ?? '',
+  };
+}
+
+function rowToDetail(r: RawDetailRow): ExperienceDetail {
+  return {
+    ...rowToItem(r),
+    detail: r.detail ?? '',
+    context: r.context ?? '',
+    source: r.source ?? '',
+    sessionId: r.sessionId ?? '',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 路由注册
+// ---------------------------------------------------------------------------
+
+const DEFAULT_LIMIT = 20;
+const MAX_LIMIT = 100;
+
+/** 解析可选数字参数（无效/缺省返回 null） */
+function parseOptionalNumber(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 解析可选字符串参数（空串视为 null） */
+function parseOptionalString(v: unknown): string | null {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s.length > 0 ? s : null;
+}
+
+export async function registerExperienceRoutes(app: FastifyInstance): Promise<void> {
+  // ===== 列表查询 =====
+  app.get('/api/experience/list', async (req, _reply) => {
+    const q = (req.query as Record<string, unknown>) ?? {};
+    const status = parseOptionalString(q.status) ?? 'all';
+    const type = parseOptionalString(q.type);
+    const from = parseOptionalNumber(q.from);
+    const to = parseOptionalNumber(q.to);
+    const tag = parseOptionalString(q.tag);
+    const projectName = parseOptionalString(q.projectName);
+    const limitRaw = parseOptionalNumber(q.limit);
+    const limit = Math.min(Math.max(limitRaw ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const offset = Math.max(parseOptionalNumber(q.offset) ?? 0, 0);
+
+    const params = {
+      status,
+      type: type ?? null,
+      from: from ?? null,
+      to: to ?? null,
+      tag: tag ?? null,
+      projectName: projectName ?? null,
+      limit,
+      offset,
+    };
+
+    try {
+      const [listRes, countRes] = await Promise.all([
+        runReadQuery(LIST_CYPHER, params),
+        runReadQuery(COUNT_CYPHER, params),
+      ]);
+
+      const items = listRes.records.map((rec) => rowToItem(rec.toObject() as RawListRow));
+      const totalRow = countRes.records[0]?.toObject() as { total?: unknown } | undefined;
+      const total = toNumber(totalRow?.total) ?? 0;
+
+      return { total, items } satisfies ExperienceListResponse;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, 'experience/list 查询失败');
+      return { total: 0, items: [] } satisfies ExperienceListResponse;
+    }
+  });
+
+  // ===== 关联子图（注意：放在 :id 之前，避免被 :id 路由吞掉） =====
+  app.get('/api/experience/relations/:id', async (req, reply) => {
+    const { id } = (req.params as { id: string }) ?? {};
+    if (!id) {
+      reply.code(400);
+      return { error: 'missing id' };
+    }
+    try {
+      const res = await runReadQuery(RELATIONS_CYPHER, { id });
+      const nodeMap = new Map<string, { id: string; name: string; type: string; pagerank: number }>();
+      const edgeSet = new Set<string>();
+      const edges: ExperienceGraph['edges'] = [];
+
+      for (const rec of res.records) {
+        const row = rec.toObject() as {
+          id: string;
+          name: string;
+          type: string;
+          pagerank: unknown;
+          relType: string;
+          source: string;
+          target: string;
+        };
+        // 节点去重
+        if (row.id && !nodeMap.has(row.id)) {
+          nodeMap.set(row.id, {
+            id: row.id,
+            name: row.name ?? row.id,
+            type: row.type ?? 'UNKNOWN',
+            pagerank: toNumber(row.pagerank) ?? 0,
+          });
+        }
+        // 边去重（用 source|target|type 作为 key）
+        const edgeKey = `${row.source}|${row.target}|${row.relType}`;
+        if (!edgeSet.has(edgeKey)) {
+          edgeSet.add(edgeKey);
+          edges.push({ source: row.source, target: row.target, type: row.relType });
+        }
+      }
+
+      // 当前经验节点本身也加入 nodes（避免孤立点无节点）
+      if (!nodeMap.has(id)) {
+        nodeMap.set(id, { id, name: id, type: 'EXPERIENCE', pagerank: 0 });
+      }
+
+      return { nodes: Array.from(nodeMap.values()), edges } satisfies ExperienceGraph;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, 'experience/relations 查询失败');
+      return { nodes: [], edges: [] } satisfies ExperienceGraph;
+    }
+  });
+
+  // ===== 质量分历史（MVP 单点） =====
+  // 注意：此路由路径含 quality-history 后缀，须放在 :id 之前注册以匹配优先级
+  app.get('/api/experience/:id/quality-history', async (req, reply) => {
+    const { id } = (req.params as { id: string }) ?? {};
+    if (!id) {
+      reply.code(400);
+      return { error: 'missing id' };
+    }
+    try {
+      const res = await runReadQuery(QUALITY_HISTORY_CYPHER, { id });
+      const row = res.records[0]?.toObject() as
+        | { qualityScore?: unknown; lastValidatedAt?: unknown }
+        | undefined;
+      const points: QualityHistoryPoint[] = [];
+      if (row) {
+        points.push({
+          qualityScore: toNumber(row.qualityScore),
+          timestamp: toNumber(row.lastValidatedAt),
+        });
+      }
+      return { points };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, 'experience/quality-history 查询失败');
+      return { points: [] };
+    }
+  });
+
+  // ===== 单条详情 =====
+  app.get('/api/experience/:id', async (req, reply) => {
+    const { id } = (req.params as { id: string }) ?? {};
+    if (!id) {
+      reply.code(400);
+      return { error: 'missing id' };
+    }
+    try {
+      const res = await runReadQuery(DETAIL_CYPHER, { id });
+      const row = res.records[0]?.toObject() as RawDetailRow | undefined;
+      if (!row) {
+        reply.code(404);
+        return { error: 'not found' };
+      }
+      return rowToDetail(row) satisfies ExperienceDetail;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, 'experience/:id 查询失败');
+      reply.code(500);
+      return { error: msg };
+    }
+  });
+
+  // ===== MCP 写操作转发：lcmg_forget / lcmg_pin 等 =====
+  app.post('/api/mcp/invoke', async (req, reply) => {
+    const body = (req.body as { tool?: string; params?: Record<string, unknown> }) ?? {};
+    const tool = body.tool;
+    const params = body.params ?? {};
+    if (!tool || typeof tool !== 'string') {
+      reply.code(400);
+      return { ok: false, error: 'missing tool' };
+    }
+    const result = await invokeMcpTool(tool, params);
+    return result;
+  });
+}

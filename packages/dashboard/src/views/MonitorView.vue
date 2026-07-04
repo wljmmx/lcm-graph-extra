@@ -1,0 +1,569 @@
+<script setup lang="ts">
+/**
+ * 性能监控 Dashboard（模块 1）。
+ *
+ * 布局（设计文档 4.1 节）：
+ *   KPI 卡片行 → 时序图区（压力信号 / 检索延迟 / tier 分布）→ 状态面板区
+ *
+ * 数据获取（TanStack Query 轮询）：
+ *   - health-latest  10s 轮询（KPI + 熔断 + memory 面板）
+ *   - health-history 1min 轮询（时序图）
+ *   - agent-status   30s 轮询（OpenClaw host）
+ *
+ * 降级处理：memory 为 null → memory 面板显示"插件未响应"；
+ *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
+ *          agent.error → 警告提示。
+ */
+import { computed } from 'vue';
+import { useQuery } from '@tanstack/vue-query';
+import {
+  NGrid,
+  NGi,
+  NCard,
+  NEmpty,
+  NTag,
+  NDescriptions,
+  NDescriptionsItem,
+  NAlert,
+  NSpace,
+  NSpin,
+} from 'naive-ui';
+import EChart from '../components/EChart.vue';
+import KpiCard from '../components/KpiCard.vue';
+import StatusIndicator from '../components/StatusIndicator.vue';
+import {
+  fetchHealthLatest,
+  fetchHealthHistory,
+  fetchAgentStatus,
+  type HealthSnapshot,
+  type DashboardSnapshot,
+  type AgentStatus,
+} from '../api/health';
+
+// ===== 数据获取（轮询） =====
+const { data: latestData, isLoading: latestLoading } = useQuery({
+  queryKey: ['health-latest'],
+  queryFn: fetchHealthLatest,
+  refetchInterval: 10_000,
+});
+const { data: historyData, isLoading: historyLoading } = useQuery({
+  queryKey: ['health-history'],
+  queryFn: () => fetchHealthHistory(144),
+  refetchInterval: 60_000,
+});
+const { data: agentData, isLoading: agentLoading } = useQuery({
+  queryKey: ['agent-status'],
+  queryFn: fetchAgentStatus,
+  refetchInterval: 30_000,
+});
+
+// ===== 派生数据 =====
+const db = computed<HealthSnapshot | null>(() => latestData.value?.db ?? null);
+const memory = computed<DashboardSnapshot | null>(
+  () => latestData.value?.memory ?? null,
+);
+// DB 返回 DESC（最新在前），时序图需要 ASC（最旧在前）
+const historyAsc = computed<HealthSnapshot[]>(() => {
+  const snaps = historyData.value?.snapshots ?? [];
+  return [...snaps].reverse();
+});
+const agent = computed<AgentStatus | null>(() => agentData.value ?? null);
+
+// ===== KPI 值（db 为 null 时显示 "—"） =====
+const kpiPending = computed<number | string>(() =>
+  db.value ? db.value.pendingMessages : '—',
+);
+const kpiTokenRatio = computed<number | string>(() =>
+  db.value ? Math.round(db.value.maxTokenRatio * 1000) / 10 : '—',
+);
+const kpiAssembleMs = computed<number | string>(() =>
+  db.value ? db.value.lastAssembleMs : '—',
+);
+const kpiCbFailures = computed<number | string>(() => {
+  if (!db.value) return '—';
+  return db.value.cbLcmFailures + db.value.cbQmdFailures + db.value.cbNeo4jFailures;
+});
+
+// ===== 工具：时间格式化 HH:mm =====
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+const lastUpdated = computed(() => {
+  const ts = db.value?.timestamp;
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return `${fmtTime(ts)}:${String(d.getSeconds()).padStart(2, '0')}`;
+});
+
+// ===== 时序图 X 轴标签 =====
+const timeLabels = computed(() => historyAsc.value.map((s) => fmtTime(s.timestamp)));
+
+// 时序图1：压力信号（双 Y 轴，左：数量，右：比率 0-1）
+const pressureOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  legend: { data: ['待处理消息', '摘要片段', 'Token 占用比'] },
+  grid: { left: 56, right: 64, top: 36, bottom: 28 },
+  xAxis: { type: 'category', data: timeLabels.value, boundaryGap: false },
+  yAxis: [
+    { type: 'value', name: '数量', position: 'left' },
+    { type: 'value', name: '比率', position: 'right', min: 0, max: 1 },
+  ],
+  series: [
+    {
+      name: '待处理消息',
+      type: 'line',
+      smooth: true,
+      yAxisIndex: 0,
+      data: historyAsc.value.map((s) => s.pendingMessages),
+    },
+    {
+      name: '摘要片段',
+      type: 'line',
+      smooth: true,
+      yAxisIndex: 0,
+      data: historyAsc.value.map((s) => s.summaryFragments),
+    },
+    {
+      name: 'Token 占用比',
+      type: 'line',
+      smooth: true,
+      yAxisIndex: 1,
+      data: historyAsc.value.map((s) => s.maxTokenRatio),
+    },
+  ],
+}));
+
+// 时序图2：检索延迟（堆叠柱状，Y 轴 ms）
+const latencyOption = computed(() => ({
+  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+  legend: { data: ['Assemble', 'L2', 'L3', 'L4'] },
+  grid: { left: 56, right: 20, top: 36, bottom: 28 },
+  xAxis: { type: 'category', data: timeLabels.value },
+  yAxis: { type: 'value', name: 'ms' },
+  series: [
+    {
+      name: 'Assemble',
+      type: 'bar',
+      stack: 'latency',
+      data: historyAsc.value.map((s) => s.lastAssembleMs),
+    },
+    {
+      name: 'L2',
+      type: 'bar',
+      stack: 'latency',
+      data: historyAsc.value.map((s) => s.lastL2Ms),
+    },
+    {
+      name: 'L3',
+      type: 'bar',
+      stack: 'latency',
+      data: historyAsc.value.map((s) => s.lastL3Ms),
+    },
+    {
+      name: 'L4',
+      type: 'bar',
+      stack: 'latency',
+      data: historyAsc.value.map((s) => s.lastL4Ms),
+    },
+  ],
+}));
+
+// 时序图3：tier 分布（堆叠面积图，Y 轴次数）
+const tierOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  legend: { data: ['Low', 'Medium', 'High'] },
+  grid: { left: 56, right: 20, top: 36, bottom: 28 },
+  xAxis: { type: 'category', data: timeLabels.value, boundaryGap: false },
+  yAxis: { type: 'value', name: '次数' },
+  series: [
+    {
+      name: 'Low',
+      type: 'line',
+      stack: 'tier',
+      areaStyle: {},
+      data: historyAsc.value.map((s) => s.tierLow),
+    },
+    {
+      name: 'Medium',
+      type: 'line',
+      stack: 'tier',
+      areaStyle: {},
+      data: historyAsc.value.map((s) => s.tierMedium),
+    },
+    {
+      name: 'High',
+      type: 'line',
+      stack: 'tier',
+      areaStyle: {},
+      data: historyAsc.value.map((s) => s.tierHigh),
+    },
+  ],
+}));
+
+// ===== Cascade top 10 Beta 分布柱状图 =====
+const cascadeTopArms = computed(
+  () => memory.value?.cascade?.topArms?.slice(0, 10) ?? [],
+);
+const betaOption = computed(() => {
+  const arms = cascadeTopArms.value;
+  return {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['alpha', 'beta'] },
+    grid: { left: 48, right: 16, top: 30, bottom: 48 },
+    xAxis: {
+      type: 'category',
+      data: arms.map((a) =>
+        a.armKey.length > 12 ? a.armKey.slice(0, 10) + '…' : a.armKey,
+      ),
+      axisLabel: { rotate: 30, fontSize: 10 },
+    },
+    yAxis: { type: 'value' },
+    series: [
+      { name: 'alpha', type: 'bar', data: arms.map((a) => a.alpha) },
+      { name: 'beta', type: 'bar', data: arms.map((a) => a.beta) },
+    ],
+  };
+});
+
+// ===== 用户画像 top 标签 =====
+const topTechStack = computed(() => {
+  const ts = memory.value?.userProfile?.techStack ?? [];
+  return [...ts].sort((a, b) => b.weight - a.weight).slice(0, 5);
+});
+const topScenario = computed(() => {
+  const sc = memory.value?.userProfile?.scenario ?? [];
+  return [...sc].sort((a, b) => b.weight - a.weight).slice(0, 5);
+});
+const userLanguage = computed(() => memory.value?.userProfile?.language ?? '—');
+
+// ===== Agent 额外字段（排除 online/error） =====
+const agentExtraFields = computed(() => {
+  const a = agent.value;
+  if (!a) return [];
+  return Object.entries(a)
+    .filter(([k]) => k !== 'online' && k !== 'error')
+    .map(([k, v]) => ({
+      key: k,
+      value: typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v),
+    }));
+});
+
+// 响应式列数（naive-ui 描述符字符串 + responsive="screen"，断点 xs/s/m/l/xl/xxl）
+// KPI 卡片：小屏 2 列，宽屏（l≥1280）4 列
+const kpiCols = '2 s:2 m:2 l:4';
+// 时序图区下半部分：小屏 1 列，中屏（m≥1024）2 列
+const chartCols = '1 s:1 m:2';
+// 状态面板：小屏 1 列，中屏 2 列，宽屏（l≥1280）3 列
+const panelCols = '1 s:1 m:2 l:3';
+</script>
+
+<template>
+  <div class="monitor-view">
+    <!-- 标题行 -->
+    <div class="monitor-header">
+      <h2 style="margin: 0">性能监控</h2>
+      <span class="last-updated">最近更新: {{ lastUpdated }}</span>
+    </div>
+
+    <NSpace vertical :size="12" style="margin-top: 12px">
+      <!-- KPI 卡片行 -->
+      <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
+        <NGi>
+          <KpiCard
+            label="待处理消息"
+            :value="kpiPending"
+            :threshold="100"
+          />
+        </NGi>
+        <NGi>
+          <KpiCard
+            label="Token 占用比"
+            :value="kpiTokenRatio"
+            unit="%"
+            :threshold="80"
+          />
+        </NGi>
+        <NGi>
+          <KpiCard
+            label="检索延迟 Assemble"
+            :value="kpiAssembleMs"
+            unit="ms"
+            :threshold="2000"
+          />
+        </NGi>
+        <NGi>
+          <KpiCard
+            label="熔断失败总数"
+            :value="kpiCbFailures"
+            :threshold="0"
+          />
+        </NGi>
+      </NGrid>
+
+      <!-- 时序图区：压力信号（全宽） -->
+      <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
+        <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
+        <NEmpty
+          v-else
+          :description="historyLoading ? '加载中…' : '无历史数据'"
+          style="padding: 24px 0"
+        />
+      </NCard>
+
+      <!-- 时序图区：检索延迟 + tier 分布（2 列） -->
+      <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
+        <NGi>
+          <NCard title="检索延迟（Assemble + L2/L3/L4 堆叠）" size="small">
+            <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+            <NEmpty
+              v-else
+              :description="historyLoading ? '加载中…' : '无历史数据'"
+              style="padding: 24px 0"
+            />
+          </NCard>
+        </NGi>
+        <NGi>
+          <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
+            <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
+            <NEmpty
+              v-else
+              :description="historyLoading ? '加载中…' : '无历史数据'"
+              style="padding: 24px 0"
+            />
+          </NCard>
+        </NGi>
+      </NGrid>
+
+      <!-- 状态面板区（3 列） -->
+      <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+        <!-- 熔断状态 -->
+        <NGi>
+          <NCard title="熔断状态" size="small">
+            <template v-if="db">
+              <StatusIndicator
+                label="LCM"
+                :available="db.cbLcmAvailable"
+                :failures="db.cbLcmFailures"
+              />
+              <StatusIndicator
+                label="QMD"
+                :available="db.cbQmdAvailable"
+                :failures="db.cbQmdFailures"
+              />
+              <StatusIndicator
+                label="Neo4j"
+                :available="db.cbNeo4jAvailable"
+                :failures="db.cbNeo4jFailures"
+              />
+            </template>
+            <NEmpty v-else description="无历史数据" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- Cascade 面板 -->
+        <NGi>
+          <NCard title="Cascade" size="small">
+            <template v-if="memory">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="arms 数量">
+                  {{ memory.cascade?.armsCount ?? 0 }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="置信阈值">
+                  {{ memory.cascade?.confidenceThreshold ?? '—' }}
+                </NDescriptionsItem>
+              </NDescriptions>
+              <EChart
+                v-if="cascadeTopArms.length"
+                :option="betaOption"
+                height="220px"
+              />
+              <NEmpty
+                v-else
+                size="small"
+                description="无 arm 数据"
+                style="margin: 12px 0"
+              />
+            </template>
+            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- 用户画像 -->
+        <NGi>
+          <NCard title="用户画像" size="small">
+            <template v-if="memory">
+              <div class="profile-section">
+                <div class="profile-label">技术栈 Top5</div>
+                <NSpace :size="4" v-if="topTechStack.length">
+                  <NTag
+                    v-for="t in topTechStack"
+                    :key="t.name"
+                    size="small"
+                    type="info"
+                  >
+                    {{ t.name }} ({{ t.weight }})
+                  </NTag>
+                </NSpace>
+                <span v-else class="muted">—</span>
+              </div>
+              <div class="profile-section">
+                <div class="profile-label">场景 Top5</div>
+                <NSpace :size="4" v-if="topScenario.length">
+                  <NTag
+                    v-for="s in topScenario"
+                    :key="s.name"
+                    size="small"
+                    type="success"
+                  >
+                    {{ s.name }} ({{ s.weight }})
+                  </NTag>
+                </NSpace>
+                <span v-else class="muted">—</span>
+              </div>
+              <div class="profile-section">
+                <span class="profile-label">语言：</span>
+                <NTag size="small">{{ userLanguage }}</NTag>
+              </div>
+            </template>
+            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- 债务调度 -->
+        <NGi>
+          <NCard title="债务调度" size="small">
+            <template v-if="memory">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="running">
+                  {{ memory.debt?.running ?? 0 }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="pendingCount">
+                  {{ memory.debt?.pendingCount ?? 0 }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="pollIntervalMs">
+                  {{ memory.debt?.pollIntervalMs ?? 0 }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="maxConcurrent">
+                  {{ memory.debt?.maxConcurrent ?? 0 }}
+                </NDescriptionsItem>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- 检索状态 -->
+        <NGi>
+          <NCard title="检索状态" size="small">
+            <template v-if="memory">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="最近查询">
+                  <span class="mono">{{ memory.retrieval?.lastQuery || '—' }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="性能摘要">
+                  <span class="mono">{{ memory.retrieval?.perfSummary || '—' }}</span>
+                </NDescriptionsItem>
+              </NDescriptions>
+              <div class="profile-section">
+                <div class="profile-label">图谱适配器</div>
+                <StatusIndicator
+                  label="connected"
+                  :available="!!memory.graphAdapter?.connected"
+                  :failures="memory.graphAdapter?.connectFailed ? 1 : 0"
+                />
+                <div v-if="memory.graphAdapter?.lastError" class="muted mono">
+                  {{ memory.graphAdapter.lastError }}
+                </div>
+              </div>
+            </template>
+            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- Agent 状态 -->
+        <NGi>
+          <NCard title="Agent 状态" size="small">
+            <NSpin v-if="agentLoading && !agent" size="small" style="padding: 12px 0">
+              <template #default>加载中…</template>
+            </NSpin>
+            <template v-else-if="agent">
+              <div class="profile-section">
+                <NTag :type="agent.online ? 'success' : 'error'" size="small">
+                  {{ agent.online ? '在线' : '离线' }}
+                </NTag>
+              </div>
+              <NAlert
+                v-if="agent.error"
+                type="warning"
+                :show-icon="true"
+                style="margin: 8px 0"
+              >
+                {{ agent.error }}
+              </NAlert>
+              <NDescriptions
+                v-if="agentExtraFields.length"
+                :column="1"
+                size="small"
+                label-placement="left"
+                bordered
+              >
+                <NDescriptionsItem
+                  v-for="f in agentExtraFields"
+                  :key="f.key"
+                  :label="f.key"
+                >
+                  <span class="mono">{{ f.value }}</span>
+                </NDescriptionsItem>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="无 Agent 数据" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+      </NGrid>
+
+      <!-- 首次加载提示 -->
+      <NAlert
+        v-if="latestLoading && !latestData"
+        type="info"
+        :show-icon="true"
+        title="正在加载最新健康指标…"
+      />
+    </NSpace>
+  </div>
+</template>
+
+<style scoped>
+.monitor-view {
+  width: 100%;
+}
+.monitor-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.last-updated {
+  font-size: 12px;
+  color: #909399;
+}
+.profile-section {
+  margin-bottom: 8px;
+}
+.profile-label {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 4px;
+}
+.muted {
+  color: #909399;
+  font-size: 13px;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+</style>

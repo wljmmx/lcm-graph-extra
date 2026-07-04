@@ -1,0 +1,222 @@
+<script setup lang="ts">
+/**
+ * OperationCard —— 维护操作卡片通用组件（模块 4）。
+ *
+ * - NCard + 标题 + 描述 + form slot + 执行按钮
+ * - danger=true 时按钮用 error type，边框/标题红色
+ * - confirmLevel=0：点击即执行
+ * - confirmLevel=1：NPopconfirm 二次确认
+ * - confirmLevel=2：NPopconfirm 链式两次确认（三次确认）
+ *
+ * 不持有业务状态：表单数据由父组件通过 v-model 维护，
+ * 本组件仅负责 UI 框架 + 确认流程；点击执行 emit('execute')，
+ * 父组件在回调中读取自身表单状态后调用对应 invoke 函数。
+ *
+ * danger / confirmLevel 均为响应式：父组件可动态切换（如 sync 卡片
+ * 在 mode=repair 时升级为 danger + 二次确认）。
+ */
+import { computed, ref } from 'vue';
+import { NCard, NButton, NPopconfirm, NTag, NSpace } from 'naive-ui';
+
+const props = withDefaults(
+  defineProps<{
+    title: string;
+    description: string;
+    /** 可选图标（emoji 或文本字符） */
+    icon?: string;
+    /** 危险操作：按钮 type=error，标题红色 */
+    danger?: boolean;
+    /** 0=直接执行，1=二次确认，2=三次确认 */
+    confirmLevel?: 0 | 1 | 2;
+    /** 是否加载中（执行按钮禁用 + loading） */
+    loading?: boolean;
+  }>(),
+  {
+    icon: '',
+    danger: false,
+    confirmLevel: 0,
+    loading: false,
+  },
+);
+
+const emit = defineEmits<{
+  (e: 'execute'): void;
+}>();
+
+// confirmLevel=2 时的二次确认状态：第一次确认后切换到第二次确认按钮
+const secondConfirmPending = ref(false);
+
+/** 第一次确认通过：confirmLevel=1 直接执行；confirmLevel=2 进入第二次确认 */
+function onFirstConfirm(): void {
+  if (props.confirmLevel >= 2) {
+    secondConfirmPending.value = true;
+  } else {
+    emit('execute');
+  }
+}
+
+/** 第二次确认通过：实际执行 */
+function onFinalConfirm(): void {
+  secondConfirmPending.value = false;
+  emit('execute');
+}
+
+/** 取消第二次确认：回到初始状态 */
+function onCancelSecondConfirm(): void {
+  secondConfirmPending.value = false;
+}
+
+/** 按钮直接点击（confirmLevel=0） */
+function onDirectClick(): void {
+  if (props.confirmLevel === 0) {
+    emit('execute');
+  }
+}
+
+// 按钮类型 / 标题颜色响应式跟随 danger（sync 卡片会动态切换）
+const buttonType = computed<'error' | 'primary'>(() =>
+  props.danger ? 'error' : 'primary',
+);
+const titleColor = computed<string | undefined>(() =>
+  props.danger ? '#d03050' : undefined,
+);
+</script>
+
+<template>
+  <NCard
+    size="small"
+    :bordered="true"
+    :class="['operation-card', { 'operation-card-danger': danger }]"
+  >
+    <!-- 标题 + 危险标签 -->
+    <div class="card-header">
+      <NSpace align="center" :size="6">
+        <span v-if="icon" class="card-icon">{{ icon }}</span>
+        <span class="card-title" :style="{ color: titleColor }">{{ title }}</span>
+        <NTag v-if="danger" size="small" type="error">危险</NTag>
+        <NTag v-if="confirmLevel === 2" size="small" type="warning">三次确认</NTag>
+        <NTag v-else-if="confirmLevel === 1" size="small" type="warning">二次确认</NTag>
+      </NSpace>
+    </div>
+
+    <div class="card-desc">{{ description }}</div>
+
+    <!-- 参数表单 slot -->
+    <div class="card-form">
+      <slot name="form" />
+    </div>
+
+    <!-- 执行按钮：根据 confirmLevel 切换 UI -->
+    <div class="card-footer">
+      <!-- confirmLevel=0：直接执行 -->
+      <NButton
+        v-if="confirmLevel === 0"
+        :type="buttonType"
+        size="small"
+        :loading="loading"
+        :disabled="loading"
+        @click="onDirectClick"
+      >
+        执行
+      </NButton>
+
+      <!-- confirmLevel=1：单次 NPopconfirm -->
+      <NPopconfirm
+        v-else-if="confirmLevel === 1"
+        placement="top"
+        @positive-click="onFirstConfirm"
+      >
+        <template #trigger>
+          <NButton
+            :type="buttonType"
+            size="small"
+            :loading="loading"
+            :disabled="loading"
+          >
+            执行
+          </NButton>
+        </template>
+        确认执行「{{ title }}」？此操作可能影响数据。
+      </NPopconfirm>
+
+      <!-- confirmLevel=2：两次 NPopconfirm 链式 -->
+      <template v-else>
+        <NPopconfirm
+          v-if="!secondConfirmPending"
+          placement="top"
+          @positive-click="onFirstConfirm"
+        >
+          <template #trigger>
+            <NButton
+              :type="buttonType"
+              size="small"
+              :loading="loading"
+              :disabled="loading"
+            >
+              执行
+            </NButton>
+          </template>
+          <span class="warn-text">⚠️ 危险操作：{{ title }}。第一次确认（共 2 次）。</span>
+        </NPopconfirm>
+
+        <NPopconfirm
+          v-else
+          placement="top"
+          @positive-click="onFinalConfirm"
+          @negative-click="onCancelSecondConfirm"
+        >
+          <template #trigger>
+            <NButton
+              :type="buttonType"
+              size="small"
+              :loading="loading"
+              :disabled="loading"
+            >
+              再次确认
+            </NButton>
+          </template>
+          <span class="warn-text-strong">🚨 最终确认：此操作不可逆！确定继续？</span>
+        </NPopconfirm>
+      </template>
+    </div>
+  </NCard>
+</template>
+
+<style scoped>
+.operation-card {
+  height: 100%;
+}
+.operation-card-danger {
+  border-color: rgba(208, 48, 80, 0.4);
+}
+.card-header {
+  margin-bottom: 4px;
+}
+.card-icon {
+  font-size: 16px;
+}
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.card-desc {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.card-form {
+  margin-bottom: 8px;
+}
+.card-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+.warn-text {
+  color: #d03050;
+}
+.warn-text-strong {
+  color: #d03050;
+  font-weight: 600;
+}
+</style>

@@ -278,6 +278,31 @@ function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
 
 export function registerOperationalTools(api: any): void {
   _pluginNeo4jConfig = mergeEntriesNeo4jConfig(api) as Record<string, unknown>;
+  _registerOperationalToolsImpl(api, undefined);
+}
+
+/**
+ * Dashboard 工具上下文 —— 由 index.ts 注入，供 lcmg_distill / lcmg_compact / lcmg_reset_breaker
+ * 访问 register() 闭包内的单例（expStore / runDistillation / triggerCompact / resetBreaker）。
+ * 可选参数：未注入时三个工具返回 "dashboard context not available"（向后兼容旧调用方）。
+ */
+export interface DashboardToolContext {
+  expStore?: any;
+  runDistillation?: (limit: number) => Promise<any>;
+  triggerCompact?: (conversationId?: number) => Promise<boolean>;
+  resetBreaker?: (name: string) => boolean;
+}
+
+/**
+ * 带 dashboard 上下文的工具注册入口。
+ * dashboardContext 可选，未注入时不注册三个 dashboard 工具（向后兼容）。
+ */
+export function registerOperationalToolsWithDashboard(api: any, dashboardContext?: DashboardToolContext): void {
+  _pluginNeo4jConfig = mergeEntriesNeo4jConfig(api) as Record<string, unknown>;
+  _registerOperationalToolsImpl(api, dashboardContext);
+}
+
+function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardToolContext | undefined): void {
   // ===================================================================
   // 1. lcmg_experience_report
   // ===================================================================
@@ -1383,6 +1408,127 @@ export function registerOperationalTools(api: any): void {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], isError: true };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 13. lcmg_distill —— 手动触发经验蒸馏（PENDING → DISTILLED）
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_distill",
+    description: "手动触发经验蒸馏。从 PENDING 经验中批量蒸馏为 DISTILLED，调用 LLM 提取结构化经验。limit 控制单次处理数量。",
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number({
+        description: "最大蒸馏数量，默认 50",
+        minimum: 1,
+        maximum: 200,
+      })),
+    }),
+    async execute(_id: string, params: { limit?: number }) {
+      if (!dashboardContext?.runDistillation) {
+        return {
+          content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
+          isError: true,
+        };
+      }
+      const limit = params.limit ?? 50;
+      try {
+        await dashboardContext.runDistillation(limit);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `✅ Distillation triggered for up to ${limit} pending experience(s).`,
+          }],
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ Distillation failed: ${e?.message ?? String(e)}` }],
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 14. lcmg_compact —— 手动触发指定会话的 compact
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_compact",
+    description: "手动触发指定会话的 compact。无 conversationId 时触发最紧急的债务。用于手动控制上下文压缩。",
+    parameters: Type.Object({
+      conversationId: Type.Optional(Type.Number({
+        description: "目标会话 ID，省略则处理最紧急债务",
+      })),
+    }),
+    async execute(_id: string, params: { conversationId?: number }) {
+      if (!dashboardContext?.triggerCompact) {
+        return {
+          content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
+          isError: true,
+        };
+      }
+      try {
+        const ok = await dashboardContext.triggerCompact(params.conversationId);
+        const target = params.conversationId != null
+          ? `conversation ${params.conversationId}`
+          : 'most urgent debt';
+        return {
+          content: [{
+            type: "text" as const,
+            text: ok
+              ? `✅ Compact completed for ${target}.`
+              : `⚠️ Compact triggered for ${target} but did not produce a summary (may retry).`,
+          }],
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ Compact failed: ${e?.message ?? String(e)}` }],
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 15. lcmg_reset_breaker —— 重置指定子系统的熔断器状态
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_reset_breaker",
+    description: "重置指定子系统的熔断器状态。name: lcm/qmd/neo4j。neo4j 还会重置 GraphAdapter 连接失败标志，允许立即重试连接。",
+    parameters: Type.Object({
+      name: Type.String({ description: "子系统名: lcm | qmd | neo4j" }),
+    }),
+    async execute(_id: string, params: { name: string }) {
+      const name = params.name;
+      if (!['lcm', 'qmd', 'neo4j'].includes(name)) {
+        return {
+          content: [{ type: "text" as const, text: `Error: 无效的子系统名: ${name}（支持 lcm/qmd/neo4j）` }],
+          isError: true,
+        };
+      }
+      try {
+        // resetCircuitBreaker 是模块级函数，动态导入避免循环依赖
+        const { resetCircuitBreaker } = await import('./circuit-breaker.js');
+        const reset = resetCircuitBreaker(name);
+        // neo4j 额外重置 graphAdapter 连接标志（通过注入的回调，graphAdapter 在 index.ts 闭包内）
+        let adapterReset = false;
+        if (name === 'neo4j' && dashboardContext?.resetBreaker) {
+          adapterReset = dashboardContext.resetBreaker(name);
+        }
+        return {
+          content: [{
+            type: "text" as const,
+            text: reset
+              ? `✅ Circuit breaker reset for "${name}"${name === 'neo4j' ? (adapterReset ? ' + GraphAdapter connect flag reset' : '') : ''}.`
+              : `❌ Failed to reset circuit breaker for "${name}".`,
+          }],
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ Reset breaker failed: ${e?.message ?? String(e)}` }],
+          isError: true,
+        };
       }
     },
   });

@@ -126,3 +126,23 @@ export function getHealthSnapshot(): Record<string, { available: boolean; failur
   }
   return snap;
 }
+
+/**
+ * 重置指定子系统的熔断器状态：清零 failures、关闭 open、清除冷却窗口。
+ * 供 dashboard lcmg_reset_breaker 工具手动恢复使用。
+ *
+ * @param name 子系统名（lcm | qmd | neo4j）
+ * @returns 合法子系统返回 true，非法名返回 false
+ */
+export function resetCircuitBreaker(name: string): boolean {
+  // 合法性校验：只允许已定义的子系统
+  if (name !== 'lcm' && name !== 'qmd' && name !== 'neo4j') {
+    return false;
+  }
+  const s = getState(name as Subsystem);
+  s.failures = 0;
+  s.open = false;
+  s.halfOpenAt = null;
+  s.lastFailureAt = null;
+  return true;
+}
