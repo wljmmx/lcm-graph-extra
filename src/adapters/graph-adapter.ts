@@ -455,8 +455,8 @@ export class GraphAdapter {
    * Reduces N round-trips to O(1).
    */
   async batchUpsert(
-    entities: Array<{ name: string; type: string; description: string; content: string }>,
-    relations: Array<{ from: string; to: string; type: string; instruction?: string }>,
+    entities: Array<{ name: string; type: string; description: string; content: string; updatedAt?: number }>,
+    relations: Array<{ from: string; to: string; type: string; instruction?: string; updatedAt?: number }>,
   ): Promise<{ upserted: number; conflicts: number }> {
     if (!this.driver) return { upserted: 0, conflicts: 0 };
 
@@ -472,11 +472,18 @@ export class GraphAdapter {
     let cc = 0;
 
     try {
-      // Batch upsert nodes via UNWIND + MERGE
+      // N-1: Sync 算法升级 —— updatedAt 对比 + 增量 MERGE
+      // 输入实体可选携带 updatedAt（毫秒时间戳）：
+      //   - 若存在且大于现有节点：更新属性并刷新 updatedAt
+      //   - 若存在但小于等于现有节点：跳过（保留更新，避免旧数据覆盖新数据）
+      //   - 若不存在或节点不存在：插入并设置 createdAt + updatedAt
+      // 未携带 updatedAt 时默认 Date.now()（等价于原全量覆盖语义）。
       if (validEntities.length > 0) {
+        const now = Date.now();
         const nodeData = validEntities.map((e) => {
           const t = mapEntityType(e.type);
           const nid = makeNodeId(e.name, t);
+          const ts = typeof e.updatedAt === 'number' && e.updatedAt > 0 ? e.updatedAt : now;
           return {
             id: nid,
             label: t,
@@ -485,7 +492,7 @@ export class GraphAdapter {
             content: (e.content ?? '').slice(0, 2000),
             status: 'active',
             pagerank: 0.5,
-            updatedAt: Date.now(),
+            updatedAt: ts,
           };
         });
 
@@ -496,67 +503,59 @@ export class GraphAdapter {
         );
         cc += (existingResult.records[0]?.get('existingIds') ?? []).length;
 
-        // Batch MERGE all nodes
-        const mergeLabels = new Set(nodeData.map((n) => n.label));
-        const labelUnion = Array.from(mergeLabels).join('|');
-        const cypher = `
-          UNWIND $nodes AS node
-          CALL apoc.create.node([node.label], {
-            id: node.id,
-            name: node.name,
-            description: node.description,
-            content: node.content,
-            status: node.status,
-            pagerank: node.pagerank,
-            updatedAt: node.updatedAt,
-          }) YIELD node AS created
-          RETURN count(created) AS cnt
-        `;
+        // N-1: 增量 MERGE —— 按 label 分组 UNWIND MERGE，实现 updatedAt 对比
+        // 仅在节点不存在 OR 节点存在但 incoming updatedAt > existing updatedAt 时才更新属性。
+        // 这样重放旧数据不会覆盖新数据，支持增量同步。
+        //
+        // 实现方式：按 label 分组，每组一条 UNWIND MERGE（关系类型不可参数化的同构问题）
+        const nodesByLabel = new Map<string, typeof nodeData>();
+        for (const n of nodeData) {
+          const arr = nodesByLabel.get(n.label) || [];
+          arr.push(n);
+          nodesByLabel.set(n.label, arr);
+        }
 
-        // Fallback: if apoc not available, use per-node MERGE in one transaction
-        try {
-          const result = await session.run(cypher, { nodes: nodeData });
+        for (const [label, nodes] of nodesByLabel) {
+          const cypher = `
+            UNWIND $nodes AS node
+            MERGE (n:\`${label}\` { id: node.id })
+            ON CREATE SET
+              n.name = node.name,
+              n.description = node.description,
+              n.content = node.content,
+              n.status = node.status,
+              n.pagerank = node.pagerank,
+              n.updatedAt = node.updatedAt,
+              n.createdAt = node.updatedAt
+            ON MATCH SET
+              n.name = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.name ELSE n.name END,
+              n.description = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.description ELSE n.description END,
+              n.content = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.content ELSE n.content END,
+              n.status = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.status ELSE n.status END,
+              n.pagerank = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.pagerank ELSE n.pagerank END,
+              n.updatedAt = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.updatedAt ELSE n.updatedAt END
+            RETURN count(*) AS cnt
+          `;
+          const result = await session.run(cypher, { nodes });
           uc += result.records[0]?.get('cnt') ?? 0;
-        } catch {
-          // Fallback: MERGE each node in a single transaction (still better than N round-trips)
-          for (const n of nodeData) {
-            await session.run(
-              `MERGE (n:${n.label} { id: $id })
-               SET n.name = $name,
-                   n.description = $description,
-                   n.content = $content,
-                   n.status = $status,
-                   n.pagerank = $pagerank,
-                   n.updatedAt = $updatedAt
-               ON CREATE SET n.createdAt = $updatedAt`,
-              {
-                id: n.id,
-                name: n.name,
-                description: n.description,
-                content: n.content,
-                status: n.status,
-                pagerank: n.pagerank,
-                updatedAt: n.updatedAt,
-              },
-            );
-          }
-          uc += nodeData.length;
         }
       }
 
       // P1-2 M-1: 边 upsert 改为按 type 分组的 UNWIND MERGE
       // （Cypher 关系类型不可参数化，故按 mapEdgeType 结果分组后逐组单条 UNWIND MERGE）
+      // N-1: 边也支持增量 updatedAt 对比
       if (validRelations.length > 0) {
         const now = Date.now();
         const edgesByType = new Map<string, any[]>();
         for (const rel of validRelations) {
           const mt = mapEdgeType(rel.type);
+          const ts = typeof rel.updatedAt === 'number' && rel.updatedAt > 0 ? rel.updatedAt : now;
           const entry = {
             fromId: makeNodeId(rel.from, 'TASK'),
             toId: makeNodeId(rel.to, 'TASK'),
             instruction: (rel.instruction ?? '').slice(0, 500),
             weight: 1.0,
-            updatedAt: now,
+            updatedAt: ts,
           };
           const list = edgesByType.get(mt) ?? [];
           list.push(entry);
@@ -564,7 +563,7 @@ export class GraphAdapter {
         }
         for (const [mt, group] of edgesByType) {
           await session.run(
-            `UNWIND $edges AS edge MATCH (a { id: edge.fromId }), (b { id: edge.toId }) MERGE (a)-[r:${mt}]->(b) SET r.instruction = edge.instruction, r.weight = edge.weight, r.updatedAt = edge.updatedAt ON CREATE SET r.createdAt = edge.updatedAt`,
+            `UNWIND $edges AS edge MATCH (a { id: edge.fromId }), (b { id: edge.toId }) MERGE (a)-[r:${mt}]->(b) ON CREATE SET r.instruction = edge.instruction, r.weight = edge.weight, r.updatedAt = edge.updatedAt, r.createdAt = edge.updatedAt ON MATCH SET r.instruction = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.instruction ELSE r.instruction END, r.weight = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.weight ELSE r.weight END, r.updatedAt = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.updatedAt ELSE r.updatedAt END`,
             { edges: group },
           );
         }
