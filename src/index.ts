@@ -124,7 +124,11 @@ const userProfile = new UserProfileTracker();
 import { healthMetrics } from './health-metrics.js';
 
 // G-8: 记录最近一轮 assemble 返回的经验 ID + query，供 afterTurn 异步验证
-let lastAssembleExpIds: Array<{ id: string; summary: string; query: string }> = [];
+// B-1 修复: 原为模块级 let 变量，多 session 并发时 G-8 验证回路会串数据
+// （session A 的 assemble 写入，session B 的 afterTurn 读取）。
+// 改为 per-sessionKey Map，每个 session 独立追踪。
+const lastAssembleExpIdsBySession = new Map<string, Array<{ id: string; summary: string; query: string }>>();
+const LAST_EXP_MAP_MAX = 200; // 防止无界增长，LRU 上限
 
 // R-2: 成本感知级联管理器 —— 全局单例
 import { cascadeManager, CascadeManager } from './cascade-manager.js';
@@ -550,7 +554,7 @@ function getSessionDedup(sessionKey: string) {
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.1.9",
+        version: "2.1.10",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         hostRequirements: {
@@ -1015,7 +1019,10 @@ function getSessionDedup(sessionKey: string) {
                 // N-2: Merger LLM 重排 —— 低压力 tier（token 充裕）时启用，
                 // 中高压跳过以避免 LLM 调用延迟影响响应速度。
                 // 复用 distillation 的 LLM 配置（Ollama 本地模型优先，避免 GPU 切换）。
-                if (tier === 'low' && merged.length >= 3 && typeof merger.llmRerank === 'function') {
+                // B-3 修复: 原 tier === 'low' 仍会在对话深入后阻塞 assemble 主路径
+                // （8s timeout）。收紧为 tokenRatio < 0.25，即仅 context 几乎空时
+                // （对话初期，用户可承受短暂延迟）才同步调用 LLM。
+                if (tier === 'low' && tokenRatio < 0.25 && merged.length >= 3 && typeof merger.llmRerank === 'function') {
                   try {
                     const runtimeLlm = api.runtimeContext?.llm;
                     let llmCfg: { model: string; apiKey: string; baseURL: string } | null = null;
@@ -1296,11 +1303,17 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             for (const e of personalizedResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
 
             // G-8: 记录本轮 assemble 返回的经验，供 afterTurn 异步验证
-            lastAssembleExpIds = personalizedResults.map((e: any) => ({
+            // B-1 修复: 使用 sessionKey-scoped Map，避免多 session 竞态
+            lastAssembleExpIdsBySession.set(sessionKey, personalizedResults.map((e: any) => ({
               id: e.experience.id,
               summary: e.experience.summary ?? '',
               query: qmdQuery,
-            }));
+            })));
+            // LRU 淘汰：超过上限时删除最早插入的 session 条目
+            if (lastAssembleExpIdsBySession.size > LAST_EXP_MAP_MAX) {
+              const oldest = lastAssembleExpIdsBySession.keys().next().value;
+              if (oldest !== undefined) lastAssembleExpIdsBySession.delete(oldest);
+            }
           }
 
           // Layer 3: Neo4j knowledge graph
@@ -1739,10 +1752,18 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // 通过比较用户查询与经验内容的语义相关性，判断召回是否有效。
           // 成功 → relevanceScore +0.05, 失败 → relevanceScore -0.05（不低于 0.3）
           // 不主动询问用户，纯 LLM 异步判断，权重 ≤ 0.3（避免过度偏置）。
-          if (lastAssembleExpIds.length > 0) {
-            const expIdsToValidate = [...lastAssembleExpIds];
-            lastAssembleExpIds = []; // 清空，避免重复验证
-            (async () => {
+          // B-1 修复: 从 per-sessionKey Map 读取，避免多 session 竞态
+          {
+            const g8SessionKey = typeof params.sessionKey === 'string'
+              ? params.sessionKey
+              : typeof params.session_id === 'string'
+                ? params.session_id
+                : 'default';
+            const lastAssembleExpIds = lastAssembleExpIdsBySession.get(g8SessionKey) ?? [];
+            if (lastAssembleExpIds.length > 0) {
+              const expIdsToValidate = [...lastAssembleExpIds];
+              lastAssembleExpIdsBySession.delete(g8SessionKey); // 清空，避免重复验证
+              (async () => {
               try {
                 // 防御：异步执行期间 expStore 可能已被 dispose 置 null
                 const store = expStore;
@@ -1779,6 +1800,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 logger?.debug?.("[afterTurn] G-8 validation loop skipped", { err: String(g8Err) });
               }
             })().catch(() => { /* swallowed */ });
+          }
           }
 
           // S-9': 情节缓冲扩展 —— 语义边界检测 → 触发 compact
@@ -2478,4 +2500,4 @@ export type {
 } from './experience/types.js';
 
 
-export const VERSION = '2.1.9';
+export const VERSION = '2.1.10';
