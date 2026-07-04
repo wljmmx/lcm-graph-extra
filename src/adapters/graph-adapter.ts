@@ -8,6 +8,8 @@
 
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import * as neo4jDriver from 'neo4j-driver';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
@@ -47,7 +49,8 @@ export interface GraphAdapterConfig {
 }
 
 const _gmpRequire = createRequire(import.meta.url);
-const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
+
+const OPENCLAW_DIR = process.env.OPENCLAW_DIR || join(homedir(), '.openclaw');
 
 /**
  * P3-3: 解析 graph-memory-pro 模块路径（单一来源，去除 graph-adapter / tools 重复逻辑）。
@@ -567,7 +570,9 @@ export class GraphAdapter {
         }
       }
 
-      uc += validRelations.length;
+      // P2-AUDIT: 关系计数不再混入 uc（upserted 节点数），
+      // 避免调用方收到虚高的节点数。关系仍正常 upsert。
+      // uc += validRelations.length;
     } catch (err) {
       this.logger?.error?.(`[lcm-graph-extra] batchUpsert error: ${err}`);
     } finally {
@@ -691,7 +696,9 @@ export class GraphAdapter {
     if (!this.mod || nodeIds.length < 2) return new Map();
     try {
       // P2-17: 用 buildGmConfig 统一构建（PPR 只用 pagerank* 字段）
-      const cfg = buildGmConfig(this.neo4jConfig, { recallMaxNodes: undefined, recallMaxDepth: undefined, freshTailCount: undefined, dedupThreshold: undefined, compactTurnCount: undefined });
+      // P0-AUDIT: 不传 undefined 覆盖值，buildGmConfig 内部 spread 会
+        // 把 undefined 写进配置对象，导致下游 PPR 算法收到 undefined 而非默认值。
+        const cfg = buildGmConfig(this.neo4jConfig);
       const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
       // gm-pro returns PPRResult with scores Map
       return result.scores ?? new Map();

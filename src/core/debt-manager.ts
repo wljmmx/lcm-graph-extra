@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+// P2-AUDIT: 默认 tokenBudget ≈ 112K（128K 上下文窗口的 ~90%），
+// 集中定义避免魔术数字散落。
+const DEFAULT_TOKEN_BUDGET = 114688;
+
 // ─── Types ──────────────────────────────────────────────
 
 export interface DebtRecord {
@@ -131,7 +135,7 @@ export function getPendingDebts(dbPath?: string): DebtRecord[] {
       requestedAt: r.requestedAt,
       reason: r.reason || "unknown",
       running: !!r.running,
-      tokenBudget: r.tokenBudget || 114688,
+      tokenBudget: r.tokenBudget || DEFAULT_TOKEN_BUDGET,
       currentTokenCount: r.currentTokenCount || 0,
       updatedAt: r.updatedAt,
     }));

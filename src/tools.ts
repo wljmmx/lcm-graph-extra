@@ -34,7 +34,9 @@ function getPluginNeo4jConfig(): Record<string, unknown> | undefined {
   return _pluginNeo4jConfig;
 }
 
-const LCM_DB = resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'lcm.db');
+// P1-AUDIT: 统一使用 homedir() 解析路径，与 lcm-bridge.ts 保持一致，
+// 避免 process.env.HOME 被篡改或与系统 passwd 不一致导致访问不同数据库。
+const LCM_DB = resolve(homedir(), '.openclaw', 'lcm.db');
 // Neo4j credentials resolved at runtime via neo4j-helper
 // Neo4j user resolved at runtime via neo4j-helper
 // Neo4j credentials resolved at runtime via neo4j-helper
@@ -43,8 +45,16 @@ const LCM_DB = resolve(process.env.HOME || process.env.USERPROFILE || '.', '.ope
 // Helpers
 // ---------------------------------------------------------------------------
 
+// P2-AUDIT: 单例 DB 连接，与 lcm-bridge.ts / debt-manager.ts 保持一致，
+// 避免 lcmg_diagnose 等工具连续查询时多次 open/close。
+let _sharedDb: any = null;
 function openDb() {
-  return new DatabaseSync(LCM_DB);
+  if (_sharedDb) {
+    // 验证连接仍可用
+    try { _sharedDb.prepare("SELECT 1").get(); return _sharedDb; } catch { _sharedDb = null; }
+  }
+  _sharedDb = new DatabaseSync(LCM_DB);
+  return _sharedDb;
 }
 
 /**
@@ -481,11 +491,11 @@ export function registerOperationalTools(api: any): void {
 
       // 记忆文件导入
       if (params.source === "memory_files" || params.source === "all") {
+        let fCount = 0;
         try {
           const memDir = join(homedir(), ".openclaw", "workspace", "main", "memory");
           const { driver, session } = await neo4jSession();
           try {
-            let fCount = 0;
             const files = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")).slice(0, limit) : [];
             for (const file of files) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
@@ -493,7 +503,7 @@ export function registerOperationalTools(api: any): void {
               fCount++;
             }
           } finally { await closeNeo4j(driver, session); }
-          lines.push(`✅ Imported ${total} memory files into Neo4j`);
+          lines.push(`✅ Imported ${fCount} memory files into Neo4j`);
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
@@ -542,7 +552,10 @@ export function registerOperationalTools(api: any): void {
         const depths = db.prepare("SELECT depth, COUNT(*) as c FROM summaries GROUP BY depth ORDER BY depth").all();
         ok("DAG depths", depths.map((d: any) => "depth=" + d.depth + ":" + d.c).join(" | "));
 
-        const fts = db.prepare("SELECT COUNT(*) as c FROM messages_fts WHERE messages_fts MATCH 'test'").get().c;
+        // P1-AUDIT: FTS5 索引为空或不含 'test' 时 .get() 返回 undefined，
+        // 直接访问 .c 会抛 TypeError。加空值保护，未命中时显示 0。
+        const ftsRow = db.prepare("SELECT COUNT(*) as c FROM messages_fts WHERE messages_fts MATCH 'test'").get();
+        const fts = ftsRow?.c ?? 0;
         ok("FTS5 index", "searchable (test -> " + fts + " hits)");
         pass += 6;
       } catch (e: any) { fail("lossless-claw", e.message); fails++; }
@@ -857,7 +870,9 @@ export function registerOperationalTools(api: any): void {
               const relCleanup = await session.run(
                 `MATCH (n) WHERE NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage DELETE n`
               );
-              const moreDeleted = 0; // batch delete already covered
+              // P1-AUDIT: 批量清理结果从 Neo4j result summary 中提取实际删除数，
+              // 修复前硬编码 moreDeleted=0，用户无法知道额外清理了多少节点。
+              const moreDeleted = (relCleanup?.summary?.counters?.nodesDeleted?.() ?? 0) as number;
               push(`  ✅ Pruned ${deleted} orphan nodes, ${moreDeleted} additional via batch cleanup\n`);
             } finally { await closeNeo4j(driver, session); }
           } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
@@ -981,7 +996,7 @@ export function registerOperationalTools(api: any): void {
         // P3-3: 复用 graph-adapter 的统一路径解析（去除重复逻辑），并记录实际路径
         const { resolveGmProPath } = await import("./adapters/graph-adapter.js");
         const _resolved = resolveGmProPath();
-        getGlobalLogger().info('[lcm-graph-extra] lcmg_diagnose loading graph-memory-pro', { path: _resolved.path, source: _resolved.source });
+        getGlobalLogger().info('[lcm-graph-extra] lcmg_maintain loading graph-memory-pro', { path: _resolved.path, source: _resolved.source });
         const GM_PRO_PATH = _resolved.path;
 
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
