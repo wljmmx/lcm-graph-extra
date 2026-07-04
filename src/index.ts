@@ -1667,12 +1667,19 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (wordRatio < 0.3) return;
 
           // Prefer runtimeContext.llm (SDK-provided LLM config), fallback to custom config
-          const runtimeLlm = params.runtimeContext?.llm;
-          const llmConfig = runtimeLlm?.model
+          // 复用 resolveDistillationLlm 统一处理：
+          //   - 主会话是 Ollama 模型 → 沿用主会话模型，避免 GPU 切换
+          //   - 主会话不是 Ollama → 用 distillationLlm 配置（环境变量/openclaw.json/pluginConfig）
+          //   - 自动清洗 baseURL + 注入 keepAlive（仅 Ollama 端点）
+          const distillLlm = resolveDistillationLlm(api);
+          // graphAdapter.extractAndUpsertFromTurn 期望 { apiKey, baseURL, model } 结构，
+          // 这里附加 keepAlive 让 buildLlmFn 能读到
+          const llmConfig = (distillLlm?.model || distillLlm?.apiKey)
             ? {
-                model: runtimeLlm.model,
-                apiKey: runtimeLlm.apiKey || '',
-                baseURL: runtimeLlm.baseURL || 'https://api.openai.com/v1',
+                model: distillLlm.model,
+                apiKey: distillLlm.apiKey,
+                baseURL: distillLlm.baseURL,
+                keepAlive: distillLlm.keepAlive,
               }
             : api.pluginConfig?.llm || (() => {
           try {
@@ -1683,7 +1690,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           } catch { return undefined }
         })() || {
                 apiKey: process.env.OPENAI_API_KEY || '',
-                baseURL: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+                baseURL: cleanBaseURL(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
               };
 
@@ -2240,7 +2247,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // Distillation helpers
 
     function isOllamaModel(model: string): boolean {
-      return model.startsWith('ollama/') || model.startsWith('ollama-256k/') || model.includes(':latest') || !model.includes('/');
+      // 判断主会话模型是否为 Ollama 本地模型。
+      // 识别依据：
+      //   1. 显式 provider 前缀：`ollama/...`、`ollama-256k/...`
+      //   2. Ollama 默认 tag 后缀：`:latest`
+      // 注意：原逻辑 `!model.includes('/')` 会把 `gpt-4o-mini`、`claude-3-5-sonnet`
+      // 等不含 `/` 的远程模型名误判为 Ollama，导致错误地走 Ollama baseURL。
+      // 已去除该过宽分支。
+      return model.startsWith('ollama/') || model.startsWith('ollama-256k/') || model.endsWith(':latest');
     }
 
     function resolveDistillationLlm(apiRef: any) {
