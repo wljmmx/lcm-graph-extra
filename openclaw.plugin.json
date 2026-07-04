@@ -74,7 +74,7 @@
         "properties": {
           "uri": {
             "type": "string",
-            "default": "bolt://localhost:37687"
+            "default": "bolt://localhost:7687"
           },
           "user": {
             "type": "string",
@@ -90,41 +90,83 @@
           "password"
         ]
       },
+      "summaryStrategy": {
+        "type": "string",
+        "enum": [
+          "strategy",
+          "hybrid",
+          "full"
+        ],
+        "default": "strategy"
+      },
+      "maxGraphDepth": {
+        "type": "integer",
+        "default": 10,
+        "minimum": 1
+      },
+      "maxNodeCount": {
+        "type": "integer",
+        "default": 5000,
+        "minimum": 1
+      },
+      "enableCrossFileLinkage": {
+        "type": "boolean",
+        "default": true
+      },
+      "crossReferenceRetentionDays": {
+        "type": "integer",
+        "default": 90,
+        "minimum": 1
+      },
+      "maxTokens": {
+        "type": "integer",
+        "default": 65536,
+        "minimum": 1
+      },
+      "budgetRatio": {
+        "type": "number",
+        "default": 0.3,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "cliTimeout": {
+        "type": "integer",
+        "default": 30000
+      },
+      "cliFallbackSearchType": {
+        "type": "string",
+        "enum": [
+          "search",
+          "query"
+        ],
+        "default": "search"
+      },
+      "distillationIntervalMs": {
+        "type": "integer",
+        "default": 7200000
+      },
+      "tripletTimeoutMs": {
+        "type": "integer",
+        "default": 8000
+      },
       "retrieval": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "qmd": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-              "enabled": {
-                "type": "boolean",
-                "default": true
-              },
-              "searchLimit": {
-                "type": "integer",
-                "default": 5,
-                "minimum": 1,
-                "maximum": 20
-              },
               "mcpEndpoint": {
                 "type": "string",
                 "default": "http://127.0.0.1:8081",
                 "description": "QMD MCP server base URL"
-              },
-              "searchMode": {
-                "type": "string",
-                "enum": [
-                  "mcp_fallback",
-                  "cli_only"
-                ],
-                "default": "mcp_fallback",
-                "description": "QMD search mode: mcp_fallback (prefer MCP, fall back to CLI) or cli_only"
               }
             }
           },
           "graph": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
               "enabled": {
                 "type": "boolean",
@@ -138,26 +180,24 @@
               }
             }
           },
-          "merger": {
+          "limits": {
             "type": "object",
+            "additionalProperties": false,
             "properties": {
-              "maxResults": {
+              "qmd": {
                 "type": "integer",
-                "default": 10,
-                "minimum": 1,
-                "maximum": 30
+                "default": 5,
+                "minimum": 1
               },
-              "fuzzyMatchThreshold": {
-                "type": "number",
-                "default": 0.85,
-                "minimum": 0,
-                "maximum": 1
-              },
-              "decayHalfLifeDays": {
+              "graph": {
                 "type": "integer",
-                "default": 30,
-                "minimum": 0,
-                "description": "Memory decay half-life in days (0 = disabled)"
+                "default": 5,
+                "minimum": 1
+              },
+              "exp": {
+                "type": "integer",
+                "default": 3,
+                "minimum": 0
               }
             }
           }
@@ -205,45 +245,6 @@
           }
         }
       },
-      "async": {
-        "type": "object",
-        "properties": {
-          "extraction": {
-            "type": "object",
-            "properties": {
-              "enabled": {
-                "type": "boolean",
-                "default": false
-              },
-              "concurrency": {
-                "type": "integer",
-                "default": 1,
-                "minimum": 1
-              },
-              "batchSize": {
-                "type": "integer",
-                "default": 5,
-                "minimum": 1
-              },
-              "llm": {
-                "type": "object",
-                "properties": {
-                  "apiKey": {
-                    "type": "string"
-                  },
-                  "baseURL": {
-                    "type": "string"
-                  },
-                  "model": {
-                    "type": "string",
-                    "default": "qwen2.5:7b"
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
       "lcmMonitor": {
         "type": "object",
         "additionalProperties": false,
@@ -254,58 +255,48 @@
           },
           "contextWindow": {
             "type": "integer",
-            "default": 131072,
-            "description": "\u6a21\u578b\u4e0a\u4e0b\u6587\u7a97\u53e3\u4e0a\u9650"
+            "default": 262144
+          },
+          "dedupRounds": {
+            "type": "integer",
+            "default": 24,
+            "minimum": 1
           },
           "proactiveThreshold": {
             "type": "number",
             "default": 0.65,
             "minimum": 0,
-            "maximum": 1,
-            "description": "\u89e6\u53d1\u540e\u53f0 compact \u7684 token \u6bd4\u4f8b\u9608\u503c"
-          },
-          "messageTriggerCount": {
-            "type": "integer",
-            "default": 24,
-            "minimum": 1,
-            "description": "\u89e6\u53d1\u540e\u53f0 compact \u7684\u6d88\u606f\u6570\u9608\u503c"
+            "maximum": 1
           },
           "highPressureThreshold": {
             "type": "number",
             "default": 0.85,
             "minimum": 0,
-            "maximum": 1,
-            "description": "\u9ad8\u538b\u529b token \u6bd4\u4f8b\u9608\u503c"
+            "maximum": 1
           },
           "mediumPressureThreshold": {
             "type": "number",
             "default": 0.7,
             "minimum": 0,
-            "maximum": 1,
-            "description": "\u4e2d\u538b\u529b token \u6bd4\u4f8b\u9608\u503c"
+            "maximum": 1
+          },
+          "systemPromptOverheadTokens": {
+            "type": "integer",
+            "default": 17000
           },
           "compactTokenBudget": {
             "type": "integer",
-            "default": 57344,
-            "description": "\u5199\u5165 compact debt \u7684 token_budget"
+            "default": 114688
           },
-          "maxContextChars": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "low": {
-                "type": "integer",
-                "default": 6000
-              },
-              "medium": {
-                "type": "integer",
-                "default": 3000
-              },
-              "high": {
-                "type": "integer",
-                "default": 800
-              }
-            }
+          "compactTimeout": {
+            "type": "integer",
+            "default": 60000
+          },
+          "maxSummaryTokenRatio": {
+            "type": "number",
+            "default": 0.45,
+            "minimum": 0,
+            "maximum": 1
           },
           "retrievalLimits": {
             "type": "object",
@@ -363,17 +354,208 @@
                 }
               }
             }
+          },
+          "maxContextChars": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "low": {
+                "type": "integer",
+                "default": 12000
+              },
+              "medium": {
+                "type": "integer",
+                "default": 6000
+              },
+              "high": {
+                "type": "integer",
+                "default": 1600
+              }
+            }
           }
         }
       },
-      "cliFallbackSearchType": {
-        "type": "string",
-        "enum": [
-          "search",
-          "count"
-        ],
-        "default": "search",
-        "description": "CLI fallback search type when MCP is unavailable"
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "apiKey": {
+            "type": "string",
+            "sensitive": true
+          },
+          "baseURL": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "integer"
+          },
+          "keepAlive": {
+            "type": "string"
+          }
+        }
+      },
+      "distillationLlm": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "openclaw_hooks",
+              "openai",
+              "ollama",
+              "custom"
+            ],
+            "default": "openclaw_hooks"
+          },
+          "model": {
+            "type": "string",
+            "default": "ollama/qwen3.6:27b"
+          }
+        }
+      },
+      "llmProvider": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "openclaw_hooks",
+              "openai",
+              "ollama",
+              "custom"
+            ],
+            "default": "openclaw_hooks"
+          },
+          "model": {
+            "type": "string",
+            "default": "default"
+          },
+          "maxTokens": {
+            "type": "integer",
+            "default": 4096
+          }
+        }
+      },
+      "compaction": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "triggerThreshold": {
+            "type": "integer",
+            "default": 20000
+          },
+          "softThresholdTokens": {
+            "type": "integer",
+            "default": 163840
+          },
+          "keepRecentTokens": {
+            "type": "integer",
+            "default": 131072
+          }
+        }
+      },
+      "backupConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "retentionDays": {
+            "type": "integer",
+            "default": 30
+          },
+          "maxBackups": {
+            "type": "integer",
+            "default": 10
+          },
+          "intervalHours": {
+            "type": "integer",
+            "default": 24
+          },
+          "backupDir": {
+            "type": "string"
+          }
+        }
+      },
+      "ttl": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "retentionDays": {
+            "type": "integer",
+            "default": 90,
+            "minimum": 1
+          },
+          "cleanupIntervalHours": {
+            "type": "integer",
+            "default": 24,
+            "minimum": 1
+          }
+        }
+      },
+      "logging": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "silent",
+              "fatal",
+              "error",
+              "warn",
+              "info",
+              "debug",
+              "trace"
+            ],
+            "default": "info"
+          },
+          "file": {
+            "type": "string"
+          }
+        }
+      },
+      "webhook": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "dag_update",
+                "compaction",
+                "backup",
+                "error"
+              ]
+            },
+            "default": []
+          }
+        }
       }
     }
   },
