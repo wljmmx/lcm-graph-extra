@@ -25,6 +25,7 @@ import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboar
 import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
 import { backgroundTasks } from "./async/task-registry.js"
+import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama } from "./utils/url.js"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
@@ -1033,27 +1034,21 @@ function getSessionDedup(sessionKey: string) {
                 // （对话初期，用户可承受短暂延迟）才同步调用 LLM。
                 if (tier === 'low' && tokenRatio < 0.25 && merged.length >= 3 && typeof merger.llmRerank === 'function') {
                   try {
-                    const runtimeLlm = api.runtimeContext?.llm;
-                    let llmCfg: { model: string; apiKey: string; baseURL: string } | null = null;
-                    if (runtimeLlm?.model) {
-                      llmCfg = {
-                        model: runtimeLlm.model,
-                        apiKey: runtimeLlm.apiKey || '',
-                        baseURL: runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1',
-                      };
-                    } else {
-                      const dLlm = (api.config as any)?.distillationLlm;
-                      if (dLlm?.provider === 'openclaw_hooks') {
-                        llmCfg = { model: dLlm.model || 'ollama/qwen3.6:27b', apiKey: '', baseURL: 'http://127.0.0.1:18789/v1' };
-                      }
-                    }
-                    if (llmCfg) {
+                    // 复用 resolveDistillationLlm 统一处理 baseURL 清洗 + keepAlive
+                    const llmCfg = resolveDistillationLlm(api);
+                    if (llmCfg?.model) {
                       const llmFn = async (prompt: string): Promise<string> => {
                         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                         if (llmCfg!.apiKey) headers['Authorization'] = 'Bearer ' + llmCfg!.apiKey;
+                        // 仅 Ollama 端点注入 keep_alive，避免冷启动延迟
+                        const body = withKeepAliveIfOllama(
+                          llmCfg!.baseURL,
+                          { model: llmCfg!.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 },
+                          llmCfg!.keepAlive,
+                        );
                         const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
                           method: 'POST', headers,
-                          body: JSON.stringify({ model: llmCfg!.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 }),
+                          body: JSON.stringify(body),
                           signal: AbortSignal.timeout(8000),
                         });
                         if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
@@ -1788,9 +1783,15 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     const prompt = `Rate the relevance of this experience to the user's query on a scale of 0 to 1.\nQuery: "${exp.query.slice(0, 500)}"\nExperience: "${exp.summary.slice(0, 300)}"\nReturn ONLY a number between 0 and 1 (e.g., 0.8). 1 means highly relevant, 0 means completely irrelevant.`;
                     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                     if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
+                    // 仅 Ollama 端点注入 keep_alive
+                    const body = withKeepAliveIfOllama(
+                      llm.baseURL,
+                      { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 10 },
+                      llm.keepAlive,
+                    );
                     const resp = await fetch(llm.baseURL + '/chat/completions', {
                       method: 'POST', headers,
-                      body: JSON.stringify({ model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 10 }),
+                      body: JSON.stringify(body),
                       signal: AbortSignal.timeout(5000),
                     });
                     if (!resp.ok) continue;
@@ -2244,16 +2245,35 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
     function resolveDistillationLlm(apiRef: any) {
       const runtimeLlm = apiRef.runtimeContext?.llm;
+      // 默认 keepAlive（可被 distillationLlm.keepAlive 覆盖）
+      const defaultKeepAlive = (apiRef.config as any)?.distillationLlm?.keepAlive
+        || (apiRef.config as any)?.embedding?.keepAlive
+        || '1h';
       // Session model is local Ollama → reuse it to avoid GPU model swapping
       if (runtimeLlm?.model && isOllamaModel(runtimeLlm.model)) {
-        return { model: runtimeLlm.model, apiKey: runtimeLlm.apiKey || '', baseURL: runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1' };
+        return {
+          model: runtimeLlm.model,
+          apiKey: runtimeLlm.apiKey || '',
+          baseURL: cleanBaseURL(runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+          keepAlive: defaultKeepAlive,
+        };
       }
       const dLlm = (apiRef.config as any)?.distillationLlm;
-      if (dLlm?.provider === 'openclaw_hooks') return { model: dLlm.model || 'ollama/qwen3.6:27b', apiKey: '', baseURL: 'http://127.0.0.1:18789/v1' };
-      return { model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini', apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '', baseURL: process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1' };
+      if (dLlm?.provider === 'openclaw_hooks') return {
+        model: dLlm.model || 'ollama/qwen3.6:27b',
+        apiKey: '',
+        baseURL: cleanBaseURL('http://127.0.0.1:18789/v1'),
+        keepAlive: dLlm.keepAlive || defaultKeepAlive,
+      };
+      return {
+        model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini',
+        apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+        baseURL: cleanBaseURL(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
+        keepAlive: defaultKeepAlive,
+      };
     }
 
-    async function distillOne(raw: { id: string; source: string; context: string; detail: string }, llm: { model: string; apiKey: string; baseURL: string }): Promise<any | null> {
+    async function distillOne(raw: { id: string; source: string; context: string; detail: string }, llm: { model: string; apiKey: string; baseURL: string; keepAlive?: string }): Promise<any | null> {
       // P1-4: prompt 增加 tags 字段，让 LLM 同时产出多维度标签（scenario/techStack/severity/freeTags）。
       // S-11': Zettelkasten 增强 — 增加 relatedConcepts 字段，提取 2-5 个相关概念/关键词，
       // 用于后续在经验网络中建立 RELATED_TO 边，形成知识图谱连接。
@@ -2269,7 +2289,13 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
-        const resp = await fetch(llm.baseURL + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 512 }), signal: controller.signal });
+        // 仅 Ollama 端点注入 keep_alive，避免模型 5 分钟后卸载导致冷启动延迟
+        const body = withKeepAliveIfOllama(
+          llm.baseURL,
+          { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 512 },
+          llm.keepAlive,
+        );
+        const resp = await fetch(llm.baseURL + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
         clearTimeout(timer);
         if (!resp.ok) return null;
         const data: any = await resp.json();

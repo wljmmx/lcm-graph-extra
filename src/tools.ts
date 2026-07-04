@@ -15,6 +15,7 @@ import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { getGlobalLogger } from './utils/logger.js';
+import { cleanBaseURL, withKeepAliveIfOllama } from './utils/url.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -157,16 +158,24 @@ async function generateExperienceSummary(records: any[], usedExperienceNodes: bo
     const llmCfg = _pluginNeo4jConfig?.distillationLlm || _pluginNeo4jConfig?.llm;
     const model = (llmCfg as any)?.model;
     const apiKey = (llmCfg as any)?.apiKey || '';
-    const baseURL = (llmCfg as any)?.baseURL || 'http://127.0.0.1:18789/v1';
+    // 清洗 baseURL：去掉反引号/引号/首尾空格/尾斜杠
+    const baseURL = cleanBaseURL((llmCfg as any)?.baseURL || 'http://127.0.0.1:18789/v1');
+    const keepAlive = (llmCfg as any)?.keepAlive || '1h';
     if (model) {
       const expList = experiences.map((e, i) => `${i + 1}. [${e.type}] ${e.name} (${e.confidence}, seen ${e.seen}) - ${e.desc}`).join('\n');
       const prompt = `Based on the following ${total} experiences (time range: ${fromStr} to ${toStr}), write a concise natural language summary in the user's language. Group by theme, highlight key lessons learned, and note patterns. Keep it under 500 words.\n\nExperiences:\n${expList}`;
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+      // 仅 Ollama 端点注入 keep_alive
+      const body = withKeepAliveIfOllama(
+        baseURL,
+        { model, messages: [{ role: 'user', content: prompt }], temperature: 0.4, max_tokens: 800 },
+        keepAlive,
+      );
       const resp = await fetch(baseURL + '/chat/completions', {
         method: 'POST', headers,
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0.4, max_tokens: 800 }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(15_000),
       });
       if (resp.ok) {

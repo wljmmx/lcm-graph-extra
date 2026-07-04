@@ -20,6 +20,7 @@
  */
 
 import type { EmbeddingConfig } from '../types.js';
+import { cleanBaseURL } from '../utils/url.js';
 
 /**
  * 创建一个 embed 函数：(text: string) => Promise<number[]>
@@ -37,8 +38,9 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
   } = ecfg;
 
   // 判断 API 格式：baseURL 以 /v1 结尾走 OpenAI 兼容，否则走 Ollama 原生
-  const isOpenAiCompatible = /\/v1\/?$/.test(baseURL);
-  const baseClean = baseURL.replace(/\/+$/, '');
+  // 使用 cleanBaseURL 清洗可能的反引号/引号/首尾空格污染（用户从 markdown 复制时常见）
+  const baseClean = cleanBaseURL(baseURL);
+  const isOpenAiCompatible = /\/v1\/?$/.test(baseClean);
 
   // 预构建请求头
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
