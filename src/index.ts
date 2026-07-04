@@ -127,7 +127,7 @@ import { healthMetrics } from './health-metrics.js';
 let lastAssembleExpIds: Array<{ id: string; summary: string; query: string }> = [];
 
 // R-2: 成本感知级联管理器 —— 全局单例
-import { cascadeManager } from './cascade-manager.js';
+import { cascadeManager, CascadeManager } from './cascade-manager.js';
 
 function applyTotalControl(
   injected: string,
@@ -1126,11 +1126,26 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // R-2: 成本感知级联 —— Tier 1 置信度评估 + Thompson 采样重排
           // 仅在 low tier（token 充裕）时启用，避免中高压下的额外延迟
           try {
-            const allResults = [
-              ...(Array.isArray(qmdResults) ? qmdResults : []),
-              ...(Array.isArray(graphResults) ? graphResults : []),
-              ...expResults,
-            ];
+            // BUG 修复: qmdResults 与 graphResults 在 merger 路径下可能指向同一引用，
+            // 直接展开会导致 allResults 重复计数、置信度系统性偏高。
+            // 用 Set 按 id 去重（无 id 的项保留，按内容哈希区分）。
+            const seenIds = new Set<string>();
+            const deduped: any[] = [];
+            const pushUnique = (arr: any) => {
+              if (!Array.isArray(arr)) return;
+              for (const r of arr) {
+                const rid = r?.id ?? r?.metadata?.nodeId ?? r?.experience?.id;
+                const key = rid ? `id:${rid}` : `obj:${(r?.content ?? r?.summary ?? '').slice(0, 60)}`;
+                if (seenIds.has(key)) continue;
+                seenIds.add(key);
+                deduped.push(r);
+              }
+            };
+            pushUnique(qmdResults);
+            pushUnique(graphResults);
+            pushUnique(expResults);
+            const allResults = deduped;
+
             if (allResults.length > 0) {
               const confidence = cascadeManager.evaluateTier1(
                 allResults.map((r: any) => ({
@@ -1146,14 +1161,23 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               if (confidence.needsTier2 && tier === 'low') {
                 // 对经验结果应用 Thompson 重排（探索新经验）
                 const scenarioTag = scenarioAdjust?.scenario ?? 'default';
-                expResults = cascadeManager.thompsonRerank(
+                const rerankedIds = cascadeManager.thompsonRerank(
                   expResults.map((e: any) => ({
                     id: e.experience?.id,
                     matchCount: e.experience?.matchCount,
                     score: e.score,
                   })),
                   scenarioTag,
-                ).map((idx) => expResults.find((e: any) => e.experience?.id === idx.id)).filter(Boolean) as typeof expResults;
+                );
+                // 用 id → 原对象 Map 反查，避免 duplicate/undefined id 导致 find 塌缩
+                const expById = new Map<string, any>();
+                for (const e of expResults) {
+                  const eid = e?.experience?.id;
+                  if (eid && !expById.has(eid)) expById.set(eid, e);
+                }
+                expResults = rerankedIds
+                  .map((idx: any) => idx.id ? expById.get(idx.id) : undefined)
+                  .filter((e: any): e is typeof expResults[number] => Boolean(e)) as typeof expResults;
 
                 logger?.debug?.("R-2 cascade: low confidence, Thompson rerank applied", {
                   tier1Score: confidence.tier1Score.toFixed(3),
@@ -1163,6 +1187,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
                 // 异步 Tier 2: LLM 判断（不阻塞主路径）
                 const tier2Query = qmdQuery;
+                const tier2Scenario = scenarioTag;
                 const tier2Results = [...allResults].slice(0, 5);
                 (async () => {
                   try {
@@ -1181,9 +1206,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       return data?.choices?.[0]?.message?.content || '';
                     };
                     const judgments = await cascadeManager.evaluateTier2(tier2Query, tier2Results, llmFn);
-                    // 用判断结果更新 Thompson 采样臂
+                    // BUG 修复: armKey 必须用 makeArmKey 构造，与 thompsonRerank 保持一致
                     for (const j of judgments) {
-                      if (j.id) cascadeManager.recordFeedback(j.id, j.relevant);
+                      if (j.id) {
+                        const armKey = CascadeManager.makeArmKey(tier2Scenario, j.id);
+                        cascadeManager.recordFeedback(armKey, j.relevant);
+                      }
                     }
                     if (judgments.length > 0) {
                       logger?.debug?.("R-2 Tier 2 LLM judgment completed", { judged: judgments.length, relevant: judgments.filter(j => j.relevant).length });
@@ -1682,6 +1710,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             lastAssembleExpIds = []; // 清空，避免重复验证
             (async () => {
               try {
+                // 防御：异步执行期间 expStore 可能已被 dispose 置 null
+                const store = expStore;
+                if (!store) return;
                 const llm = resolveDistillationLlm(api);
                 if (!llm?.model) return; // 无 LLM 配置则跳过
 
@@ -1706,7 +1737,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     // 相关性 ≥ 0.5 视为有效召回 → +0.05
                     // 相关性 < 0.5 视为无效召回 → -0.05
                     const delta = score >= 0.5 ? 0.05 : -0.05;
-                    await expStore.updateQualityScore(exp.id, score, delta);
+                    await store.updateQualityScore(exp.id, score, delta);
                     logger?.debug?.("G-8 quality validation", { id: exp.id, score, delta });
                   } catch { /* skip individual validation */ }
                 }

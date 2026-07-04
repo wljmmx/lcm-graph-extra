@@ -87,7 +87,7 @@ function escapeFts5Query(q: string): string {
  *   - 中文: "本周", "今天", "昨天"
  * 返回 { fromTs, toTs } 毫秒时间戳（Neo4j timestamp() 同单位）
  */
-function parseTimeRange(from?: string, to?: string): { fromTs: number | null; toTs: number | null } {
+export function parseTimeRange(from?: string, to?: string): { fromTs: number | null; toTs: number | null } {
   const now = Date.now();
   const parseOne = (val: string | undefined, isFrom: boolean): number | null => {
     if (!val || !val.trim()) return null;
@@ -841,12 +841,12 @@ export function registerOperationalTools(api: any): void {
         }
 
         // 从 lcm.db 读取历史趋势
-        const dbRows = healthMetrics.readFromDb(5);
+        const dbRows = await healthMetrics.readFromDb(5);
         if (dbRows.length > 0) {
           p("  Recent history:");
           for (const r of dbRows.slice(0, 5)) {
             const ts = new Date(r.ts).toLocaleTimeString();
-            p("    " + ts + " | msgs:" + r.pending_msgs + " frags:" + r.summary_frags + " ratio:" + r.token_ratio.toFixed(3) +
+            p("    " + ts + " | msgs:" + r.pending_msgs + " frags:" + r.summary_frags + " ratio:" + (typeof r.token_ratio === 'number' ? r.token_ratio.toFixed(3) : '0.000') +
               " | cb:" + (r.cb_lcm_ok ? "✓" : "✗") + (r.cb_qmd_ok ? "✓" : "✗") + (r.cb_neo4j_ok ? "✓" : "✗"));
           }
         }
@@ -948,7 +948,8 @@ export function registerOperationalTools(api: any): void {
           try {
             const rows = await session.run(
               `MATCH (n)
-               WHERE n.name CONTAINS $k OR n.content CONTAINS $k OR toLower(n.name) CONTAINS toLower($k)
+               WHERE (n.name CONTAINS $k OR n.content CONTAINS $k OR toLower(n.name) CONTAINS toLower($k))
+               AND (n.state IS NULL OR n.state <> 'superseded')
                RETURN n.name, labels(n)[0] AS type, n.content, n.pagerank
                ORDER BY n.pagerank DESC LIMIT $limit`,
               { k: query, limit: neo4jDriver.int(Math.trunc(limit)) as any }
@@ -1069,12 +1070,13 @@ export function registerOperationalTools(api: any): void {
             affected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
           } else {
             // Soft: reduce weight (relevanceScore * 0.3, pagerank * 0.3)
+            // G10-P2 修复: 加 0.05 下限，避免多次软遗忘后权重无限趋近 0（隐式硬遗忘）
             const result = await session.run(
               `UNWIND $ids AS nodeId
                MATCH (n {id: nodeId})
                WHERE NOT n.pinned = true
-               SET n.relevanceScore = coalesce(n.relevanceScore, 0.5) * 0.3,
-                   n.pagerank = coalesce(n.pagerank, 0.5) * 0.3,
+               SET n.relevanceScore = greatest(coalesce(n.relevanceScore, 0.5) * 0.3, 0.05),
+                   n.pagerank = greatest(coalesce(n.pagerank, 0.5) * 0.3, 0.05),
                    n.forgottenAt = timestamp()
                RETURN count(n) AS cnt`,
               { ids: nodeIds },
