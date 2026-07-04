@@ -27,7 +27,7 @@ import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { withCircuitBreaker } from "./circuit-breaker.js";
 import { resolveContextProfile, PluginConfigSchema } from "./config.js";
-import { setGlobalLogger, adaptLogger, createLogger } from "./utils/logger.js";
+import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
 import { DEFAULTS } from "./config/defaults.js";
 
 import {
@@ -509,7 +509,7 @@ function getSessionDedup(sessionKey: string) {
           }
           return { ingested: false };
         } catch (err) {
-          logger?.error?.('[lcm-graph-extra] ingest failed', { err });
+          logger?.error?.('[lcm-graph-extra] ingest failed', { err: serializeError(err) });
           return { ingested: false };
         }
       },
@@ -911,7 +911,7 @@ function getSessionDedup(sessionKey: string) {
                 graphResults = rawGraph;
               }
             } catch (mergeErr) {
-              logger?.warn?.("Merger dedup failed, using raw results", { err: mergeErr });
+              logger?.warn?.("Merger dedup failed, using raw results", { err: serializeError(mergeErr) });
               qmdResults = rawQmd;
               graphResults = rawGraph;
             }
@@ -1395,7 +1395,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           }
         } catch {}
       } catch (err) {
-          logger?.error?.('[lcm-graph-extra] afterTurn error', { err });
+          logger?.error?.('[lcm-graph-extra] afterTurn error', { err: serializeError(err) });
         }
       },
 
@@ -1463,11 +1463,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             } catch (ceErr) {
               const msg = String(ceErr);
               if (msg.includes('aborted')) {
-                logger?.warn?.("compact: DAG compaction aborted by host", { err: ceErr });
+                logger?.warn?.("compact: DAG compaction aborted by host", { err: serializeError(ceErr) });
               } else if (msg.includes('timeout')) {
-                logger?.warn?.("compact: DAG compaction timed out after 30s", { err: ceErr });
+                logger?.warn?.("compact: DAG compaction timed out after 30s", { err: serializeError(ceErr) });
               } else {
-                logger?.warn?.("compact: background DAG compaction failed", { err: ceErr });
+                logger?.warn?.("compact: background DAG compaction failed", { err: serializeError(ceErr) });
               }
             } finally {
               if (compactTimer !== undefined) clearTimeout(compactTimer);
@@ -1523,11 +1523,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           } catch (hookErr) {
             const msg = String(hookErr);
             if (msg.includes('aborted')) {
-              logger?.warn?.("compact: onCompaction hook aborted by host", { err: hookErr });
+              logger?.warn?.("compact: onCompaction hook aborted by host", { err: serializeError(hookErr) });
             } else if (msg.includes('timeout')) {
-              logger?.warn?.("compact: onCompaction hook timed out after 30s", { err: hookErr });
+              logger?.warn?.("compact: onCompaction hook timed out after 30s", { err: serializeError(hookErr) });
             } else {
-              logger?.warn?.("compact: onCompaction hook failed (non-fatal)", { err: hookErr });
+              logger?.warn?.("compact: onCompaction hook failed (non-fatal)", { err: serializeError(hookErr) });
             }
           } finally {
             if (hookTimer !== undefined) clearTimeout(hookTimer);
@@ -1563,7 +1563,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             },
           };
         } catch (err) {
-          logger?.warn?.("compact: top-level failed (non-fatal)", { err });
+          logger?.warn?.("compact: top-level failed (non-fatal)", { err: serializeError(err) });
           return { ok: false, compacted: false, reason: String(err) };
         }
       },
@@ -1594,7 +1594,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 rewrittenEntries += lcResult.rewrittenEntries ?? 0;
               }
             } catch (lcErr) {
-              logger?.debug?.("maintain: lossless-claw delegate failed (non-fatal)", { err: lcErr });
+              logger?.debug?.("maintain: lossless-claw delegate failed (non-fatal)", { err: serializeError(lcErr) });
             }
           }
 
@@ -1605,7 +1605,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
           return { changed, bytesFreed, rewrittenEntries };
         } catch (err) {
-          logger?.warn?.("maintain: failed (non-fatal)", { err });
+          logger?.warn?.("maintain: failed (non-fatal)", { err: serializeError(err) });
           return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: String(err) };
         }
       },

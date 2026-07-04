@@ -179,3 +179,48 @@ export function adaptLogger(raw: any): Logger {
     child: typeof raw.child === 'function' ? (b: Record<string, unknown>) => adaptLogger(raw.child(b)) : undefined,
   };
 }
+
+// ─── Error 序列化 ─────────────────────────────────────────────────────────────
+
+/**
+ * 将 Error 对象序列化为可 JSON 化的普通对象。
+ *
+ * 问题背景：JSON.stringify(new Error('msg')) 输出 "{}"，
+ * 因为 Error 的 message/stack/name 是不可枚举属性。
+ * 这导致 logger.error('compact failed', { err }) 的日志输出 {"err":{}}，
+ * 真正的错误信息被完全吞掉，运维无法定位问题。
+ *
+ * 本函数提取 Error 的关键信息到可枚举的普通对象：
+ *   - message: 错误消息
+ *   - name: 错误类型（Error / TypeError / RangeError 等）
+ *   - stack: 调用栈（截断到前 2000 字符避免日志爆炸）
+ *   - code: 错误码（如 ENOENT、SQLITE_BUSY，如有）
+ *   - cause: 嵌套原因（递归序列化，最多 3 层）
+ *
+ * 非 Error 值（字符串、数字、普通对象）原样返回。
+ */
+export function serializeError(err: unknown, depth = 0): Record<string, unknown> | unknown {
+  if (depth > 3) return '[max depth reached]';
+  if (err instanceof Error) {
+    const obj: Record<string, unknown> = {
+      message: err.message,
+      name: err.name,
+    };
+    if (err.stack) {
+      obj.stack = err.stack.length > 2000 ? err.stack.slice(0, 2000) + '...[truncated]' : err.stack;
+    }
+    // 常见附加字段（不可枚举但可通过属性访问获取）
+    const code = (err as any).code;
+    if (code) obj.code = code;
+    const cause = (err as any).cause;
+    if (cause) obj.cause = serializeError(cause, depth + 1);
+    // 保留任何自定义可枚举属性
+    const extraKeys = Object.keys(err);
+    for (const k of extraKeys) {
+      if (!(k in obj)) obj[k] = (err as any)[k];
+    }
+    return obj;
+  }
+  // 非 Error：字符串/数字/null 等直接返回
+  return err;
+}

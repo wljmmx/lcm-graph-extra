@@ -13,6 +13,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import type { PluginInstance } from '../register';
+import { serializeError } from '../utils/logger.js';
 // P2-6 H-12: resolveNeo4jConfig 已移除（step 3 死代码块删除后无引用）。
 
 // ---------------------------------------------------------------------------
@@ -127,7 +128,7 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
       await enforceRetention(fp, backupDir, maxBackups);
     }
   } catch (err) {
-    logger?.error?.('compaction: backup failed', { err });
+    logger?.error?.('compaction: backup failed', { err: serializeError(err) });
   }
 
   // --- step 2 — delegate to lossless-claw via adapter ------------------
@@ -183,9 +184,9 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
   } catch (err) {
     const errMsg = typeof err === "string" ? err : (err as Error).message ?? "unknown";
       if (errMsg.includes("replay") || errMsg.includes("refused")) {
-        logger?.warn?.("compaction: lossless-claw replay protection active, will retry next cycle", { err });
+        logger?.warn?.("compaction: lossless-claw replay protection active, will retry next cycle", { err: serializeError(err) });
       } else {
-        logger?.warn?.("compaction: LosslessClawAdapter call failed (non-fatal)", { err });
+        logger?.warn?.("compaction: LosslessClawAdapter call failed (non-fatal)", { err: serializeError(err) });
       }
   }
   // --- step 3 — post-compaction entity extraction -------------------------

@@ -26,7 +26,7 @@ import { readdir, readFile, stat, realpath } from 'node:fs/promises';
 import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
-import { resolveLogger } from '../utils/logger.js';
+import { resolveLogger, serializeError } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -331,7 +331,7 @@ export class LosslessClawAdapter {
 
       await this.engine.afterTurn(normalizedParams);
     } catch (err) {
-      this.logger?.warn?.('[lossless-claw-adapter] afterTurn failed', { err });
+      this.logger?.warn?.('[lossless-claw-adapter] afterTurn failed', { err: serializeError(err) });
     }
   }
 
@@ -491,7 +491,9 @@ export class LosslessClawAdapter {
         exhausted: lcResult.exhausted,
       };
     } catch (err) {
-      this.logger?.error?.('[lossless-claw-adapter] compact failed', { err });
+      // FIX-AUDIT: serializeError 提取 Error 的 message/stack/name，
+      // 修复前 JSON.stringify(Error) = {} 导致日志输出 {"err":{}}，真实错误被吞掉。
+      this.logger?.error?.('[lossless-claw-adapter] compact failed', { err: serializeError(err) });
       return {
         ok: false,
         compacted: false,
@@ -532,7 +534,7 @@ export class LosslessClawAdapter {
 
       return await this.engine.assemble(normalizedParams);
     } catch (err) {
-      this.logger?.warn?.('[lossless-claw-adapter] assemble failed', { err });
+      this.logger?.warn?.('[lossless-claw-adapter] assemble failed', { err: serializeError(err) });
       return { messages: params.messages ?? [], estimatedTokens: 0 };
     }
   }
@@ -553,7 +555,7 @@ export class LosslessClawAdapter {
     try {
       return await this.engine.maintain(params);
     } catch (err) {
-      this.logger?.warn?.('[lossless-claw-adapter] maintain failed', { err });
+      this.logger?.warn?.('[lossless-claw-adapter] maintain failed', { err: serializeError(err) });
       return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: (err as Error).message };
     }
   }
