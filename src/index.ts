@@ -1191,6 +1191,19 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               availableTools.map((t: string) => '- `' + t + '`').join('\n');
             systemPromptAddition += toolSection;
           }
+
+          // A方案：追加记忆系统工具分工说明，帮助 Agent 选择正确工具
+          if (systemPromptAddition.length > 0 && !systemPromptAddition.includes('## 记忆系统分工')) {
+            systemPromptAddition += '\n\n## 记忆系统分工\n' +
+              '- **自动注入**（无需调用）：知识图谱（Neo4j）+ 经验层（EXPERIENCE）+ qmd 全文索引，已通过 systemPromptAddition 自动加载\n' +
+              '- **memory_search**：搜索 Markdown 记忆（MEMORY.md + daily log）+ 知识图谱节点（由 graph-memory-pro 提供 Corpus Supplement）\n' +
+              '- **memory_get**：读取指定 Markdown 记忆文件\n' +
+              '- **gm_record**：手动写入知识图谱节点（SKILL/TASK/EVENT）\n' +
+              '- **gm_maintain**：手动触发图谱维护（去重+PageRank+社区检测）+ 查看统计\n' +
+              '- **gm_reembed**：批量重新向量化缺失 embedding 的节点\n' +
+              '- **lcmg_search**：跨引擎搜索（qmd+graph+experience 混合召回）\n' +
+              '- **lcmg_diagnose**：诊断 5 个子系统健康状态\n';
+          }
         } catch (err) {
 
           const e = err instanceof Error ? err : new Error(String(err));
@@ -1372,6 +1385,27 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               };
 
           if (graphAdapter) {
+            // A方案：写入提取队列供 graph-memory-pro 后台服务消费（推荐路径）
+            // 同时保留原 fire-and-forget 调用作为兼容（旧路径，待 graph-memory-pro
+            // 后台服务稳定后可移除）。两条路径的 extractor 都是幂等的（upsert by name+type）。
+            try {
+              const { appendFile, mkdir } = await import('node:fs/promises');
+              const { join } = await import('node:path');
+              const queueDir = join(
+                process.env.HOME || process.env.USERPROFILE || '.',
+                '.openclaw', 'graph-memory-pro'
+              );
+              const queuePath = join(queueDir, 'extract-queue.jsonl');
+              await mkdir(queueDir, { recursive: true }).catch(() => {});
+              const queueItem = JSON.stringify({
+                user: autoSummary ? `${userContent}\n\n[Compaction Context]\n${autoSummary}` : userContent,
+                assistant: assistantContent,
+                sessionId: params.sessionId ?? params.session_id,
+                ts: Date.now(),
+              }) + '\n';
+              await appendFile(queuePath, queueItem).catch(() => {});
+            } catch { /* 队列写入失败不影响 afterTurn */ }
+
             // Fire-and-forget with latency tracking: don't block afterTurn lifecycle
             const tripletStart = Date.now();
             Promise.race([
