@@ -817,7 +817,7 @@ function getSessionDedup(sessionKey: string) {
                     );
                   }
                 } catch (err) {
-                  logger?.warn?.('High pressure compact failed, writing debt', err);
+                  logger?.warn?.('High pressure compact failed, writing debt', { err: serializeError(err) });
                   writeCompactionDebt(
                     conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                     'high_pressure_compact_failed',

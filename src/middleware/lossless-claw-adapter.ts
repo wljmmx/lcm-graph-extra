@@ -494,11 +494,13 @@ export class LosslessClawAdapter {
       // FIX-AUDIT: serializeError 提取 Error 的 message/stack/name，
       // 修复前 JSON.stringify(Error) = {} 导致日志输出 {"err":{}}，真实错误被吞掉。
       this.logger?.error?.('[lossless-claw-adapter] compact failed', { err: serializeError(err) });
+      // 兼容字符串错误（lossless-claw 某些路径 throw "replay refused" 而非 new Error）
+      const errMsg = typeof err === 'string' ? err : (err as Error)?.message ?? String(err);
       return {
         ok: false,
         compacted: false,
-        reason: (err as Error).message,
-        error: (err as Error).message,
+        reason: errMsg,
+        error: errMsg,
       };
     }
   }

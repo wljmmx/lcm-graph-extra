@@ -16,6 +16,7 @@ import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
 import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
+import { createLocalEmbedFn } from './embed-fn';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger } from '../utils/logger.js';
 // P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
@@ -202,14 +203,27 @@ export class GraphAdapter {
         // Set embedding function for community generalized recall
         try {
           const ecfg = this.config.embedding;
-          if (ecfg && mod.createEmbedFn) {
-            this._embedFn = mod.createEmbedFn({ ...ecfg });
-            this._recaller.setEmbedFn(this._embedFn);
-            this.logger?.info?.('[graph-adapter] Embedding initialized for Recaller', { model: ecfg.model });
-          } else if (!ecfg) {
-            this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
+          if (ecfg) {
+            // 优先使用自带的 createLocalEmbedFn —— 明确在 HTTP body 中传递 keep_alive，
+            // 确保 Ollama 保持模型驻留内存（默认 keep_alive=1h）。
+            // graph-memory-pro 的 createEmbedFn 无法保证 keep_alive 被转发，仅作为 fallback。
+            try {
+              this._embedFn = createLocalEmbedFn(ecfg);
+              this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '1h') + ')', { model: ecfg.model });
+            } catch (localErr) {
+              // 自带创建失败时 fallback 到 graph-memory-pro 的 createEmbedFn
+              if (mod.createEmbedFn) {
+                this._embedFn = mod.createEmbedFn({ ...ecfg });
+                this.logger?.warn?.('[graph-adapter] Local embed fn failed, using graph-memory-pro createEmbedFn (keep_alive not guaranteed)', { err: localErr });
+              } else {
+                throw localErr;
+              }
+            }
+            if (this._embedFn) {
+              this._recaller.setEmbedFn(this._embedFn);
+            }
           } else {
-            this.logger?.warn?.('[graph-adapter] createEmbedFn not available, community recall disabled');
+            this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
           }
         } catch (embedErr) {
           this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller', { err: embedErr });
