@@ -108,6 +108,7 @@ export function resolveNeo4jSearchConfig(
  * Uses EmbeddingConfig type from graph-memory-pro for unified configuration.
  */
 import type { EmbeddingConfig } from '../types.js';
+import { cleanBaseURL } from '../utils/url.js';
 
 export function resolveEmbeddingConfig(
   pluginConfig: Record<string, unknown> | undefined,
@@ -124,7 +125,9 @@ export function resolveEmbeddingConfig(
   if (!hasEmbeddingConfig) return null;
 
   const model = (embeddingSection.model as string) || process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
-  const baseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434/v1";
+  // 清洗 baseURL：用户从 markdown 复制时可能混入反引号/引号/首尾空格
+  const rawBaseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434/v1";
+  const baseURL = cleanBaseURL(rawBaseURL);
   const dimensions = (embeddingSection.dimensions as number) ?? 1024;
   const keepAlive = (embeddingSection.keepAlive as string) || "1h";
   // P1-6 BUG-3: 原返回对象丢失 apiKey 与 options，导致需要鉴权的远程 embedding 端点不可用。

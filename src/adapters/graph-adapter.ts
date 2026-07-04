@@ -19,6 +19,7 @@ import { acquireDriver, releaseDriver } from './connection-pool';
 import { createLocalEmbedFn } from './embed-fn';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger } from '../utils/logger.js';
+import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
 // P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
 import { DEFAULTS } from '../config/defaults.js';
 
@@ -757,14 +758,22 @@ export class GraphAdapter {
     }
   }
 
-  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string }): ((system: string, user: string) => Promise<string>) | null {
+  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string }): ((system: string, user: string) => Promise<string>) | null {
     if (!config?.model && !config?.apiKey) return null;
-    const baseUrl = (config.baseURL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    // 清洗 baseURL：去掉反引号/引号/首尾空格/尾斜杠
+    const baseUrl = cleanBaseURL(config.baseURL || 'https://api.openai.com/v1');
     const model = config.model || 'gpt-4o-mini';
+    const keepAlive = config.keepAlive;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (config.apiKey) headers['Authorization'] = 'Bearer ' + config.apiKey;
     return async (system, user) => {
-      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 }), signal: AbortSignal.timeout(30000) });
+      // 仅 Ollama 端点注入 keep_alive，避免冷启动延迟
+      const body = withKeepAliveIfOllama(
+        baseUrl,
+        { model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 },
+        keepAlive,
+      );
+      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
       if (!res.ok) throw new Error('LLM ' + res.status);
       const data = await res.json();
       return (data as any)?.choices?.[0]?.message?.content ?? '';
