@@ -22,6 +22,7 @@ import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-
 import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
 import { registerOperationalTools, closeNeo4jDriver } from './tools.js';
 import { UsageTracker } from "./async/usage-tracker"
+import { backgroundTasks } from "./async/task-registry.js"
 import { onCompaction } from "./hooks/compaction";
 import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
@@ -1706,8 +1707,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             } catch { /* 队列写入失败不影响 afterTurn */ }
 
             // Fire-and-forget with latency tracking: don't block afterTurn lifecycle
+            // 注册到 backgroundTasks 以便 dispose 时等待
             const tripletStart = Date.now();
-            Promise.race([
+            backgroundTasks.register('afterturn:triplet-extract', Promise.race([
               graphAdapter.extractAndUpsertFromTurn(llmConfig, autoSummary ? `${userContent}\n\n[Compaction Context]\n${autoSummary}` : userContent, assistantContent),
               new Promise((_, reject) => setTimeout(() => reject(new Error('Triplet extraction timeout')), (api.pluginConfig?.tripletTimeoutMs ?? 8000)))
             ]).then(result => {
@@ -1719,7 +1721,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               }
             }).catch((err: Error) => {
               logger?.warn?.('afterTurn: triplet extraction skipped (async)', { err: err.message });
-            });
+            }));
           }
 
           // P0-1: 接入经验提取管道。修复前 detectExperienceTrigger/extractRawExperience
@@ -1763,7 +1765,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (lastAssembleExpIds.length > 0) {
               const expIdsToValidate = [...lastAssembleExpIds];
               lastAssembleExpIdsBySession.delete(g8SessionKey); // 清空，避免重复验证
-              (async () => {
+              backgroundTasks.register('afterturn:g8-validate', (async () => {
               try {
                 // 防御：异步执行期间 expStore 可能已被 dispose 置 null
                 const store = expStore;
@@ -1799,7 +1801,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               } catch (g8Err) {
                 logger?.debug?.("[afterTurn] G-8 validation loop skipped", { err: String(g8Err) });
               }
-            })().catch(() => { /* swallowed */ });
+            })());
           }
           }
 
@@ -1837,13 +1839,13 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       uncompressedCount,
                     });
                     const sk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
-                    _losslessClawAdapter.compact({
+                    backgroundTasks.register('afterturn:s9-topic-shift', _losslessClawAdapter.compact({
                       sessionId: getConversationId(sk) ?? _sessionId,
                       sessionKey: sk,
                       sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                       force: false,
                       reason: 'topic-shift',
-                    }).catch(() => {});
+                    }));
                   }
                 }
               }
@@ -2075,15 +2077,29 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         }
       },
 
-      dispose() {
-        // Stop debt scheduler and heartbeat timers on dispose
-        (async () => { try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {} })()
+      async dispose() {
+        // 1. 先停止 heartbeat timer，避免新任务进入
         if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
-        // Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
+
+        // 2. 等待在途的 fire-and-forget 任务（heartbeat / afterTurn 启动的），
+        //    超时 5s 后强制放行，避免 dispose 卡死。
+        //    这一步必须在关闭 DB/driver 之前完成，否则在途任务会写入已关闭的资源。
+        try {
+          if (backgroundTasks.pendingCount > 0) {
+            logger?.info?.(`dispose: waiting for ${backgroundTasks.pendingCount} background tasks`, {
+              names: backgroundTasks.pendingNames,
+            });
+          }
+          await backgroundTasks.awaitAll(5000);
+        } catch { /* 超时或异常，继续清理 */ }
+
+        // 3. 停止 debt scheduler（等待活跃任务完成）
+        try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {}
+
+        // 4. Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
         tracker?.close?.();
-        (async () => { try { await closeNeo4jDriver(); } catch {} })()
-        try { (graphAdapter as any)?.close?.(); } catch {}
+        try { await closeNeo4jDriver(); } catch {}
         initialized = false;
         initPromise = null;
         qmdClient = null;
@@ -2333,9 +2349,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const elapsed = Date.now() - lastDistillationRun;
           if (elapsed >= distillIntervalMs) {
             lastDistillationRun = Date.now();
-            runDistillation(expStore, api, logger).catch((e: any) => {
+            // 注册到 backgroundTasks 以便 dispose 时等待
+            backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger).catch((e: any) => {
               logger?.warn?.("distillation batch failed", { err: String(e) });
-            });
+            }));
           }
 
           // --- N-3: EXPERIENCE TTL cleanup (every ~24h) ---
@@ -2345,7 +2362,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const expTtlElapsed = Date.now() - lastExperienceTtlRun;
           if (expTtlElapsed >= expTtlIntervalMs && typeof expStore.cleanupExpired === "function") {
             lastExperienceTtlRun = Date.now();
-            (async () => {
+            backgroundTasks.register('hb:experience-ttl', (async () => {
               try {
                 let totalDeleted = 0;
                 let round = 0;
@@ -2363,7 +2380,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               } catch (ttlErr) {
                 logger?.warn?.("heartbeat: experience TTL cleanup failed (non-fatal)", { err: String(ttlErr) });
               }
-            })().catch(() => { /* swallowed */ });
+            })());
           }
         }
 
@@ -2374,7 +2391,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const ttlElapsed = Date.now() - lastTtlRun;
           if (ttlElapsed >= TTL_INTERVAL_MS) {
             lastTtlRun = Date.now();
-            (async () => {
+            backgroundTasks.register('hb:neo4j-ttl', (async () => {
               try {
                 const { applyNeo4jWeightDecay, cleanupNeo4jExpiredNodes, DEFAULT_TTL_CONFIG } = await import("./core/ttl.js");
                 const decayed = await applyNeo4jWeightDecay(graphAdapter);
@@ -2385,7 +2402,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               } catch (ttlErr) {
                 logger?.warn?.("heartbeat: TTL cleanup failed (non-fatal)", { err: String(ttlErr) });
               }
-            })().catch(() => { /* swallowed */ });
+            })());
           }
         }
 
@@ -2396,7 +2413,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const reconcileElapsed = Date.now() - lastDebtReconcileRun;
           if (reconcileElapsed >= DEBT_RECONCILE_INTERVAL_MS) {
             lastDebtReconcileRun = Date.now();
-            (async () => {
+            backgroundTasks.register('hb:debt-reconcile', (async () => {
               try {
                 const { reconcileDebtTable } = await import("./core/debt-manager.js");
                 const r = reconcileDebtTable();
@@ -2406,7 +2423,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               } catch (reconcileErr) {
                 logger?.warn?.("heartbeat: debt reconcile failed (non-fatal)", { err: String(reconcileErr) });
               }
-            })().catch(() => { /* swallowed */ });
+            })());
           }
         }
 
