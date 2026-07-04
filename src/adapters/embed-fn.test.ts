@@ -188,4 +188,94 @@ describe('createLocalEmbedFn', () => {
     expect(r2).toEqual([2]);
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
+
+  // ─── Ollama 新旧版本端点回退 ───────────────────────────────────────────
+
+  it('新版 Ollama: /api/embed + input 字段（默认）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ embedding: [0.1, 0.2] }),
+    });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h:11434' });
+    const result = await embed('text');
+
+    expect(mockFetch.mock.calls[0][0]).toBe('http://h:11434/api/embed');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input).toBe('text');
+    expect(body.prompt).toBeUndefined();
+    expect(body.keep_alive).toBe('1h');
+    expect(result).toEqual([0.1, 0.2]);
+  });
+
+  it('旧版 Ollama 回退: /api/embed 404 → /api/embeddings + prompt 字段', async () => {
+    // 第一次请求 /api/embed 返回 404（旧版 Ollama 无此端点）
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      text: async () => 'Not Found',
+    });
+    // 回退到 /api/embeddings 成功
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ embedding: [0.3, 0.4] }),
+    });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h:11434' });
+    const result = await embed('text');
+
+    // 第一次: 新版端点
+    expect(mockFetch.mock.calls[0][0]).toBe('http://h:11434/api/embed');
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).input).toBe('text');
+    // 第二次: 旧版端点 + prompt 字段
+    expect(mockFetch.mock.calls[1][0]).toBe('http://h:11434/api/embeddings');
+    const legacyBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+    expect(legacyBody.prompt).toBe('text');
+    expect(legacyBody.input).toBeUndefined();
+    expect(legacyBody.keep_alive).toBe('1h');
+    expect(result).toEqual([0.3, 0.4]);
+  });
+
+  it('旧版回退后缓存状态：后续请求直接用旧版端点', async () => {
+    // 首次: 404 → 回退成功
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404, text: async () => '' });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ embedding: [1] }) });
+    // 第二次请求: 应直接走旧版（不再次探测）
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ embedding: [2] }) });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h:11434' });
+    await embed('first');
+    await embed('second');
+
+    // 总共 3 次 fetch（首次探测 1 + 回退 1 + 第二次直接旧版 1）
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    // 第二次请求的端点应为旧版
+    expect(mockFetch.mock.calls[2][0]).toBe('http://h:11434/api/embeddings');
+    expect(JSON.parse(mockFetch.mock.calls[2][1].body).prompt).toBe('second');
+  });
+
+  it('v1 路径不触发旧版回退（即使 404）', async () => {
+    // v1 路径 404 应直接抛错，不回退
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      text: async () => 'Not Found',
+    });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h:11434/v1' });
+    await expect(embed('text')).rejects.toThrow('404');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('新版端点 500 错误不触发回退（仅 404 回退）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => 'Internal Error',
+    });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h:11434' });
+    await expect(embed('text')).rejects.toThrow('500');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
 });
