@@ -55,6 +55,8 @@ const SEARCH_RELEVANT = `
          e.relevanceScore AS relevanceScore,
          e.createdAt AS createdAt,
          e.matchCount AS matchCount,
+         e.rawIds AS rawIds,
+         e.type AS type,
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity,
@@ -63,43 +65,8 @@ const SEARCH_RELEVANT = `
   LIMIT $limit
 `;
 
-/** Query-aware 混合搜索：静态 relevanceScore + 动态 query 关键词匹配 + 标签过滤 */
-const SEARCH_BY_QUERY = `
-  MATCH (e:${LABEL})
-  WHERE e.status = 'DISTILLED'
-    AND e.relevanceScore >= $minScore
-    AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
-
-  // 标签过滤：如果提供了 scenario/techStack 标签，经验必须匹配至少一个
-  $HAS_FILTERS
-  AND (
-    ANY(s IN COALESCE(e.tags_scenario, []) WHERE s IN $scenarioTags)
-    OR ANY(t IN COALESCE(e.tags_techStack, []) WHERE t IN $techStackTags)
-  )
-
-  // query 关键词匹配度（summary + context 字段）
-  WITH e,
-    CASE WHEN toLower(COALESCE(e.summary, '')) CONTAINS toLower($queryKeyword) THEN 1.0 ELSE 0.0 END
-    + CASE WHEN toLower(COALESCE(e.context, '')) CONTAINS toLower($queryKeyword) THEN 0.5 ELSE 0.0 END
-    + CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END
-    AS queryMatch
-
-  RETURN e.id AS id,
-         e.title AS title,
-         e.summary AS summary,
-         e.detail AS detail,
-         e.context AS context,
-         e.relevanceScore AS relevanceScore,
-         e.createdAt AS createdAt,
-         e.matchCount AS matchCount,
-         e.tags_scenario AS tags_scenario,
-         e.tags_techStack AS tags_techStack,
-         e.tags_severity AS tags_severity,
-         queryMatch AS queryMatch
-  ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) DESC,
-           e.matchCount DESC
-  LIMIT $limit
-`;
+/** P3-6: SEARCH_BY_QUERY 已删除 —— 死代码常量，定义但从未被引用，
+ *  且含未实现的 $HAS_FILTERS 占位符与缺失 tags_free 处理，已被 searchByQuery 内联实现取代。 */
 
 /** 按上下文关键词搜索（原始方法保留） */
 const SEARCH_BY_CONTEXT = `
@@ -115,6 +82,8 @@ const SEARCH_BY_CONTEXT = `
          e.relevanceScore AS relevanceScore,
          e.createdAt AS createdAt,
          e.matchCount AS matchCount,
+         e.rawIds AS rawIds,
+         e.type AS type,
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity
@@ -126,6 +95,40 @@ const INCREMENT_MATCH_COUNT = `
   MATCH (e:${LABEL} {id: $id})
   SET e.matchCount = coalesce(e.matchCount, 0) + 1
 `;
+
+/**
+ * P3-6: searchByQuery 的共享尾部（WITH 计算 queryMatch + RETURN + ORDER BY + LIMIT）。
+ * 原先 hasFilters / 无过滤两个分支各有一份完全相同的 30 行 Cypher，仅 WHERE 过滤条件不同。
+ * 提取为常量消除重复，降低维护成本与拼写漂移风险。
+ */
+const SEARCH_QUERY_TAIL = `
+        WITH e,
+          CASE WHEN toLower(COALESCE(e.summary, '')) CONTAINS toLower($queryKeyword) THEN 1.0 ELSE 0.0 END
+          + CASE WHEN toLower(COALESCE(e.context, '')) CONTAINS toLower($queryKeyword) THEN 0.5 ELSE 0.0 END
+          + CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END
+          + CASE WHEN size($queryFreeTags) > 0
+            AND coalesce(e.tags_free, '') <> ''
+            THEN ANY(f IN split(coalesce(e.tags_free, ''), ',')
+               WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
+               ? 0.3
+               : 0.0
+            ELSE 0.0 END
+        RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
+               e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
+               e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
+               e.tags_scenario AS tags_scenario,
+               e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
+               e.tags_free AS tags_free,
+               queryMatch AS queryMatch
+        ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) DESC, e.matchCount DESC
+        LIMIT $limit
+`;
+
+/** P3-6: 可选的标签过滤条件（hasFilters 时拼接到 WHERE 子句） */
+const SEARCH_QUERY_TAG_FILTER = `AND (
+             ANY(s IN COALESCE(e.tags_scenario, []) WHERE s IN $scenarioTags)
+             OR ANY(t IN COALESCE(e.tags_techStack, []) WHERE t IN $techStackTags)
+           )`;
 
 const FETCH_PENDING = `
   MATCH (e:${LABEL})
@@ -236,57 +239,13 @@ export class ExperienceStorage {
       limit: Math.trunc(limit),
     };
 
-    const actualCypher = hasFilters
-      ? `MATCH (e:${LABEL})
+    // P3-6: 用常量组合替代原先两份重复的 30 行 Cypher，仅 WHERE 过滤条件按 hasFilters 拼接
+    const filterClause = hasFilters ? `\n           ${SEARCH_QUERY_TAG_FILTER}` : '';
+    const actualCypher = `MATCH (e:${LABEL})
          WHERE e.status = 'DISTILLED'
            AND e.relevanceScore >= $minScore
-           AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
-           AND (
-             ANY(s IN COALESCE(e.tags_scenario, []) WHERE s IN $scenarioTags)
-             OR ANY(t IN COALESCE(e.tags_techStack, []) WHERE t IN $techStackTags)
-           )
-         WITH e,
-           CASE WHEN toLower(COALESCE(e.summary, '')) CONTAINS toLower($queryKeyword) THEN 1.0 ELSE 0.0 END
-           + CASE WHEN toLower(COALESCE(e.context, '')) CONTAINS toLower($queryKeyword) THEN 0.5 ELSE 0.0 END
-           + CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END
-           + CASE WHEN size($queryFreeTags) > 0
-             AND coalesce(e.tags_free, '') <> ''
-             THEN ANY(f IN split(coalesce(e.tags_free, ''), ',') 
-                WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
-                ? 0.3
-                : 0.0
-             ELSE 0.0 END
-         RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
-                e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
-                e.matchCount AS matchCount, e.tags_scenario AS tags_scenario,
-                e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
-                e.tags_free AS tags_free,
-                queryMatch AS queryMatch
-         ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) DESC, e.matchCount DESC
-         LIMIT $limit`
-      : `MATCH (e:${LABEL})
-         WHERE e.status = 'DISTILLED'
-           AND e.relevanceScore >= $minScore
-           AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
-         WITH e,
-           CASE WHEN toLower(COALESCE(e.summary, '')) CONTAINS toLower($queryKeyword) THEN 1.0 ELSE 0.0 END
-           + CASE WHEN toLower(COALESCE(e.context, '')) CONTAINS toLower($queryKeyword) THEN 0.5 ELSE 0.0 END
-           + CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END
-           + CASE WHEN size($queryFreeTags) > 0
-             AND coalesce(e.tags_free, '') <> ''
-             THEN ANY(f IN split(coalesce(e.tags_free, ''), ',') 
-                WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
-                ? 0.3
-                : 0.0
-             ELSE 0.0 END
-         RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
-                e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
-                e.matchCount AS matchCount, e.tags_scenario AS tags_scenario,
-                e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
-                e.tags_free AS tags_free,
-                queryMatch AS queryMatch
-         ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) DESC, e.matchCount DESC
-         LIMIT $limit`;
+           AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())${filterClause}
+         ${SEARCH_QUERY_TAIL}`;
 
     const rows = await this.adapter.query<ExperienceSearchRow>(
       actualCypher,
@@ -376,6 +335,9 @@ interface ExperienceSearchRow {
   relevanceScore: number;
   createdAt: number;
   matchCount: number;
+  // P1-8 BUG-5: 原接口缺少 rawIds 和 type，导致 rowToDistilled 读回时丢失这两个字段
+  rawIds?: string;
+  type?: string;
   tags_scenario?: string;
   tags_techStack?: string;
   tags_severity?: string;
@@ -393,10 +355,12 @@ interface PendingRow {
 }
 
 function rowToDistilled(r: ExperienceSearchRow): DistilledExperience {
+  // P1-8 BUG-5: 原代码 rawIds:[] 恒空、type:'lesson' 硬编码，
+  // 尽管 saveDistilled 写入了 rawIds/type，读回时丢失。修复为从行读取并 split。
   return {
     id: r.id,
-    rawIds: [],
-    type: 'lesson',
+    rawIds: r.rawIds ? r.rawIds.split(',').filter(Boolean) : [],
+    type: (r.type as DistilledExperience['type']) ?? 'lesson',
     title: r.title,
     summary: r.summary,
     detail: r.detail,

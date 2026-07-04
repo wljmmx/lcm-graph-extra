@@ -11,10 +11,14 @@ import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
 const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
-import { execSync } from "node:child_process";
-import { join, basename, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
+import { getGlobalLogger } from './utils/logger.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -43,6 +47,28 @@ function openDb() {
   return new DatabaseSync(LCM_DB);
 }
 
+/**
+ * SEC-5 M-11/M-12: 校验 backup/restore 路径必须在 ~/.openclaw 之下，
+ * 防止用户提供的路径穿越到任意文件系统位置。
+ */
+function validateBackupPath(p: string): string {
+  const allowedRoot = resolve(homedir(), '.openclaw');
+  const abs = resolve(p);
+  if (abs !== allowedRoot && !abs.startsWith(allowedRoot + sep)) {
+    throw new Error(`path must be under ${allowedRoot}`);
+  }
+  return abs;
+}
+
+/**
+ * SEC-L: 转义 FTS5 MATCH 查询字符串。
+ * FTS5 对 `"`、`*`、`(`、`)`、`-` 等字符有特殊语法含义，未转义会导致语法错误或意外匹配。
+ * 将整个查询用双引号包裹为短语，并转义内部双引号（"" 表示字面量 "）。
+ */
+function escapeFts5Query(q: string): string {
+  return '"' + q.replace(/"/g, '""') + '"';
+}
+
 // ---------------------------------------------------------------------------
 // Neo4j connection pool — single shared driver, per-call sessions only
 // ---------------------------------------------------------------------------
@@ -53,12 +79,19 @@ async function getNeo4jDriver(): Promise<any> {
   if (_neo4jDriver) return _neo4jDriver;
   if (_neo4jDriverReady) return _neo4jDriverReady;
   _neo4jDriverReady = (async () => {
-    const neo4j = await import("neo4j-driver").then((m) => m.default);
-    const config = resolveNeo4jConfig(getPluginNeo4jConfig());
-    if (!config || !config.uri) throw new Error("Neo4j not configured");
-    _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
-    _neo4jDriverReady = null;
-    return _neo4jDriver;
+    try {
+      const neo4j = await import("neo4j-driver").then((m) => m.default);
+      const config = resolveNeo4jConfig(getPluginNeo4jConfig());
+      if (!config || !config.uri) throw new Error("Neo4j not configured");
+      _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+      _neo4jDriverReady = null;
+      return _neo4jDriver;
+    } catch (e) {
+      // SEC-1 H-7: 初始化失败后必须重置 ready promise，
+      // 否则后续调用会永久锁定在 rejected promise 上，无法重试。
+      _neo4jDriverReady = null;
+      throw e;
+    }
   })();
   return _neo4jDriverReady;
 }
@@ -102,11 +135,11 @@ function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
       const lcmConfig = entriesSection['lcm-graph-extra']?.config;
       if (lcmConfig && 'neo4j' in lcmConfig && lcmConfig.neo4j.uri) {
         const merged = { ...config, ...lcmConfig };
-        console.log('[lcm-graph-extra] Neo4j config loaded from entries:', merged.neo4j.uri);
+        getGlobalLogger().info('[lcm-graph-extra] Neo4j config loaded from entries', { uri: merged.neo4j.uri });
         return merged;
       }
     } catch (e) {
-      console.warn('[lcm-graph-extra] Failed to read openclaw.json:', e);
+      getGlobalLogger().warn('[lcm-graph-extra] Failed to read openclaw.json', { err: String(e) });
     }
   }
   return config;
@@ -203,9 +236,16 @@ export function registerOperationalTools(api: any): void {
     }),
     async execute(_id: string, params: { outputPath?: string }) {
       const outDir = params.outputPath ?? join(homedir(), ".openclaw", "lcm-graph-extra", "backup");
-      mkdirSync(outDir, { recursive: true });
+      // SEC-5 M-11: 校验输出路径必须在 ~/.openclaw 之下，防止路径穿越
+      let safeOutDir: string;
+      try {
+        safeOutDir = validateBackupPath(outDir);
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+      }
+      mkdirSync(safeOutDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backupPath = join(outDir, `memory-full-backup-${stamp}.json`);
+      const backupPath = join(safeOutDir, `memory-full-backup-${stamp}.json`);
 
       const backup: Record<string, unknown> = {
         version: "2.0", createdAt: new Date().toISOString(),
@@ -230,8 +270,9 @@ export function registerOperationalTools(api: any): void {
       } catch { /* Neo4j unavailable */ }
 
       // lossless-claw DB
+      let db: any = null;
       try {
-        const db = openDb();
+        db = openDb();
         const convs = db.prepare("SELECT conversation_id, session_id, session_key FROM conversations ORDER BY conversation_id").all() as any[];
         for (const conv of convs) {
           const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq").all(conv.conversation_id) as any[];
@@ -240,8 +281,8 @@ export function registerOperationalTools(api: any): void {
             messages: msgs.map((m) => ({ seq: m.seq, role: m.role, content: (m.content ?? "").slice(0, 10000) })),
           });
         }
-        db.close();
       } catch { /* DB unavailable */ }
+      finally { if (db) { try { db.close(); } catch {} } }
 
       // Memory files
       try {
@@ -293,15 +334,22 @@ export function registerOperationalTools(api: any): void {
       dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default false)" })),
     }),
     async execute(_id: string, params: { backupPath: string; targets?: string; dryRun?: boolean }) {
-      if (!existsSync(params.backupPath)) {
-        return { content: [{ type: "text" as const, text: `Backup not found: ${params.backupPath}` }], isError: true };
+      // SEC-5 M-12: 校验备份路径必须在 ~/.openclaw 之下，防止路径穿越
+      let safeBackupPath: string;
+      try {
+        safeBackupPath = validateBackupPath(params.backupPath);
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
       }
-      const data = JSON.parse(readFileSync(params.backupPath, "utf-8"));
+      if (!existsSync(safeBackupPath)) {
+        return { content: [{ type: "text" as const, text: `Backup not found: ${safeBackupPath}` }], isError: true };
+      }
+      const data = JSON.parse(readFileSync(safeBackupPath, "utf-8"));
       const targets = params.targets ?? "all";
       const dryRun = params.dryRun ?? false;
       const report: string[] = [];
 
-      report.push(`Restore from: ${params.backupPath}`);
+      report.push(`Restore from: ${safeBackupPath}`);
       report.push(`Dry run: ${dryRun ? "YES" : "NO"}\n`);
 
       // Neo4j
@@ -325,8 +373,9 @@ export function registerOperationalTools(api: any): void {
 
       // lossless-claw DB
       if ((targets === "all" || targets === "lcm_only") && !dryRun) {
+        let db: any = null;
         try {
-          const db = openDb();
+          db = openDb();
           let msgCount = 0;
           const insertMsg = db.prepare("INSERT OR IGNORE INTO messages (conversation_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?)");
           for (const conv of (data.lcm as any)?.conversations ?? []) {
@@ -343,23 +392,37 @@ export function registerOperationalTools(api: any): void {
               msgCount++;
             }
           }
-          db.close();
           report.push(`✅ lossless-claw: Restored ${msgCount} messages`);
         } catch (e: any) { report.push(`❌ lossless-claw: ${e.message}`); }
+        finally { if (db) { try { db.close(); } catch {} } }
       }
 
       // Files
       if ((targets === "all" || targets === "files_only") && !dryRun) {
         try {
-          const memDir = join(homedir(), ".openclaw", "workspace", "main");
+          const memDir = resolve(join(homedir(), ".openclaw", "workspace", "main"));
           let fCount = 0;
+          let skipped = 0;
           for (const file of (data.files as any[]) ?? []) {
-            const fp = join(memDir, file.path);
-            mkdirSync(fp.substring(0, fp.lastIndexOf("/")), { recursive: true });
+            // P0-5 SEC-4: 路径穿越防护。备份 JSON 中的 file.path 不可信，
+            // 必须是相对路径且不含 ..，realpath 必须仍在 memDir 之下。
+            const relPath = file.path;
+            if (typeof relPath !== 'string' || relPath === '' || relPath.startsWith('/')) {
+              skipped++; continue;
+            }
+            if (relPath.includes('..') || relPath.includes('\0')) {
+              skipped++; continue;
+            }
+            const fp = resolve(join(memDir, relPath));
+            // 二次校验：resolve 后的绝对路径必须以 memDir 为前缀
+            if (fp !== memDir && !fp.startsWith(memDir + sep)) {
+              skipped++; continue;
+            }
+            mkdirSync(fp.substring(0, fp.lastIndexOf(sep)), { recursive: true });
             writeFileSync(fp, file.content, "utf-8");
             fCount++;
           }
-          report.push(`✅ Files: Restored ${fCount} files`);
+          report.push(`✅ Files: Restored ${fCount} files${skipped > 0 ? ` (skipped ${skipped} unsafe paths)` : ''}`);
         } catch (e: any) { report.push(`❌ Files: ${e.message}`); }
       }
 
@@ -394,8 +457,9 @@ export function registerOperationalTools(api: any): void {
 
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {
+        let db: any = null;
         try {
-          const db = openDb();
+          db = openDb();
           const convs = db.prepare("SELECT conversation_id, session_id FROM conversations WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) ORDER BY conversation_id DESC LIMIT ?").all(limit) as any[];
           const { driver, session } = await neo4jSession();
           try {
@@ -410,9 +474,9 @@ export function registerOperationalTools(api: any): void {
               }
             }
           } finally { await closeNeo4j(driver, session); }
-          db.close();
           lines.push(`✅ Imported ${total} messages from lossless-claw DB`);
         } catch (e: any) { lines.push(`❌ lossless-claw import: ${e.message}`); }
+        finally { if (db) { try { db.close(); } catch {} } }
       }
 
       // 记忆文件导入
@@ -462,8 +526,9 @@ export function registerOperationalTools(api: any): void {
       p(H);
       p("1. lossless-claw (SQLite DAG)");
       p(H);
+      let db: any = null;
       try {
-        const db = openDb();
+        db = openDb();
         const msgs = db.prepare("SELECT COUNT(*) as c FROM messages").get().c;
         const sms = db.prepare("SELECT COUNT(*) as c FROM summaries").get().c;
         const ctx = db.prepare("SELECT COUNT(*) as c FROM context_items").get().c;
@@ -480,8 +545,8 @@ export function registerOperationalTools(api: any): void {
         const fts = db.prepare("SELECT COUNT(*) as c FROM messages_fts WHERE messages_fts MATCH 'test'").get().c;
         ok("FTS5 index", "searchable (test -> " + fts + " hits)");
         pass += 6;
-        db.close();
       } catch (e: any) { fail("lossless-claw", e.message); fails++; }
+      finally { if (db) { try { db.close(); } catch {} } }
 
       // 2. qmd
       sep();
@@ -492,17 +557,20 @@ export function registerOperationalTools(api: any): void {
         const r = await fetch(getQmdBaseUrl() + "/health", { signal: AbortSignal.timeout(2000) });
         ok("MCP 8081", "HTTP " + r.status); pass++;
       } catch { warn("MCP 8081", "unreachable"); warns++; }
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const c = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
-        if (await c.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        if (await qmd.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
         else { warn("QmdClient", "MCP down, running in CLI fallback mode"); warns++; }
-        const stat = await c.status();
+        const stat = await qmd.status();
         if (stat) { ok("Qmd status", stat.slice(0, 100).replace(/\n/g, " ")); pass++; }
         else { warn("Qmd status", "status() returned no data"); warns++; }
-        const r2 = await c.query({ searches: [{ type: "lex", query: "test" }], limit: 1 });
+        const r2 = await qmd.query({ searches: [{ type: "lex", query: "test" }], limit: 1 });
         ok("Search test", r2.length > 0 ? r2.length + " results" : "0 results (empty index)"); pass++;
       } catch (e: any) { warn("qmd", "unavailable: " + e.message); warns++; }
+      finally { if (qmd) { try { qmd.dispose(); } catch {} } }
 
       // 3. Neo4j
       sep();
@@ -583,29 +651,33 @@ export function registerOperationalTools(api: any): void {
 
       // --- lossless-claw FTS5 ---
       if (engines === "all" || engines === "lcm_only") {
+        let db: any = null;
         try {
-          const db = openDb();
+          db = openDb();
           const rows = db.prepare(
             `SELECT rowid, rank, substr(content, 1, 300) as preview FROM messages_fts
              WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?`
-          ).all(query, limit) as any[];
+          ).all(escapeFts5Query(query), limit) as any[];
           if (rows.length > 0) {
             results.push(`## 📇 lossless-claw (${rows.length} hits)`);
             for (const r of rows) results.push(`- [score ${r.rank.toFixed(2)}] ${r.preview}...`);
             results.push("");
           }
-          db.close();
         } catch (e: any) { results.push(`❌ lossless-claw search: ${e.message}\n`); }
+        finally { if (db) { try { db.close(); } catch {} } }
       }
 
       // --- qmd ---
       if (engines === "all" || engines === "qmd_only") {
         try {
-          const out = execSync(`qmd query "${query.replace(/"/g, '\\"')}"`, {
-            timeout: 15000, encoding: "utf-8",
-          });
+          // P0-1 SEC-1: use execFile (no shell) to prevent command injection
+          const { stdout } = await execFileAsync(
+            "qmd",
+            ["query", query, "--format", "json"],
+            { timeout: 15000, encoding: "utf-8" },
+          );
           // Parse qmd output — it returns lines
-          const qmdLines = out.split("\n").filter((l: string) => l.trim()).slice(0, limit);
+          const qmdLines = stdout.split("\n").filter((l: string) => l.trim()).slice(0, limit);
           if (qmdLines.length > 0) {
             results.push(`## 📄 qmd memory (${qmdLines.length} hits)`);
             for (const l of qmdLines) results.push(`- ${l}`);
@@ -686,11 +758,13 @@ export function registerOperationalTools(api: any): void {
         description: '"check" (default, read-only), "repair" (prune orphans + re-import)',
         default: "check",
       })),
-      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default true for check, false for repair)", default: true })),
+      // P0-5 SEC-4: dryRun 默认 true。原代码 repair 模式默认 false，用户不显式传 dryRun 时
+      // 直接执行 DETACH DELETE 批量删除。改为默认 true，强制用户显式 dryRun:false 才执行删除。
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default true). Set to false only after reviewing the dry-run report.", default: true })),
     }),
     async execute(_id: string, params: { mode?: string; dryRun?: boolean }) {
       const mode = params.mode ?? "check";
-      const isDryRun = params.dryRun ?? (mode === "check" ? true : false);
+      const isDryRun = params.dryRun ?? true;
       const lines: string[] = [];
       const push = (s: string) => lines.push(s);
 
@@ -703,13 +777,14 @@ export function registerOperationalTools(api: any): void {
       let orphanNodes = 0;
       let orphanedIds: string[] = [];
 
+      let db: any = null;
       try {
-        const db = openDb();
+        db = openDb();
         const convs = db.prepare("SELECT DISTINCT conversation_id FROM messages").all() as any[];
         lcmConvIds = new Set(convs.map((c: any) => c.conversation_id));
-        db.close();
         push(`  lossless-claw: ${convs.length} active conversations\n`);
       } catch (e: any) { push(`  ❌ lossless-claw: ${e.message}\n`); }
+      finally { if (db) { try { db.close(); } catch {} } }
 
       try {
         const { driver, session } = await neo4jSession();
@@ -722,18 +797,21 @@ export function registerOperationalTools(api: any): void {
           push(`  Neo4j: ${neo4jMsgNodes} ConversationMessage nodes\n`);
 
           // Check each for orphan (no matching session in lcm.db)
-          const db2 = openDb();
-          for (const rec of allMsgNodes.records) {
-            const sid = rec.get("sid") ?? "";
-            if (sid) {
-              const exists = db2.prepare("SELECT COUNT(*) AS c FROM conversations WHERE session_id = ?").get(sid) as any;
-              if (exists.c === 0) {
-                orphanNodes++;
-                orphanedIds.push(rec.get("id") ?? sid);
+          // SEC-3 H-6: db2 嵌套在 neo4j session 内，需独立 finally 清理
+          let db2: any = null;
+          try {
+            db2 = openDb();
+            for (const rec of allMsgNodes.records) {
+              const sid = rec.get("sid") ?? "";
+              if (sid) {
+                const exists = db2.prepare("SELECT COUNT(*) AS c FROM conversations WHERE session_id = ?").get(sid) as any;
+                if (exists.c === 0) {
+                  orphanNodes++;
+                  orphanedIds.push(rec.get("id") ?? sid);
+                }
               }
             }
-          }
-          db2.close();
+          } finally { if (db2) { try { db2.close(); } catch {} } }
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) { push(`  ❌ Neo4j: ${e.message}\n`); }
 
@@ -763,21 +841,27 @@ export function registerOperationalTools(api: any): void {
       // --- Phase 3: Repair if requested ---
       if (mode === "repair" && !isDryRun && orphanNodes > 0) {
         push("\n## Phase 3: Repairing\n");
-        try {
-          const { driver, session } = await neo4jSession();
+        // P0-5 SEC-4: 删除数量上限保护，防止误删大量数据
+        const MAX_DELETE = 1000;
+        if (orphanNodes > MAX_DELETE) {
+          push(`  ❌ Aborted: ${orphanNodes} orphan nodes exceed safety limit (${MAX_DELETE}). Re-run with explicit smaller scope or contact admin.\n`);
+        } else {
           try {
-            for (const id of orphanedIds) {
-              await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
-            }
-            const deleted = orphanedIds.length;
-            // Also delete orphaned relationships
-            const relCleanup = await session.run(
-              `MATCH (n) WHERE NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage DELETE n`
-            );
-            const moreDeleted = 0; // batch delete already covered
-            push(`  ✅ Pruned ${deleted} orphan nodes, ${moreDeleted} additional via batch cleanup\n`);
-          } finally { await closeNeo4j(driver, session); }
-        } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
+            const { driver, session } = await neo4jSession();
+            try {
+              for (const id of orphanedIds) {
+                await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
+              }
+              const deleted = orphanedIds.length;
+              // Also delete orphaned relationships
+              const relCleanup = await session.run(
+                `MATCH (n) WHERE NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage DELETE n`
+              );
+              const moreDeleted = 0; // batch delete already covered
+              push(`  ✅ Pruned ${deleted} orphan nodes, ${moreDeleted} additional via batch cleanup\n`);
+            } finally { await closeNeo4j(driver, session); }
+          } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
+        }
       } else if (mode === "repair" && orphanNodes === 0) {
         push("\n## Phase 3: No repair needed — all consistent\n");
       } else if (mode === "repair" && isDryRun) {
@@ -797,9 +881,11 @@ export function registerOperationalTools(api: any): void {
       "Calls the 'status' tool on QMD's MCP server.",
     parameters: Type.Object({}),
     async execute() {
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const [pingOk, statusText] = await Promise.all([
           qmd.ping().catch(() => false),
           qmd.status().catch(() => null),
@@ -815,6 +901,8 @@ export function registerOperationalTools(api: any): void {
         return { content: [{ type: "text" as const, text: lines.join("\n") }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      } finally {
+        if (qmd) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -830,9 +918,11 @@ export function registerOperationalTools(api: any): void {
       file: Type.String({ description: "File path or docid to retrieve" }),
     }),
     async execute(_id: string, params: { file: string }) {
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const content = await qmd.get(params.file);
         if (content) {
           return { content: [{ type: "text" as const, text: content }] };
@@ -840,6 +930,8 @@ export function registerOperationalTools(api: any): void {
         return { content: [{ type: "text" as const, text: `Document not found: ${params.file}` }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      } finally {
+        if (qmd) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -855,17 +947,21 @@ export function registerOperationalTools(api: any): void {
       pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
     }),
     async execute(_id: string, params: { pattern: string }) {
+      // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      let qmd: any = null;
       try {
         const { QmdClient } = await import("./qmd-client.js");
-        const qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const results = await qmd.multiGet(params.pattern);
         if (results.length === 0) {
           return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }] };
         }
-        const lines = results.map((doc, i) => `--- Document ${i + 1} ---\n${doc}`);
+        const lines = results.map((doc: string, i: number) => `--- Document ${i + 1} ---\n${doc}`);
         return { content: [{ type: "text" as const, text: lines.join("\n\n") }] };
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+      } finally {
+        if (qmd) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -882,30 +978,20 @@ export function registerOperationalTools(api: any): void {
     async execute() {
       try {
         const driver = await getNeo4jDriver();
-        const { createRequire } = await import("node:module");
-        const _req = createRequire(import.meta.url);
-        const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
-        const GM_PRO_PATH = process.env.GM_PRO_PATH
-          || (() => {
-              try {
-                const resolved = _req.resolve("@openclaw/graph-memory-pro/dist/index.js");
-                return resolved.endsWith("/dist/index.js") ? resolved.slice(0, -14) : resolved;
-              } catch { return undefined; }
-            })()
-          || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
+        // P3-3: 复用 graph-adapter 的统一路径解析（去除重复逻辑），并记录实际路径
+        const { resolveGmProPath } = await import("./adapters/graph-adapter.js");
+        const _resolved = resolveGmProPath();
+        getGlobalLogger().info('[lcm-graph-extra] lcmg_diagnose loading graph-memory-pro', { path: _resolved.path, source: _resolved.source });
+        const GM_PRO_PATH = _resolved.path;
 
         const gm = await import(GM_PRO_PATH + "/dist/index.js");
-        // Full GmConfig — all required fields
-        const cfg = {
-          neo4j: resolveNeo4jConfig(getPluginNeo4jConfig()),
-          compactTurnCount: 10,
-          recallMaxNodes: 10,
-          recallMaxDepth: 2,
-          freshTailCount: 5,
-          dedupThreshold: 0.90,
-          pagerankDamping: 0.85,
-          pagerankIterations: 20,
-        };
+        // P2-17: 用 buildGmConfig 统一构建，保留工具的特殊 override
+        // (recallMaxNodes:10, pagerankIterations:20 与 GraphAdapter 默认不同)
+        const { buildGmConfig } = await import("./adapters/graph-adapter.js");
+        const cfg = buildGmConfig(
+          resolveNeo4jConfig(getPluginNeo4jConfig()),
+          { recallMaxNodes: 10, pagerankIterations: 20 },
+        );
         const result = await gm.runMaintenance(driver, cfg);
         const lines = [];
         lines.push("# Graph Maintenance Report");

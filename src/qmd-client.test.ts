@@ -34,14 +34,33 @@ vi.stubGlobal("fetch", mockFetch);
 // Helpers
 // ---------------------------------------------------------------------------
 
+// P1-12 FAIL-3: 修复 mock 以匹配实际 MCP 协议（initialize + tools/call 两步）。
+// 原 mockMcpOk 只 mock 一次响应且 body 是 { results: [...] }，但 QmdClient.queryViaMcp
+// 先发 initialize 请求（期望 mcp-session-id header），再发 tools/call 请求（期望
+// { result: { content: [{ text: JSON.stringify(results) }] } }）。
 function mockMcpOk(body: unknown): void {
+  // 1st call: initialize response (with session id header)
   mockFetch.mockResolvedValueOnce({
     ok: true,
-    json: async () => body,
+    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
+    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
+  } as Response);
+  // 2nd call: tools/call response (body wrapped in MCP content format)
+  const results = body && (body as any).results ? (body as any).results : body;
+  const text = JSON.stringify(results);
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text }] } }),
   } as Response);
 }
 
 function mockMcpFail(status = 500): void {
+  // initialize succeeds, tools/call fails
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
+    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
+  } as Response);
   mockFetch.mockResolvedValueOnce({
     ok: false,
     status,
@@ -109,7 +128,8 @@ describe("QmdClient", () => {
         file: "test.md",
         score: 0.95,
       });
-      expect(mockFetch).toHaveBeenCalledTimes(1);
+      // P1-12 FAIL-3: MCP 协议需 2 次 fetch（initialize + tools/call）
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
     it("falls back to CLI when MCP fails with HTTP error", async () => {
@@ -161,8 +181,9 @@ describe("QmdClient", () => {
 
       const results = await client.query({ searches: [{ type: "lex", query: "b" }] });
 
-      // MCP was called only once (first call), second call went directly to CLI
-      expect(mockFetch).toHaveBeenCalledTimes(1);
+     // P1-12 FAIL-3: MCP 协议需 2 次 fetch（initialize + tools/call），第一次 query 调用 2 次，
+      // 第二次 query 跳过 MCP 直接走 CLI（mcpAvailable = false），总调用 2 次。
+      expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(results[0].docid).toBe("#b");
     });
   });
@@ -206,9 +227,9 @@ describe("QmdClient", () => {
     it("uses qmd search for pure lex queries", async () => {
       mockMcpOk({ results: [] });
       await client.query({ searches: [{ type: "lex", query: "keyword" }] });
-      // Should have called MCP which we mocked, check MCP request body
+      // P1-12 FAIL-3: 实际端点是 /mcp（MCP JSON-RPC），非 /query
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("/query"),
+        expect.stringContaining("/mcp"),
         expect.objectContaining({
           method: "POST",
         }),

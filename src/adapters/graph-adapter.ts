@@ -14,6 +14,10 @@ import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
 import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
+import type { Logger } from '../utils/logger.js';
+import { resolveLogger } from '../utils/logger.js';
+// P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
+import { DEFAULTS } from '../config/defaults.js';
 
 
 class LRUCache<K, V> {
@@ -44,16 +48,54 @@ export interface GraphAdapterConfig {
 
 const _gmpRequire = createRequire(import.meta.url);
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || (process.env.HOME ? `${process.env.HOME}/.openclaw` : './.openclaw');
-const GM_PRO_PATH = process.env.GM_PRO_PATH
-  || (() => {
-      try {
-        const resolved = _gmpRequire.resolve('@openclaw/graph-memory-pro/dist/index.js');
-        return resolved.endsWith('/dist/index.js') ? resolved.slice(0, -14) : resolved;
-      } catch {
-        return undefined;
-      }
-    })()
-  || `${OPENCLAW_DIR}/extensions/graph-memory-pro`;
+
+/**
+ * P3-3: 解析 graph-memory-pro 模块路径（单一来源，去除 graph-adapter / tools 重复逻辑）。
+ *
+ * 解析优先级：
+ *   1. 环境变量 GM_PRO_PATH
+ *   2. require.resolve('@openclaw/graph-memory-pro/dist/index.js') —— 取其目录
+ *   3. 回退到 ${OPENCLAW_DIR}/extensions/graph-memory-pro
+ *
+ * 返回 { path, source } 供调用方记录实际使用的路径与来源。
+ */
+export function resolveGmProPath(): { path: string; source: 'env' | 'require' | 'fallback' } {
+  if (process.env.GM_PRO_PATH) {
+    return { path: process.env.GM_PRO_PATH, source: 'env' };
+  }
+  try {
+    const resolved = _gmpRequire.resolve('@openclaw/graph-memory-pro/dist/index.js');
+    const dir = resolved.endsWith('/dist/index.js') ? resolved.slice(0, -'/dist/index.js'.length) : resolved;
+    return { path: dir, source: 'require' };
+  } catch {
+    return { path: `${OPENCLAW_DIR}/extensions/graph-memory-pro`, source: 'fallback' };
+  }
+}
+
+const _GM_PRO_RESOLVED = resolveGmProPath();
+const GM_PRO_PATH = _GM_PRO_RESOLVED.path;
+
+/**
+ * P2-17: 统一 GmConfig 默认值。原代码在 connect/runMaintenance 等 4 处重复硬编码
+ * compactTurnCount/recallMaxNodes/dedupThreshold/pagerankDamping 等参数，
+ * 易漂移且用户无法调优。集中到 DEFAULT_GM_CONFIG，buildGmConfig 附加 neo4j。
+ */
+const DEFAULT_GM_CONFIG = {
+  compactTurnCount: 10,
+  recallMaxNodes: 8,
+  recallMaxDepth: 2,
+  freshTailCount: 5,
+  dedupThreshold: 0.90,
+  pagerankDamping: 0.85,
+  pagerankIterations: 12,
+};
+
+function buildGmConfig(neo4jConfig: Neo4jConfig, overrides?: Partial<typeof DEFAULT_GM_CONFIG>): Record<string, any> {
+  return { neo4j: neo4jConfig, ...DEFAULT_GM_CONFIG, ...overrides };
+}
+
+// P2-17: 导出供 tools.ts 等其他模块复用，避免 GmConfig 重复硬编码
+export { DEFAULT_GM_CONFIG, buildGmConfig };
 
 /** Map node label to result type */
 function inferType(label: string): RetrievalType {
@@ -88,31 +130,49 @@ function makeNodeId(name: string, typeName: string): string {
 
 type GmModule = Record<string, any>;
 
+/** SEC-L: 简单字符串 hash（djb2 变体），用于 searchCache key 后缀防碰撞。 */
+function hashString(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
 export class GraphAdapter {
   public conflictLogger = new ConflictLogger();
   private mod: GmModule | null = null;
   private driver: any = null;
   private _connectFailed = false;
   private _connectRetryCount = 0;
-  private readonly maxRetries = 3;
+  // P2-3 H-16: 重试次数与冷却期改为引用 DEFAULTS.graph，避免魔术数字散落
+  private readonly maxRetries = DEFAULTS.graph.maxRetries;
+  // P1-10 GMR-1: 连接失败冷却期。原代码 _connectFailed=true 后无自动恢复路径，
+  // 一旦 graph-memory-pro 短暂不可用，L3/L4 永久降级直到插件重载。
+  // 加 _lastFailTime + 冷却期（60s），冷却期满后自动重置允许重试。
+  private _lastFailTime = 0;
+  private readonly reconnectCooldownMs = DEFAULTS.graph.reconnectCooldownMs;
   private config: GraphAdapterConfig;
   private neo4jConfig: Neo4jConfig;
-  private logger: any;
+  private logger: Logger;
   private _recaller: any = null;
   private _gmConfig: Record<string, any> = {};
   private _embedFn: any = null;
   private _llm?: (system: string, user: string) => Promise<string>;
 
-  private searchCache = new LRUCache(50, 300 * 1000);
+  // P2-3 H-16: searchWithCache 的 LRU 容量与 TTL 改为引用 DEFAULTS.graph
+  private searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
 
-  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: any) {
+  constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: Logger) {
     this.neo4jConfig = neo4jConfig;
     this.config = config;
-    this.logger = logger;
+    this.logger = resolveLogger(logger);
   }
 
   async connect(): Promise<boolean> {
     try {
+      // P3-3: 记录实际使用的 graph-memory-pro 路径与解析来源
+      this.logger?.info?.('[graph-adapter] loading graph-memory-pro', { path: GM_PRO_PATH, source: _GM_PRO_RESOLVED.source });
       const mod = await import(`${GM_PRO_PATH}/dist/index.js`);
       this.mod = mod;
       this.driver = mod.getDriver?.() ?? null;
@@ -131,17 +191,8 @@ export class GraphAdapter {
 
       // - Initialize Recaller (gm-pro dual-path recall) -
       try {
-        // Full GmConfig — all required fields for type safety
-        const gmCfg: Record<string, any> = {
-          neo4j: this.neo4jConfig,
-          compactTurnCount: 10,
-          recallMaxNodes: 8,
-          recallMaxDepth: 2,
-          freshTailCount: 5,
-          dedupThreshold: 0.90,
-          pagerankDamping: 0.85,
-          pagerankIterations: 12,
-        };
+        // P2-17: 用 buildGmConfig 统一构建，避免重复硬编码
+        const gmCfg: Record<string, any> = buildGmConfig(this.neo4jConfig);
         this._recaller = new mod.Recaller(this.driver, gmCfg);
         this._gmConfig = gmCfg;
 
@@ -158,22 +209,27 @@ export class GraphAdapter {
             this.logger?.warn?.('[graph-adapter] createEmbedFn not available, community recall disabled');
           }
         } catch (embedErr) {
-          this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller:', embedErr);
+          this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller', { err: embedErr });
         }
 
         this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
       } catch (initErr) {
-        this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes:', initErr);
+        this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes', { err: initErr });
         this._recaller = null;
       }
 
+      // P1-10 GMR-1: 连接成功，重置失败计数与冷却时间
+      this._connectRetryCount = 0;
+      this._connectFailed = false;
+      this._lastFailTime = 0;
       return true;
     } catch (err) {
       this._connectRetryCount++;
       this.logger?.warn?.(`[graph-adapter] connect attempt ${this._connectRetryCount}/${this.maxRetries} failed: ${err}`);
       if (this._connectRetryCount >= this.maxRetries) {
         this._connectFailed = true;
-        this.logger?.error?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts`);
+        this._lastFailTime = Date.now();
+        this.logger?.error?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts, will retry in ${this.reconnectCooldownMs / 1000}s`);
       }
       return false;
     }
@@ -183,13 +239,32 @@ export class GraphAdapter {
   resetConnectFlag(): void {
     this._connectFailed = false;
     this._connectRetryCount = 0;
+    this._lastFailTime = 0;
+  }
+
+  /**
+   * P1-10 GMR-1: 检查连接失败冷却期是否已过。如果冷却期满，自动重置失败标记，允许重试。
+   * 返回 true 表示当前处于"失败锁定"状态（调用方应跳过），false 表示可以尝试 connect。
+   */
+  private _checkCooldownAndMaybeReset(): boolean {
+    if (!this._connectFailed) return false;
+    const elapsed = Date.now() - this._lastFailTime;
+    if (elapsed >= this.reconnectCooldownMs) {
+      this.logger?.info?.(`[graph-adapter] reconnect cooldown elapsed (${elapsed}ms), resetting failure flag for retry`);
+      this._connectFailed = false;
+      this._connectRetryCount = 0;
+      this._lastFailTime = 0;
+      return false;
+    }
+    return true; // 仍在冷却期，跳过
   }
 
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
-      if (this._connectFailed && this._connectRetryCount >= this.maxRetries) {
-        this.logger?.warn?.(`[lcm-graph-extra] search: max retries (${this.maxRetries}) reached, skipping`);
+      // P1-10 GMR-1: 用冷却期检查代替原永久失败逻辑
+      if (this._checkCooldownAndMaybeReset()) {
+        this.logger?.warn?.(`[lcm-graph-extra] search: in reconnect cooldown, skipping`);
         return [];
       }
       await this.connect();
@@ -206,7 +281,7 @@ export class GraphAdapter {
           nodes = recallResult.nodes ?? [];
           this.logger?.debug?.('[graph-adapter] Recaller returned', { nodeCount: nodes.length });
         } catch (recallErr) {
-          this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back:', recallErr);
+          this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back', { err: recallErr });
         }
       }
 
@@ -249,23 +324,17 @@ export class GraphAdapter {
 
   /* @deprecated - cache-aware search wrapper */
   async searchWithCache(query: string, limit?: number): Promise<RetrievalResult[]> {
-    const key = `s:${query.slice(0,200).toLowerCase().trim()}`;
+    // SEC-L: 修复前 key 仅截断前 200 字符，超长查询（>200）会碰撞。
+    // 加 full-hash 后缀区分，前缀保留便于调试。
+    const fullHash = hashString(query.toLowerCase().trim());
+    const key = `s:${query.slice(0, 50).toLowerCase().trim()}:${fullHash}`;
     const cached = this.searchCache.get(key);
     if (cached) return cached as RetrievalResult[];
     let results = await this.search(query, limit);
     if (!Array.isArray(results)) results = [];
-    // PPR rerank (in case search() didn't have enough data)
-    const cacheNodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
-    if (cacheNodeIds.length >= 2) {
-      const pprScores = await this.rerankByPageRank(cacheNodeIds as string[]);
-      if (pprScores.size > 0) {
-        results.sort((a, b) => {
-          const sa = pprScores.get(a.metadata?.nodeId as string) ?? 0.5;
-          const sb = pprScores.get(b.metadata?.nodeId as string) ?? 0.5;
-          return sb - sa;
-        });
-      }
-    }
+    // PERF-M2 M-2: 移除重复 rerank。search() 内部已在 nodes.length >= 2 时执行过 rerankByPageRank，
+    // 此处重复调用纯属浪费。search() 未 rerank 的唯一情况是 nodes.length < 2，
+    // 此时原 length >= 2 守卫也会跳过，故可安全移除。
     // Community enrichment — batch findById via raw Cypher (avoids N round-trips)
     const nodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
     if (nodeIds.length > 0) {
@@ -302,17 +371,20 @@ export class GraphAdapter {
   ): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
-      if (this._connectFailed && this._connectRetryCount >= this.maxRetries) {
-        this.logger?.warn(`[lcm-graph-extra] searchExperience: max retries (${this.maxRetries}) reached, skipping`);
+      // P1-10 GMR-1: 用冷却期检查代替原永久失败逻辑
+      if (this._checkCooldownAndMaybeReset()) {
+        this.logger?.warn(`[lcm-graph-extra] searchExperience: in reconnect cooldown, skipping`);
         return [];
       }
       await this.connect();
     }
     if (!this.mod) return [];
+    // P3-9 GMR-3: 捕获到局部常量，跨 await 保持非空收窄，消除后续 this.mod! 非空断言
+    const mod = this.mod;
     const rl = options?.limit ?? this.config.searchLimit;
     const ctx = options?.context;
     try {
-      const nodes = await this.mod.searchNodes(this.driver, query, rl * 3);
+      const nodes = await mod.searchNodes(this.driver, query, rl * 3);
       const events = (nodes ?? []).filter((n: any) => (n.type ?? n.labels?.[0]) === 'EVENT');
 
       // 场景优先级加权排序
@@ -336,12 +408,30 @@ export class GraphAdapter {
         return { ...evt, boostedScore: (Number(evt.properties?.pagerank ?? 0.5)) + scenarioBonus + techBonus + urgencyBoost };
       }).sort((a: any, b: any) => b.boostedScore - a.boostedScore);
 
+      // P1-1 M-1: 消除 N+1 —— 原代码 per-event 调用 getEdgesForNodes（共 rl 次往返），
+      // 改为一次性批量取所有 top events 的 edges，再在内存中按 source id 分组成 Map<eventId, edges[]>，
+      // 遍历 topEvents 时从 Map 取对应 edges。
+      const topEvents = ranked.slice(0, rl);
+      const topIds = topEvents.map((evt: any) => evt.id).filter(Boolean);
+      const rawEdges = topIds.length > 0 ? await mod.getEdgesForNodes(this.driver, topIds) : [];
+      const allEdges: any[] = rawEdges ?? [];
+      // 按 source id 分组（防御性多字段查找，兼容不同 edge 形态）
+      const edgesBySource = new Map<string, any[]>();
+      for (const e of allEdges) {
+        const srcId = e.fromId ?? e.sourceId ?? e.from ?? e.source;
+        if (!srcId) continue;
+        const list = edgesBySource.get(srcId) ?? [];
+        list.push(e);
+        edgesBySource.set(srcId, list);
+      }
+
       const out: RetrievalResult[] = [];
-      for (const evt of ranked.slice(0, rl)) {
+      for (const evt of topEvents) {
         const name = evt.name ?? evt.properties?.name ?? '';
         const desc = evt.description ?? evt.properties?.description ?? '';
-        const edges = await this.mod!.getEdgesForNodes(this.driver, [evt.id]);
-        const sols = (edges ?? []).filter((e: any) => e.type === 'SOLVED_BY');
+        const edges = edgesBySource.get(evt.id) ?? [];
+        // 防御性多字段查找 type/label（兼容不同 edge 形态）
+        const sols = edges.filter((e: any) => (e.type ?? e.label) === 'SOLVED_BY');
         let expText = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
         for (const s of sols) expText += `\n- ${s.targetName ?? 'Unknown'}`;
         out.push({
@@ -396,18 +486,12 @@ export class GraphAdapter {
           };
         });
 
-        // First batch check which nodes already exist (to count conflicts)
-        const existingIds: string[] = [];
-        for (const n of nodeData) {
-          const record = await session.run(
-            'MATCH (n:' + n.label + ' { id: $id }) RETURN n',
-            { id: n.id },
-          );
-          if (record.records.length > 0) {
-            existingIds.push(n.id);
-            cc++;
-          }
-        }
+        // P1-2 M-1: 节点存在性检查改为单条 UNWIND（原 per-node N 次 MATCH 查询）
+        const existingResult = await session.run(
+          `UNWIND $nodes AS node MATCH (n { id: node.id }) RETURN collect(node.id) AS existingIds`,
+          { nodes: nodeData },
+        );
+        cc += (existingResult.records[0]?.get('existingIds') ?? []).length;
 
         // Batch MERGE all nodes
         const mergeLabels = new Set(nodeData.map((n) => n.label));
@@ -457,27 +541,28 @@ export class GraphAdapter {
         }
       }
 
-      // Batch upsert edges in a single session
+      // P1-2 M-1: 边 upsert 改为按 type 分组的 UNWIND MERGE
+      // （Cypher 关系类型不可参数化，故按 mapEdgeType 结果分组后逐组单条 UNWIND MERGE）
       if (validRelations.length > 0) {
+        const now = Date.now();
+        const edgesByType = new Map<string, any[]>();
         for (const rel of validRelations) {
           const mt = mapEdgeType(rel.type);
-          const fromId = makeNodeId(rel.from, 'TASK');
-          const toId = makeNodeId(rel.to, 'TASK');
-
+          const entry = {
+            fromId: makeNodeId(rel.from, 'TASK'),
+            toId: makeNodeId(rel.to, 'TASK'),
+            instruction: (rel.instruction ?? '').slice(0, 500),
+            weight: 1.0,
+            updatedAt: now,
+          };
+          const list = edgesByType.get(mt) ?? [];
+          list.push(entry);
+          edgesByType.set(mt, list);
+        }
+        for (const [mt, group] of edgesByType) {
           await session.run(
-            `MATCH (a { id: $fromId }), (b { id: $toId })
-             MERGE (a)-[r:${mt}]->(b)
-             SET r.instruction = $instruction,
-                 r.weight = $weight,
-                 r.updatedAt = $updatedAt
-             ON CREATE SET r.createdAt = $updatedAt`,
-            {
-              fromId,
-              toId,
-              instruction: (rel.instruction ?? '').slice(0, 500),
-              weight: 1.0,
-              updatedAt: Date.now(),
-            },
+            `UNWIND $edges AS edge MATCH (a { id: edge.fromId }), (b { id: edge.toId }) MERGE (a)-[r:${mt}]->(b) SET r.instruction = edge.instruction, r.weight = edge.weight, r.updatedAt = edge.updatedAt ON CREATE SET r.createdAt = edge.updatedAt`,
+            { edges: group },
           );
         }
       }
@@ -504,7 +589,7 @@ export class GraphAdapter {
       for (const e of entities) {
         if (!e.name?.trim()) continue;
         const t = mapEntityType(e.type), nid = makeNodeId(e.name, t);
-        const existing = await this.mod!.findById(this.driver, nid);
+        const existing = await m3.findById(this.driver, nid);
         if (existing) {
           const ec = existing.properties?.content ?? '';
           if (ec.trim() !== (e.content ?? '').trim()) {
@@ -520,7 +605,7 @@ export class GraphAdapter {
               continue;
             } else if (decision === 'replace_with_new') {
               // Full replacement with new content
-              await this.mod!.upsertNode(this.driver, {
+              await m3.upsertNode(this.driver, {
                 id: nid, type: t, name: e.name.trim(),
                 description: (e.description ?? '').slice(0, 500),
                 content: (e.content ?? '').slice(0, 2000),
@@ -533,7 +618,7 @@ export class GraphAdapter {
             } else if (decision === 'merge_both') {
               // Merge existing + new content
               const mergedContent = (ec.trim() || '') + '\n---\n' + ((e.content ?? '').trim() || '');
-              await this.mod!.upsertNode(this.driver, {
+              await m3.upsertNode(this.driver, {
                 id: nid, type: t, name: e.name.trim(),
                 description: (e.description ?? '').slice(0, 500),
                 content: mergedContent.slice(0, 2000),
@@ -547,7 +632,7 @@ export class GraphAdapter {
           }
         }
         // No conflict or no decision path matched - standard upsert
-        await this.mod!.upsertNode(this.driver, {
+        await m3.upsertNode(this.driver, {
           id: nid, type: t, name: e.name.trim(),
           description: (e.description ?? '').slice(0, 500),
           content: (e.content ?? '').slice(0, 2000),
@@ -560,7 +645,7 @@ export class GraphAdapter {
       for (const rel of relations) {
         if (!rel.from?.trim() || !rel.to?.trim()) continue;
         const mt = mapEdgeType(rel.type);
-        await this.mod!.upsertEdge(this.driver, {
+        await m3.upsertEdge(this.driver, {
           id: makeNodeId(rel.from + '-' + rel.to, mt), type: mt,
           fromId: makeNodeId(rel.from, 'TASK'), toId: makeNodeId(rel.to, 'TASK'),
           instruction: (rel.instruction ?? '').slice(0, 500),
@@ -571,10 +656,7 @@ export class GraphAdapter {
     return { upserted: uc, conflicts: cc };
   }
 
-  async processFeedback(): Promise<{ processed: number; updatedNodes: number }> {
-    return { processed: 0, updatedNodes: 0 };
-  }
-
+  // P3-9 GMR-4: processFeedback 已移除 —— 空实现（恒返回 0）且无任何生产代码调用，属死代码。
   
   /**
    * Run raw Cypher query (for experience storage layer).
@@ -608,11 +690,8 @@ export class GraphAdapter {
   async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
     if (!this.mod || nodeIds.length < 2) return new Map();
     try {
-      // gm-pro personalizedPageRank(driver, seedIds[], candidateIds[], GmConfig): PPRResult { scores: Map }
-      const cfg = {
-        pagerankDamping: 0.85,
-        pagerankIterations: 12,
-      };
+      // P2-17: 用 buildGmConfig 统一构建（PPR 只用 pagerank* 字段）
+      const cfg = buildGmConfig(this.neo4jConfig, { recallMaxNodes: undefined, recallMaxDepth: undefined, freshTailCount: undefined, dedupThreshold: undefined, compactTurnCount: undefined });
       const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
       // gm-pro returns PPRResult with scores Map
       return result.scores ?? new Map();
@@ -669,17 +748,8 @@ export class GraphAdapter {
   async runMaintenance(llm?: (system: string, user: string) => Promise<string>): Promise<any> {
     if (!this.mod || !this.driver) return null;
     try {
-      // Full GmConfig for runMaintenance
-      const cfg: Record<string, any> = {
-        neo4j: this.neo4jConfig,
-        compactTurnCount: 10,
-        recallMaxNodes: 8,
-        recallMaxDepth: 2,
-        freshTailCount: 5,
-        dedupThreshold: 0.90,
-        pagerankDamping: 0.85,
-        pagerankIterations: 12,
-      };
+      // P2-17: 用 buildGmConfig 统一构建
+      const cfg: Record<string, any> = buildGmConfig(this.neo4jConfig);
       this.logger?.info?.('[graph-adapter] triggering maintenance pipeline');
       const result = await this.mod.runMaintenance(this.driver, cfg, llm ?? this._llm ?? undefined, this._embedFn ?? undefined);
       this.logger?.info?.('[graph-adapter] maintenance completed', {

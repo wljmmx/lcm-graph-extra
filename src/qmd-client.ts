@@ -7,6 +7,8 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { Logger } from './utils/logger.js';
+import { resolveLogger } from './utils/logger.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +46,8 @@ export interface QmdClientOptions {
   cliTimeout?: number;
   pingInterval?: number;
   cliFallbackSearchType?: 'search' | 'vsearch';
+  /** P3-B3: 注入统一 logger；未提供时降级到 globalLogger。 */
+  logger?: Logger;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +87,8 @@ export class QmdClient {
   private readonly cliTimeout: number;
   private readonly cliFallbackSearchType: string;
   private readonly pingInterval: number;
+  /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
+  private readonly logger: Logger;
 
   /** null = undetermined, true = MCP可用, false = MCP不可用 */
   private mcpAvailable: boolean | null = null;
@@ -94,6 +100,7 @@ export class QmdClient {
     this.cliTimeout = opts.cliTimeout ?? DEFAULTS.cliTimeout;
     this.cliFallbackSearchType = opts.cliFallbackSearchType ?? DEFAULTS.cliFallbackSearchType;
     this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
+    this.logger = resolveLogger(opts.logger);
   }
 
   // ===================== public API =======================================
@@ -114,13 +121,13 @@ export class QmdClient {
         this.scheduleRecovery();
         const _mcpErr = (err as Error).message;
         if (_mcpErr.includes("circuit breaker")) {
-          console.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
+          this.logger.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
         } else if (_mcpErr.includes("HTTP")) {
-          console.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
+          this.logger.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
         } else if (_mcpErr.includes("empty response")) {
-          console.warn("[qmd-client] MCP query returned no results, falling back to CLI");
+          this.logger.warn("[qmd-client] MCP query returned no results, falling back to CLI");
         } else {
-          console.warn("[qmd-client] MCP query failed, falling back to CLI:", _mcpErr);
+          this.logger.warn("[qmd-client] MCP query failed, falling back to CLI", { err: _mcpErr });
         }
       }
     }
@@ -398,7 +405,9 @@ export class QmdClient {
 
     // Pure lex -> qmd search
     if (hasLex && !hasVec && !hasHyde) {
-      const query = params.searches.find((s) => s.type === "lex")!.query;
+      // SEC-L: 修复前 `find(...).query!` 非空断言。虽然 hasLex 已确认存在，但显式检查更稳健。
+      const lexEntry = params.searches.find((s) => s.type === "lex");
+      const query = lexEntry?.query ?? "";
       const args = ["search", query, "-n", n, "--format", "json"];
       if (!withRerank) args.push("--no-rerank");
       return { cmd: "qmd", args };
@@ -406,7 +415,8 @@ export class QmdClient {
 
     // Pure vec -> qmd vsearch
     if (hasVec && !hasLex && !hasHyde) {
-      const query = params.searches.find((s) => s.type === "vec")!.query;
+      const vecEntry = params.searches.find((s) => s.type === "vec");
+      const query = vecEntry?.query ?? "";
       return { cmd: "qmd", args: ["vsearch", query, "-n", n, "--format", "json"] };
     }
 
@@ -427,7 +437,10 @@ export class QmdClient {
       lines.push(`${s.type}: ${s.query}`);
     }
 
-    const queryStr = lines.join("\\n");
+    // SEC M-15: 修复前 lines.join("\\n") 是字面量反斜杠+n（2 字符），
+    // 多检索 CLI fallback 收到 "lex:q\nvec:q" 单行文本而非多行，导致解析失败。
+    // 改为真实换行符 "\n"。
+    const queryStr = lines.join("\n");
     const args = ["query", queryStr, "-n", n, "--format", "json"];
     if (!withRerank) args.push("--no-rerank");
     return { cmd: "qmd", args };
@@ -443,7 +456,7 @@ export class QmdClient {
         if (ok) {
           this.mcpAvailable = true;
           this.clearRecovery();
-          console.info("[qmd-client] MCP recovered, switching back");
+          this.logger.info("[qmd-client] MCP recovered, switching back");
         } else {
           this.scheduleRecovery(); // retry
         }
@@ -458,5 +471,13 @@ export class QmdClient {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = null;
     }
+  }
+
+  /**
+   * 释放客户端持有的资源（recoveryTimer 等）。
+   * SEC-2 H-8: 调用方应在 finally 块中调用以避免定时器泄漏。
+   */
+  dispose(): void {
+    this.clearRecovery();
   }
 }

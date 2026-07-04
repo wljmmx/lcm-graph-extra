@@ -22,9 +22,11 @@
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readdir, readFile, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readdir, readFile, stat, realpath } from 'node:fs/promises';
+import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
+import type { Logger } from '../utils/logger.js';
+import { resolveLogger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -142,6 +144,36 @@ class MemorySupplementCtxEngine implements LosslessClawEngine {
 }
 
 // ---------------------------------------------------------------------------
+// 辅助函数
+// ---------------------------------------------------------------------------
+
+/**
+ * P2-2 H-14: 统一 message content 归一化逻辑。
+ * 修复前 ingest/ingestBatch/afterTurn/bootstrap/ensureBootstrapped/assemble 6 处
+ * 重复实现"数组 content → string"变换，filter 谓词、join 分隔符、兜底逐字符相同。
+ * 此处抽取为单一函数，归一化规则变更只需改一处。
+ *
+ * - 数组 content：仅保留 string 或带 text 字段的部分，按 '\n' 拼接
+ * - 非字符串 content（number/boolean/null/undefined 等）：String() 强制转换
+ * - 字符串 content：原样返回 msg（不创建新对象，保持引用相等）
+ *
+ * 非 text 类型（image/tool_use/tool_result 等）会被静默丢弃，与历史行为一致。
+ */
+function normalizeMessageContent<T extends { content?: unknown }>(msg: T): T {
+  if (Array.isArray(msg.content)) {
+    const normalized = (msg.content as any[])
+      .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
+      .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
+      .join('\n');
+    return { ...msg, content: normalized };
+  }
+  if (typeof msg.content !== 'string') {
+    return { ...msg, content: String(msg.content ?? '') };
+  }
+  return msg;
+}
+
+// ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
 
@@ -154,11 +186,11 @@ export class LosslessClawAdapter {
   private _connecting: Promise<boolean> | null = null;
   private _initError: string | null = null;
 
-  /** 日志器 */
-  private logger?: any;
+  /** 日志器 (P3-B2: 类型 any → Logger，缺失时降级到 globalLogger) */
+  private logger: Logger;
 
-  constructor(logger?: any) {
-    this.logger = logger;
+  constructor(logger?: Logger) {
+    this.logger = resolveLogger(logger);
   }
 
   // ── 状态只读属性 ──
@@ -233,18 +265,9 @@ export class LosslessClawAdapter {
       return { ingested: false };
     }
     try {
-      // Normalize message content before passing to lossless-claw engine
       const msg = params.message;
-      if (msg && Array.isArray(msg.content)) {
-        const normalizedContent = msg.content
-          .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-          .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-          .join('\n');
-        const normalizedParams = { ...params, message: { ...msg, content: normalizedContent } };
-        return await this.engine.ingest(normalizedParams);
-      }
-      if (msg && typeof msg.content !== 'string') {
-        const normalizedParams = { ...params, message: { ...msg, content: String(msg.content ?? '') } };
+      if (msg && (Array.isArray(msg.content) || typeof msg.content !== 'string')) {
+        const normalizedParams = { ...params, message: normalizeMessageContent(msg) };
         return await this.engine.ingest(normalizedParams);
       }
       return await this.engine.ingest(params);
@@ -269,21 +292,7 @@ export class LosslessClawAdapter {
     try {
       // Normalize messages before passing to lossless-claw engine
       // OpenClaw may pass content as arrays (rich text/images), but engine expects strings
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -312,21 +321,7 @@ export class LosslessClawAdapter {
     if (!this._connected || !this.engine) return;
     if (typeof this.engine.afterTurn !== 'function') return;
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -354,21 +349,7 @@ export class LosslessClawAdapter {
       return { bootstrapped: false, importedMessages: 0 };
     }
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -421,21 +402,7 @@ export class LosslessClawAdapter {
     }
 
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -556,21 +523,7 @@ export class LosslessClawAdapter {
       return { messages: params.messages ?? [], estimatedTokens: 0 };
     }
     try {
-      const normalizedMessages = (params.messages ?? []).map((msg) => {
-        if (Array.isArray(msg.content)) {
-          return {
-            ...msg,
-            content: msg.content
-              .filter((c: any) => typeof c === 'string' || (typeof c === 'object' && c !== null && 'text' in c))
-              .map((c: any) => (typeof c === 'string' ? c : String(c.text ?? '')))
-              .join('\n'),
-          };
-        }
-        if (typeof msg.content !== 'string') {
-          return { ...msg, content: String(msg.content ?? '') };
-        }
-        return msg;
-      });
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
       const normalizedParams = {
         ...params,
@@ -652,7 +605,7 @@ export class LosslessClawAdapter {
     Promise<((ctx: any) => Promise<LosslessClawEngine>) | null>
   {
     // ── Primary: globalThis Symbol 方式 ──
-    console.debug("[lcm] path 1/4: Primary Symbol registry");
+    this.logger.debug("[lcm] path 1/4: Primary Symbol registry");
     try {
       const state: Record<string, any> | undefined =
         (globalThis as any)[CONTEXT_ENGINE_REGISTRY_STATE];
@@ -665,9 +618,9 @@ export class LosslessClawAdapter {
     } catch {
       // Symbol 方式失败，走 Fallback
     }
-      console.debug("[lcm] _discoverCEFactory: path 1/4 FAILED (Symbol registry)");
+      this.logger.debug("[lcm] _discoverCEFactory: path 1/4 FAILED (Symbol registry)");
 
-    console.debug("[lcm] path 2/4: Shared State");
+    this.logger.debug("[lcm] path 2/4: Shared State");
     // ── Shared State: 直接通过 lossless-claw 的 globalThis Symbol shared-init 获取 engine ──
     // 如果 lossless-claw 插件已被 OpenClaw 加载（即使非活跃 CE），shared state 里就有引擎实例。
     // 这比走 factory registry 更直接——类似于 GraphAdapter 直连 Neo4j 而不是经过 plugin SDK。
@@ -691,18 +644,25 @@ export class LosslessClawAdapter {
           }
         }
       }
-      console.debug("[lcm] _discoverCEFactory: path 2/4 FAILED (Shared State)");
+      this.logger.debug("[lcm] _discoverCEFactory: path 2/4 FAILED (Shared State)");
     } catch {
       // shared state not available, continue
     }
-    console.debug("[lcm] path 3/4: Direct FS scan");
+    this.logger.debug("[lcm] path 3/4: Direct FS scan");
 
     // ── Direct FS: 扫描 projects/ 找 lossless-claw dist，import 触发初始化 ──
+    // P0-4 SEC-2: 加路径白名单校验。任何能写入 ~/.openclaw/npm/projects/*/node_modules
+    // 的进程可注入任意代码并经 pluginEntry.register(mockApi) 执行。此处严格校验：
+    //   1) entry.name 必须是安全的目录名（无路径分隔符、无 ..）
+    //   2) realpath(candidatePath) 必须仍在 projectsDir 之下（防符号链接逃逸）
+    //   3) 候选路径必须严格匹配预期形状（@martian-engineering/lossless-claw/dist/index.js）
     try {
       const projectsDir = join(homedir(), '.openclaw', 'npm', 'projects');
       const entries = await readdir(projectsDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
+        // 安全目录名校验：仅允许 [A-Za-z0-9._-]
+        if (!/^[A-Za-z0-9._-]+$/.test(entry.name)) continue;
         const candidatePath = join(
           projectsDir,
           entry.name,
@@ -713,6 +673,15 @@ export class LosslessClawAdapter {
           'index.js',
         );
         try {
+          // realpath 校验，防止符号链接逃逸到 projectsDir 之外
+          const [realCandidate, realProjectsDir] = await Promise.all([
+            realpath(candidatePath),
+            realpath(projectsDir),
+          ]);
+          if (!realCandidate.startsWith(realProjectsDir + sep) && realCandidate !== realProjectsDir) {
+            this.logger.debug(`[lcm] _discoverCEFactory: reject path escaping projectsDir: ${candidatePath}`);
+            continue;
+          }
           await stat(candidatePath);
           const lcModule = await import(pathToFileURL(candidatePath).href);
           // dist/index.js default export is the plugin entry with register()
@@ -753,7 +722,7 @@ export class LosslessClawAdapter {
       }
     } catch {
       // projects dir scan failed, fall through to Fallback
-    console.debug("[lcm] path 4/4: Fallback registry");
+    this.logger.debug("[lcm] path 4/4: Fallback registry");
     }
 
     // ── Fallback: 文件系统 Registry 发现 ──
@@ -800,11 +769,11 @@ export class LosslessClawAdapter {
     const factory = getFactory('lossless-claw');
 
     if (typeof factory !== 'function') {
-      console.debug("[lcm] _discoverCEFactory: path 4/4 FAILED, factory not a function");
+      this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FAILED, factory not a function");
       return null;
     }
 
-    console.debug("[lcm] _discoverCEFactory: path 4/4 FOUND factory");
+    this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FOUND factory");
     return factory as (ctx: any) => Promise<LosslessClawEngine>;
   }
 }

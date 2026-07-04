@@ -295,12 +295,14 @@ export async function archiveDAG(
   fs.writeFileSync(tmpPath, json, 'utf-8');
 
   try {
-    const outPath = path.join(archiveDir, fileName.replace(/\.json$/, '.tar.gz'));
+    // P1-12 FAIL-2: 原代码扩展名用 .tar.gz 但实际写入的是 zlib.gzipSync 的纯 gzip
+    // (非 tar 归档)，测试用 `tar xzf` 解压必然失败。改为 .json.gz 与实际格式匹配。
+    const outPath = path.join(archiveDir, fileName.replace(/\.json$/, '.json.gz'));
     const gzipData = zlib.gzipSync(Buffer.from(json, "utf-8"));
     fs.writeFileSync(outPath, gzipData);
     return { archivedAt: now, path: outPath };
   } finally {
-    try { fs.unlinkSync(tmpPath); } catch { /* already removed by tar */ }
+    try { fs.unlinkSync(tmpPath); } catch { /* tmp cleanup */ }
   }
 }
 

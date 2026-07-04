@@ -5,6 +5,8 @@
  * 在连续失败 N 次后自动降级，一段时间后尝试恢复。
  */
 
+import { DEFAULTS } from './config/defaults.js';
+
 type Subsystem = "lcm" | "qmd" | "neo4j";
 
 interface CircuitState {
@@ -16,10 +18,11 @@ interface CircuitState {
 
 const state = new Map<Subsystem, CircuitState>();
 
+// P2-3 H-16: 阈值/冷却期集中到 DEFAULTS.circuitBreaker
 const CONFIG = {
-  threshold: 3,          // N 次失败后熔断
-  cooldownMs: 30_000,    // 30 秒后尝试半开
-  halfOpenTimeoutMs: 5_000, // 半开超时
+  threshold: DEFAULTS.circuitBreaker.threshold,
+  cooldownMs: DEFAULTS.circuitBreaker.cooldownMs,
+  halfOpenTimeoutMs: DEFAULTS.circuitBreaker.halfOpenTimeoutMs,
 };
 
 function getState(name: Subsystem): CircuitState {

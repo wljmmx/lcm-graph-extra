@@ -3,6 +3,7 @@
 // ============================================================
 
 import { GraphMemoryManager } from './graph';
+import { DEFAULTS } from '../config/defaults.js';
 
 // ---------- Types ---------------------------------------------------------
 
@@ -24,11 +25,17 @@ export const DEFAULT_TTL_CONFIG: TTLConfig = {
 
 // ---------- Helpers -------------------------------------------------------
 
-/** Parse an ISO date string to a Date object, falling back to the current time on failure. */
+/**
+ * Parse an ISO date string to a Date object.
+ *
+ * P1-7 BUG-4: 原代码对坏数据/缺失值回退 `new Date()`（现在），导致节点被判为
+ * "刚创建" → `created >= cutoff` → 永不过期。改为回退 epoch（1970-01-01），
+ * 让数据损坏/缺失的节点被强制过期清理（保守策略：宁删勿留）。
+ */
 function parseDate(value: string | undefined): Date {
-  if (!value) return new Date();
+  if (!value) return new Date(0);
   const d = new Date(value);
-  return isNaN(d.getTime()) ? new Date() : d;
+  return isNaN(d.getTime()) ? new Date(0) : d;
 }
 
 /** Return the number of days elapsed between two dates. */
@@ -134,7 +141,7 @@ export async function cleanupExpiredNodes(
  */
 export function applyWeightDecay(
   manager: GraphMemoryManager,
-  halfLifeDays: number = 45,
+  halfLifeDays: number = DEFAULTS.ttl.halfLifeDays,
   minWeight: number = 0.01
 ): void {
   if (halfLifeDays <= 0) return;

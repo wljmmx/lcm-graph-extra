@@ -17,6 +17,9 @@ import { Merger, type MergerConfig } from './merger.js';
 import { ExperienceStorage } from './experience/storage.js';
 import { TagRegistry } from './experience/tag-registry.js';
 import { inferQueryContext, buildExperienceFilters } from './context-inference.js';
+import { DEFAULTS } from './config/defaults.js';
+import type { Logger } from './utils/logger.js';
+import { resolveLogger } from './utils/logger.js';
 
 export interface PerformanceStats {
   searches: number;
@@ -33,6 +36,8 @@ export class RetrievalGateway {
   private experienceStorage: ExperienceStorage;
   private tagRegistry: TagRegistry;
   private lastQuery = '';
+  /** P3-B4: 统一 logger（从全局单例解析），替换 console.* */
+  private readonly logger: Logger = resolveLogger();
 
   // Performance monitoring
   public stats: Record<string, PerformanceStats> = {
@@ -41,8 +46,9 @@ export class RetrievalGateway {
     experience: { searches: 0, totalDurationMs: 0, maxDurationMs: 0, failures: 0, lastQueryTime: 0 },
     distilledExp: { searches: 0, totalDurationMs: 0, maxDurationMs: 0, failures: 0, lastQueryTime: 0 },
   };
-  public slowSearchThresholdMs = 1000;
-  public globalTimeoutMs = 15000;
+  // P2-3 H-16: 超时/慢查询阈值集中到 DEFAULTS.retrieval
+  public slowSearchThresholdMs = DEFAULTS.retrieval.slowSearchThresholdMs;
+  public globalTimeoutMs = DEFAULTS.retrieval.globalTimeoutMs;
 
   constructor(
     qmdClient: QmdClient,
@@ -172,12 +178,13 @@ export class RetrievalGateway {
     const allExp = this.merger.merge(distilledExpResults, eventExpResults);
 
     // Increment match count for top recalled experiences
+    // P1-6 M-3: 修复前为 for-await 串行，2 次 Neo4j 往返叠加。
+    // 改为 Promise.all 并行；每项独立 catch 防止单点失败短路整体。
     try {
-      for (const r of allExp.slice(0, 2)) {
-        if (r.metadata?.experience && r.id) {
-          await this.experienceStorage.incrementMatchCount(r.id);
-        }
-      }
+      const topExp = allExp.slice(0, 2)
+        .filter(r => r.metadata?.experience && r.id)
+        .map(r => this.experienceStorage.incrementMatchCount(r.id).catch(() => {}));
+      await Promise.all(topExp);
     } catch { /* non-critical, ignore */ }
 
     const experience = allExp.slice(0, 5); // cap at 5 total experience items
@@ -191,13 +198,20 @@ export class RetrievalGateway {
     searchFn: () => Promise<RetrievalResult[]>,
   ): Promise<RetrievalResult[]> {
     const start = performance.now();
+    // P0-3a H-3: 修复前用 AbortSignal.timeout，即使 searchFn 先完成，底层定时器
+    // 仍会持续到 globalTimeoutMs 才释放（node 内部 timer 资源）。高并发下累积。
+    // 改用显式 setTimeout + finally clearTimeout，确保任一 Promise 先 settle 即释放。
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error('search timeout')), this.globalTimeoutMs);
+    });
+    // SEC-9: 预吞 timeoutPromise 的 reject，防止 race 中 searchFn 先 resolve 时
+    // timeoutPromise 的 reject 成为 unhandledRejection。
+    timeoutPromise.catch(() => {});
     try {
-      const timer = AbortSignal.timeout(this.globalTimeoutMs);
       const results: RetrievalResult[] = await Promise.race([
         searchFn(),
-        new Promise<never>((_, reject) => {
-          timer.addEventListener('abort', () => reject(new Error('search timeout')));
-        }),
+        timeoutPromise,
       ]);
       const duration = performance.now() - start;
       const s = this.stats[engine];
@@ -208,7 +222,7 @@ export class RetrievalGateway {
       s.lastQueryTime = duration;
 
       if (duration > this.slowSearchThresholdMs) {
-        console.warn(`[lcm-graph-extra] Slow ${engine} search: ${duration.toFixed(0)}ms`);
+        this.logger.warn(`[lcm-graph-extra] Slow ${engine} search: ${duration.toFixed(0)}ms`);
       }
       return results;
     } catch (err) {
@@ -218,8 +232,10 @@ export class RetrievalGateway {
         s.failures++;
         s.lastQueryTime = duration;
       }
-      console.error(`[lcm-graph-extra] ${engine} search failed (${duration.toFixed(0)}ms): ${err}`);
+      this.logger.error(`[lcm-graph-extra] ${engine} search failed (${duration.toFixed(0)}ms)`, { err: String(err) });
       return [] as RetrievalResult[];
+    } finally {
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
     }
   }
 
@@ -236,9 +252,8 @@ export class RetrievalGateway {
     return lines.join('\n');
   }
 
-  async processFeedback(): Promise<{ processed: number; updatedNodes: number }> {
-    return this.graphAdapter.processFeedback();
-  }
+  // P3-9 GMR-4: processFeedback 已移除 —— 委托到 graphAdapter.processFeedback()，
+  // 但后者为空实现且无生产调用，整条链路属死代码。
 
   getLastQuery(): string {
     return this.lastQuery;

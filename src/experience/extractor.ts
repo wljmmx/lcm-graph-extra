@@ -10,6 +10,7 @@
  * 提取方式: 轻量规则匹配 + 可选 LLM 确认
  */
 
+import { randomUUID } from 'node:crypto';
 import type { ExperienceSource, RawExperience } from './types';
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,8 @@ export function extractRawExperience(
   const shortContext = text.slice(0, 500);
 
   return {
-    id: `exp_raw_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+    // P3-7: Math.random 改为 crypto.randomUUID —— 避免高并发下的碰撞风险，且为加密级唯一性
+    id: `exp_raw_${randomUUID()}`,
     source,
     sessionId,
     timestamp: new Date(),

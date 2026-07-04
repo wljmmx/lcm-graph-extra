@@ -44,18 +44,52 @@ export interface MaxContextChars {
 }
 
 // ---------------------------------------------------------------------------
-// Internal — lazy DB 连接
+// Internal — 单例 DB 连接 + prepared statement 缓存（P0-2 H-1）
 // ---------------------------------------------------------------------------
 
 const _lcmRequire = createRequire(import.meta.url);
 
+// P0-2 H-1: 单例 DB 连接，避免每次操作都 open/close
+let _lcmDb: any = null;
+
+// P0-2 H-1: 预编译 statement 缓存，按 key 复用
+const _lcmStmts = new Map<string, any>();
+
+// P0-2 H-1: 获取单例 DB 连接，若不存在则创建；创建失败返回 null
 function getDb(): any {
+  if (_lcmDb) return _lcmDb;
   try {
     const { DatabaseSync } = _lcmRequire('node:sqlite');
-    return new DatabaseSync(LCM_DB_PATH);
+    _lcmDb = new DatabaseSync(LCM_DB_PATH);
+    return _lcmDb;
+  } catch {
+    _lcmDb = null;
+    return null;
+  }
+}
+
+// P0-2 H-1: 从缓存取或新建 prepared statement；失败返回 null
+function getStmt(key: string, sql: string): any {
+  const cached = _lcmStmts.get(key);
+  if (cached) return cached;
+  const db = getDb();
+  if (!db) return null;
+  try {
+    const stmt = db.prepare(sql);
+    _lcmStmts.set(key, stmt);
+    return stmt;
   } catch {
     return null;
   }
+}
+
+// P0-2 H-1: 关闭单例连接并清空缓存（用于测试隔离）
+function closeLcmDb(): void {
+  if (_lcmDb) {
+    try { _lcmDb.close(); } catch { /* already closed or close failed */ }
+  }
+  _lcmDb = null;
+  _lcmStmts.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -67,22 +101,20 @@ function getDb(): any {
  */
 export function getConversationId(sessionKey?: string, sessionId?: string): number | null {
   if (!sessionKey && !sessionId) return null;
+  // P1-9 BUG-6: 把 db 引用提到 try 外，close 移到 finally，防止 prepare 抛错时连接泄漏
+  // P0-2 H-1: 改为单例 DB + 预编译 statement，不再每次 open/close
   try {
-    const db = getDb();
-    if (!db) return null;
-
-    let row: any = null;
+    let row: { conversation_id: number } | undefined;
     if (sessionKey) {
-      row = db.prepare(
-        'SELECT conversation_id FROM conversations WHERE session_key = ? AND active = 1 ORDER BY conversation_id DESC LIMIT 1'
-      ).get(sessionKey);
+      const stmt = getStmt('getConversationId_bySessionKey',
+        'SELECT conversation_id FROM conversations WHERE session_key = ? AND active = 1 ORDER BY conversation_id DESC LIMIT 1');
+      if (stmt) row = stmt.get(sessionKey) as { conversation_id: number } | undefined;
     }
     if (!row && sessionId) {
-      row = db.prepare(
-        'SELECT conversation_id FROM conversations WHERE session_id = ? AND active = 1 ORDER BY conversation_id DESC LIMIT 1'
-      ).get(sessionId);
+      const stmt = getStmt('getConversationId_bySessionId',
+        'SELECT conversation_id FROM conversations WHERE session_id = ? AND active = 1 ORDER BY conversation_id DESC LIMIT 1');
+      if (stmt) row = stmt.get(sessionId) as { conversation_id: number } | undefined;
     }
-    db.close();
     return row?.conversation_id ?? null;
   } catch {
     return null;
@@ -93,13 +125,12 @@ export function getConversationId(sessionKey?: string, sessionId?: string): numb
  * 查询指定会话的消息数和总 token
  */
 export function getMessageStats(conversationId: number): { count: number; totalTokens: number } {
+  // P0-2 H-1: 复用单例 DB + 预编译 statement（不再每次 open/close）
   try {
-    const db = getDb();
-    if (!db) return { count: 0, totalTokens: 0 };
-    const row = db.prepare(
-      'SELECT COUNT(*) as cnt, COALESCE(SUM(token_count), 0) as total_tok FROM messages WHERE conversation_id = ?'
-    ).get(conversationId) as any;
-    db.close();
+    const stmt = getStmt('getMessageStats',
+      'SELECT COUNT(*) as cnt, COALESCE(SUM(token_count), 0) as total_tok FROM messages WHERE conversation_id = ?');
+    if (!stmt) return { count: 0, totalTokens: 0 };
+    const row = stmt.get(conversationId) as { cnt: number; total_tok: number } | undefined;
     return { count: row?.cnt ?? 0, totalTokens: row?.total_tok ?? 0 };
   } catch {
     return { count: 0, totalTokens: 0 };
@@ -115,20 +146,14 @@ export function writeCompactionDebt(
   currentTokenCount: number,
   reason: string = 'proactive_lcm_graph_extra',
 ): boolean {
+  // P0-2 H-1: 复用单例 DB + 预编译 statement（不再每次 open/close）
   try {
-    const db = getDb();
-    if (!db) return false;
-
-    db.exec(
+    const stmt = getStmt('writeCompactionDebt',
       `INSERT OR REPLACE INTO conversation_compaction_maintenance
        (conversation_id, pending, requested_at, reason, running, token_budget, current_token_count, updated_at)
-       VALUES (?, 1, datetime('now'), ?, 0, ?, ?, datetime('now'))`,
-      conversationId,
-      reason,
-      tokenBudget,
-      currentTokenCount,
-    );
-    db.close();
+       VALUES (?, 1, datetime('now'), ?, 0, ?, ?, datetime('now'))`);
+    if (!stmt) return false;
+    stmt.run(conversationId, reason, tokenBudget, currentTokenCount);
     return true;
   } catch {
     return false;
@@ -256,14 +281,14 @@ export function getConversationSummaries(conversationId: number): Array<{
   tokenCount: number;
   earliestAt: string | null;
 }> {
+  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally，防止 prepare 抛错时连接泄漏
+  // P0-2 H-1: 改为单例 DB + 预编译 statement，不再每次 open/close
   try {
-    const db = getDb();
-    if (!db) return [];
-    const rows = db.prepare(
+    const stmt = getStmt('getConversationSummaries',
       "SELECT summary_id, content, token_count, earliest_at " +
-      "FROM summaries WHERE conversation_id = ? ORDER BY earliest_at ASC",
-    ).all(conversationId) as Array<Record<string, unknown>>;
-    try { db.close(); } catch { /* ignore */ }
+      "FROM summaries WHERE conversation_id = ? ORDER BY earliest_at ASC");
+    if (!stmt) return [];
+    const rows = stmt.all(conversationId) as Array<Record<string, unknown>>;
     return (rows ?? []).map((r: any) => ({
       summaryId: r.summary_id as string,
       content: r.content as string,
@@ -280,18 +305,14 @@ export function getConversationSummaries(conversationId: number): Array<{
  * Returns the number of uncompressed (pending compaction) messages.
  */
 export function getUncompressedMessageCount(conversationId: number): number {
+  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally
+  // P0-2 H-1: 复用单例 DB + 预编译 statement（不再每次 open/close）
   try {
-    const db = getDb();
-    if (!db) return -1;
-
-    // Count messages whose created_at is NOT within any summary range
-    const row = db.prepare(
+    const stmt = getStmt('getUncompressedMessageCount',
       "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ? " +
-      "AND created_at > (SELECT COALESCE(MAX(latest_at),0) FROM summaries WHERE conversation_id = ?)",
-    ).get(conversationId, conversationId);
-
-    try { db.close(); } catch { /* ignore */ }
-
+      "AND created_at > (SELECT COALESCE(MAX(latest_at),0) FROM summaries WHERE conversation_id = ?)");
+    if (!stmt) return -1;
+    const row = stmt.get(conversationId, conversationId) as { cnt: number } | undefined;
     return row?.cnt ?? 0;
   } catch {
     return -1;
@@ -303,25 +324,19 @@ export function getUncompressedMessageCount(conversationId: number): number {
  * Returns true if there appear to be uncompressed messages.
  */
 export function hasUncompressedMessages(conversationId: number): boolean {
+  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally
+  // P0-2 H-1: 复用单例 DB + 预编译 statement，用 2 个独立 statement 分别统计
   try {
-    const db = getDb();
-    if (!db) return true;
-    
-    // Count total tokens in raw messages for this conversation
-    const msgRow = db.prepare(
-      "SELECT COALESCE(SUM(token_count), 0) as t FROM messages WHERE conversation_id = ?",
-    ).get(conversationId) as { t: number } | undefined;
+    const msgStmt = getStmt('hasUncompressedMessages_msgTokens',
+      "SELECT COALESCE(SUM(token_count), 0) as t FROM messages WHERE conversation_id = ?");
+    if (!msgStmt) return true;
+    const msgRow = msgStmt.get(conversationId) as { t: number } | undefined;
     const msgTokens = msgRow?.t ?? 0;
-    
-    // Count total tokens in summaries for this conversation
-    const sumRow = db.prepare(
-      "SELECT COALESCE(SUM(token_count), 0) as t FROM summaries WHERE conversation_id = ?",
-    ).get(conversationId) as { t: number } | undefined;
+    const sumStmt = getStmt('hasUncompressedMessages_sumTokens',
+      "SELECT COALESCE(SUM(token_count), 0) as t FROM summaries WHERE conversation_id = ?");
+    if (!sumStmt) return true;
+    const sumRow = sumStmt.get(conversationId) as { t: number } | undefined;
     const summaryTokens = sumRow?.t ?? 0;
-    
-    try { db.close(); } catch { /* ignore */ }
-    
-    // If summary tokens are a small fraction of message tokens, there's likely uncompressed content
     return msgTokens > 0 && summaryTokens < msgTokens * 0.3;
   } catch {
     return true;
@@ -352,8 +367,5 @@ export function trimSummariesToBudget(
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
-
-export const __test__ = {
-  LCM_DB_PATH,
-  getDb,
-};
+// P3-8: 原 __test__ 导出（LCM_DB_PATH, getDb）无任何测试引用，属死代码，已收敛移除。
+// 如未来测试需要内部钩子，应通过 vitest 的 vi.mock 或独立 test-utils 模块注入，而非污染生产导出。
