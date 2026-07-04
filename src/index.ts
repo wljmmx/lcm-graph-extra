@@ -37,6 +37,7 @@ import {
   shouldTriggerCompact,
   getRetrievalLimitsForTier,
   getMaxContextCharsForTier,
+  detectScenarioAndAdjustLimits,
   getConversationId,
   writeCompactionDebt,
   estimateTokensFromMessages,
@@ -46,6 +47,58 @@ import {
   getUncompressedMessageCount,
   trimSummariesToBudget,
 } from "./lcm-bridge.js";
+
+// ---------------------------------------------------------------------------
+// S-9': 关键词提取（轻量版）
+// ---------------------------------------------------------------------------
+
+const TOPIC_STOP_WORDS = new Set([
+  'the','a','an','is','are','was','were','be','been','being',
+  'have','has','had','do','does','did','will','would','could','should',
+  'may','might','can','this','that','these','those','it','its','for',
+  'with','from','into','through','during','before','after','by','about',
+  'and','or','but','not','no','yes','so','if','then','else','when',
+  'what','which','who','whom','how','why','where','there','here',
+  '的','了','在','是','我','有','和','就','不','人','都','一','一个','上',
+  '也','很','到','说','要','去','你','会','着','没有','看','好','自己','这',
+  '他','她','它','们','那','些','什么','怎么','吗','呢','吧','啊','哦',
+  'please','just','need','want','like','get','make','use','using','used',
+  'help','know','think','还是','可以','已经','现在','因为','所以','但是',
+]);
+
+/**
+ * S-9': 从消息列表中提取 top-N 关键词，用于话题漂移检测。
+ * 简单的词频统计 + 停用词过滤，零延迟。
+ */
+function extractTopKeywords(messages: any[], topN: number = 15): string[] {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const freq = new Map<string, number>();
+  for (const msg of messages) {
+    const content = msg?.content;
+    let text = '';
+    if (typeof content === 'string') text = content;
+    else if (Array.isArray(content)) {
+      text = content.map((c: any) => typeof c === 'string' ? c : c?.text ?? '').join(' ');
+    }
+    if (!text) continue;
+    const tokens = text
+      .replace(/[\s,;.，；。.、:：!?！？\\/\\[\\](){}|~`@#$%^&*=+<>-]+/g, ' ')
+      .split(/\s+/)
+      .filter((t) => {
+        const w = t.toLowerCase();
+        return !TOPIC_STOP_WORDS.has(w) && w.length >= 2;
+      });
+    for (const tok of tokens) {
+      const w = tok.toLowerCase();
+      freq.set(w, (freq.get(w) || 0) + 1);
+    }
+  }
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([word]) => word);
+}
+
 /** Simple string hash for cross-turn dedup */
 function quickHash(s: string): string {
   let h = 0;
@@ -61,6 +114,20 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 // P0-1: 静态导入经验提取函数，供 afterTurn 中直接调用。
 import { detectExperienceTrigger, extractRawExperience } from './experience/index.js';
+import { UserProfileTracker } from './experience/user-profile.js';
+
+// S-7': 用户画像轻量版 —— 全局单例，带时间衰减
+// 用于经验搜索的个性化加权，不持久化（重启重置）
+const userProfile = new UserProfileTracker();
+
+// N-4: 健康指标收集器 —— 全局单例
+import { healthMetrics } from './health-metrics.js';
+
+// G-8: 记录最近一轮 assemble 返回的经验 ID + query，供 afterTurn 异步验证
+let lastAssembleExpIds: Array<{ id: string; summary: string; query: string }> = [];
+
+// R-2: 成本感知级联管理器 —— 全局单例
+import { cascadeManager, CascadeManager } from './cascade-manager.js';
 
 function applyTotalControl(
   injected: string,
@@ -635,6 +702,7 @@ function getSessionDedup(sessionKey: string) {
               medium: { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
               high: { qmd: 1, graph: 1, exp: 0 },
             });
+
             maxContextChars = getMaxContextCharsForTier(tier, {
               low: resolvedCtx.maxContextChars.low,
               medium: resolvedCtx.maxContextChars.medium,
@@ -749,7 +817,7 @@ function getSessionDedup(sessionKey: string) {
                     );
                   }
                 } catch (err) {
-                  logger?.warn?.('High pressure compact failed, writing debt', err);
+                  logger?.warn?.('High pressure compact failed, writing debt', { err: serializeError(err) });
                   writeCompactionDebt(
                     conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                     'high_pressure_compact_failed',
@@ -823,6 +891,17 @@ function getSessionDedup(sessionKey: string) {
           // Per-module latency tracking
           let l2_ms = 0, l3_ms = 0, l4_ms = 0;
 
+          // R-5': 动态混合简化 —— 按 scenario 调整 retrievalLimits 比例
+          // 不同场景对各层（QMD/Graph/Experience）依赖程度不同：
+          //   - bug-fix/config-debug/performance-opt: QMD 权重高
+          //   - feature-dev/refactor: Graph 权重稍高
+          //   - code-review/security-audit: Experience 权重高
+          const scenarioAdjust = detectScenarioAndAdjustLimits(qmdQuery, retrievalLimits);
+          retrievalLimits = scenarioAdjust.limits;
+          if (scenarioAdjust.scenario) {
+            logger?.debug?.("R-5 scenario-adjusted retrieval limits", { scenario: scenarioAdjust.scenario, limits: retrievalLimits });
+          }
+
           try {
             const results = await Promise.all([
               // L2: qmd search (always executed — core memory retrieval, not tool-gated)
@@ -881,7 +960,33 @@ function getSessionDedup(sessionKey: string) {
                     return { results: [], ms: 0 };
                   }
                   if (retrievalLimits.exp === 0) return { results: [], ms: 0 };
-                  const res = await withCircuitBreaker("neo4j", "L4 expStore.search", () => expStore.searchRelevant(0.6, retrievalLimits.exp));
+                  // S-6': 使用 searchByQuery 以支持项目名软过滤
+                  // 从 query 中提取 projects 用于场景隔离
+                  const expProjects: string[] = (() => {
+                    try {
+                      // 简单的路径/项目名提取（避免在 assemble 主路径引入完整 context-inference）
+                      const found = new Set<string>();
+                      const pathRe = /(?:^|[\s(,.;:!?'"\[])([a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9._-]+)+)/g;
+                      let m: RegExpExecArray | null;
+                      while ((m = pathRe.exec(qmdQuery)) !== null) {
+                        const parts = m[1].split('/').filter(Boolean);
+                        if (parts.length >= 2) {
+                          if (parts[0].startsWith('@')) found.add(parts[0] + '/' + parts[1]);
+                          else found.add(parts[0]);
+                        }
+                      }
+                      const stops = new Set(['src','lib','dist','build','test','tests','node_modules','public','assets','components','pages','app','apps','packages','config','scripts','utils','hooks','api','docs','styles']);
+                      return [...found].map(s => s.toLowerCase()).filter(s => !stops.has(s) && s.length >= 2).slice(0, 5);
+                    } catch { return []; }
+                  })();
+                  const res = await withCircuitBreaker("neo4j", "L4 expStore.search", () =>
+                    expStore.searchByQuery({
+                      query: qmdQuery,
+                      projects: expProjects,
+                      minScore: 0.6,
+                      limit: retrievalLimits.exp,
+                    }),
+                  );
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.("L4 experience search failed", { err: (e as Error).message });
@@ -905,7 +1010,48 @@ function getSessionDedup(sessionKey: string) {
             // S1-1: Use Merger for entity-level cross-engine dedup (replaces hand-written ID dedup)
             try {
               if (merger && Array.isArray(rawQmd) && Array.isArray(rawGraph)) {
-                const merged = merger.merge(rawQmd, rawGraph);
+                let merged = merger.merge(rawQmd, rawGraph);
+
+                // N-2: Merger LLM 重排 —— 低压力 tier（token 充裕）时启用，
+                // 中高压跳过以避免 LLM 调用延迟影响响应速度。
+                // 复用 distillation 的 LLM 配置（Ollama 本地模型优先，避免 GPU 切换）。
+                if (tier === 'low' && merged.length >= 3 && typeof merger.llmRerank === 'function') {
+                  try {
+                    const runtimeLlm = api.runtimeContext?.llm;
+                    let llmCfg: { model: string; apiKey: string; baseURL: string } | null = null;
+                    if (runtimeLlm?.model) {
+                      llmCfg = {
+                        model: runtimeLlm.model,
+                        apiKey: runtimeLlm.apiKey || '',
+                        baseURL: runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1',
+                      };
+                    } else {
+                      const dLlm = (api.config as any)?.distillationLlm;
+                      if (dLlm?.provider === 'openclaw_hooks') {
+                        llmCfg = { model: dLlm.model || 'ollama/qwen3.6:27b', apiKey: '', baseURL: 'http://127.0.0.1:18789/v1' };
+                      }
+                    }
+                    if (llmCfg) {
+                      const llmFn = async (prompt: string): Promise<string> => {
+                        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                        if (llmCfg!.apiKey) headers['Authorization'] = 'Bearer ' + llmCfg!.apiKey;
+                        const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
+                          method: 'POST', headers,
+                          body: JSON.stringify({ model: llmCfg!.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 }),
+                          signal: AbortSignal.timeout(8000),
+                        });
+                        if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+                        const data: any = await resp.json();
+                        return data?.choices?.[0]?.message?.content || '';
+                      };
+                      const reranked = await merger.llmRerank(merged, qmdQuery, llmFn);
+                      if (reranked.length > 0) merged = reranked;
+                    }
+                  } catch (rerankErr) {
+                    logger?.debug?.("Merger LLM rerank skipped/failed, using entity sort", { err: String(rerankErr) });
+                  }
+                }
+
                 qmdResults = merged;
                 graphResults = merged;  // same entity-deduped results for both
               } else {
@@ -972,6 +1118,112 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
   has_graph_tool: hasGraphTool,
   has_experience_tool: hasExperienceTool,
 });
+          // N-4: 记录 assemble 性能指标到健康收集器
+          try {
+            healthMetrics.recordAssemble(tier, Date.now() - assembleStart, l2_ms, l3_ms, l4_ms);
+          } catch { /* non-fatal */ }
+
+          // R-2: 成本感知级联 —— Tier 1 置信度评估 + Thompson 采样重排
+          // 仅在 low tier（token 充裕）时启用，避免中高压下的额外延迟
+          try {
+            // BUG 修复: qmdResults 与 graphResults 在 merger 路径下可能指向同一引用，
+            // 直接展开会导致 allResults 重复计数、置信度系统性偏高。
+            // 用 Set 按 id 去重（无 id 的项保留，按内容哈希区分）。
+            const seenIds = new Set<string>();
+            const deduped: any[] = [];
+            const pushUnique = (arr: any) => {
+              if (!Array.isArray(arr)) return;
+              for (const r of arr) {
+                const rid = r?.id ?? r?.metadata?.nodeId ?? r?.experience?.id;
+                const key = rid ? `id:${rid}` : `obj:${(r?.content ?? r?.summary ?? '').slice(0, 60)}`;
+                if (seenIds.has(key)) continue;
+                seenIds.add(key);
+                deduped.push(r);
+              }
+            };
+            pushUnique(qmdResults);
+            pushUnique(graphResults);
+            pushUnique(expResults);
+            const allResults = deduped;
+
+            if (allResults.length > 0) {
+              const confidence = cascadeManager.evaluateTier1(
+                allResults.map((r: any) => ({
+                  score: r?.score ?? r?.pagerank,
+                  pagerank: r?.pagerank ?? r?.experience?.relevanceScore,
+                  matchCount: r?.matchCount ?? r?.experience?.matchCount,
+                  content: r?.content ?? r?.summary ?? r?.experience?.summary,
+                  type: r?.type ?? r?.experience?.type,
+                })),
+              );
+
+              // 低置信度时用 Thompson 采样重排，引入探索性
+              if (confidence.needsTier2 && tier === 'low') {
+                // 对经验结果应用 Thompson 重排（探索新经验）
+                const scenarioTag = scenarioAdjust?.scenario ?? 'default';
+                const rerankedIds = cascadeManager.thompsonRerank(
+                  expResults.map((e: any) => ({
+                    id: e.experience?.id,
+                    matchCount: e.experience?.matchCount,
+                    score: e.score,
+                  })),
+                  scenarioTag,
+                );
+                // 用 id → 原对象 Map 反查，避免 duplicate/undefined id 导致 find 塌缩
+                const expById = new Map<string, any>();
+                for (const e of expResults) {
+                  const eid = e?.experience?.id;
+                  if (eid && !expById.has(eid)) expById.set(eid, e);
+                }
+                expResults = rerankedIds
+                  .map((idx: any) => idx.id ? expById.get(idx.id) : undefined)
+                  .filter((e: any): e is typeof expResults[number] => Boolean(e)) as typeof expResults;
+
+                logger?.debug?.("R-2 cascade: low confidence, Thompson rerank applied", {
+                  tier1Score: confidence.tier1Score.toFixed(3),
+                  needsTier3: confidence.needsTier3,
+                  hasFactual: confidence.hasFactualClaim,
+                });
+
+                // 异步 Tier 2: LLM 判断（不阻塞主路径）
+                const tier2Query = qmdQuery;
+                const tier2Scenario = scenarioTag;
+                const tier2Results = [...allResults].slice(0, 5);
+                (async () => {
+                  try {
+                    const llm = resolveDistillationLlm(api);
+                    if (!llm?.model) return;
+                    const llmFn = async (prompt: string): Promise<string> => {
+                      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                      if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
+                      const resp = await fetch(llm.baseURL + '/chat/completions', {
+                        method: 'POST', headers,
+                        body: JSON.stringify({ model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 }),
+                        signal: AbortSignal.timeout(8000),
+                      });
+                      if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+                      const data: any = await resp.json();
+                      return data?.choices?.[0]?.message?.content || '';
+                    };
+                    const judgments = await cascadeManager.evaluateTier2(tier2Query, tier2Results, llmFn);
+                    // BUG 修复: armKey 必须用 makeArmKey 构造，与 thompsonRerank 保持一致
+                    for (const j of judgments) {
+                      if (j.id) {
+                        const armKey = CascadeManager.makeArmKey(tier2Scenario, j.id);
+                        cascadeManager.recordFeedback(armKey, j.relevant);
+                      }
+                    }
+                    if (judgments.length > 0) {
+                      logger?.debug?.("R-2 Tier 2 LLM judgment completed", { judged: judgments.length, relevant: judgments.filter(j => j.relevant).length });
+                    }
+                  } catch { /* Tier 2 failed, non-fatal */ }
+                })().catch(() => { /* swallowed */ });
+              }
+            }
+          } catch (r2Err) {
+            logger?.debug?.("R-2 cascade evaluation skipped", { err: String(r2Err) });
+          }
+
           // ---- Merge results ----
           // Session-isolated cross-round dedup (24-round window)
           const sessionKey = typeof params.sessionKey === 'string'
@@ -1018,9 +1270,37 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
           // Layer 4: Experience
           if (expResults.length > 0) {
-            const expBody = expResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
+            // S-7': 用户画像轻量版 —— 个性化加权重排
+            // 对经验搜索结果按用户偏好（techStack/scenario）小幅 boost，
+            // boost 系数 1.0-1.3，避免过度偏置。
+            let personalizedResults = expResults;
+            try {
+              const topTech = userProfile.getTopTechStack(3);
+              const topScenario = userProfile.getTopScenario(2);
+              if (topTech.length > 0 || topScenario.length > 0) {
+                personalizedResults = [...expResults]
+                  .map((e: any) => {
+                    const boost = userProfile.computeBoost(e.experience?.tags);
+                    return { ...e, score: (e.score ?? 0.5) * boost, _personalizedBoost: boost };
+                  })
+                  .sort((a: any, b: any) => b.score - a.score);
+                const boostedCount = personalizedResults.filter((r: any) => (r._personalizedBoost ?? 1) > 1.0).length;
+                if (boostedCount > 0) {
+                  logger?.debug?.("S-7 personalized experience rerank", { boosted: boostedCount, topTech: topTech.map(t => t.name), topScenario: topScenario.map(s => s.name) });
+                }
+              }
+            } catch { /* non-fatal */ }
+
+            const expBody = personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
             addSection('## \ud83d\udca1 经验总结', expBody, 5);
-            for (const e of expResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
+            for (const e of personalizedResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
+
+            // G-8: 记录本轮 assemble 返回的经验，供 afterTurn 异步验证
+            lastAssembleExpIds = personalizedResults.map((e: any) => ({
+              id: e.experience.id,
+              summary: e.experience.summary ?? '',
+              query: qmdQuery,
+            }));
           }
 
           // Layer 3: Neo4j knowledge graph
@@ -1359,6 +1639,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             logger?.debug?.(`[afterTurn] skipped (assistant content too short, ${qualityFilterMs}ms total)`);
             return;
           }
+
+          // S-7': 用户画像轻量版 —— 从用户消息中提取偏好信号
+          // 用于后续经验搜索的个性化加权（零延迟，纯规则）
+          try {
+            userProfile.observe(userContent);
+          } catch { /* non-fatal */ }
           // Skip if content is mostly whitespace or repetitive
           const wordRatio = (userContent.match(/[\w]+/g) || []).length / userContent.trim().length;
           if (wordRatio < 0.3) return;
@@ -1447,6 +1733,101 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             } catch (expErr) {
               logger?.warn?.('[afterTurn] experience extraction pipeline failed (non-fatal)', { err: String(expErr) });
             }
+          }
+
+          // G-8: LLM 异步验证回路 —— 评估上一轮 assemble 返回的经验是否被有效使用
+          // 通过比较用户查询与经验内容的语义相关性，判断召回是否有效。
+          // 成功 → relevanceScore +0.05, 失败 → relevanceScore -0.05（不低于 0.3）
+          // 不主动询问用户，纯 LLM 异步判断，权重 ≤ 0.3（避免过度偏置）。
+          if (lastAssembleExpIds.length > 0) {
+            const expIdsToValidate = [...lastAssembleExpIds];
+            lastAssembleExpIds = []; // 清空，避免重复验证
+            (async () => {
+              try {
+                // 防御：异步执行期间 expStore 可能已被 dispose 置 null
+                const store = expStore;
+                if (!store) return;
+                const llm = resolveDistillationLlm(api);
+                if (!llm?.model) return; // 无 LLM 配置则跳过
+
+                // 只验证前 3 条，避免过多 LLM 调用
+                for (const exp of expIdsToValidate.slice(0, 3)) {
+                  try {
+                    // 用 LLM 判断经验与查询的相关性
+                    const prompt = `Rate the relevance of this experience to the user's query on a scale of 0 to 1.\nQuery: "${exp.query.slice(0, 500)}"\nExperience: "${exp.summary.slice(0, 300)}"\nReturn ONLY a number between 0 and 1 (e.g., 0.8). 1 means highly relevant, 0 means completely irrelevant.`;
+                    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                    if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
+                    const resp = await fetch(llm.baseURL + '/chat/completions', {
+                      method: 'POST', headers,
+                      body: JSON.stringify({ model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 10 }),
+                      signal: AbortSignal.timeout(5000),
+                    });
+                    if (!resp.ok) continue;
+                    const data: any = await resp.json();
+                    const text = data?.choices?.[0]?.message?.content?.trim() || '';
+                    const score = parseFloat(text);
+                    if (isNaN(score) || score < 0 || score > 1) continue;
+
+                    // 相关性 ≥ 0.5 视为有效召回 → +0.05
+                    // 相关性 < 0.5 视为无效召回 → -0.05
+                    const delta = score >= 0.5 ? 0.05 : -0.05;
+                    await store.updateQualityScore(exp.id, score, delta);
+                    logger?.debug?.("G-8 quality validation", { id: exp.id, score, delta });
+                  } catch { /* skip individual validation */ }
+                }
+              } catch (g8Err) {
+                logger?.debug?.("[afterTurn] G-8 validation loop skipped", { err: String(g8Err) });
+              }
+            })().catch(() => { /* swallowed */ });
+          }
+
+          // S-9': 情节缓冲扩展 —— 语义边界检测 → 触发 compact
+          // 基于最近消息关键词与上一周期关键词的 Jaccard 相似度判断话题漂移。
+          // 话题漂移超过阈值 + 消息数达到最小周期 → 异步触发 compact。
+          // 零延迟：纯规则关键词提取，不调用 LLM。
+          try {
+            const _sessionId = params.sessionId ?? params.session_id ?? '';
+            if (_sessionId && _losslessClawAdapter?.connected && typeof _losslessClawAdapter.compact === 'function') {
+              const allMsgs = params.messages ?? [];
+              const preCount = params.prePromptMessageCount ?? 0;
+              const uncompressedCount = allMsgs.length - preCount;
+              const MIN_EPISODE_MSGS = 12; // 至少 12 条消息才考虑话题边界触发
+              const TOPIC_SHIFT_THRESHOLD = 0.35; // Jaccard < 0.35 视为话题漂移
+
+              if (uncompressedCount >= MIN_EPISODE_MSGS) {
+                const recentKeywords = extractTopKeywords(
+                  allMsgs.slice(-Math.floor(uncompressedCount * 0.3)),
+                  15,
+                );
+                const priorKeywords = extractTopKeywords(
+                  allMsgs.slice(preCount, preCount + Math.floor(uncompressedCount * 0.3)),
+                  15,
+                );
+                if (recentKeywords.length >= 5 && priorKeywords.length >= 5) {
+                  const intersection = recentKeywords.filter((k) => priorKeywords.includes(k));
+                  const union = new Set([...recentKeywords, ...priorKeywords]);
+                  const jaccard = union.size > 0 ? intersection.length / union.size : 1;
+                  if (jaccard < TOPIC_SHIFT_THRESHOLD) {
+                    logger?.info?.("[afterTurn] S-9 topic shift detected, triggering async compact", {
+                      jaccard: jaccard.toFixed(3),
+                      recentTop: recentKeywords.slice(0, 5),
+                      priorTop: priorKeywords.slice(0, 5),
+                      uncompressedCount,
+                    });
+                    const sk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
+                    _losslessClawAdapter.compact({
+                      sessionId: getConversationId(sk) ?? _sessionId,
+                      sessionKey: sk,
+                      sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                      force: false,
+                      reason: 'topic-shift',
+                    }).catch(() => {});
+                  }
+                }
+              }
+            }
+          } catch (topicErr) {
+            logger?.debug?.("[afterTurn] S-9 topic shift detection skipped", { err: String(topicErr) });
           }
         // Track response tokens (non-blocking)
         try {
@@ -1694,13 +2075,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // Heartbeat - periodic async maintenance (every 5 minutes)
     //   1. Compaction pressure check + predictive pre-compaction
     //   2. qmd MCP health check
-    //   3. Experience distillation (every ~2h)
+    //   3. Experience distillation (every ~2h) + TTL cleanup (every ~24h)
     //   4. Neo4j TTL weight decay + expired cleanup (every ~24h)
     //   5. Debt table reconcile — orphan/tombstone cleanup (every ~24h)
     // -------------------------------------------------------------------
     const HB_INTERVAL_MS = DEFAULTS.heartbeat.intervalMs;
     let hbTimer: ReturnType<typeof setInterval> | ReturnType<typeof setTimeout> | null = null;
     let lastDistillationRun = 0;
+    let lastExperienceTtlRun = 0;  // N-3: EXPERIENCE TTL 清理节流（默认 24h）
     let hbDedupCleanupCounter = 0;  // Clean dedup cache every 15 heartbeats (~75min)
     // P0-2: TTL 清理节流。默认 24h 一次（与 DEFAULT_TTL_CONFIG.cleanupIntervalHours 对齐）。
     let lastTtlRun = 0;
@@ -1728,12 +2110,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
     async function distillOne(raw: { id: string; source: string; context: string; detail: string }, llm: { model: string; apiKey: string; baseURL: string }): Promise<any | null> {
       // P1-4: prompt 增加 tags 字段，让 LLM 同时产出多维度标签（scenario/techStack/severity/freeTags）。
-      // 修复前蒸馏不产生任何 tags，saveDistilled 的 tags 参数恒 undefined，标签检索无数据可用。
+      // S-11': Zettelkasten 增强 — 增加 relatedConcepts 字段，提取 2-5 个相关概念/关键词，
+      // 用于后续在经验网络中建立 RELATED_TO 边，形成知识图谱连接。
       const prompt = 'Summarize the following experience into a concise lesson.' + '\nSource: ' + raw.source + '\nContext: ' + raw.context + '\nDetail: ' + raw.detail
         + '\nReturn a JSON with: title, summary, type (lesson|failure|correction|fix|best_practice), relevanceScore (0-1),'
         + ' scenario (array, subset of: bug-fix|feature-dev|code-review|config-debug|deployment|performance-opt|security-audit|refactor),'
         + ' techStack (array, subset of: frontend|backend|devops|database|mobile|ai-ml|infrastructure|general),'
-        + ' severity (one of: critical|major|minor), freeTags (array of short strings).'
+        + ' severity (one of: critical|major|minor), freeTags (array of short strings),'
+        + ' relatedConcepts (array of 2-5 short keywords/phrases representing closely related topics or concepts for cross-linking).'
         + ' Return ONLY JSON.';
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 15_000);
@@ -1771,10 +2155,20 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               freeTags,
             }
           : undefined;
+        // S-11': 提取 relatedConcepts（Zettelkasten 关联概念）
+        let relatedConcepts: string[] | undefined;
+        if (Array.isArray(parsed.relatedConcepts)) {
+          const rc = parsed.relatedConcepts
+            .map(String)
+            .filter((s: string) => s.trim().length > 0 && s.length <= 50)
+            .slice(0, 5);
+          relatedConcepts = rc.length > 0 ? rc : undefined;
+        }
+
         // 校验 relevanceScore 范围 [0,1]，越界回退 0.5
         let rs = typeof parsed.relevanceScore === 'number' ? parsed.relevanceScore : 0.5;
         if (!isFinite(rs) || rs < 0) rs = 0; else if (rs > 1) rs = 1;
-        return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: rs, createdAt: new Date(), matchCount: 0, tags };
+        return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: rs, createdAt: new Date(), matchCount: 0, tags, relatedConcepts };
       } catch { clearTimeout(timer); return null; }
     }
 
@@ -1787,7 +2181,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         for (const raw of pending) {
           try {
             const distilled = await distillOne(raw, llm);
-            if (distilled) { await expStoreRef.saveDistilled(distilled); await expStoreRef.deleteById(raw.id); }
+            if (distilled) {
+              await expStoreRef.saveDistilled(distilled);
+              await expStoreRef.deleteById(raw.id);
+
+              // S-11': Zettelkasten evolve — 建立 RELATED_TO 关联
+              // 用 LLM 提取的 relatedConcepts 搜索已有经验并建立关联，
+              // 让经验网络自组织生长（类似卡片盒笔记法）。
+              const concepts: string[] | undefined = distilled.relatedConcepts;
+              if (concepts?.length && typeof expStoreRef.linkRelated === 'function') {
+                try {
+                  const linked = await expStoreRef.linkRelated(distilled.id, concepts, 3);
+                  if (linked > 0) {
+                    log?.debug?.("distillation: zettelkasten evolve linked", { id: distilled.id, linked, concepts: concepts.slice(0, 3) });
+                  }
+                } catch (linkErr) {
+                  log?.debug?.("distillation: zettelkasten evolve skipped", { err: String(linkErr) });
+                }
+              }
+            }
           } catch (e) { log?.warn?.("distillation item failed", { err: String(e) }); }
         }
       } catch (e) { log?.warn?.("distillation batch failed", { err: String(e) }); }
@@ -1796,6 +2208,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     async function runHeartbeat() {
       if (!initialized) return;
       const t0 = Date.now();
+      // N-4: 提升到函数作用域，供 health metrics 收集使用
+      let pendingMessages = 0;
+      let summaryFragments = 0;
+      let maxTokenRatio = 0;
       try {
         // --- 1. Compaction pressure check (scan .lossless/ directories) ---
         // P2-4 M-8: 原 readdirSync/readFileSync/existsSync 同步阻塞事件循环；
@@ -1814,7 +2230,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             const losslessDir = join(wsDir, ".lossless");
 
             // pending messages count + cache parsed session data for reuse
-            let pendingMessages = 0;
+            pendingMessages = 0;
             const sessionDir = join(losslessDir, "sessions");
             // sessionDataCache: 缓存 sessionDir 文件名与解析结果，超限写 debt 分支直接复用
             const sessionDataCache: { file: string; data: any }[] = [];
@@ -1830,14 +2246,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
 
             // summary fragments count
-            let summaryFragments = 0;
+            summaryFragments = 0;
             const summaryDir = join(losslessDir, "summaries");
             if (await dirExists(summaryDir)) {
               summaryFragments = (await readdir(summaryDir)).filter((f) => f.endsWith(".json")).length;
             }
 
             // token ratio from debt files
-            let maxTokenRatio = 0;
+            maxTokenRatio = 0;
             const debtDir = join(losslessDir, "debt");
             if (await dirExists(debtDir)) {
               const debtFiles = (await readdir(debtDir)).filter((f) => f.endsWith(".json"));
@@ -1899,6 +2315,34 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               logger?.warn?.("distillation batch failed", { err: String(e) });
             });
           }
+
+          // --- N-3: EXPERIENCE TTL cleanup (every ~24h) ---
+          // 检索时已按 expiresAt 过滤，但过期节点仍留在图中占用空间。
+          // 与蒸馏共享 24h 节流，批量删除过期 EXPERIENCE 节点。
+          const expTtlIntervalMs = api.pluginConfig?.experienceTtlIntervalMs ?? 24 * 60 * 60 * 1000;
+          const expTtlElapsed = Date.now() - lastExperienceTtlRun;
+          if (expTtlElapsed >= expTtlIntervalMs && typeof expStore.cleanupExpired === "function") {
+            lastExperienceTtlRun = Date.now();
+            (async () => {
+              try {
+                let totalDeleted = 0;
+                let round = 0;
+                // 分批删除，每次最多 100 个，最多 10 轮（防止单次心跳删除过多）
+                while (round < 10) {
+                  const deleted = await expStore.cleanupExpired(100);
+                  if (deleted === 0) break;
+                  totalDeleted += deleted;
+                  round++;
+                  if (deleted < 100) break;
+                }
+                if (totalDeleted > 0) {
+                  logger?.info?.(`heartbeat: expired EXPERIENCE nodes cleaned up (deleted=${totalDeleted}, rounds=${round})`);
+                }
+              } catch (ttlErr) {
+                logger?.warn?.("heartbeat: experience TTL cleanup failed (non-fatal)", { err: String(ttlErr) });
+              }
+            })().catch(() => { /* swallowed */ });
+          }
         }
 
         // --- 4. P0-2: Neo4j-backed TTL weight decay + expired cleanup (every ~24h) ---
@@ -1945,6 +2389,23 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         }
 
         try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
+
+        // N-4: 收集健康指标快照
+        try {
+          const { getHealthSnapshot } = await import('./circuit-breaker.js');
+          const cbStates = getHealthSnapshot();
+          healthMetrics.collect({
+            pendingMessages: (pendingMessages ?? 0) as number,
+            summaryFragments: (summaryFragments ?? 0) as number,
+            maxTokenRatio: (maxTokenRatio ?? 0) as number,
+            cbLcmAvailable: cbStates?.lcm?.available ?? true,
+            cbQmdAvailable: cbStates?.qmd?.available ?? true,
+            cbNeo4jAvailable: cbStates?.neo4j?.available ?? true,
+            cbLcmFailures: cbStates?.lcm?.failures ?? 0,
+            cbQmdFailures: cbStates?.qmd?.failures ?? 0,
+            cbNeo4jFailures: cbStates?.neo4j?.failures ?? 0,
+          });
+        } catch { /* health metrics collection failed, non-fatal */ }
 
         // Periodic dedup cache cleanup (every 15 heartbeats)
         hbDedupCleanupCounter++;

@@ -66,6 +66,7 @@ export interface DistilledExperience {
   createdAt: Date;
   expiresAt?: Date;              // TTL
   matchCount: number;            // 被命中间接召回次数
+  relatedIds?: string[];         // S-11': Zettelkasten 关联 — 相关经验 ID 列表
 }
 
 /** Neo4j 存储格式 */
@@ -81,6 +82,7 @@ export interface ExperienceQueryOptions {
   scenarioTags?: ScenarioTag[];  // 场景过滤
   techStackTags?: TechStackTag[];// 技术栈过滤
   freeTags?: string[];              // 自由标签（开放词汇匹配）
+  projects?: string[];          // S-6': 项目名过滤（软过滤，命中任一即可）
   minScore?: number;             // 最低相关性分数
   limit?: number;                // 返回上限
 }

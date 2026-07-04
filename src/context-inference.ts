@@ -69,6 +69,77 @@ export function extractFreeTags(query: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Project name extraction — 从路径/代码引用中推断项目名
+// ---------------------------------------------------------------------------
+
+/**
+ * S-6': 从 query 中推断提及的项目名。
+ *
+ * 匹配规则（按优先级）：
+ * 1. 路径模式：例如 "my-project/src/index.ts"、"@org/lib/api.ts"
+ * 2. 项目引用模式：例如 "project foo"、"in bar project"、"repo: baz"
+ * 3. 仓库 URL：例如 "https://github.com/org/repo"
+ *
+ * 不新建 sceneId 体系，只用于搜索过滤（soft 模式）。
+ */
+export function extractProjects(query: string): string[] {
+  if (!query || !query.trim()) return [];
+  const found = new Set<string>();
+
+  // 1. 路径模式：以 / 或 \ 分隔的路径，第一段非空视为项目名
+  // 匹配如 "proj/file.py"、"@scope/pkg/index.ts"、"path/to/file.js"
+  const pathPattern = /(?:^|[\s(,.;:!?'"\[])([a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9._-]+)+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = pathPattern.exec(query)) !== null) {
+    const fullPath = m[1];
+    const parts = fullPath.split('/').filter(Boolean);
+    if (parts.length >= 2) {
+      // 如果第一部分像 @scope 包名，则取前两部分
+      if (parts[0].startsWith('@') && parts.length >= 2) {
+        found.add(parts[0] + '/' + parts[1]);
+      } else {
+        found.add(parts[0]);
+      }
+    }
+  }
+
+  // 2. 明确的项目/仓库引用关键词
+  const explicitPatterns = [
+    /(?:project|repo|repository|package|module|app)\s+(?:name\s*[:=]?\s*)?['"]?([a-zA-Z0-9_@\/-]{2,64})['"]?/gi,
+    /(?:in|for|of|from)\s+(?:the\s+)?([a-zA-Z0-9_@\/-]{2,64})\s+(?:project|repo|repository|codebase)/gi,
+    /['"]([a-zA-Z0-9_@\/-]{2,64})['"]\s*(?:project|repo)/gi,
+  ];
+  for (const pat of explicitPatterns) {
+    while ((m = pat.exec(query)) !== null) {
+      const name = m[1].toLowerCase();
+      if (name.length >= 2 && name.length <= 64) {
+        found.add(name);
+      }
+    }
+  }
+
+  // 3. GitHub/GitLab 仓库 URL
+  const urlPattern = /(?:github\.com|gitlab\.com)\/([\w.-]+)\/([\w.-]+)/gi;
+  while ((m = urlPattern.exec(query)) !== null) {
+    found.add(m[1] + '/' + m[2]);
+  }
+
+  // 过滤掉明显的停用词（常见路径前缀名）
+  const STOP_PROJECTS = new Set([
+    'src', 'lib', 'dist', 'build', 'test', 'tests', 'node_modules',
+    'public', 'assets', 'components', 'pages', 'app', 'apps', 'packages',
+    'config', 'scripts', 'utils', 'hooks', 'api', 'docs', 'styles',
+  ]);
+
+  const result = [...found]
+    .map((p) => p.toLowerCase())
+    .filter((p) => !STOP_PROJECTS.has(p) && p.length >= 2 && p.length <= 80)
+    .slice(0, 5);
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Main inference function — 使用 TagRegistry 动态匹配
 // ---------------------------------------------------------------------------
 
@@ -110,7 +181,10 @@ export function inferQueryContext(
   // 2. 提取自由标签（开放词汇，不依赖 registry）
   context.freeTags = extractFreeTags(query);
 
-  // 3. 紧急度推断
+  // 3. S-6': 项目名推断 — 从路径、引用、URL 中提取
+  context.projects = extractProjects(query);
+
+  // 4. 紧急度推断
   for (const { pattern, level } of URGENT_PATTERNS) {
     if (pattern.test(query)) {
       context.urgency = Math.max(context.urgency, level);
