@@ -23,7 +23,11 @@
       "lcmg_qmd_status",
       "lcmg_get_document",
       "lcmg_batch_get",
-      "lcmg_maintain"
+      "lcmg_maintain",
+      "lcmg_forget",
+      "lcmg_distill",
+      "lcmg_compact",
+      "lcmg_reset_breaker"
     ]
   },
   "toolMetadata": {
@@ -62,6 +66,18 @@
     },
     "lcmg_maintain": {
       "description": "Trigger knowledge graph maintenance pipeline"
+    },
+    "lcmg_forget": {
+      "description": "Actively forget a node/experience (G-10 soft/hard mode)"
+    },
+    "lcmg_distill": {
+      "description": "Manually trigger experience distillation (PENDING to DISTILLED)"
+    },
+    "lcmg_compact": {
+      "description": "Manually trigger compaction for a specific conversation"
+    },
+    "lcmg_reset_breaker": {
+      "description": "Reset circuit breaker for a subsystem (lcm/qmd/neo4j)"
     }
   },
   "configSchema": {

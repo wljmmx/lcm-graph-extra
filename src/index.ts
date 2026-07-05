@@ -1996,7 +1996,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   memoryDir: _memoryDir,
                   sessionKey: _sessionKey,
                   sessionFile: _sessionFile,
-                  sessionId: params.sessionId ?? params.session_id,
+                  // 修复：sessionId 可能是 number（SDK conversationId），强制 String 化
+                  // 避免 lossless-claw 内部 sessionId.trim() 抛 TypeError
+                  sessionId: params.sessionId != null
+                    ? String(params.sessionId)
+                    : (params.session_id != null ? String(params.session_id) : undefined),
                 } as any,
                 unregister: () => {},
                 _losslessClawAdapter: _losslessClawAdapter,

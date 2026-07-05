@@ -137,7 +137,12 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
     const adapter = inst._losslessClawAdapter;
     if (adapter && adapter.connected) {
       // Use SDK-injected context values directly (no fallback needed)
-      const sessionId = inst.context.sessionId;
+      // 修复：sessionId 可能是 number 类型（OpenClaw SDK 的 conversationId），
+      // lossless-claw 内部调用 sessionId.trim() 会抛 "sessionId?.trim is not a function"
+      // 强制 String 化确保下游始终拿到 string
+      const sessionId = inst.context.sessionId != null
+        ? String(inst.context.sessionId)
+        : inst.context.sessionId;
       const sessionKey = inst.context.sessionKey;
       const sessionFile = inst.context.sessionFile;
 
