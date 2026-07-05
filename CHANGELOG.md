@@ -39,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TypeScript 'health' is of type 'unknown'**: 新增 `HealthSnapshotLite` 接口，修复 `buildPrometheusMetrics` 中访问 health 字段的类型错误
 - **'await' expressions are only allowed within async functions**: `/internal/graph-health` 路由改用 `.then/.catch` 链处理
 
+## [Unreleased]
+
+### PM × PD 双视角审计与 v1.1 演进路线
+
+- **审计报告** (`docs/pm-pd-audit-2026-07-06.md`): 并行启动项目经理（PM）与产品经理（PD）两路独立审计，覆盖代码质量/技术债务/CI-CD/文档/风险/资源进度（PM）与产品定位/功能完整度/UX/降级链路/竞品/演进建议（PD）双视角
+- **综合评分**: PM 4.0/5.0 · PD 4.2/5.0 · 综合 B+（准 A）
+- **v1.0.0 验收**: ROADMAP 13 项全部落地，16 工具 + 7 钩子 + 4 Dashboard 视图齐备，6 项独家/领先能力（PressureTier / debt-manager / experience distillation / 四层检索 / R-2 级联 / 可观测 Dashboard）
+- **v1.1 演进路线** (12 项，分三批):
+  - 第一批 - 还债与门禁 (P0): 拆分 `src/index.ts` (146KB) / CI lint 关闭 continue-on-error / dashboard 版本号统一 / 文档测试统计对齐
+  - 第二批 - 体验下沉: 降级输出有效性校验 + `degraded` 标记 / UX 指标面板 / Dashboard 降级状态可视化 / onboarding 冒烟脚本
+  - 第三批 - 稳定性收尾: 空 catch 块补日志 / qmd-client status() CLI fallback / timer .unref() + SIGTERM handler / 资源释放断言测试
+
 ### Resource Leak & Lifecycle Audit (2026-07-05)
 
 **P0 - 严重资源泄漏修复（8 项）**
