@@ -122,14 +122,19 @@ export class QmdClient {
         this.mcpAvailable = false;
         this.scheduleRecovery();
         const _mcpErr = (err as Error).message;
+        const _mcpStack = (err as Error).stack;
         if (_mcpErr.includes("circuit breaker")) {
           this.logger.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
         } else if (_mcpErr.includes("HTTP")) {
           this.logger.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
         } else if (_mcpErr.includes("empty response")) {
           this.logger.warn("[qmd-client] MCP query returned no results, falling back to CLI");
+        } else if (_mcpErr.includes("timeout") || _mcpErr.includes("Timeout") || _mcpErr.includes("aborted")) {
+          this.logger.warn("[qmd-client] MCP query timeout, falling back to CLI", { err: _mcpErr, timeout: this.mcpTimeout });
+        } else if (_mcpErr.includes("fetch failed") || _mcpErr.includes("ECONNREFUSED") || _mcpErr.includes("ECONNRESET")) {
+          this.logger.warn("[qmd-client] MCP connection failed, falling back to CLI", { err: _mcpErr, baseUrl: this.mcpBaseUrl });
         } else {
-          this.logger.warn("[qmd-client] MCP query failed, falling back to CLI", { err: _mcpErr });
+          this.logger.warn("[qmd-client] MCP query failed, falling back to CLI", { err: _mcpErr, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
         }
       }
     }
@@ -247,6 +252,7 @@ export class QmdClient {
    * @param retried 内部使用，是否已经是重试（防止无限递归）
    */
   private async mcpCall(toolName: string, args: Record<string, unknown>, retried = false): Promise<any> {
+    this.logger?.debug?.(`[qmd-client] mcpCall: tool=${toolName}, retried=${retried}, mcpAvailable=${this.mcpAvailable}, hasSession=${!!this.mcpSessionId}`);
     const sessionId = await this.mcpInitialize();
     const body = {
       jsonrpc: "2.0",
@@ -254,6 +260,7 @@ export class QmdClient {
       method: "tools/call",
       params: { name: toolName, arguments: args },
     };
+    this.logger?.debug?.(`[qmd-client] POST ${this.mcpBaseUrl}/mcp (tools/call: ${toolName}), sessionId=${sessionId?.slice(0, 8)}...`);
     const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
       method: "POST",
       headers: {
@@ -265,25 +272,59 @@ export class QmdClient {
       signal: AbortSignal.timeout(this.mcpTimeout),
     });
 
+    this.logger?.debug?.(`[qmd-client] mcpCall response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}`);
+
     if (!resp.ok) {
       let respBody: any = null;
       try { respBody = await resp.json(); } catch {}
+      this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body`, { status: resp.status, body: respBody });
 
       if (!retried && this.isSessionExpiredError(resp, respBody)) {
         this.logger?.warn?.('[qmd-client] MCP session expired, reinitializing...');
         await this.mcpReinitialize();
         return this.mcpCall(toolName, args, true);
       }
-      throw new Error(`MCP HTTP ${resp.status}`);
+      throw new Error(`MCP HTTP ${resp.status} ${resp.statusText}`);
     }
 
-    const data = await resp.json() as any;
+    // 检查 content-type：MCP 可能返回 SSE 格式（text/event-stream）而非 JSON
+    const contentType = resp.headers?.get('content-type') ?? '';
+    let data: any;
+    if (contentType.includes('text/event-stream')) {
+      // SSE 格式：解析 data: 行
+      const text = await resp.text();
+      this.logger?.debug?.(`[qmd-client] mcpCall SSE response (len=${text.length}), parsing...`);
+      const dataLines = text.split('\n').filter((l: string) => l.startsWith('data: ')).map((l: string) => l.slice(6));
+      if (dataLines.length === 0) {
+        throw new Error(`MCP SSE response has no data lines (len=${text.length})`);
+      }
+      try {
+        data = JSON.parse(dataLines[dataLines.length - 1]);
+        this.logger?.debug?.(`[qmd-client] mcpCall SSE parsed successfully, keys=${Object.keys(data ?? {}).join(',')}`);
+      } catch (parseErr) {
+        this.logger?.debug?.(`[qmd-client] mcpCall SSE parse failed`, { rawPreview: dataLines[dataLines.length - 1]?.slice(0, 200), err: String(parseErr) });
+        throw new Error(`MCP SSE parse failed: ${String(parseErr)}`);
+      }
+    } else {
+      try {
+        data = await resp.json() as any;
+        this.logger?.debug?.(`[qmd-client] mcpCall JSON parsed, keys=${Object.keys(data ?? {}).join(',')}, hasError=${!!data?.error}, hasResult=${!!data?.result}`);
+      } catch (jsonErr) {
+        // JSON 解析失败，可能是空响应或非 JSON 内容
+        const rawText = await resp.text().catch(() => '');
+        this.logger?.debug?.(`[qmd-client] mcpCall JSON parse failed`, { err: String(jsonErr), rawPreview: rawText.slice(0, 200) });
+        throw new Error(`MCP response JSON parse failed: ${String(jsonErr)} (rawLen=${rawText.length})`);
+      }
+    }
+
     if (data?.error && !retried) {
       if (this.isSessionExpiredError(resp, data)) {
-        this.logger?.warn?.('[qmd-client] MCP session expired (from response error), reinitializing...');
+        this.logger?.warn?.('[qmd-client] MCP session expired (from response error), reinitializing...', { errorMsg: data?.error?.message });
         await this.mcpReinitialize();
         return this.mcpCall(toolName, args, true);
       }
+      this.logger?.debug?.(`[qmd-client] mcpCall response has error`, { error: data?.error });
+      throw new Error(`MCP response error: ${data?.error?.message ?? JSON.stringify(data?.error)}`);
     }
     return data;
   }
@@ -310,7 +351,9 @@ export class QmdClient {
   }
 
   private async _doInitialize(): Promise<string> {
-    const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+    const initUrl = `${this.mcpBaseUrl}/mcp`;
+    this.logger?.debug?.(`[qmd-client] _doInitialize: POST ${initUrl} (initialize), timeout=${this.mcpTimeout}ms`);
+    const resp = await fetch(initUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -329,11 +372,24 @@ export class QmdClient {
       signal: AbortSignal.timeout(this.mcpTimeout),
     });
 
-    if (!resp.ok) throw new Error(`MCP initialize HTTP ${resp.status}`);
+    this.logger?.debug?.(`[qmd-client] _doInitialize response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}`);
 
-    const sessionId = resp.headers.get("mcp-session-id");
-    if (!sessionId) throw new Error("MCP initialize: no mcp-session-id header");
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      this.logger?.debug?.(`[qmd-client] _doInitialize failed: HTTP ${resp.status}`, { errPreview: errText.slice(0, 300) });
+      throw new Error(`MCP initialize HTTP ${resp.status} ${resp.statusText}`);
+    }
 
+    const sessionId = resp.headers?.get("mcp-session-id");
+    if (!sessionId) {
+      // 记录所有响应头，帮助排查为何缺少 mcp-session-id
+      const allHeaders: Record<string, string> = {};
+      resp.headers?.forEach((v: string, k: string) => { allHeaders[k] = v; });
+      this.logger?.debug?.(`[qmd-client] _doInitialize: no mcp-session-id header`, { allHeaders, url: initUrl });
+      throw new Error("MCP initialize: no mcp-session-id header in response");
+    }
+
+    this.logger?.debug?.(`[qmd-client] _doInitialize success: sessionId=${sessionId.slice(0, 8)}...`);
     return sessionId;
   }
 
@@ -347,9 +403,19 @@ export class QmdClient {
     if (params.collections) args.collections = params.collections;
     if (params.intent) args.intent = params.intent;
 
+    this.logger?.debug?.(`[qmd-client] queryViaMcp: searches=${params.searches.length}, limit=${args.limit}, minScore=${args.minScore}`);
     const data = await this.mcpCall("query", args) as McpToolsCallResponse;
-    const textContent = data?.result?.content?.[0]?.text;
+    const contentArr = data?.result?.content;
+    const textContent = contentArr?.[0]?.text;
+    this.logger?.debug?.(`[qmd-client] queryViaMcp response: contentArr=${Array.isArray(contentArr) ? contentArr.length : 'N/A'} items, textContentLen=${textContent?.length ?? 0}, isError=${data?.result?.isError}`);
     if (!textContent) {
+      // 记录响应结构帮助排查空响应问题
+      this.logger?.debug?.(`[qmd-client] queryViaMcp: empty textContent`, { 
+        hasResult: !!data?.result, 
+        hasContent: !!contentArr, 
+        contentTypes: Array.isArray(contentArr) ? contentArr.map((c: any) => c?.type).join(',') : 'N/A',
+        rawPreview: JSON.stringify(data)?.slice(0, 300),
+      });
       throw new Error("MCP query returned empty response");
     }
 
