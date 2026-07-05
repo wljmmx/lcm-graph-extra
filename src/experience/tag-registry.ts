@@ -9,6 +9,7 @@
  */
 
 import type { DynamicTag, TagRegistryResult } from './types';
+import { getGlobalLogger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // 内置默认标签集（作为 registry 的初始值 / fallback）
@@ -189,7 +190,9 @@ export class TagRegistry {
           tagId: tag.id,
           tagLabel: tag.label,
         });
-      } catch { /* Invalid regex, skip */ }
+      } catch (e) { /* Invalid regex, skip */
+        getGlobalLogger()?.debug?.("tag regex compilation failed, skipping", { tagId: tag.id, err: e instanceof Error ? e.message : String(e) });
+      }
     }
 
     this._patternsCache = patterns;

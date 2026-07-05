@@ -78,6 +78,14 @@ export interface HealthSnapshotLite {
   cascadeJudgeSource?: 'gm-pro' | 'local';
   // N-5: Embedding API 健康状态（heartbeat 中定时探测）
   embedAvailable?: boolean;
+  // v1.1-6: UX 指标 —— 降级频率 / Token 节省率 / 经验命中率
+  degradedCount?: number;
+  totalAssembleCount?: number;
+  tokenSavedRatio?: number;
+  experienceHitCount?: number;
+  experienceQueryCount?: number;
+  // v1.1-7: 最近一次 assemble 的降级原因（用于 Dashboard 链路状态展示）
+  lastDegradedReasons?: string[];
 }
 
 /**
@@ -208,6 +216,24 @@ export function buildPrometheusMetrics(providers: SnapshotProviders): string {
   lines.push('# TYPE lcm_graph_adapter_connected gauge');
   lines.push(`lcm_graph_adapter_connected ${graph?.connected ? 1 : 0} ${ts}`);
 
+  // v1.1-6: UX 指标 —— 降级频率 / Token 节省率 / 经验命中率
+  lines.push('# HELP lcm_ux_degradation_rate Assemble degradation rate (0-1)');
+  lines.push('# TYPE lcm_ux_degradation_rate gauge');
+  const uxTotal = h.totalAssembleCount ?? 0;
+  const uxDegraded = h.degradedCount ?? 0;
+  lines.push(`lcm_ux_degradation_rate ${uxTotal > 0 ? (uxDegraded / uxTotal).toFixed(4) : '0'} ${ts}`);
+  lines.push('# HELP lcm_ux_token_saved_ratio Token saved ratio (sliding avg, 0-1)');
+  lines.push('# TYPE lcm_ux_token_saved_ratio gauge');
+  lines.push(`lcm_ux_token_saved_ratio ${(h.tokenSavedRatio ?? 0).toFixed(4)} ${ts}`);
+  lines.push('# HELP lcm_ux_experience_hit_rate Experience hit rate (0-1)');
+  lines.push('# TYPE lcm_ux_experience_hit_rate gauge');
+  const expQuery = h.experienceQueryCount ?? 0;
+  const expHit = h.experienceHitCount ?? 0;
+  lines.push(`lcm_ux_experience_hit_rate ${expQuery > 0 ? (expHit / expQuery).toFixed(4) : '0'} ${ts}`);
+  lines.push('# HELP lcm_ux_assemble_total Total assemble count');
+  lines.push('# TYPE lcm_ux_assemble_total counter');
+  lines.push(`lcm_ux_assemble_total ${uxTotal} ${ts}`);
+
   return lines.join('\n') + '\n';
 }
 
@@ -245,8 +271,9 @@ export async function resolveGraphHealth(providers: SnapshotProviders): Promise<
         details: gmHealth.details,
       };
     }
-  } catch {
+  } catch (e) {
     // 降级到 local
+    getGlobalLogger().debug('[dashboard-snapshot] graph-memory-pro health probe failed, falling back to local', { err: e instanceof Error ? e.message : String(e) });
   }
 
   return {
@@ -313,8 +340,9 @@ async function shutdownStaleInstance(host: string, port: number, timeoutMs: numb
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     await fetch(url, { method: 'POST', signal: controller.signal });
-  } catch {
+  } catch (e) {
     // 旧实例关闭后连接断开是正常的
+    getGlobalLogger().debug('[dashboard-snapshot] shutdown stale instance request failed (expected)', { err: e instanceof Error ? e.message : String(e) });
   } finally {
     clearTimeout(timer);
   }
@@ -394,8 +422,9 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           if (recovered) {
             probeResult = 'free';
           }
-        } catch {
+        } catch (e) {
           // shutdown 失败，继续走放弃启动逻辑
+          getGlobalLogger().debug('[dashboard-snapshot] stale instance shutdown failed, giving up start', { err: e instanceof Error ? e.message : String(e) });
         }
       }
       if (probeResult !== 'free') {

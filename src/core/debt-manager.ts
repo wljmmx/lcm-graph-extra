@@ -195,8 +195,9 @@ export function reconcileDebtTable(dbPath?: string): ReconcileResult {
       const r = tombStmt.run();
       result.tombstones = (r?.changes ?? 0) as number;
     }
-  } catch {
+  } catch (e) {
     // 静默失败 —— 对账是非关键维护操作
+    _apiContext?.logger?.debug?.("debt table reconcile failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
   }
   return result;
 }
@@ -367,11 +368,15 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
                 sessionFile = path.join(wsDir, ".lossless", "sessions", fname);
                 break;
               }
-            } catch {}
+            } catch (e) {
+              _apiContext?.logger?.debug?.("session file parse failed, skipping", { file: fname, err: e instanceof Error ? e.message : String(e) });
+            }
           }
         }
       }
-    } catch {}
+    } catch (e) {
+      _apiContext?.logger?.debug?.("lossless session file scan failed", { err: e instanceof Error ? e.message : String(e) });
+    }
 
     // Build instance for onCompaction
     const memoryDir = resolveMemoryDir(sessionFile, _apiContext.config);

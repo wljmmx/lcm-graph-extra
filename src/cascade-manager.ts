@@ -19,6 +19,8 @@ export interface RecallConfidence {
   hasFactualClaim: boolean;  // 是否包含事实性声明
 }
 
+import { getGlobalLogger } from './utils/logger.js';
+
 /** Thompson 采样的 Beta 分布臂 */
 interface BetaArm {
   alpha: number;  // 成功次数
@@ -197,7 +199,9 @@ export class CascadeManager {
           }))
           .filter((r) => r.id && validIds.has(r.id)); // 过滤幻觉 id
       }
-    } catch { /* LLM judgment failed, return empty */ }
+    } catch (e) { /* LLM judgment failed, return empty */
+      getGlobalLogger()?.debug?.("Tier 2 LLM judgment failed, returning empty (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+    }
 
     return [];
   }

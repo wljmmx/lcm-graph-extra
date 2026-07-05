@@ -199,7 +199,9 @@ async function generateExperienceSummary(records: any[], usedExperienceNodes: bo
         if (text?.trim()) return `## 经验回顾摘要\n\n**时间范围**: ${fromStr} → ${toStr}\n**总数**: ${total} 条经验\n\n${text.trim()}`;
       }
     }
-  } catch { /* LLM unavailable, fall back to text summary */ }
+  } catch (e) { /* LLM unavailable, fall back to text summary */
+    getGlobalLogger()?.debug?.("experience review LLM summary failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+  }
 
   // 回退：简单的文本摘要
   const lines: string[] = [`## 经验回顾摘要`, ``, `**时间范围**: ${fromStr} → ${toStr}`, `**总数**: ${total} 条经验`, ``];
@@ -450,7 +452,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             ORDER BY e.relevanceScore DESC, e.matchCount DESC LIMIT $limit`;
           result = await session.run(expQuery, queryParams);
           if (result.records.length > 0) usedExperienceNodes = true;
-        } catch { /* EXPERIENCE label may not exist, fall through to EVENT */ }
+        } catch (e) { /* EXPERIENCE label may not exist, fall through to EVENT */
+          getGlobalLogger()?.debug?.("EXPERIENCE label query failed, falling back to EVENT (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
 
         if (!usedExperienceNodes) {
           if (signal?.aborted) {
@@ -611,7 +615,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             return { fromId: p.fromId ?? "", toId: p.toId ?? "", type: r.get("r").type };
           });
         } finally { await closeNeo4j(driver, session); }
-      } catch { /* Neo4j unavailable */ }
+      } catch (e) { /* Neo4j unavailable */
+        getGlobalLogger()?.debug?.("backup: Neo4j unavailable (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+      }
 
       // lossless-claw DB
       let db: any = null;
@@ -625,7 +631,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             messages: msgs.map((m) => ({ seq: m.seq, role: m.role, content: (m.content ?? "").slice(0, 10000) })),
           });
         }
-      } catch { /* DB unavailable */ }
+      } catch (e) { /* DB unavailable */
+        getGlobalLogger()?.debug?.("backup: lossless-claw DB unavailable (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+      }
       finally { if (db) { try { db.close(); } catch {} } }
 
       // Memory files
@@ -644,7 +652,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             }
           }
         }
-      } catch { /* File read unavailable */ }
+      } catch (e) { /* File read unavailable */
+        getGlobalLogger()?.debug?.("backup: memory files read unavailable (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+      }
 
       writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf-8");
       const msgCount = (backup.lcm as any).conversations.reduce((a: number, c: any) => a + (c.messages?.length ?? 0), 0);

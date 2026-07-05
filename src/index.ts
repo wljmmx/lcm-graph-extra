@@ -236,7 +236,9 @@ const pluginEntry: any = definePluginEntry({
           }
           _modelRegistry = modelRegistry;
           logger?.debug?.("cached " + Object.keys(modelRegistry).length + " model context window(s)");
-        } catch { /* non-fatal, will use defaults */ }
+        } catch (e) { /* non-fatal, will use defaults */
+          logger?.debug?.("model registry loading failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
 
         initialized = true;
       } catch (err) {
@@ -337,7 +339,9 @@ const pluginEntry: any = definePluginEntry({
       async ingestBatch(params: any) {
         try {
           await _losslessClawAdapter?.ingestBatch?.(params);
-        } catch { /* non-fatal */ }
+        } catch (e) { /* non-fatal */
+          logger?.debug?.("ingest failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
         const count = (params.messages ?? []).length;
         return { ingestedCount: count };
       },
@@ -376,6 +380,11 @@ const pluginEntry: any = definePluginEntry({
         let removedSections: { label: string; chars: number }[] = [];
         let _overheadCacheKey = "";
         let contextWindow = 0;
+        // v1.1-5: 降级追踪 —— 记录 assemble 过程中触发的降级路径
+        const degradedReasons: string[] = [];
+        const markDegraded = (reason: string): void => {
+          if (!degradedReasons.includes(reason)) degradedReasons.push(reason);
+        };
 
         try {
           const initStart = Date.now();
@@ -697,14 +706,19 @@ const pluginEntry: any = definePluginEntry({
                   const _l2e = e as Error; const _l2m = _l2e.message;
           if (_l2m.includes("circuit breaker")) {
             logger?.warn?.("L2 qmd: circuit breaker OPEN, skipping", { err: _l2m });
+            markDegraded("L2_circuit_breaker");
           } else if (_l2m.includes("MCP HTTP")) {
             logger?.warn?.("L2 qmd: MCP service error (" + _l2m + "), falling back to CLI");
+            markDegraded("L2_mcp_http_error");
           } else if (_l2m.includes("empty response")) {
             logger?.warn?.("L2 qmd: MCP returned empty result, falling back to CLI");
+            markDegraded("L2_mcp_empty");
           } else if (_l2m.includes("CLI output")) {
             logger?.warn?.("L2 qmd: CLI fallback also failed (" + _l2m + ")");
+            markDegraded("L2_cli_failed");
           } else {
             logger?.warn?.("L2 qmd: error - " + _l2m);
+            markDegraded("L2_unknown_error");
           }
                   return { results: [], ms: Date.now() - t0 };
                 }
@@ -722,6 +736,7 @@ const pluginEntry: any = definePluginEntry({
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.("L3 graph search failed", { err: (e as Error).message });
+                  markDegraded("L3_graph_search_failed");
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
@@ -765,6 +780,7 @@ const pluginEntry: any = definePluginEntry({
                   return { results: res, ms: Date.now() - t0 };
                 } catch (e) {
                   logger?.warn?.("L4 experience search failed", { err: (e as Error).message });
+                  markDegraded("L4_experience_search_failed");
                   return { results: [], ms: Date.now() - t0 };
                 }
               })(),
@@ -837,6 +853,7 @@ const pluginEntry: any = definePluginEntry({
             }
           } catch (e) {
             logger?.warn?.("Parallel L2/L3/L4 phase failed", { err: (e as Error).message });
+            markDegraded("parallel_phase_failed");
           }
 
           const parallelMs = Date.now() - parallelStart;
@@ -893,7 +910,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // N-4: 记录 assemble 性能指标到健康收集器
           try {
             healthMetrics.recordAssemble(tier, Date.now() - assembleStart, l2_ms, l3_ms, l4_ms);
-          } catch { /* non-fatal */ }
+          } catch (e) { /* non-fatal */
+            logger?.debug?.("recordAssemble failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+          }
 
           // R-2: 成本感知级联 —— Tier 1 置信度评估 + Thompson 采样重排
           // 仅在 low tier（token 充裕）时启用，避免中高压下的额外延迟
@@ -958,7 +977,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               try {
                 const { healthMetrics } = await import('./health-metrics.js');
                 healthMetrics.recordCascadeConfidence(confidence.tier1Score ?? 0, r2JudgeSource);
-              } catch { /* non-fatal */ }
+              } catch (e) { /* non-fatal */
+                logger?.debug?.("recordCascadeConfidence failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+              }
 
               // 低置信度时用 Thompson 采样重排，引入探索性
               if (confidence.needsTier2 && tier === 'low') {
@@ -1019,7 +1040,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     if (judgments.length > 0) {
                       logger?.debug?.("R-2 Tier 2 LLM judgment completed", { judged: judgments.length, relevant: judgments.filter(j => j.relevant).length });
                     }
-                  } catch { /* Tier 2 failed, non-fatal */ }
+                  } catch (e) { /* Tier 2 failed, non-fatal */
+                    logger?.debug?.("Tier 2 LLM judgment failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                  }
                 })().then(() => {}, () => {}));
               }
             }
@@ -1092,7 +1115,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   logger?.debug?.("S-7 personalized experience rerank", { boosted: boostedCount, topTech: topTech.map(t => t.name), topScenario: topScenario.map(s => s.name) });
                 }
               }
-            } catch { /* non-fatal */ }
+            } catch (e) { /* non-fatal */
+              logger?.debug?.("S-7 personalized experience rerank failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+            }
 
             const expBody = personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
             addSection('## \ud83d\udca1 经验总结', expBody, 5);
@@ -1334,15 +1359,43 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               }
             }
           }
+          // v1.1-5: 输出有效性校验 + degraded 标记
+          const degraded = degradedReasons.length > 0;
+          if (degraded) {
+            logger?.warn?.("[assemble] degraded paths triggered", { reasons: degradedReasons });
+          }
+          // 有效性校验：messages 必须非空数组，systemPromptAddition 若为空字符串转为 undefined
+          const validatedMessages = Array.isArray(finalMessages) && finalMessages.length > 0
+            ? finalMessages
+            : (params.messages ?? []);
+          const validatedAddition = (typeof systemPromptAddition === "string" && systemPromptAddition.trim().length > 0)
+            ? systemPromptAddition
+            : undefined;
+          // v1.1-6: 记录 UX 指标
+          try {
+            healthMetrics.recordUxMetrics({
+              degraded,
+              degradedReasons: degraded ? degradedReasons : undefined,
+              estimatedTokens: messageTokens + additionTokens,
+              maxContextChars,
+              experienceHit: Array.isArray(expResults) && expResults.length > 0,
+              experienceQueried: hasToolCategory(extractAvailableTools(params), "experience"),
+            });
+          } catch (e) { /* non-fatal */
+            logger?.debug?.("recordUxMetrics failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+          }
           return {
-            messages: finalMessages,
+            messages: validatedMessages,
             estimatedTokens: messageTokens + additionTokens,
-            systemPromptAddition: systemPromptAddition || undefined,
-            promptAuthority: typeof systemPromptAddition == "string" && systemPromptAddition.length > 0 ? "preassembly_may_overflow" : "assembled",
+            systemPromptAddition: validatedAddition,
+            promptAuthority: validatedAddition ? "preassembly_may_overflow" : "assembled",
+            degraded,
+            degradedReasons: degraded ? degradedReasons : undefined,
           };
         } catch (finalErr) {
           const fe = finalErr instanceof Error ? finalErr : new Error(String(finalErr));
           logger?.error?.("assemble: return error", { err: fe.message, stack: fe.stack });
+          markDegraded("assemble_final_error");
           // P0: Final hard-truncation safety net (error path)
           // P2-15: 重写 minified 风格代码为可读形式（与成功路径对称）
           {
@@ -1370,6 +1423,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             estimatedTokens: estimateTokensFromMessages(finalMessages),
             systemPromptAddition: undefined,
             promptAuthority: "assembled",
+            degraded: true,
+            degradedReasons: degradedReasons.length > 0 ? degradedReasons : ["assemble_final_error"],
           };
         }
       },
@@ -1402,7 +1457,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             ...params,
             prePromptMessageCount: params.prePromptMessageCount ?? 0,
           });
-        } catch { /* non-fatal */ }
+        } catch (e) { /* non-fatal */
+          logger?.debug?.("lossless-claw afterTurn failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
         const lcAfterTurnMs = Date.now() - lcAfterTurnStart;
 
         try {
@@ -1453,7 +1510,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // 用于后续经验搜索的个性化加权（零延迟，纯规则）
           try {
             userProfile.observe(userContent);
-          } catch { /* non-fatal */ }
+          } catch (e) { /* non-fatal */
+            logger?.debug?.("userProfile.observe failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+          }
           // Skip if content is mostly whitespace or repetitive
           const wordRatio = (userContent.match(/[\w]+/g) || []).length / userContent.trim().length;
           if (wordRatio < 0.3) return;
@@ -1516,7 +1575,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 ts: Date.now(),
               }) + '\n';
               await appendFile(queuePath, queueItem).catch(() => {});
-            } catch { /* 队列写入失败不影响 afterTurn */ }
+            } catch (e) { /* 队列写入失败不影响 afterTurn */
+              logger?.debug?.("experience extract queue write failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+            }
 
             // Fire-and-forget with latency tracking: don't block afterTurn lifecycle
             // 注册到 backgroundTasks 以便 dispose 时等待
@@ -1555,7 +1616,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     logger?.warn?.('[afterTurn] experience saveRaw failed', { err: String(saveErr) });
                   }));
                   logger?.debug?.(`[afterTurn] experience extracted: source=${trigger}, id=${raw.id}`);
-                } catch { /* single message extraction failure, non-fatal */ }
+                } catch (e) { /* single message extraction failure, non-fatal */
+                  logger?.debug?.("single message experience extraction failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                }
               }
             } catch (expErr) {
               logger?.warn?.('[afterTurn] experience extraction pipeline failed (non-fatal)', { err: String(expErr) });
@@ -1638,7 +1701,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       await store.updateQualityScore(exp.id, score, delta);
                     }
                     logger?.debug?.("G-8 quality validation", { id: exp.id, score, delta });
-                  } catch { /* skip individual validation */ }
+                  } catch (e) { /* skip individual validation */
+                    logger?.debug?.("G-8 quality validation skipped (non-fatal)", { id: exp.id, err: e instanceof Error ? e.message : String(e) });
+                  }
                 }
               } catch (g8Err) {
                 logger?.debug?.("[afterTurn] G-8 validation loop skipped", { err: String(g8Err) });
@@ -1706,7 +1771,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           if (assistantContent) {
             tracker?.onResponseReceived?.(sessionId, model, Math.ceil(assistantContent.length / 4), "completed", Date.now() - afterTurnStart);
           }
-        } catch {}
+        } catch (e) {
+          logger?.debug?.("tracker.onResponseReceived failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
       } catch (err) {
           logger?.error?.('[lcm-graph-extra] afterTurn error', { err: serializeError(err) });
         }
@@ -1938,7 +2005,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // 2. Local: evict stale dedup via LRU cache
           try {
             evictStaleDedupPublic();
-          } catch {}
+          } catch (e) {
+            logger?.debug?.("dedup cache eviction failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+          }
 
           return { changed, bytesFreed, rewrittenEntries };
         } catch (err) {
@@ -1970,7 +2039,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             });
           }
           await backgroundTasks.awaitAll(5000);
-        } catch { /* 超时或异常，继续清理 */ }
+        } catch (e) { /* 超时或异常，继续清理 */
+          logger?.debug?.("background tasks awaitAll failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
 
         // 3. 停止 debt scheduler（等待活跃任务完成）
         try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {}
@@ -1983,7 +2054,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         try { const { closeSharedDb } = await import('./tools.js'); closeSharedDb(); } catch {}
 
         // 5. Dispose lossless-claw adapter（触发底层 engine.dispose）
-        try { await _losslessClawAdapter?.dispose?.(); } catch {}
+        try { await _losslessClawAdapter?.dispose?.(); } catch (e) {
+          logger?.debug?.("lossless-claw adapter dispose failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
         _losslessClawAdapter = null;
 
         // 6. Dispose QmdClient（清理 recoveryTimer，避免 timer 泄漏）
@@ -1991,7 +2064,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
         // 7. Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         //    必须 await，确保 driver 底层 TCP 连接被优雅关闭
-        try { await graphAdapter?.close?.(); } catch {}
+        try { await graphAdapter?.close?.(); } catch (e) {
+          logger?.debug?.("graph adapter close failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
         tracker?.close?.();
         try { await closeNeo4jDriver(); } catch {}
         // 兜底：强制清理连接池中所有条目（防止 refCount 失衡导致泄漏）
@@ -2205,7 +2280,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   if (debt.currentTokenCount) {
                     maxTokenRatio = Math.max(maxTokenRatio, debt.currentTokenCount / 262144);
                   }
-                } catch { /* skip */ }
+                } catch (e) { /* skip */
+                  logger?.debug?.("heartbeat: debt file parse failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                }
               }
             }
 
@@ -2227,7 +2304,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     if (!convId) continue;
                     const tokenCount = Math.round((maxTokenRatio || 0.5) * P.contextWindowChars);
                     writeCompactionDebt(convId, P.tokenBudget, tokenCount, "hb_pressure_" + signals.length + "dims");
-                  } catch { /* skip bad session file */ }
+                  } catch (e) { /* skip bad session file */
+                    logger?.debug?.("heartbeat: session debt write failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                  }
                 }
               } catch (debtWriteErr) {
                 logger?.warn?.("heartbeat: debt write failed", { err: String(debtWriteErr) });
@@ -2235,7 +2314,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               // Debt scheduler (resident) will pick this up automatically
             }
           }
-        } catch { /* pressure check failed, non-fatal */ }
+        } catch (e) { /* pressure check failed, non-fatal */
+          logger?.debug?.("heartbeat: pressure check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
         
         // --- 2. qmd MCP health check ---
         if (qmdClient && typeof qmdClient.ping === "function") {
@@ -2244,7 +2325,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (!qmdOnline) {
               logger?.warn?.("heartbeat: qmd MCP unavailable");
             }
-          } catch { /* qmd health check failed, non-fatal */ }
+          } catch (e) { /* qmd health check failed, non-fatal */
+            logger?.debug?.("heartbeat: qmd health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+          }
         }
 
         // --- 2b. Graph / Neo4j health check + auto reconnect ---
@@ -2256,7 +2339,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (!graphOk) {
               logger?.warn?.("heartbeat: graph/neo4j unavailable, will retry on next heartbeat");
             }
-          } catch { /* graph health check failed, non-fatal */ }
+          } catch (e) { /* graph health check failed, non-fatal */
+            logger?.debug?.("heartbeat: graph health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+          }
         }
 
         // --- 2c. Embedding API health check ---
@@ -2274,7 +2359,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               }
             }
           }
-        } catch { /* embedding health check failed, non-fatal */ }
+        } catch (e) { /* embedding health check failed, non-fatal */
+          logger?.debug?.("heartbeat: embedding health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
 
         // --- 2d. Snapshot server health check + auto-restart ---
         // 插件启动时 snapshot server 可能因端口被占等原因启动失败，
@@ -2400,7 +2487,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             cbQmdFailures: cbStates?.qmd?.failures ?? 0,
             cbNeo4jFailures: cbStates?.neo4j?.failures ?? 0,
           });
-        } catch { /* health metrics collection failed, non-fatal */ }
+        } catch (e) { /* health metrics collection failed, non-fatal */
+          logger?.debug?.("heartbeat: health metrics collection failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
 
         // Periodic dedup cache cleanup (every 15 heartbeats)
         hbDedupCleanupCounter++;

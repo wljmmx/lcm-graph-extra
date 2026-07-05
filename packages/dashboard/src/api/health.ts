@@ -29,6 +29,14 @@ export interface HealthSnapshot {
   // R-2: cascade Tier 1 置信度（仅内存态，来自 :7423 snapshot）
   cascadeTier1Confidence?: number;
   cascadeJudgeSource?: 'gm-pro' | 'local';
+  // v1.1-6: UX 指标 —— 降级频率 / Token 节省率 / 经验命中率（来自内存快照）
+  degradedCount?: number;
+  totalAssembleCount?: number;
+  tokenSavedRatio?: number;
+  experienceHitCount?: number;
+  experienceQueryCount?: number;
+  // v1.1-7: 最近一次 assemble 的降级原因（用于链路状态可视化）
+  lastDegradedReasons?: string[];
 }
 
 export interface CascadeSnapshot {

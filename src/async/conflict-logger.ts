@@ -11,6 +11,7 @@ import { appendFileSync, mkdirSync, statSync, renameSync, existsSync } from 'nod
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { DEFAULTS } from '../config/defaults.js';
+import { getGlobalLogger } from '../utils/logger.js';
 
 export interface ConflictRecord {
   /** Entity name that conflicted */
@@ -127,8 +128,9 @@ export class ConflictLogger {
       this.maybeRotate();
       const line = JSON.stringify(record) + '\n';
       appendFileSync(this.logPath, line, 'utf-8');
-    } catch {
+    } catch (e) {
       // Non-critical
+      getGlobalLogger()?.debug?.("conflict log write failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -143,8 +145,9 @@ export class ConflictLogger {
       if (stats.size >= ConflictLogger.MAX_FILE_SIZE_BYTES) {
         renameSync(this.logPath, this.rotatedPath);
       }
-    } catch {
+    } catch (e) {
       // 轮转失败不影响主流程
+      getGlobalLogger()?.debug?.("conflict log rotation failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
   }
 

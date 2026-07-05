@@ -185,7 +185,9 @@ export class RetrievalGateway {
         .filter(r => r.metadata?.experience && r.id)
         .map(r => this.experienceStorage.incrementMatchCount(r.id).catch(() => {}));
       await Promise.all(topExp);
-    } catch { /* non-critical, ignore */ }
+    } catch (e) { /* non-critical, ignore */
+      this.logger.debug('experience match count increment failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) });
+    }
 
     const experience = allExp.slice(0, 5); // cap at 5 total experience items
 

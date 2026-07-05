@@ -12,6 +12,7 @@ import { execFile } from 'node:child_process';
 import { writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { getGlobalLogger } from './logger.js';
 
 export interface PdfExportResult {
   ok: boolean;
@@ -207,8 +208,9 @@ export async function exportMarkdownToPdf(
     try {
       const result = await exportWithPandoc(markdown, filename);
       if (result.ok) return result;
-    } catch {
+    } catch (e) {
       // fall through to fallback
+      getGlobalLogger()?.debug?.("[pdf-export] pandoc export failed, falling back", { err: e instanceof Error ? e.message : String(e) });
     }
   }
 

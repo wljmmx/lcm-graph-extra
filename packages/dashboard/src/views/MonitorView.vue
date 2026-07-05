@@ -242,6 +242,50 @@ const cascadeTier1Confidence = computed<number | null>(() => {
 const cascadeJudgeSource = computed<'gm-pro' | 'local' | null>(
   () => memory.value?.health?.latest?.cascadeJudgeSource ?? null,
 );
+
+// v1.1-7: 降级链路状态 —— 来自 memory.health.latest 的 UX 指标 + 最近一次降级原因
+const uxSnapshot = computed(() => memory.value?.health?.latest ?? null);
+const lastDegradedReasons = computed<string[]>(() => {
+  const r = uxSnapshot.value?.lastDegradedReasons;
+  return Array.isArray(r) ? r : [];
+});
+const uxSummary = computed(() => {
+  const s = uxSnapshot.value;
+  if (!s) {
+    return { degradationRate: 0, tokenSavedRatio: 0, experienceHitRate: 0, totalAssembles: 0, degradedCount: 0 };
+  }
+  const total = s.totalAssembleCount ?? 0;
+  const degraded = s.degradedCount ?? 0;
+  const expQuery = s.experienceQueryCount ?? 0;
+  const expHit = s.experienceHitCount ?? 0;
+  return {
+    degradationRate: total > 0 ? degraded / total : 0,
+    tokenSavedRatio: s.tokenSavedRatio ?? 0,
+    experienceHitRate: expQuery > 0 ? expHit / expQuery : 0,
+    totalAssembles: total,
+    degradedCount: degraded,
+  };
+});
+// 各检索层当前是否处于降级（基于 lastDegradedReasons 关键字匹配）
+const layerStatus = computed(() => {
+  const r = lastDegradedReasons.value;
+  const has = (kw: string[]) => kw.some((k) => r.some((x) => x.toLowerCase().includes(k)));
+  return {
+    L1: has(['l1_', 'qmd']),
+    L2: has(['l2_', 'circuit']),
+    L3: has(['l3_', 'graph']),
+    L4: has(['l4_', 'experience']),
+    gmPro: has(['gm_pro', 'gmpro', 'cascade']),
+  };
+});
+// 降级率 tag 颜色：>50% error, >10% warning, 否则 success
+const degradationTagType = computed<'success' | 'warning' | 'error' | 'default'>(() => {
+  const r = uxSummary.value.degradationRate;
+  if (r > 0.5) return 'error';
+  if (r > 0.1) return 'warning';
+  if (uxSummary.value.totalAssembles > 0) return 'success';
+  return 'default';
+});
 const betaOption = computed(() => {
   const arms = cascadeTopArms.value;
   return {
@@ -395,6 +439,72 @@ const panelCols = '1 s:1 m:2 l:3';
               />
             </template>
             <NEmpty v-else description="无历史数据" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- v1.1-7: 降级链路状态（实时展示 L1/L2/L3/L4 + gm-pro 各路径状态） -->
+        <NGi>
+          <NCard title="降级链路状态" size="small">
+            <template v-if="memory">
+              <!-- 各检索层状态指示灯 -->
+              <div class="layer-grid">
+                <div class="layer-cell">
+                  <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" />
+                  <span class="layer-label">L1 QMD</span>
+                </div>
+                <div class="layer-cell">
+                  <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" />
+                  <span class="layer-label">L2 熔断</span>
+                </div>
+                <div class="layer-cell">
+                  <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" />
+                  <span class="layer-label">L3 图谱</span>
+                </div>
+                <div class="layer-cell">
+                  <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" />
+                  <span class="layer-label">L4 经验</span>
+                </div>
+                <div class="layer-cell">
+                  <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" />
+                  <span class="layer-label">gm-pro</span>
+                </div>
+              </div>
+              <!-- UX 摘要 -->
+              <NDescriptions :column="1" size="small" label-placement="left" bordered style="margin-top: 8px">
+                <NDescriptionsItem label="降级率">
+                  <NTag :type="degradationTagType" size="small">
+                    {{ (uxSummary.degradationRate * 100).toFixed(1) }}%
+                  </NTag>
+                  <span class="muted mono" style="margin-left: 6px">
+                    {{ uxSummary.degradedCount }}/{{ uxSummary.totalAssembles }}
+                  </span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="Token 节省率">
+                  <span class="mono">{{ (uxSummary.tokenSavedRatio * 100).toFixed(1) }}%</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="经验命中率">
+                  <span class="mono">{{ (uxSummary.experienceHitRate * 100).toFixed(1) }}%</span>
+                </NDescriptionsItem>
+              </NDescriptions>
+              <!-- 最近一次降级原因 -->
+              <div v-if="lastDegradedReasons.length" class="profile-section" style="margin-top: 8px">
+                <div class="profile-label">最近降级原因</div>
+                <NSpace :size="4">
+                  <NTag
+                    v-for="r in lastDegradedReasons"
+                    :key="r"
+                    size="small"
+                    type="warning"
+                  >
+                    {{ r }}
+                  </NTag>
+                </NSpace>
+              </div>
+              <div v-else class="muted" style="margin-top: 8px; font-size: 12px">
+                最近一次 assemble 未触发降级
+              </div>
+            </template>
+            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
           </NCard>
         </NGi>
 
@@ -655,5 +765,37 @@ const panelCols = '1 s:1 m:2 l:3';
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   word-break: break-all;
+}
+.layer-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.layer-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 2px;
+  border: 1px solid #eaecef;
+  border-radius: 4px;
+}
+.layer-cell .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.layer-cell .dot-ok {
+  background: #18a058;
+  box-shadow: 0 0 4px rgba(24, 160, 88, 0.6);
+}
+.layer-cell .dot-fail {
+  background: #d03050;
+  box-shadow: 0 0 4px rgba(208, 48, 80, 0.6);
+}
+.layer-label {
+  font-size: 11px;
+  color: #606266;
 }
 </style>

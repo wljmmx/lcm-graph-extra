@@ -415,22 +415,34 @@ describe("QmdClient", () => {
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
-    it("returns null when MCP returns HTTP error (no CLI fallback)", async () => {
+    it("v1.1-10: falls back to CLI when MCP returns HTTP error", async () => {
       mockMcpFail(500);
+      mockCliOk("Index: 80 docs (CLI)");
       const result = await client.status();
-      expect(result).toBeNull();
-      // status() has no CLI fallback — verify execFile was NOT called
-      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(result).toBe("Index: 80 docs (CLI)");
+      expect(mockExecFile).toHaveBeenCalled();
     });
 
-    it("returns null on network error", async () => {
+    it("v1.1-10: falls back to CLI on network error", async () => {
       mockMcpTimeout();
+      mockCliOk("Index: 80 docs (CLI)");
       const result = await client.status();
-      expect(result).toBeNull();
+      expect(result).toBe("Index: 80 docs (CLI)");
+      expect(mockExecFile).toHaveBeenCalled();
     });
 
-    it("returns null when MCP returns ok but no text content", async () => {
+    it("v1.1-10: falls back to CLI when MCP returns ok but no text content", async () => {
       mockMcpToolsCall({ result: { content: [] } });
+      mockCliOk("Index: 80 docs (CLI)");
+      const result = await client.status();
+      expect(result).toBe("Index: 80 docs (CLI)");
+    });
+
+    it("v1.1-10: returns null when both MCP and CLI fail", async () => {
+      mockMcpFail(500);
+      mockExecFile.mockImplementationOnce((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+        setTimeout(() => cb(new Error("qmd CLI not found"), { stdout: "", stderr: "" }), 10);
+      });
       const result = await client.status();
       expect(result).toBeNull();
     });

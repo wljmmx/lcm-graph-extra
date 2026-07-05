@@ -4,6 +4,7 @@
 
 import { GraphMemoryManager } from './graph';
 import { DEFAULTS } from '../config/defaults.js';
+import { getGlobalLogger } from '../utils/logger.js';
 
 // ---------- Types ---------------------------------------------------------
 
@@ -195,8 +196,9 @@ export function startCleanupScheduler(
       lastRun = new Date().toISOString();
       runCount++;
       onCleanup?.(result);
-    } catch {
+    } catch (e) {
       // silent — scheduler should not crash the host process
+      getGlobalLogger()?.debug?.("TTL cleanup scheduler iteration failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
   }, intervalMs);
 

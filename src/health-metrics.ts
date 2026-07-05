@@ -8,6 +8,8 @@
  * - 不依赖外部服务，纯本地收集
  */
 
+import { getGlobalLogger } from './utils/logger.js';
+
 /** 单次指标快照 */
 export interface HealthSnapshot {
   timestamp: number;
@@ -37,6 +39,14 @@ export interface HealthSnapshot {
   // R-2 cascade judgeRecall（仅内存态，不持久化到 lcm.db 避免 ALTER TABLE 风险）
   cascadeTier1Confidence?: number;
   cascadeJudgeSource?: 'gm-pro' | 'local';
+  // v1.1-6: UX 指标 —— 降级频率 / Token 节省率 / 经验命中率
+  degradedCount: number;
+  totalAssembleCount: number;
+  tokenSavedRatio: number;
+  experienceHitCount: number;
+  experienceQueryCount: number;
+  // v1.1-7: 最近一次 assemble 的降级原因（用于 Dashboard 实时展示链路状态）
+  lastDegradedReasons?: string[];
 }
 
 const MAX_SNAPSHOTS = 144; // ~12h of 5min heartbeats
@@ -78,6 +88,11 @@ export class HealthMetricsCollector {
       tierLow: 0,
       tierMedium: 0,
       tierHigh: 0,
+      degradedCount: 0,
+      totalAssembleCount: 0,
+      tokenSavedRatio: 0,
+      experienceHitCount: 0,
+      experienceQueryCount: 0,
       ...rest,
     };
 
@@ -122,6 +137,8 @@ export class HealthMetricsCollector {
         lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
         pendingExperienceCount: 0, distilledExperienceCount: 0,
         tierLow: 0, tierMedium: 0, tierHigh: 0,
+        degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
+        experienceHitCount: 0, experienceQueryCount: 0,
       };
       this.snapshots.push(latest);
     }
@@ -142,6 +159,79 @@ export class HealthMetricsCollector {
   }
 
   /**
+   * v1.1-6: 记录 UX 指标 —— 降级触发 / Token 节省 / 经验命中。
+   * 在 assemble 完成后调用，累积到最新快照。
+   */
+  recordUxMetrics(opts: {
+    degraded: boolean;
+    degradedReasons?: string[];
+    estimatedTokens: number;
+    maxContextChars: number;
+    experienceHit: boolean;
+    experienceQueried: boolean;
+  }): void {
+    let latest = this.snapshots[this.snapshots.length - 1];
+    if (!latest) {
+      latest = {
+        timestamp: Date.now(),
+        pendingMessages: 0, summaryFragments: 0, maxTokenRatio: 0,
+        cbLcmAvailable: true, cbQmdAvailable: true, cbNeo4jAvailable: true,
+        cbLcmFailures: 0, cbQmdFailures: 0, cbNeo4jFailures: 0,
+        lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
+        pendingExperienceCount: 0, distilledExperienceCount: 0,
+        tierLow: 0, tierMedium: 0, tierHigh: 0,
+        degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
+        experienceHitCount: 0, experienceQueryCount: 0,
+      };
+      this.snapshots.push(latest);
+    }
+    latest.totalAssembleCount++;
+    if (opts.degraded) latest.degradedCount++;
+    // v1.1-7: 记录最近一次降级原因（覆盖式，便于 Dashboard 实时展示）
+    latest.lastDegradedReasons = opts.degraded && Array.isArray(opts.degradedReasons)
+      ? [...opts.degradedReasons]
+      : [];
+    if (opts.experienceQueried) {
+      latest.experienceQueryCount++;
+      if (opts.experienceHit) latest.experienceHitCount++;
+    }
+    // Token 节省率 = (maxContextChars - estimatedTokens) / maxContextChars
+    if (opts.maxContextChars > 0 && opts.estimatedTokens >= 0) {
+      const saved = Math.max(0, opts.maxContextChars - opts.estimatedTokens) / opts.maxContextChars;
+      // 滑动平均：新值占 20%，避免单次抖动
+      latest.tokenSavedRatio = latest.tokenSavedRatio === 0
+        ? saved
+        : latest.tokenSavedRatio * 0.8 + saved * 0.2;
+    }
+    this.dirtySinceLastPersist = true;
+  }
+
+  /**
+   * v1.1-6: 计算 UX 指标摘要，供 Dashboard / Prometheus 暴露。
+   */
+  getUxSummary(): {
+    degradationRate: number;
+    avgTokenSavedRatio: number;
+    experienceHitRate: number;
+    totalAssembles: number;
+    degradedCount: number;
+  } {
+    const latest = this.snapshots[this.snapshots.length - 1];
+    if (!latest || latest.totalAssembleCount === 0) {
+      return { degradationRate: 0, avgTokenSavedRatio: 0, experienceHitRate: 0, totalAssembles: 0, degradedCount: 0 };
+    }
+    return {
+      degradationRate: latest.degradedCount / latest.totalAssembleCount,
+      avgTokenSavedRatio: latest.tokenSavedRatio,
+      experienceHitRate: latest.experienceQueryCount > 0
+        ? latest.experienceHitCount / latest.experienceQueryCount
+        : 0,
+      totalAssembles: latest.totalAssembleCount,
+      degradedCount: latest.degradedCount,
+    };
+  }
+
+  /**
    * R-2: 记录 cascade Tier 1 置信度评估结果（仅内存态）。
    * - confidence: 0-1 浮点
    * - source: 'gm-pro'（gm-pro judgeRecall 可用）/ 'local'（本地 evaluateTier1）
@@ -158,6 +248,8 @@ export class HealthMetricsCollector {
         lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
         pendingExperienceCount: 0, distilledExperienceCount: 0,
         tierLow: 0, tierMedium: 0, tierHigh: 0,
+        degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
+        experienceHitCount: 0, experienceQueryCount: 0,
       };
       this.snapshots.push(latest);
     }
@@ -248,8 +340,9 @@ export class HealthMetricsCollector {
       // 清理 7 天前的数据
       const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
       this.db.prepare('DELETE FROM health_metrics WHERE ts < ?').run(cutoff);
-    } catch {
+    } catch (e) {
       // DB 写入失败不影响主流程
+      getGlobalLogger()?.debug?.("health metrics persistToDb failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
   }
 

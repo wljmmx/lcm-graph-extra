@@ -418,8 +418,9 @@ export class LosslessClawAdapter {
           // Already bootstrapped, no-op
           return { bootstrapped: true, importedMessages: 0 };
         }
-      } catch {
+      } catch (e) {
         // Fallback: 直接调用 bootstrap（幂等）
+        this.logger?.debug?.("[lossless-claw-adapter] bootstrap status check failed, falling back to direct call", { err: e instanceof Error ? e.message : String(e) });
       }
     }
 
@@ -501,8 +502,9 @@ export class LosslessClawAdapter {
               summaryContent = summaries[0].content;
             }
           }
-        } catch {
+        } catch (e) {
           // Fallback: use summary ID as indicator
+          this.logger?.debug?.("[lossless-claw-adapter] summary content fetch failed, using summary ID as indicator", { err: e instanceof Error ? e.message : String(e) });
         }
       }
 
@@ -657,8 +659,9 @@ export class LosslessClawAdapter {
           return entry.factory as (ctx: any) => Promise<LosslessClawEngine>;
         }
       }
-    } catch {
+    } catch (e) {
       // Symbol 方式失败，走 Fallback
+      this.logger?.debug?.("[lcm] _discoverCEFactory: path 1/4 Symbol registry failed", { err: e instanceof Error ? e.message : String(e) });
     }
       this.logger.debug("[lcm] _discoverCEFactory: path 1/4 FAILED (Symbol registry)");
 
@@ -687,8 +690,9 @@ export class LosslessClawAdapter {
         }
       }
       this.logger.debug("[lcm] _discoverCEFactory: path 2/4 FAILED (Shared State)");
-    } catch {
+    } catch (e) {
       // shared state not available, continue
+      this.logger?.debug?.("[lcm] _discoverCEFactory: path 2/4 Shared State failed", { err: e instanceof Error ? e.message : String(e) });
     }
     this.logger.debug("[lcm] path 3/4: Direct FS scan");
 
@@ -758,12 +762,14 @@ export class LosslessClawAdapter {
               }
             }
           }
-        } catch {
+        } catch (e) {
           // candidate not found or import failed
+          this.logger?.debug?.("[lcm] _discoverCEFactory: path 3/4 candidate not found or import failed", { err: e instanceof Error ? e.message : String(e) });
         }
       }
-    } catch {
+    } catch (e) {
       // projects dir scan failed, fall through to Fallback
+      this.logger?.debug?.("[lcm] _discoverCEFactory: path 3/4 projects dir scan failed", { err: e instanceof Error ? e.message : String(e) });
     this.logger.debug("[lcm] path 4/4: Fallback registry");
     }
 

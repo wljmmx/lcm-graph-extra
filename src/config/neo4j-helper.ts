@@ -12,6 +12,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { getGlobalLogger } from '../utils/logger.js';
 
 export interface Neo4jConnectionConfig {
   uri: string;
@@ -37,8 +38,9 @@ function loadFromOpenclawJson(): { uri?: string; user?: string; password?: strin
     if (neo4j && typeof neo4j === 'object') {
       return { uri: neo4j.uri, user: neo4j.user, password: neo4j.password };
     }
-  } catch {
+  } catch (e) {
     // ignore
+    getGlobalLogger()?.debug?.("openclaw.json neo4j config load failed", { err: e instanceof Error ? e.message : String(e) });
   }
   return null;
 }

@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as zlib from 'zlib';
 import * as path from 'path';
 import { GraphMemoryManager, GraphNode, GraphEdge } from './graph';
+import { getGlobalLogger } from '../utils/logger.js';
 
 // ---------- types ---------------------------------------------------------
 
@@ -468,8 +469,9 @@ export async function buildGraphFromMemoryFiles(
         if (depth > options.maxDepth) {
           toRemove.push(id);
         }
-      } catch {
+      } catch (e) {
         // cycle detected or other issue; skip pruning
+        getGlobalLogger()?.debug?.("graph depth check failed, skipping prune", { id, err: e instanceof Error ? e.message : String(e) });
       }
     }
     for (const id of toRemove) {

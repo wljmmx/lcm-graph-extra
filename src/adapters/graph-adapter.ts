@@ -19,7 +19,7 @@ import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
 import { createLocalEmbedFn } from './embed-fn';
 import type { Logger } from '../utils/logger.js';
-import { resolveLogger } from '../utils/logger.js';
+import { resolveLogger, getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
 // P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
 import { DEFAULTS } from '../config/defaults.js';
@@ -97,7 +97,9 @@ export function resolveGmProPath(): { path: string; source: 'env' | 'extensions-
     if (existsSync(join(stockExtPath, 'dist', 'index.js'))) {
       return { path: stockExtPath, source: 'extensions-stock' };
     }
-  } catch { /* openclaw package not found */ }
+  } catch (e) { /* openclaw package not found */
+    getGlobalLogger()?.debug?.('graph-memory-pro stock extensions resolution failed', { err: e instanceof Error ? e.message : String(e) });
+  }
 
   // 5. require.resolve 降级（兼容旧 npm install 方式）
   try {

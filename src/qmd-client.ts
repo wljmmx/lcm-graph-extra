@@ -220,14 +220,38 @@ export class QmdClient {
 
   /**
    * QMD index status — calls MCP tools/call for "status".
+   * v1.1-10: MCP 不可用时降级到 `qmd status` CLI，避免 status() 永远返回 null。
    * Returns index health and collection info as a string.
    */
   async status(): Promise<string | null> {
+    if (this.mcpAvailable !== false) {
+      try {
+        const data = await this.mcpCall("status", {}) as McpToolsCallResponse;
+        const text = data?.result?.content?.[0]?.text;
+        if (typeof text === "string") {
+          this.mcpAvailable = true;
+          this.clearRecovery();
+          return text;
+        }
+      } catch (err) {
+        this.mcpAvailable = false;
+        this.scheduleRecovery();
+        this.logger?.warn?.("[qmd-client] MCP status failed, falling back to CLI", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // v1.1-10: CLI fallback — `qmd status` outputs index info as text
     try {
-      const data = await this.mcpCall("status", {}) as McpToolsCallResponse;
-      const text = data?.result?.content?.[0]?.text;
-      return typeof text === "string" ? text : null;
-    } catch {
+      const { stdout } = await execFileAsync("qmd", ["status"], {
+        timeout: this.cliTimeout,
+      });
+      return stdout || null;
+    } catch (err) {
+      this.logger?.debug?.("[qmd-client] qmd status CLI fallback failed", {
+        err: err instanceof Error ? err.message : String(err),
+      });
       return null;
     }
   }
@@ -276,7 +300,9 @@ export class QmdClient {
 
     if (!resp.ok) {
       let respBody: any = null;
-      try { respBody = await resp.json(); } catch {}
+      try { respBody = await resp.json(); } catch (e) {
+        this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body parse failed`, { err: e instanceof Error ? e.message : String(e) });
+      }
       this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body`, { status: resp.status, body: respBody });
 
       if (!retried && this.isSessionExpiredError(resp, respBody)) {
@@ -426,8 +452,9 @@ export class QmdClient {
     try {
       const parsed = JSON.parse(textContent);
       if (Array.isArray(parsed)) raw = parsed;
-    } catch {
+    } catch (e) {
       // Non-JSON response (e.g. "No results found"), treat as empty
+      this.logger?.debug?.(`[qmd-client] search response parse failed, treating as empty`, { err: e instanceof Error ? e.message : String(e) });
     }
 
     if (raw.length === 0) {

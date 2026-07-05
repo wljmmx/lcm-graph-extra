@@ -32,6 +32,7 @@
     "test": "vitest run",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke.ts",
     "postinstall": "node -e \"try{require('better-sqlite3')}catch(e){console.warn('[lcm-graph-extra] better-sqlite3 native build missing, JSON fallback will be used:', e.message)}\""
   },
   "keywords": [
