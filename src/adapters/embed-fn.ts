@@ -130,3 +130,43 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
     throw new Error('Embedding API: exhausted retries');
   };
 }
+
+/**
+ * 轻量级 Embedding API 健康探测（heartbeat 中调用）。
+ * 不消耗 token，仅验证服务可达且端点正常响应。
+ * - OpenAI 兼容 (baseURL 以 /v1 结尾): 探测 /v1/models
+ * - Ollama 原生: 探测 /api/tags
+ *
+ * 返回 true 表示服务可用，false 表示不可用。
+ */
+export async function probeEmbeddingHealth(cfg: EmbeddingConfig): Promise<boolean> {
+  if (!cfg?.baseURL) return false;
+  const baseClean = cleanBaseURL(cfg.baseURL);
+  const isOpenAiCompatible = /\/v1\/?$/.test(baseClean);
+  const timeoutMs = 5000;
+
+  const probePaths: string[] = isOpenAiCompatible
+    ? ['/models', '/health']
+    : ['/api/tags', '/health'];
+
+  for (const path of probePaths) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const resp = await fetch(`${baseClean}${path}`, {
+          method: 'GET',
+          signal: controller.signal,
+          headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : undefined,
+        });
+        if (resp.ok) return true;
+        if (resp.status === 401 || resp.status === 403) return true;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}

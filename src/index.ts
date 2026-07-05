@@ -348,6 +348,7 @@ const pluginEntry: any = definePluginEntry({
     let merger: any = null;
     let expStore: any = null;
     let _retrievalGateway: any = null;
+    let _lastEmbedHealth: boolean = true;
     let _modelRegistry: Record<string, number> | undefined;
     // Dashboard 快照服务停止函数（register 时启动，dispose 时调用）；null 表示未启动
     let snapshotServerStop: (() => Promise<void>) | null = null;
@@ -2389,7 +2390,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             lastQuery: lastRetrievalQuery,
             perfSummary: _retrievalGateway?.getPerfSummary?.() ?? 'gateway not initialized',
           }),
-          getHealthLatest: () => healthMetrics.getLatest(),
+          getHealthLatest: () => {
+            const base = healthMetrics.getLatest();
+            if (!base) return base;
+            return { ...base, embedAvailable: _lastEmbedHealth };
+          },
         };
         const snapshotHandle = startDashboardSnapshotServer({ port, host, providers });
         snapshotServerStop = snapshotHandle.stop;
@@ -2409,7 +2414,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // -------------------------------------------------------------------
     // Heartbeat - periodic async maintenance (every 5 minutes)
     //   1. Compaction pressure check + predictive pre-compaction
-    //   2. qmd MCP health check
+    //   2. qmd MCP health check (auto-recovery via scheduleRecovery)
+    //   2b. Graph / Neo4j health check + auto reconnect
+    //   2c. Embedding API health check
     //   3. Experience distillation (every ~2h) + TTL cleanup (every ~24h)
     //   4. Neo4j TTL weight decay + expired cleanup (every ~24h)
     //   5. Debt table reconcile — orphan/tombstone cleanup (every ~24h)
@@ -2673,6 +2680,35 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
           } catch { /* qmd health check failed, non-fatal */ }
         }
+
+        // --- 2b. Graph / Neo4j health check + auto reconnect ---
+        // 图谱连接断开后，heartbeat 每 5 分钟探测一次并尝试自动重连，
+        // 避免服务恢复后需要等用户主动触发检索才能恢复。
+        if (graphAdapter && typeof graphAdapter.health === "function") {
+          try {
+            const graphOk = await graphAdapter.health();
+            if (!graphOk) {
+              logger?.warn?.("heartbeat: graph/neo4j unavailable, will retry on next heartbeat");
+            }
+          } catch { /* graph health check failed, non-fatal */ }
+        }
+
+        // --- 2c. Embedding API health check ---
+        // 定期探测 embedding 服务可用性，更新状态供 dashboard 展示
+        // 和 gm-pro 向量召回的可用性判断。
+        try {
+          const { probeEmbeddingHealth } = await import("./adapters/embed-fn.js");
+          if (typeof probeEmbeddingHealth === "function") {
+            const embedCfg = api.pluginConfig?.embedding;
+            if (embedCfg?.baseURL) {
+              const embedOk = await probeEmbeddingHealth(embedCfg);
+              _lastEmbedHealth = embedOk;
+              if (!embedOk) {
+                logger?.warn?.("heartbeat: embedding API unavailable");
+              }
+            }
+          }
+        } catch { /* embedding health check failed, non-fatal */ }
         
         // --- 3. Experience distillation (scheduled async, default every 2h) ---
         const distillIntervalMs = api.pluginConfig?.distillationIntervalMs ?? 2 * 60 * 60 * 1000;

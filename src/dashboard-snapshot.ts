@@ -76,6 +76,8 @@ export interface HealthSnapshotLite {
   // R-2: cascade Tier 1 置信度（仅内存态）
   cascadeTier1Confidence?: number;
   cascadeJudgeSource?: 'gm-pro' | 'local';
+  // N-5: Embedding API 健康状态（heartbeat 中定时探测）
+  embedAvailable?: boolean;
 }
 
 /**
