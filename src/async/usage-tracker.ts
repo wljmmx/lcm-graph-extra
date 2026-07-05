@@ -97,20 +97,31 @@ class UsageDb {
       // @ts-ignore - better-sqlite3 optional, caught by try/catch
       const BetterSqlite3 = await import('better-sqlite3').catch(() => null);
       if (BetterSqlite3?.default) {
-        mkdirSync(DB_DIR, { recursive: true });
-        this.db = new BetterSqlite3.default(DB_PATH);
-        this.db.pragma('journal_mode = WAL');
-        this.db.pragma('synchronous = NORMAL');
-        this.initSchema();
-        this.ready = true;
-        this.logger.info('[usage-tracker] DB ready (better-sqlite3)');
+        try {
+          mkdirSync(DB_DIR, { recursive: true });
+          this.db = new BetterSqlite3.default(DB_PATH);
+          this.db.pragma('journal_mode = WAL');
+          this.db.pragma('synchronous = NORMAL');
+          this.initSchema();
+          this.ready = true;
+          this.logger.info('[usage-tracker] DB ready (better-sqlite3)');
+        } catch (nativeErr) {
+          // 原生绑定缺失（如 better_sqlite3.node 未编译）→ 降级 JSON 文件存储
+          // 修复前：catch 在外层，this.ready 未置 true，导致 JSON fallback 也不生效
+          this.db = null;
+          this.ready = true;
+          this.logger.warn(`[usage-tracker] better-sqlite3 native init failed, falling back to JSON: ${nativeErr}`);
+        }
       } else {
         // Fallback: JSON file storage
         this.logger.info('[usage-tracker] DB fallback: JSON file storage');
         this.ready = true; // Will work in memory/file mode
       }
     } catch (err) {
-      this.logger.warn(`[usage-tracker] DB init failed: ${err}`);
+      // 兜底：任何未预期错误也启用 JSON fallback，避免 usage-tracker 完全不可用
+      this.db = null;
+      this.ready = true;
+      this.logger.warn(`[usage-tracker] DB init failed, falling back to JSON: ${err}`);
     }
   }
 

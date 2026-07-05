@@ -448,6 +448,12 @@ export class LosslessClawAdapter {
       throw new Error('LosslessClawAdapter: not connected, cannot compact');
     }
 
+    // 修复：sessionId 可能是 number（SDK conversationId），强制 String 化
+    // 避免 lossless-claw 内部 sessionId.trim() 抛 "sessionId?.trim is not a function"
+    if (params.sessionId != null && typeof params.sessionId !== 'string') {
+      params = { ...params, sessionId: String(params.sessionId) };
+    }
+
     try {
       // Call lossless-claw's compact engine
       const lcResult = await this.engine.compact(params);
