@@ -98,7 +98,7 @@ const INCREMENT_MATCH_COUNT = `
   SET e.matchCount = coalesce(e.matchCount, 0) + 1
 `;
 
-// G-8: LLM 异步验证回路 —— 更新 qualityScore + 调整 relevanceScore
+// G-8: LLM 异步验证回路 —— 更新 qualityScore + 调整 relevanceScore + 记录历史
 const UPDATE_QUALITY_SCORE = `
   MATCH (e:${LABEL} {id: $id})
   SET e.qualityScore = $qualityScore,
@@ -107,7 +107,8 @@ const UPDATE_QUALITY_SCORE = `
         WHEN $delta < 0 THEN greatest(coalesce(e.relevanceScore, 0.5) + $delta, 0.3)
         ELSE coalesce(e.relevanceScore, 0.5)
       END,
-      e.lastValidatedAt = timestamp()
+      e.lastValidatedAt = timestamp(),
+      e.qualityScoreHistory = coalesce(e.qualityScoreHistory, []) + { ts: timestamp(), score: $qualityScore, delta: $delta, source: $source }
 `;
 
 /**
@@ -344,12 +345,14 @@ export class ExperienceStorage {
    * @param id 经验 ID
    * @param qualityScore LLM 判定的质量分数 [0, 1]
    * @param delta relevanceScore 调整量（正值=成功召回+0.05，负值=无效召回-0.05）
+   * @param source 来源（gm-pro / local）
    */
-  async updateQualityScore(id: string, qualityScore: number, delta: number): Promise<void> {
+  async updateQualityScore(id: string, qualityScore: number, delta: number, source: 'gm-pro' | 'local' = 'local'): Promise<void> {
     await this.adapter.query(UPDATE_QUALITY_SCORE, {
       id,
       qualityScore: Math.max(0, Math.min(1, qualityScore)),
       delta,
+      source,
     });
   }
 

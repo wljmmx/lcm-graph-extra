@@ -345,9 +345,10 @@ const pluginEntry: any = definePluginEntry({
     let _losslessClawAdapter: any = null;
     let qmdClient: any = null;
     let graphAdapter: any = null;
-let merger: any = null;
-let expStore: any = null;
-let _modelRegistry: Record<string, number> | undefined;
+    let merger: any = null;
+    let expStore: any = null;
+    let _retrievalGateway: any = null;
+    let _modelRegistry: Record<string, number> | undefined;
     // Dashboard 快照服务停止函数（register 时启动，dispose 时调用）；null 表示未启动
     let snapshotServerStop: (() => Promise<void>) | null = null;
     // 最近一次 assemble 的检索 query，供 dashboard /internal/snapshot 只读访问
@@ -515,6 +516,15 @@ function getSessionDedup(sessionKey: string) {
           fuzzyMatchThreshold: 0.85,
           decayHalfLifeDays: 30,
         });
+
+        // 创建全局 RetrievalGateway 单例，供 dashboard snapshot 读取检索性能
+        const { RetrievalGateway } = await import("./retrieval-gateway.js");
+        _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, {
+          maxResults: merger.config.maxResults,
+          fuzzyMatchThreshold: merger.config.fuzzyMatchThreshold,
+          decayHalfLifeDays: merger.config.decayHalfLifeDays,
+        });
+
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
         // WindowMonitor config is at api.pluginConfig.lcmMonitor (not nested under plugins.entries)
         if (api.pluginConfig?.lcmMonitor?.dedupRounds) {
@@ -1924,9 +1934,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                             score,
                             delta,
                           });
+                          await store.updateQualityScore(exp.id, score, delta, 'gm-pro');
                         },
                         async () => {
-                          await store.updateQualityScore(exp.id, score, delta);
+                          await store.updateQualityScore(exp.id, score, delta, 'local');
                         },
                         { logger, label: 'G-8 upsertFeedback' },
                       );
@@ -2372,8 +2383,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           },
           getRetrievalState: () => ({
             lastQuery: lastRetrievalQuery,
-            // 无全局 gateway 单例，perfSummary 暂返回空串（dashboard 显示为空）
-            perfSummary: '',
+            perfSummary: _retrievalGateway?.getPerfSummary?.() ?? 'gateway not initialized',
           }),
           getHealthLatest: () => healthMetrics.getLatest(),
         };

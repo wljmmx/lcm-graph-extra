@@ -50,6 +50,20 @@ export class RetrievalGateway {
   public slowSearchThresholdMs = DEFAULTS.retrieval.slowSearchThresholdMs;
   public globalTimeoutMs = DEFAULTS.retrieval.globalTimeoutMs;
 
+  getPerfSummary(): string {
+    const parts: string[] = [];
+    for (const [engine, stat] of Object.entries(this.stats)) {
+      if (stat.searches > 0) {
+        const avg = Math.round(stat.totalDurationMs / stat.searches);
+        parts.push(`${engine}: ${stat.searches} searches, avg=${avg}ms, max=${stat.maxDurationMs}ms, failures=${stat.failures}`);
+      }
+    }
+    if (this.lastQuery) {
+      parts.push(`last: "${this.lastQuery.slice(0, 50)}${this.lastQuery.length > 50 ? '...' : ''}"`);
+    }
+    return parts.join(' | ') || 'no searches yet';
+  }
+
   constructor(
     qmdClient: QmdClient,
     graphAdapter: GraphAdapter,

@@ -1,0 +1,79 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [2.1.10] - 2026-07-05
+
+### Added
+
+- **graph-memory-pro v2.1.10 API 对接**（5 个新能力）
+  - `judgeRecall` (R-2): 级联 Tier 1 置信度评估，优先调用 gm-pro，失败降级到本地 `evaluateTier1`
+  - `upsertFeedback` (G-8): afterTurn 验证回路反馈，优先调用 gm-pro，失败降级到 `store.updateQualityScore`
+  - `getNodesByTimeRange` (S-8'): 时间范围节点查询，优先调用 gm-pro，失败降级到 Cypher
+  - `evolveNode` (G-10): 主动遗忘时节点状态演进，优先调用 gm-pro，失败降级到 Cypher SET superseded
+  - `getGraphHealth` (G-5): 图谱健康快照，优先调用 gm-pro，失败降级到本地 GraphAdapter 状态推断
+- **gm-pro fallback wrapper** (`src/adapters/gm-pro-fallback.ts`): 统一 graceful degradation 入口，所有新 API 调用通过此 wrapper 实现"优先 gm-pro → 失败降级"模式
+- **Prometheus /metrics 端点** (`src/dashboard-snapshot.ts`): 输出 text/plain v0.0.4 格式指标，覆盖压力信号、熔断器、检索性能、经验层、Tier 分布、Graph adapter 状态
+- **R-2 cascade Tier 1 置信度上报** (`src/health-metrics.ts`): 新增 `recordCascadeConfidence` 方法，通过 :7423 snapshot + Prometheus 暴露 `lcm_cascade_tier1_confidence{source}` 指标
+- **Dashboard 图谱健康卡片** (`packages/dashboard/src/views/MonitorView.vue`): 显示 status/source/nodeCount/relationshipCount/graphAdapterConnected
+- **Dashboard Cascade 置信度展示**: MonitorView Cascade 面板新增 Tier1 置信度 + judge source tag（gm-pro/local）
+- **Dashboard 系统诊断卡片** (`packages/dashboard/src/views/MaintainView.vue`): 通过 `/api/mcp/invoke` 触发 `lcmg_diagnose` 工具
+- **Dashboard 后端图谱健康路由** (`packages/dashboard/server/routes/graph-health.ts`): `GET /api/graph/health`，5s 超时，失败降级
+- **Dashboard 前端 fetcher** (`packages/dashboard/src/api/health.ts`): `fetchGraphHealth()` + `GraphHealthResponse` 类型定义
+- **Dashboard MCP 封装** (`packages/dashboard/src/api/maintain.ts`): `invokeDiagnose()` 封装
+
+### Changed
+
+- **N-1 Sync 算法升级**: Phase 1.5 新增 updatedAt 时间戳 drift 检测，对比 lcm.db messages.created_at 与 Neo4j ConversationMessage.updatedAt，差异 > 60s 视为 drift，repair 模式下增量 MERGE 更新到 Neo4j
+- **G-10 lcmg_forget hard 模式**: 优先调用 gm-pro evolveNode API，失败降级到 Cypher SET superseded
+- **S-8' lcmg_experience_report**: 支持 from/to 时间范围过滤（ISO 8601 / 相对时间如 '7d'/'24h' / 中文如 '今天'/'本周'），优先调用 gm-pro getNodesByTimeRange
+- **lcmg_maintain**: 触发 gm-pro 维护管线（dedup / PageRank / 社区检测）+ 债务表对账
+- **HealthSnapshotLite 类型**: 新增 `cascadeTier1Confidence` / `cascadeJudgeSource` 字段
+- **HealthSnapshot 类型**: 前端同步新增 R-2 字段
+
+### Fixed
+
+- **TypeScript 'health' is of type 'unknown'**: 新增 `HealthSnapshotLite` 接口，修复 `buildPrometheusMetrics` 中访问 health 字段的类型错误
+- **'await' expressions are only allowed within async functions**: `/internal/graph-health` 路由改用 `.then/.catch` 链处理
+
+### Testing
+
+- **新增 7 测试用例**:
+  - `dashboard-snapshot.test.ts`: 5 个（Prometheus /metrics + /internal/graph-health 端点覆盖）
+  - `health-metrics.test.ts`: 3 个（recordCascadeConfidence 单元测试）
+- **全量测试**: 424 通过（主包）+ 56 通过（dashboard），无回归
+
+## [2.1.9] - 2026-06-xx
+
+### Added
+
+- **ROADMAP 第一批 8 项全部落地**:
+  - S-6' 场景隔离扩展
+  - S-7' 用户画像轻量版
+  - S-9' 情节缓冲扩展
+  - S-11' Zettelkasten 增强
+  - R-5' 动态混合简化
+  - N-1 Sync 算法升级
+  - N-2 Merger LLM 重排启用
+  - N-3 TTL-经验层集成
+- **ROADMAP 第二批 4 项全部落地**:
+  - R-2 成本感知级联 Tier 2/3
+  - G-8 LLM 异步验证回路
+  - S-8' 时间范围回顾总结
+  - N-4 健康指标导出
+- **ROADMAP 第三批 G-10 落地**:
+  - G-10 主动遗忘命令（lcmg_forget）
+- **Dashboard 四大模块**: MonitorView / ExperienceView / MemoryView / MaintainView（4 view + 13 组件）
+- **16 个 MCP 工具**: lcmg_search / backup / restore / import / pin / forget / sync / qmd_status / get_document / batch_get / maintain / diagnose / experience_report / distill / compact / reset_breaker
+- **三层架构**: 插件 snapshot 服务（:7423）→ dashboard 后端（:7421）→ 前端 SPA（:7422）
+
+### Security
+
+- **SEC-5 M-11/M-12**: backup/restore 路径校验，防止路径穿越到 `~/.openclaw` 之外
+- **SEC-L**: FTS5 MATCH 查询字符串转义，防止语法错误和意外匹配
+
+[2.1.10]: https://github.com/wljmmx/lcm-graph-extra/releases/tag/v2.1.10
+[2.1.9]: https://github.com/wljmmx/lcm-graph-extra/releases/tag/v2.1.9

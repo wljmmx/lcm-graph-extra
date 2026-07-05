@@ -174,6 +174,10 @@ export class GraphAdapter {
     this.logger = resolveLogger(logger);
   }
 
+  get isConnected(): boolean {
+    return !!this.driver;
+  }
+
   async connect(): Promise<boolean> {
     try {
       // P3-3: 记录实际使用的 graph-memory-pro 路径与解析来源

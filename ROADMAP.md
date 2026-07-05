@@ -4,7 +4,7 @@
 > 模块定位：**上层编排层**——上下文管理、prompt 组装、Agent 工作流、用户界面
 > 依赖：graph-memory-pro v2.1.10（记忆底层引擎），通过 Re-exports API 调用
 > 对等计划：[graph-memory-pro ROADMAP.md](https://github.com/wljmmx/graph-memory-pro/blob/main/ROADMAP.md)
-> 基线：lcm-graph-extra v2.1.9（已具备四层检索、经验层、TagRegistry、PressureTier、12 工具）
+> 基线：lcm-graph-extra v2.1.10（已具备四层检索、经验层、TagRegistry、PressureTier、16 工具）
 
 ---
 
@@ -12,7 +12,7 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  lcm-graph-extra v2.1.9（上层编排层）← 本计划     │
+│  lcm-graph-extra v2.1.10（上层编排层）← 本计划     │
 │  四层检索 · 经验层 · TagRegistry · PressureTier  │
 │  12 个 Agent 工具 · 熔断器 · debt-manager         │
 │  调用 graph-memory-pro 的 Re-exports API        │
