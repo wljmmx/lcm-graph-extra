@@ -2264,10 +2264,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // 1. 先停止 heartbeat timer，避免新任务进入
         if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
         // 关闭 dashboard 快照 HTTP 服务（幂等，可多次调用）
+        // 必须 await 确保端口完全释放，否则插件 reload 时新实例会遇到 EADDRINUSE
         if (snapshotServerStop) {
           const stopFn = snapshotServerStop;
           snapshotServerStop = null;
-          stopFn().catch(() => {});
+          await stopFn().catch(() => {});
         }
 
         // 2. 等待在途的 fire-and-forget 任务（heartbeat / afterTurn 启动的），
