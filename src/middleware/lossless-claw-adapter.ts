@@ -43,7 +43,7 @@ const SHARED_INIT_STATE = Symbol.for('@martian-engineering/lossless-claw/shared-
 
 /** lossless-claw 暴露的完整 ContextEngine 接口（最小子集） */
 interface LosslessClawEngine {
-  info?: { id: string; name: string; version: string };
+  info?: { id: string; name: string; version: string; ownsCompaction?: boolean; turnMaintenanceMode?: 'background' | 'inline' | string };
   ingest?(params: {
     sessionId: string;
     sessionKey?: string;
@@ -81,6 +81,7 @@ interface LosslessClawEngine {
     sessionFile: string;
     messages: any[];
     prePromptMessageCount: number;
+    autoCompactionSummary?: string;
     isHeartbeat?: boolean;
     tokenBudget?: number;
     currentTokenCount?: number;
@@ -92,7 +93,7 @@ interface LosslessClawEngine {
     sessionKey?: string;
     sessionFile?: string;
     messages?: any[];
-  }): Promise<{ bootstrapped: boolean; importedMessages: number }>;
+  }): Promise<{ bootstrapped: boolean; importedMessages: number; reason?: string }>;
   assemble?(params: {
     sessionId: string;
     sessionKey?: string;
@@ -112,7 +113,7 @@ interface LosslessClawEngine {
     sessionFile: string;
     sessionKey?: string;
     runtimeContext?: any;
-  }): Promise<{ changed: boolean; bytesFreed: number; rewrittenEntries: number }>;
+  }): Promise<{ changed: boolean; bytesFreed: number; rewrittenEntries: number; reason?: string }>;
   dispose?(): Promise<void>;
   getConversationStore?(): any;
   getSummaryStore?(): any;
@@ -171,6 +172,23 @@ function normalizeMessageContent<T extends { content?: unknown }>(msg: T): T {
     return { ...msg, content: String(msg.content ?? '') };
   }
   return msg;
+}
+
+/**
+ * P0-AUDIT: 统一 sessionId String 化。
+ *
+ * lossless-claw 在 shouldIgnoreSession (engine.ts L540) 和 resolveSessionQueueKey (L634)
+ * 中对每个公共方法都调用 sessionId?.trim()。`?.` 仅防 null/undefined，不防 number。
+ * 若 sessionId 是 number（如 getConversationId() 返回的 conversationId），会抛
+ * TypeError: sessionId?.trim is not a function。
+ *
+ * 此 helper 在所有调用 engine 前统一 String 化，作为防御性兜底。
+ */
+function coerceSessionId<T extends { sessionId?: unknown }>(params: T): T {
+  if (params.sessionId != null && typeof params.sessionId !== 'string') {
+    return { ...params, sessionId: String(params.sessionId) };
+  }
+  return params;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,11 +284,12 @@ export class LosslessClawAdapter {
     }
     try {
       const msg = params.message;
+      let normalizedParams = params;
       if (msg && (Array.isArray(msg.content) || typeof msg.content !== 'string')) {
-        const normalizedParams = { ...params, message: normalizeMessageContent(msg) };
-        return await this.engine.ingest(normalizedParams);
+        normalizedParams = { ...params, message: normalizeMessageContent(msg) };
       }
-      return await this.engine.ingest(params);
+      normalizedParams = coerceSessionId(normalizedParams);
+      return await this.engine.ingest(normalizedParams);
     } catch {
       return { ingested: false };
     }
@@ -294,10 +313,10 @@ export class LosslessClawAdapter {
       // OpenClaw may pass content as arrays (rich text/images), but engine expects strings
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
-      const normalizedParams = {
+      const normalizedParams = coerceSessionId({
         ...params,
         messages: normalizedMessages,
-      };
+      });
 
       return await this.engine.ingestBatch(normalizedParams);
     } catch {
@@ -312,6 +331,7 @@ export class LosslessClawAdapter {
     sessionFile: string;
     messages: any[];
     prePromptMessageCount?: number;
+    autoCompactionSummary?: string;
     isHeartbeat?: boolean;
     tokenBudget?: number;
     currentTokenCount?: number;
@@ -323,11 +343,11 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
-      const normalizedParams = {
+      const normalizedParams = coerceSessionId({
         ...params,
         messages: normalizedMessages,
         prePromptMessageCount: params.prePromptMessageCount ?? 0,
-      };
+      });
 
       await this.engine.afterTurn(normalizedParams);
     } catch (err) {
@@ -351,10 +371,10 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
-      const normalizedParams = {
+      const normalizedParams = coerceSessionId({
         ...params,
         messages: normalizedMessages,
-      };
+      });
 
       return await this.engine.bootstrap(normalizedParams);
     } catch {
@@ -384,7 +404,7 @@ export class LosslessClawAdapter {
     if (convStore) {
       try {
         const existing = await convStore.getConversationForSession?.({
-          sessionId: params.sessionId,
+          sessionId: params.sessionId != null ? String(params.sessionId) : undefined,
           sessionKey: params.sessionKey,
         });
         if (existing && existing.bootstrapped_at) {
@@ -404,10 +424,10 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
-      const normalizedParams = {
+      const normalizedParams = coerceSessionId({
         ...params,
         messages: normalizedMessages,
-      };
+      });
 
       const result = await this.engine.bootstrap(normalizedParams);
       return result ?? { bootstrapped: false, importedMessages: 0 };
@@ -448,11 +468,9 @@ export class LosslessClawAdapter {
       throw new Error('LosslessClawAdapter: not connected, cannot compact');
     }
 
-    // 修复：sessionId 可能是 number（SDK conversationId），强制 String 化
-    // 避免 lossless-claw 内部 sessionId.trim() 抛 "sessionId?.trim is not a function"
-    if (params.sessionId != null && typeof params.sessionId !== 'string') {
-      params = { ...params, sessionId: String(params.sessionId) };
-    }
+    // P0-AUDIT: 统一用 coerceSessionId 强制 sessionId String 化
+    // 避免 lossless-claw 内部 sessionId.trim() 抛 TypeError
+    params = coerceSessionId(params);
 
     try {
       // Call lossless-claw's compact engine
@@ -535,10 +553,10 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
-      const normalizedParams = {
+      const normalizedParams = coerceSessionId({
         ...params,
         messages: normalizedMessages,
-      };
+      });
 
       return await this.engine.assemble(normalizedParams);
     } catch (err) {
@@ -561,7 +579,8 @@ export class LosslessClawAdapter {
       return { changed: false, bytesFreed: 0, rewrittenEntries: 0 };
     }
     try {
-      return await this.engine.maintain(params);
+      const normalizedParams = coerceSessionId(params);
+      return await this.engine.maintain(normalizedParams);
     } catch (err) {
       this.logger?.warn?.('[lossless-claw-adapter] maintain failed', { err: serializeError(err) });
       return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: (err as Error).message };
