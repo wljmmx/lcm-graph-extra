@@ -860,7 +860,8 @@ function getSessionDedup(sessionKey: string) {
                   const summaryMsgs = convSummaries.map((s) => ({
                     role: 'user', content: s.content, token_count: s.tokenCount,
                   }));
-                  finalMessages = summaryMsgs;
+                  // Medium tier: summaries + 全部原始消息（保证用户最新消息在最后）
+                  finalMessages = [...summaryMsgs, ...messages];
                 }
 
                 // Use hasUncompressedMessages to confirm there are messages needing compression
@@ -877,25 +878,31 @@ function getSessionDedup(sessionKey: string) {
                 const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
                   : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
                 try {
+                  let compactTimer: ReturnType<typeof setTimeout> | undefined;
+                  const compactTimeoutPromise = new Promise<never>((_, reject) => {
+                    compactTimer = setTimeout(() => reject(new Error('Compact timeout')), compactTimeout);
+                  });
+                  compactTimeoutPromise.catch(() => {}); // 预吞 rejection 防 unhandledRejection
                   await Promise.race([
                     _losslessClawAdapter.compact({
                       sessionId: _lcSid, sessionKey, sessionFile, force: true,
                       tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                       compactionTarget: 'threshold',
                     }),
-                    new Promise((_, r) => setTimeout(() => r(new Error('Compact timeout')), compactTimeout)),
+                    compactTimeoutPromise,
                   ]);
+                  if (compactTimer) clearTimeout(compactTimer);
                   const freshSummaries = getConversationSummaries(conversationId);
                   if (freshSummaries.length > 0) {
                     const trimmedSummaryMsgs = trimSummariesToBudget(
                       freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                       resolvedCtx.compactTokenBudget * maxSummaryRatio,
                     ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-                    // Preserve last user message for context
-                    const lastOriginalMsg = messages.at(-1);
-                    finalMessages = lastOriginalMsg
-                      ? [...trimmedSummaryMsgs, lastOriginalMsg]
-                      : trimmedSummaryMsgs;
+                    // Preserve last few messages (at least last user + last assistant) for context
+                    // 保留最近 N 条原始消息确保对话连贯性（优先保留最新消息在末尾）
+                    const recentRawCount = Math.min(messages.length, 4);
+                    const recentRawMsgs = messages.slice(-recentRawCount);
+                    finalMessages = [...trimmedSummaryMsgs, ...recentRawMsgs];
                   } else {
                     writeCompactionDebt(
                     conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
@@ -948,10 +955,10 @@ function getSessionDedup(sessionKey: string) {
                 const _summaryMsgs = _existingSummaries.map((s) => ({
                   role: 'user', content: s.content, token_count: s.tokenCount,
                 }));
-                const _lastOriginalMsg = messages.at(-1);
-                finalMessages = _lastOriginalMsg
-                  ? [..._summaryMsgs, _lastOriginalMsg]
-                  : _summaryMsgs;
+                // 保留最近几条原始消息（保证最新消息在最后），而非仅最后一条
+                const _recentCount = Math.min(messages.length, 4);
+                const _recentRawMsgs = messages.slice(-_recentCount);
+                finalMessages = [..._summaryMsgs, ..._recentRawMsgs];
               }
             }
           }

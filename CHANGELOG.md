@@ -59,6 +59,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **审计报告**: 完整审计报告见 `docs/resource-leak-audit-2026-07-05.md`
 
+### Message Order & Stability Fixes (2026-07-06)
+
+**P0 - 消息顺序问题修复**
+
+- **Medium tier 消息顺序修复** (`index.ts`): medium pressure 场景下 `finalMessages = summaryMsgs` 只保留了摘要，**完全丢弃了所有原始消息**（包括用户最新消息）。修复为 `[...summaryMsgs, ...messages]`，摘要在前 + 全部原始消息在后，保证最新消息在末尾
+- **High tier 消息保留修复** (`index.ts`): high pressure 场景下只保留最后 1 条消息，对话上下文丢失严重。修复为保留最近 4 条原始消息（最近 2 轮对话），确保对话连贯性
+- **Fallback 路径消息保留修复** (`index.ts`): async-compaction fallback 路径同样只保留最后 1 条消息，修复为保留最近 4 条
+
+**P1 - 错误与稳定性修复**
+
+- **better-sqlite3 构造函数兼容** (`usage-tracker.ts`): ESM dynamic import 下 `BetterSqlite3.default is not a constructor` 错误。修复为 `BetterSqlite3 = mod.default ?? mod`，兼容 CJS 与 ESM 两种导出形态
+- **high-pressure compact timeout timer 泄漏** (`index.ts`): Promise.race 中 compact timeout 的 setTimeout 句柄未清理，导致 timer 泄漏 + unhandledRejection 风险。修复为提取 timer 句柄 + race 后 clearTimeout + 预吞 rejection
+
+**P2 - 降级与告警**
+
+- **gm-pro PPR failed** (`graph-adapter.ts`): gm-pro 的 personalizedPageRank 调用失败属于预期降级路径（gm-pro 未安装/内部 session 管理问题），已有 fallback 到 Cypher PageRank，再降级到 degree-based 排序。日志级别为 warn，属正常降级行为
+- **L4 experience search failed** (`index.ts`): experience 层搜索失败有完整 try/catch 降级（返回空数组不阻塞主流程），通常由 Neo4j 连接波动或 expStore 未初始化导致
+- **MCP query failed → CLI fallback** (`qmd-client.ts`): MCP 不可用时自动降级到 qmd CLI 查询，属预期降级机制
+
 ### Testing
 
 - **新增 7 测试用例**:

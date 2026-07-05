@@ -95,11 +95,14 @@ class UsageDb {
     try {
       // Try native better-sqlite3 first (commonjs)
       // @ts-ignore - better-sqlite3 optional, caught by try/catch
-      const BetterSqlite3 = await import('better-sqlite3').catch(() => null);
-      if (BetterSqlite3?.default) {
+      const BetterSqlite3Mod = await import('better-sqlite3').catch(() => null);
+      // ESM default 导出兼容：better-sqlite3 是 CJS 模块，在 ESM dynamic import 下
+      // 可能是 mod.default 或直接是构造函数，需兼容多种形态
+      const BetterSqlite3 = BetterSqlite3Mod?.default ?? BetterSqlite3Mod;
+      if (BetterSqlite3 && typeof BetterSqlite3 === 'function') {
         try {
           mkdirSync(DB_DIR, { recursive: true });
-          this.db = new BetterSqlite3.default(DB_PATH);
+          this.db = new BetterSqlite3(DB_PATH);
           this.db.pragma('journal_mode = WAL');
           this.db.pragma('synchronous = NORMAL');
           this.initSchema();
