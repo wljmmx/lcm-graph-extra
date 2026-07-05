@@ -9,14 +9,16 @@
  * 本模块实现自带的 embed 函数，明确在请求 body 中包含 keep_alive 字段，
  * 绕过 graph-memory-pro 的不确定性。支持三种端点格式：
  *
- *   - OpenAI 兼容 (/v1): POST /v1/embeddings → body { model, input, keep_alive }
- *       （OpenAI 标准，字段始终用 input，保持 OpenAI 旧格式不变）
- *   - Ollama 新版原生: POST /api/embed       → body { model, input, keep_alive }
- *       （Ollama 0.3+，字段为 input）
- *   - Ollama 旧版原生: POST /api/embeddings   → body { model, prompt, keep_alive }
- *       （Ollama 0.1.x，字段为 prompt，端点带 s）
+ *   - OpenAI 兼容 (/v1): POST /v1/embeddings → body { model, input, keep_alive, ...options }
+ *       （OpenAI 标准，字段始终用 input；扩展 options 平铺到顶层）
+ *   - Ollama 新版原生: POST /api/embed       → body { model, input, keep_alive, options: {...} }
+ *       （Ollama 0.3+，字段为 input；运行时参数 num_ctx/seed 等嵌套在 options 内）
+ *   - Ollama 旧版原生: POST /api/embeddings   → body { model, prompt, keep_alive, options: {...} }
+ *       （Ollama 0.1.x，字段为 prompt，端点带 s；options 同样嵌套）
  *
  * 非新版端点首次 404 时自动回退到旧版并缓存，避免每次探测。
+ * Ollama 原生端点的 options 嵌套：Ollama 会忽略顶层不认识的字段，运行时参数
+ * （num_ctx、seed、temperature、top_k 等）必须放在 options 子对象内才会生效。
  */
 
 import type { EmbeddingConfig } from '../types.js';
@@ -41,6 +43,10 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
   // 使用 cleanBaseURL 清洗可能的反引号/引号/首尾空格污染（用户从 markdown 复制时常见）
   const baseClean = cleanBaseURL(baseURL);
   const isOpenAiCompatible = /\/v1\/?$/.test(baseClean);
+  // Ollama 原生端点（/api/embed 和 /api/embeddings）要求运行时参数嵌套在 options 子对象内，
+  // 不能平铺到 body 顶层（顶层会被 Ollama 静默忽略，导致 num_ctx/seed/temperature 等失效）。
+  // OpenAI 兼容端点的扩展字段（dimensions/encoding_format）本就在顶层，保持平铺。
+  const isOllamaNative = !isOpenAiCompatible;
 
   // 预构建请求头
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -68,10 +74,17 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
         ep = baseClean + '/api/embed';
         body = { model, input: text, keep_alive: keepAlive };
       }
-      // 透传额外 options（Ollama 会忽略不认识的字段）
+      // 透传额外 options：
+      // - OpenAI 兼容端点：平铺到 body 顶层（dimensions/encoding_format 等标准字段本就在顶层）
+      // - Ollama 原生端点：嵌套为 body.options（num_ctx/seed/temperature 等运行时参数必须嵌套）
       if (options) {
-        for (const [k, v] of Object.entries(options)) {
-          if (!(k in body)) body[k] = v;
+        if (isOllamaNative) {
+          // 保留已有 options 字段（理论上不应有），合并用户 options
+          body.options = { ...(body.options as Record<string, unknown> | undefined), ...options };
+        } else {
+          for (const [k, v] of Object.entries(options)) {
+            if (!(k in body)) body[k] = v;
+          }
         }
       }
 

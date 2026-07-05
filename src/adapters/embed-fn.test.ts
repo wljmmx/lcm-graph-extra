@@ -278,4 +278,92 @@ describe('createLocalEmbedFn', () => {
     await expect(embed('text')).rejects.toThrow('500');
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
+
+  // ─── options 字段在不同端点的合并策略 ─────────────────────────────────
+
+  it('Ollama 新版端点: options 嵌套为 body.options 子对象', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ embedding: [0.1, 0.2] }),
+    });
+
+    const embed = createLocalEmbedFn({
+      model: 'm',
+      baseURL: 'http://h:11434',
+      options: { num_ctx: 4096, seed: 42, temperature: 0.8 },
+    });
+    await embed('text');
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    // options 必须嵌套为子对象，不能平铺到顶层
+    expect(body.options).toEqual({ num_ctx: 4096, seed: 42, temperature: 0.8 });
+    // 顶层不应出现运行时参数（Ollama 会忽略顶层不认识的字段）
+    expect(body.num_ctx).toBeUndefined();
+    expect(body.seed).toBeUndefined();
+    expect(body.temperature).toBeUndefined();
+    // 核心字段保持不变
+    expect(body.model).toBe('m');
+    expect(body.input).toBe('text');
+    expect(body.keep_alive).toBe('1h');
+  });
+
+  it('Ollama 旧版端点回退: options 同样嵌套为 body.options', async () => {
+    // 首次 /api/embed 404 触发回退
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404, text: async () => 'Not Found' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ embedding: [0.3] }),
+    });
+
+    const embed = createLocalEmbedFn({
+      model: 'm',
+      baseURL: 'http://h:11434',
+      options: { num_ctx: 8192, top_k: 40 },
+    });
+    await embed('text');
+
+    // 第二次调用是旧版端点
+    const legacyBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+    expect(mockFetch.mock.calls[1][0]).toBe('http://h:11434/api/embeddings');
+    expect(legacyBody.options).toEqual({ num_ctx: 8192, top_k: 40 });
+    expect(legacyBody.num_ctx).toBeUndefined();
+    expect(legacyBody.top_k).toBeUndefined();
+    expect(legacyBody.prompt).toBe('text');
+    expect(legacyBody.keep_alive).toBe('1h');
+  });
+
+  it('OpenAI 兼容端点: options 平铺到 body 顶层（不嵌套）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ embedding: [0.1] }] }),
+    });
+
+    const embed = createLocalEmbedFn({
+      model: 'm',
+      baseURL: 'http://h:11434/v1',
+      // OpenAI 标准扩展字段：dimensions / encoding_format 本就在顶层
+      options: { dimensions: 1024, encoding_format: 'float' },
+    });
+    await embed('text');
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    // OpenAI 兼容端点：平铺到顶层（不嵌套）
+    expect(body.dimensions).toBe(1024);
+    expect(body.encoding_format).toBe('float');
+    // 不应出现 options 子对象
+    expect(body.options).toBeUndefined();
+  });
+
+  it('Ollama 原生端点: 无 options 时不添加空 options 字段', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ embedding: [0.1] }),
+    });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h:11434' });
+    await embed('text');
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.options).toBeUndefined();
+  });
 });
