@@ -742,8 +742,13 @@ function getSessionDedup(sessionKey: string) {
                 : '';
               const preCompactConversationId = getConversationId(preCompactSessionKey);
               if (preCompactConversationId != null) {
+                // BUG-AUDIT: sessionId 必须是 OpenClaw 会话 ID（字符串，SDK 注入），
+                // 不是 conversationId（SQLite 主键 number）。lossless-claw 用 sessionId 查
+                // conversations.session_id 列，传 number 主键会永远查不到。
+                const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
+                  : (typeof params.session_id === 'string' ? params.session_id : String(preCompactConversationId));
                 backgroundTasks.register('compact:pre-emptive', _losslessClawAdapter.compact({
-                  sessionId: preCompactConversationId,
+                  sessionId: _lcSid,
                   sessionKey: preCompactSessionKey,
                   sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                   force: true,
@@ -780,8 +785,11 @@ function getSessionDedup(sessionKey: string) {
 
               if (tier === 'medium') {
                 // Medium: fire-and-forget compact, assemble summaries + all raw msgs, write debt if needed
+                // BUG-AUDIT: sessionId 用 SDK 字符串会话 ID，不是 conversationId（number 主键）
+                const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
+                  : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
                 backgroundTasks.register('compact:medium-tier', _losslessClawAdapter.compact({
-                  sessionId: conversationId, sessionKey, sessionFile, force: true,
+                  sessionId: _lcSid, sessionKey, sessionFile, force: true,
                   tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
                 }).then(() => {}, () => {}));
@@ -803,10 +811,13 @@ function getSessionDedup(sessionKey: string) {
                 }
               } else if (tier === 'high') {
                 // High: BLOCKING emergency compaction + trim excess
+                // BUG-AUDIT: sessionId 用 SDK 字符串会话 ID，不是 conversationId（number 主键）
+                const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
+                  : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
                 try {
                   await Promise.race([
                     _losslessClawAdapter.compact({
-                      sessionId: conversationId, sessionKey, sessionFile, force: true,
+                      sessionId: _lcSid, sessionKey, sessionFile, force: true,
                       tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                       compactionTarget: 'threshold',
                     }),
@@ -843,7 +854,10 @@ function getSessionDedup(sessionKey: string) {
                   'proactive_' + tier + '_pressure',
                 );
                 backgroundTasks.register('compact:low-tier', _losslessClawAdapter.compact({
-                  sessionId: conversationId, sessionKey, sessionFile, force: true,
+                  // BUG-AUDIT: sessionId 用 SDK 字符串会话 ID，不是 conversationId（number 主键）
+                  sessionId: typeof params.sessionId === 'string' ? params.sessionId
+                    : (typeof params.session_id === 'string' ? params.session_id : String(conversationId)),
+                  sessionKey, sessionFile, force: true,
                   tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
                 }).then(() => {}, () => {}));
@@ -1856,12 +1870,16 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       uncompressedCount,
                     });
                     const sk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
+                    // BUG-AUDIT: sessionId 用 SDK 字符串会话 ID（_sessionId），
+                    // 不是 getConversationId() 返回的 number 主键。
+                    // 原代码 `getConversationId(sk) ?? _sessionId` 优先用 number 主键，
+                    // lossless-claw 用它查 conversations.session_id 列永远查不到。
+                    // 同时移除接口不存在的 reason 字段。
                     backgroundTasks.register('afterturn:s9-topic-shift', _losslessClawAdapter.compact({
-                      sessionId: getConversationId(sk) ?? _sessionId,
+                      sessionId: _sessionId,
                       sessionKey: sk,
                       sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                       force: false,
-                      reason: 'topic-shift',
                     }));
                   }
                 }
