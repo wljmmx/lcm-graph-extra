@@ -42,6 +42,8 @@ export interface ExperienceGraph {
 export interface QualityHistoryPoint {
   qualityScore: number | null;
   timestamp: number | null;
+  delta?: number | null;
+  source?: 'gm-pro' | 'local' | null;
 }
 
 export interface QualityHistoryResponse {

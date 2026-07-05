@@ -603,7 +603,10 @@
                 "dag_update",
                 "compaction",
                 "backup",
-                "error"
+                "error",
+                "circuit_breaker_trip",
+                "debt_overflow",
+                "gm_pro_unavailable"
               ]
             },
             "default": []

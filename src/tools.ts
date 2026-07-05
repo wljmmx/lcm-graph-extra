@@ -318,10 +318,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_experience_report",
     label: "经验报告",
-    description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown, summary (LLM natural language summary). default limit=20. tag filters by community label. S-8': supports from/to time range filtering (ISO 8601 or natural language like '7d', '24h')." +
+    description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown, summary (LLM natural language summary), markdown-file (落盘到 ~/.openclaw/reports/), pdf-file (先存 md，需 pandoc 转 PDF). default limit=20. tag filters by community label. S-8': supports from/to time range filtering (ISO 8601 or natural language like '7d', '24h')." +
       "Searches for EVENT nodes with SOLVED_BY relationships and formats as a report.",
     parameters: Type.Object({
-      format: Type.Optional(Type.String({ description: 'Output: "text", "json", "markdown", "summary"', default: "text" })),
+      format: Type.Optional(Type.String({ description: 'Output: "text", "json", "markdown", "summary", "markdown-file", "pdf-file"', default: "text" })),
       limit: Type.Optional(Type.Number({ description: "Max experiences (default 20)", minimum: 1, maximum: 100 })),
       tag: Type.Optional(Type.String({ description: "Filter by community tag" })),
       from: Type.Optional(Type.String({ description: "S-8': Start time (ISO 8601 or relative like '7d', '24h', '2024-01-01')" })),
@@ -512,7 +512,28 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           lines.push("");
         }
         lines.push(`---\nTotal: ${result.records.length} experiences`);
-        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { ok: true } };
+        const finalText = lines.join("\n");
+
+        // 阶段 3-2: 报告导出 — markdown-file / pdf-file 格式落盘到 ~/.openclaw/reports/
+        if (format === "markdown-file" || format === "pdf-file") {
+          try {
+            const reportsDir = join(homedir(), '.openclaw', 'reports');
+            if (!existsSync(reportsDir)) mkdirSync(reportsDir, { recursive: true });
+            const ts = new Date().toISOString().replace(/[:.]/g, '-');
+            const ext = format === "pdf-file" ? 'md' : 'md'; // PDF 需外部转换，先存 md
+            const filename = `experience-report-${ts}.${ext}`;
+            const filepath = join(reportsDir, filename);
+            writeFileSync(filepath, finalText, 'utf8');
+            const msg = format === "pdf-file"
+              ? `Report saved to ${filepath}\n(PDF 转换需外部工具如 pandoc，已保存为 markdown 源文件)`
+              : `Report saved to ${filepath}`;
+            return { content: [{ type: "text" as const, text: msg }], details: { ok: true, path: filepath, format } };
+          } catch (err) {
+            return { content: [{ type: "text" as const, text: `Failed to save report: ${String(err)}` }], details: { ok: false, error: String(err) } };
+          }
+        }
+
+        return { content: [{ type: "text" as const, text: finalText }], details: { ok: true } };
       } finally {
         await closeNeo4j(driver, session);
       }

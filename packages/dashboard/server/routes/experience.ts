@@ -53,6 +53,8 @@ export interface ExperienceGraph {
 export interface QualityHistoryPoint {
   qualityScore: number | null;
   timestamp: number | null;
+  delta?: number | null;
+  source?: 'gm-pro' | 'local' | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +115,9 @@ RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
 
 const QUALITY_HISTORY_CYPHER = `
 MATCH (e:EXPERIENCE {id: $id})
-RETURN e.qualityScore AS qualityScore, e.lastValidatedAt AS lastValidatedAt
+RETURN e.qualityScore AS qualityScore,
+       e.lastValidatedAt AS lastValidatedAt,
+       e.qualityScoreHistory AS qualityScoreHistory
 `;
 
 // ---------------------------------------------------------------------------
@@ -297,7 +301,7 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     }
   });
 
-  // ===== 质量分历史（MVP 单点） =====
+  // ===== 质量分历史（含完整时序） =====
   // 注意：此路由路径含 quality-history 后缀，须放在 :id 之前注册以匹配优先级
   app.get('/api/experience/:id/quality-history', async (req, reply) => {
     const { id } = (req.params as { id: string }) ?? {};
@@ -308,14 +312,30 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     try {
       const res = await runReadQuery(QUALITY_HISTORY_CYPHER, { id });
       const row = res.records[0]?.toObject() as
-        | { qualityScore?: unknown; lastValidatedAt?: unknown }
+        | { qualityScore?: unknown; lastValidatedAt?: unknown; qualityScoreHistory?: unknown }
         | undefined;
       const points: QualityHistoryPoint[] = [];
       if (row) {
-        points.push({
-          qualityScore: toNumber(row.qualityScore),
-          timestamp: toNumber(row.lastValidatedAt),
-        });
+        // 优先使用完整时序（qualityScoreHistory 数组）
+        const historyArr = Array.isArray(row.qualityScoreHistory) ? row.qualityScoreHistory : [];
+        if (historyArr.length > 0) {
+          for (const item of historyArr) {
+            const it = item as { ts?: unknown; score?: unknown; delta?: unknown; source?: unknown };
+            points.push({
+              qualityScore: toNumber(it.score),
+              timestamp: toNumber(it.ts),
+              delta: it.delta == null ? null : toNumber(it.delta),
+              source: it.source === 'gm-pro' || it.source === 'local' ? it.source : null,
+            });
+          }
+        }
+        // 兜底：若没有历史数组，至少返回当前 qualityScore 单点
+        if (points.length === 0 && row.qualityScore != null) {
+          points.push({
+            qualityScore: toNumber(row.qualityScore),
+            timestamp: toNumber(row.lastValidatedAt),
+          });
+        }
       }
       return { points };
     } catch (err) {
@@ -357,7 +377,64 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
       reply.code(400);
       return { ok: false, error: 'missing tool' };
     }
-    const result = await invokeMcpTool(tool, params);
+    const startTs = Date.now();
+    let result: any;
+    let error: string | undefined;
+    try {
+      result = await invokeMcpTool(tool, params);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      result = { ok: false, error };
+    }
+    // 持久化操作日志
+    try {
+      const { appendOperationLog } = await import('../lib/operation-logs');
+      appendOperationLog({
+        ts: startTs,
+        tool,
+        params,
+        result: result ?? null,
+        status: error ? 'failure' : 'success',
+        durationMs: Date.now() - startTs,
+        error,
+      });
+    } catch {
+      /* 日志写入失败不阻塞响应 */
+    }
     return result;
   });
+
+  // ===== 操作日志查询 =====
+  app.get('/api/operation-logs', async (req, reply) => {
+    const query = req.query as { n?: string; tool?: string };
+    const n = query.n ? parseInt(query.n, 10) : 50;
+    const filterTool = query.tool;
+    try {
+      const { queryOperationLogs, queryOperationLogsByTool } = await import('../lib/operation-logs');
+      const rows = filterTool
+        ? queryOperationLogsByTool(filterTool, n)
+        : queryOperationLogs(n);
+      // 反序列化 JSON 字段
+      const logs = rows.map((r) => ({
+        id: r.id,
+        ts: r.ts,
+        tool: r.tool,
+        params: safeJsonParse(r.params_json, {}),
+        result: safeJsonParse(r.result_json, null),
+        status: r.status,
+        durationMs: r.duration_ms,
+        error: r.error,
+      }));
+      return { logs };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, 'operation-logs 查询失败');
+      return { logs: [] };
+    }
+  });
+}
+
+function safeJsonParse(s: string | null | undefined, fallback: unknown): unknown {
+  if (!s) return fallback;
+  try { return JSON.parse(s); } catch { return fallback; }
 }

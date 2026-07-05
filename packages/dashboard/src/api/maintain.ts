@@ -8,6 +8,7 @@
  * 中已注册的 POST /api/mcp/invoke 转发到 OpenClaw MCP host。
  */
 import { invokeMcpTool, type McpInvokeResponse } from './experience';
+import { apiGet } from './client';
 
 /** 图谱维护（dedup / PageRank / community + 债务表对账） */
 export function invokeMaintain(): Promise<McpInvokeResponse> {
@@ -17,6 +18,33 @@ export function invokeMaintain(): Promise<McpInvokeResponse> {
 /** 系统诊断（lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics 全栈自检） */
 export function invokeDiagnose(): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_diagnose', {});
+}
+
+// ─── 操作日志持久化 ────────────────────────────────────────────────────────
+
+export interface OperationLog {
+  id: number;
+  ts: number;
+  tool: string;
+  params: Record<string, unknown>;
+  result: unknown;
+  status: 'success' | 'failure';
+  durationMs: number;
+  error?: string | null;
+}
+
+export interface OperationLogsResponse {
+  logs: OperationLog[];
+}
+
+/** 查询最近 n 条操作日志 */
+export function fetchOperationLogs(n: number = 50): Promise<OperationLogsResponse> {
+  return apiGet<OperationLogsResponse>(`/api/operation-logs?n=${n}`);
+}
+
+/** 按 tool 过滤查询操作日志 */
+export function fetchOperationLogsByTool(tool: string, n: number = 50): Promise<OperationLogsResponse> {
+  return apiGet<OperationLogsResponse>(`/api/operation-logs?tool=${encodeURIComponent(tool)}&n=${n}`);
 }
 
 /** 触发经验蒸馏：limit 控制单次处理数量 */

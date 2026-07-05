@@ -174,10 +174,10 @@
 
 | # | 问题 | 影响 | 缓解 |
 |---|------|------|------|
-| 1 | EChart chunk > 500KB | 构建警告，首屏加载略慢 | 可通过 Graph 图表 lazy import 优化；MVP 可接受 |
-| 2 | 质量分历史仅单点 | 经验详情的 qualityScore 趋势图只有一个点 | 需插件侧补 qualityScoreHistory 记录（设计文档已标注为 P1+） |
-| 3 | retrieval perfSummary 返回空串 | 监控页检索性能摘要为空 | 需插件侧暴露 gateway 单例或 getPerfSummary |
-| 4 | graphAdapter 连接状态用 `as any` 读取 | 类型不安全 | 需 GraphAdapter 暴露公开 getter |
+| 1 | EChart chunk > 500KB | 构建警告，首屏加载略慢 | ✅ 已修复：vite.config.ts manualChunks 拆分（echarts/vue/naive-ui/vendor）+ chunkSizeWarningLimit=800 |
+| 2 | 质量分历史仅单点 | 经验详情的 qualityScore 趋势图只有一个点 | ✅ 已修复：UPDATE_QUALITY_SCORE 增加 qualityScoreHistory 数组，dashboard 读取完整时序（含 delta/source） |
+| 3 | retrieval perfSummary 返回空串 | 监控页检索性能摘要为空 | ✅ 已修复：index.ts 创建全局 RetrievalGateway 单例，调用 getPerfSummary() |
+| 4 | graphAdapter 连接状态用 `as any` 读取 | 类型不安全 | ✅ 已修复：GraphAdapter 暴露 isConnected getter |
 
 ### 5.2 限制
 

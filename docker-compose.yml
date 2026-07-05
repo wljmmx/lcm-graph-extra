@@ -1,0 +1,61 @@
+# LCM Graph Extra 容器化部署
+# 一键启动：docker compose up -d
+#
+# 包含服务：
+# - neo4j: 知识图谱数据库（7687 Bolt + 7474 HTTP）
+# - dashboard: dashboard 后端 + 前端静态资源（7421）
+# - plugin: lcm-graph-extra 插件（由 OpenClaw host 加载，仅 expose snapshot :7423）
+#
+# 注意：插件本体作为 OpenClaw host 的进程内扩展运行，
+# 本 compose 仅用于 dashboard 后端独立部署场景。
+
+services:
+  neo4j:
+    image: neo4j:5.20-community
+    container_name: lcm-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/lcmgraphextra
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+    ports:
+      - "7474:7474"  # HTTP Browser
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lcm-dashboard
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - DASHBOARD_PORT=7421
+      - DASHBOARD_HOST=0.0.0.0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=lcmgraphextra
+      - PLUGIN_SNAPSHOT_URL=http://host.docker.internal:7423
+      - OPENCLAW_MCP_URL=http://host.docker.internal:18789
+    ports:
+      - "7421:7421"  # dashboard 后端 + 前端静态资源
+    restart: unless-stopped
+
+volumes:
+  neo4j-data:
+  neo4j-logs:

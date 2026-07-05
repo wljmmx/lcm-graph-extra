@@ -1,0 +1,157 @@
+# LCM Graph Extra Prometheus 告警规则示例
+#
+# 使用方法：
+# 1. 将本文件放入 Prometheus rules 目录（通常 /etc/prometheus/rules/）
+# 2. 在 prometheus.yml 中配置 scrape 抓取 :7423/metrics
+# 3. 重启 Prometheus 或发送 SIGHUP
+#
+# prometheus.yml 示例：
+# scrape_configs:
+#   - job_name: 'lcm-graph-extra'
+#     static_configs:
+#       - targets: ['127.0.0.1:7423']
+
+groups:
+  - name: lcm-graph-extra
+    interval: 30s
+    rules:
+      # ============ 压力告警 ============
+      - alert: LcmHighTokenPressure
+        expr: lcm_pressure_max_token_ratio > 0.9
+        for: 2m
+        labels:
+          severity: critical
+          category: pressure
+        annotations:
+          summary: "Token 压力过高 ({{ $value | humanizePercentage }})"
+          description: "maxTokenRatio > 0.9 持续 2 分钟，应触发 emergency compact"
+
+      - alert: LcmPendingMessagesAccumulating
+        expr: lcm_pressure_pending_messages > 100
+        for: 5m
+        labels:
+          severity: warning
+          category: pressure
+        annotations:
+          summary: "待处理消息堆积 ({{ $value }})"
+          description: "pendingMessages > 100 持续 5 分钟，可能 compact 失败"
+
+      - alert: LcmSummaryFragmentsExplosion
+        expr: lcm_pressure_summary_fragments > 50
+        for: 10m
+        labels:
+          severity: warning
+          category: pressure
+        annotations:
+          summary: "摘要碎片过多 ({{ $value }})"
+          description: "summaryFragments > 50，建议触发 compact 清理"
+
+      # ============ 熔断器告警 ============
+      - alert: LcmCircuitBreakerTripped
+        expr: lcm_circuit_breaker_available{engine="lcm"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: circuit_breaker
+          engine: lcm
+        annotations:
+          summary: "lossless-claw 熔断器跳闸"
+          description: "lcm 引擎熔断，消息写入不可用"
+
+      - alert: LcmQmdCircuitBreakerTripped
+        expr: lcm_circuit_breaker_available{engine="qmd"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: circuit_breaker
+          engine: qmd
+        annotations:
+          summary: "QMD 熔断器跳闸"
+          description: "qmd 引擎熔断，L2 检索不可用，已降级到 CLI"
+
+      - alert: LcmNeo4jCircuitBreakerTripped
+        expr: lcm_circuit_breaker_available{engine="neo4j"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: circuit_breaker
+          engine: neo4j
+        annotations:
+          summary: "Neo4j 熔断器跳闸"
+          description: "neo4j 引擎熔断，L3/L4 检索不可用"
+
+      - alert: LcmCircuitBreakerFailuresSpike
+        expr: increase(lcm_circuit_breaker_failures[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+          category: circuit_breaker
+        annotations:
+          summary: "熔断器失败次数激增 ({{ $value }} in 5m)"
+          description: "5 分钟内熔断器失败 > 10 次，可能下游服务不稳定"
+
+      # ============ 检索性能告警 ============
+      - alert: LcmAssembleSlow
+        expr: lcm_retrieval_last_assemble_ms > 5000
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "assemble 响应慢 ({{ $value }}ms)"
+          description: "检索 assemble 耗时 > 5s，影响用户体验"
+
+      - alert: LcmGraphRetrievalSlow
+        expr: lcm_retrieval_engine_ms{engine="l3_graph"} > 3000
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+          engine: l3_graph
+        annotations:
+          summary: "Neo4j 图谱检索慢 ({{ $value }}ms)"
+          description: "L3 graph 检索 > 3s，可能 Neo4j 索引缺失或数据量过大"
+
+      # ============ 经验层告警 ============
+      - alert: LcmExperiencePendingBacklog
+        expr: lcm_experience_pending > 20
+        for: 10m
+        labels:
+          severity: warning
+          category: experience
+        annotations:
+          summary: "PENDING 经验堆积 ({{ $value }})"
+          description: "未蒸馏经验 > 20 条，heartbeat 可能未正常运行"
+
+      # ============ Tier 分布告警 ============
+      - alert: LcmHighPressureTierDominant
+        expr: lcm_tier_count{tier="high"} > 10
+        for: 15m
+        labels:
+          severity: warning
+          category: tier
+        annotations:
+          summary: "高压力 Tier 占比过高 ({{ $value }} 次)"
+          description: "high tier 触发 > 10 次，会话长期处于高压力状态"
+
+      # ============ 图谱健康告警 ============
+      - alert: LcmGraphAdapterDisconnected
+        expr: lcm_graph_adapter_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: graph
+        annotations:
+          summary: "GraphAdapter 未连接"
+          description: "Neo4j 连接断开，L3/L4 检索完全不可用"
+
+      # ============ R-2 级联告警 ============
+      - alert: LcmCascadeConfidenceLow
+        expr: lcm_cascade_tier1_confidence < 0.5
+        for: 5m
+        labels:
+          severity: warning
+          category: cascade
+        annotations:
+          summary: "级联 Tier 1 置信度过低 ({{ $value }})"
+          description: "judgeRecall 置信度 < 0.5，召回质量差，可能触发 Tier 2 LLM 重排"
