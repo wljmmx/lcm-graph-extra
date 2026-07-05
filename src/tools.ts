@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { getGlobalLogger } from './utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from './utils/url.js';
+import { exportMarkdownToPdf, exportMarkdownToFile } from './utils/pdf-export.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -517,17 +518,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         // 阶段 3-2: 报告导出 — markdown-file / pdf-file 格式落盘到 ~/.openclaw/reports/
         if (format === "markdown-file" || format === "pdf-file") {
           try {
-            const reportsDir = join(homedir(), '.openclaw', 'reports');
-            if (!existsSync(reportsDir)) mkdirSync(reportsDir, { recursive: true });
-            const ts = new Date().toISOString().replace(/[:.]/g, '-');
-            const ext = format === "pdf-file" ? 'md' : 'md'; // PDF 需外部转换，先存 md
-            const filename = `experience-report-${ts}.${ext}`;
-            const filepath = join(reportsDir, filename);
-            writeFileSync(filepath, finalText, 'utf8');
-            const msg = format === "pdf-file"
-              ? `Report saved to ${filepath}\n(PDF 转换需外部工具如 pandoc，已保存为 markdown 源文件)`
-              : `Report saved to ${filepath}`;
-            return { content: [{ type: "text" as const, text: msg }], details: { ok: true, path: filepath, format } };
+            if (format === "pdf-file") {
+              const result = await exportMarkdownToPdf(finalText, 'experience-report');
+              const methodInfo = result.method === 'pandoc' ? '' : ' (fallback: 内置 PDF 生成器，无外部依赖)';
+              const msg = result.ok
+                ? `PDF 报告已保存到 ${result.path}${methodInfo}`
+                : `PDF 生成失败: ${result.error}，已保存为 markdown`;
+              if (!result.ok) {
+                const mdResult = exportMarkdownToFile(finalText, 'experience-report');
+                return { content: [{ type: "text" as const, text: `${msg}\nMarkdown 路径: ${mdResult.path}` }], details: { ok: false, error: result.error, markdownPath: mdResult.path } };
+              }
+              return { content: [{ type: "text" as const, text: msg }], details: { ok: true, path: result.path, format: 'pdf', method: result.method } };
+            } else {
+              const result = exportMarkdownToFile(finalText, 'experience-report');
+              return { content: [{ type: "text" as const, text: `报告已保存到 ${result.path}` }], details: { ok: true, path: result.path, format: 'markdown' } };
+            }
           } catch (err) {
             return { content: [{ type: "text" as const, text: `Failed to save report: ${String(err)}` }], details: { ok: false, error: String(err) } };
           }

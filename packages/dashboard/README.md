@@ -79,6 +79,33 @@ npm start          # 启动后端，serve 静态资源
 | Neo4j 不可用 | 经验列表/图谱报错，监控页显示熔断状态 |
 | lcm.db 不存在 | 健康历史显示空，KPI 仅显示 memory 快照 |
 
+## 安全
+
+### Basic Auth（可选）
+
+生产环境建议启用 HTTP Basic Auth 保护 dashboard：
+
+```bash
+export DASHBOARD_AUTH="admin:your-secure-password"
+npm start
+```
+
+**保护范围**：
+- 所有 `/api/*` 路由（`/api/ping` 除外，用于健康检查）
+- 生产模式下的前端静态资源（HTML/JS/CSS）
+
+**默认不启用**（单机内网无鉴权模式）。
+
+### 操作日志持久化
+
+所有 MCP 工具调用自动记录到独立 SQLite 数据库：
+
+- **路径**：`~/.openclaw/operation_logs.db`
+- **保留**：最近 1000 条（LRU 淘汰）
+- **查询**：`GET /api/operation-logs?n=50&tool=lcmg_maintain`
+
+用于审计追溯和故障排查。
+
 ## 技术栈
 
 - **后端**: Fastify 5 + node:sqlite + neo4j-driver

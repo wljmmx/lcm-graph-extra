@@ -21,6 +21,7 @@ import { registerExperienceRoutes } from './routes/experience';
 import { registerMemoryRoutes } from './routes/memory';
 import { registerGraphHealthRoutes } from './routes/graph-health';
 import { closeNeo4j } from './lib/neo4j';
+import { requireAuth, isAuthEnabled } from './lib/auth';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -37,6 +38,23 @@ async function main(): Promise<void> {
       level: process.env.LOG_LEVEL ?? 'info',
     },
   });
+
+  // Basic Auth 中间件（DASHBOARD_AUTH 启用时生效）
+  if (isAuthEnabled()) {
+    app.addHook('onRequest', (req, reply, done) => {
+      const path = req.url.split('?')[0];
+      if (path === '/api/ping') {
+        done();
+        return;
+      }
+      if (path.startsWith('/api/') || (isProd && (path === '/' || path.endsWith('.html') || path.endsWith('.js') || path.endsWith('.css') || path.endsWith('.svg') || path.endsWith('.png')))) {
+        requireAuth(req, reply, done);
+      } else {
+        done();
+      }
+    });
+    app.log.info('Basic Auth 已启用（DASHBOARD_AUTH）');
+  }
 
   // 注册 CORS（仅本机）
   await app.register(cors, {

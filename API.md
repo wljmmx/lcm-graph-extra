@@ -234,6 +234,45 @@
 
 将指定节点标记为 `pinned: true`，不参与 TTL 记忆衰减。
 
+### `lcmg_forget`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `id` | `string` (required) | 要遗忘的节点 ID |
+| `mode` | `string` (optional) | `"soft"` (降权) / `"hard"` (软删除, 设为 superseded) |
+| `confirm` | `boolean` (optional) | hard 模式需确认（强制二次确认） |
+
+G-10 主动遗忘工具。soft 模式降低 relevanceScore；hard 模式设为 state='superseded'，从检索结果中隐藏。优先调用 gm-pro evolveNode API，失败降级到 Cypher。
+
+### `lcmg_experience_report`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `limit` | `number` (optional) | 返回结果数上限 (default: 20) |
+| `format` | `string` (optional) | 输出格式: `"text"` (默认), `"json"`, `"markdown"`, `"summary"`, `"markdown-file"`, `"pdf-file"` |
+| `from` | `string` (optional) | S-8': 开始时间（ISO 8601 / 相对时间如 `7d` / 中文如 `今天`） |
+| `to` | `string` (optional) | S-8': 结束时间（默认 now） |
+| `type` | `string` (optional) | S-8': 按经验类型过滤（lesson/failure/correction/fix/best_practice） |
+| `tag` | `string` (optional) | 按社区标签过滤 |
+
+**输出格式说明**：
+
+| 格式 | 说明 | 输出位置 |
+|------|------|---------|
+| `text` | 纯文本（默认） | 直接返回 |
+| `json` | 结构化数组 | 直接返回 |
+| `markdown` | Markdown 格式 | 直接返回 |
+| `summary` | LLM 自然语言摘要 | 直接返回 |
+| `markdown-file` | 落盘 Markdown 文件 | `~/.openclaw/reports/` |
+| `pdf-file` | 落盘 PDF 文件 | `~/.openclaw/reports/` |
+
+**PDF 导出**：双模式自动降级
+1. **pandoc 模式**：系统安装 pandoc + xelatex + 中文字体时使用，高质量排版
+2. **fallback 模式**：无外部依赖时使用内置 PDF 生成器，纯文本排版
+3. PDF 生成失败时自动回退到 Markdown 文件
+
+---
+
 ## 注册的钩子
 
 ### `before_prompt_build`

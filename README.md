@@ -103,7 +103,7 @@ cd lcm-graph-extra && npm install && npm run build
 |------|------|
 | 性能监控 | 健康指标时序、熔断状态、tier 分布、检索延迟、Cascade Beta 分布、用户画像、Agent 状态 |
 | 经验管理 | 经验列表/详情、G-8 验证时间线、RELATED_TO 关联图谱、遗忘/固定操作 |
-| 记忆查询 | 跨引擎联合搜索（lcm+qmd+neo4j 并行）、图谱浏览（ECharts force layout）|
+| 记忆查询 | 跨引擎联合搜索（lcm+qmd+neo4j 并行）、图谱浏览（ECharts force layout） |
 | 维护操作 | 9 项维护卡片（蒸馏/compact/熔断重置/TTL/备份/恢复/同步/导入）+ 操作日志 |
 
 ### 启动 Dashboard
@@ -113,6 +113,19 @@ cd packages/dashboard
 npm run dev      # 开发模式：后端 :7421 + 前端 :7422
 npm run build && npm start  # 生产模式
 ```
+
+访问 http://127.0.0.1:7421
+
+### 安全配置
+
+**Basic Auth（可选）**：生产环境建议启用身份验证
+
+```bash
+export DASHBOARD_AUTH="admin:your-secure-password"
+npm start
+```
+
+启用后所有 `/api/*` 路由（`/api/ping` 除外）和前端静态资源均需 Basic Auth 认证。
 
 详见 [packages/dashboard/E2E-REPORT.md](packages/dashboard/E2E-REPORT.md)。
 
@@ -138,9 +151,15 @@ npm test              # dashboard 测试（56 项）
 
 ## 测试
 
-- 主包：20 文件 / 329 项测试
-- Dashboard：7 文件 / 56 项测试
-- 合计：27 文件 / 385 项测试全部通过
+- 主包：26 文件 / 458 项测试
+- Dashboard：8 文件 / 63 项测试
+- 合计：34 文件 / 521 项测试全部通过
+
+## 生产就绪审计
+
+完整的 P0/P1/P2 功能审计报告见 [PRODUCTION-AUDIT-REPORT.md](PRODUCTION-AUDIT-REPORT.md)。
+
+**结论**：P0/P1/P2 全部 17 项功能已补齐，可生产使用。
 
 ## 路线图
 

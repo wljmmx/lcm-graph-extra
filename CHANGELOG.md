@@ -46,6 +46,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `health-metrics.test.ts`: 3 个（recordCascadeConfidence 单元测试）
 - **全量测试**: 424 通过（主包）+ 56 通过（dashboard），无回归
 
+### 生产就绪（P0/P1/P2 全量补齐）
+
+**P0 - 紧急且重要（7 项）**
+
+- 版本号统一：主包与 dashboard 均为 v2.1.10
+- CHANGELOG：完整版本变更记录
+- E2E-REPORT 4 问题修复：EChart chunk 拆分、质量分历史、perfSummary 空串、graphAdapter 类型安全
+- CI/CD：GitHub Actions 三 job 流水线（test / dashboard-test / build）
+- Docker：多阶段构建 + docker-compose 一键部署
+- 主插件 E2E 测试：工具/钩子/搜索/持久化/健康检查 全覆盖
+- afterTurn/heartbeat 专测：24 项单元测试
+
+**P1 - 重要不紧急（6 项）**
+
+- Quick Start + FAQ：快速上手指南 + 常见问题解答
+- 告警通道扩展：Prometheus /metrics 端点（v0.0.4 格式）
+- G-8 完整时序：验证时间线 + upsertFeedback 闭环
+- 报告导出：Markdown / PDF / JSON / 摘要 多格式
+- 多用户 Auth：Dashboard Basic Auth（`DASHBOARD_AUTH` 环境变量）
+- gm-pro 升级文档：完整升级指南 + 降级方案
+
+**P2 - 紧急不紧急（4 项）**
+
+- 操作日志持久化：独立 SQLite 数据库，LRU 1000 条
+- S-8' 路径对齐：getNodesByTimeRange + from/to 过滤
+- evolveNode 元数据：G-10 主动遗忘 + gm-pro evolveNode API
+- PDF 导出：pandoc + 纯 JS fallback 双模式自动降级
+
 ## [2.1.9] - 2026-06-xx
 
 ### Added
