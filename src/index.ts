@@ -565,10 +565,21 @@ function getSessionDedup(sessionKey: string) {
         version: "2.1.10",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
+        // SDK ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn"
+        // 为每个 operation 声明所需 host capabilities，确保 SDK 在 host 不支持时
+        // 抛出明确错误而非静默降级。
         hostRequirements: {
           'agent-run': {
-            requiredCapabilities: ['assemble-before-prompt', 'after-turn', 'compact', 'maintain']
-          }
+            requiredCapabilities: ['assemble-before-prompt', 'after-turn', 'compact', 'maintain'],
+          },
+          // 手动触发 compact（如用户调用 lcmg_compact 工具）时所需能力
+          'manual-compact': {
+            requiredCapabilities: ['compact'],
+          },
+          // subagent 启动前需要 bootstrap 注入子会话上下文
+          'subagent-spawn': {
+            requiredCapabilities: ['bootstrap', 'assemble-before-prompt'],
+          },
         },
       },
 

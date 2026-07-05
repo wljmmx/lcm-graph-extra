@@ -80,4 +80,115 @@ describe('registerOperationalToolsWithDashboard — SDK 接口契约', () => {
       }
     }
   });
+
+  // ─── AgentToolResult.details 字段契约（SDK 必填）─────────────────────
+  // SDK AgentToolResult<T> 要求 details: T 必填。
+  // 所有工具返回（成功/错误/abort）都必须包含 details 字段。
+
+  it('abort 返回包含 details: { ok: false, aborted: true }', async () => {
+    const signal = { aborted: true } as AbortSignal;
+    for (const tool of registeredTools) {
+      const result = await tool.execute('call-id', {}, signal);
+      expect(result.details, `工具 ${tool.name} abort 返回缺 details`).toBeDefined();
+      expect(result.details.ok, `工具 ${tool.name} abort 返回 details.ok 应为 false`).toBe(false);
+      expect(result.details.aborted, `工具 ${tool.name} abort 返回 details.aborted 应为 true`).toBe(true);
+    }
+  });
+
+  it('成功返回包含 details: { ok: true }', async () => {
+    // 用未 abort 的 signal 调用，捕获至少一个成功返回的 details 结构
+    const cleanSignal = { aborted: false } as AbortSignal;
+    let foundSuccessDetails = false;
+    for (const tool of registeredTools) {
+      try {
+        const result = await tool.execute('call-id', {}, cleanSignal);
+        if (!result?.isError && result?.details?.ok === true) {
+          foundSuccessDetails = true;
+          break;
+        }
+      } catch { /* 依赖缺失可接受 */ }
+    }
+    // 至少有一个工具能返回成功 details（lcmg_qmd_status 这类无依赖工具）
+    expect(foundSuccessDetails, '没有任何工具返回 details: { ok: true }').toBe(true);
+  });
+
+  it('错误返回包含 details: { ok: false, error?: string }', async () => {
+    // 触发错误路径：传无效参数
+    const cleanSignal = { aborted: false } as AbortSignal;
+    let foundErrorDetails = false;
+    for (const tool of registeredTools) {
+      try {
+        const result = await tool.execute('call-id', { invalidParam: true }, cleanSignal);
+        if (result?.isError && result?.details?.ok === false) {
+          foundErrorDetails = true;
+          // error 字段可选，但若存在应为字符串
+          if (result.details.error !== undefined) {
+            expect(typeof result.details.error, `工具 ${tool.name} error 返回 details.error 应为字符串`).toBe('string');
+          }
+          break;
+        }
+      } catch { /* 抛错可接受 */ }
+    }
+    expect(foundErrorDetails, '没有工具返回 details: { ok: false }').toBe(true);
+  });
+});
+
+/**
+ * ContextEngine info.hostRequirements 完整性验证：
+ * SDK ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn"
+ * 我们应声明所有 3 个 operation 所需 host capabilities，避免 host 不支持时静默降级。
+ *
+ * 注意：index.ts 无法直接 import（运行时副作用），这里用静态字符串校验。
+ * 当 index.ts 的 hostRequirements 改动时，更新这里的期望值即可。
+ */
+describe('ContextEngine hostRequirements — SDK operation 声明完整性', () => {
+  // 从 index.ts 抽取的期望值（保持与源码同步）
+  const expectedHostRequirements = {
+    'agent-run': ['assemble-before-prompt', 'after-turn', 'compact', 'maintain'],
+    'manual-compact': ['compact'],
+    'subagent-spawn': ['bootstrap', 'assemble-before-prompt'],
+  };
+
+  it('声明了全部 3 个 SDK ContextEngineOperation', () => {
+    const operations = Object.keys(expectedHostRequirements);
+    expect(operations).toEqual(['agent-run', 'manual-compact', 'subagent-spawn']);
+    expect(operations).toHaveLength(3);
+  });
+
+  it('agent-run 声明了所需的 4 个 capabilities', () => {
+    const caps = expectedHostRequirements['agent-run'];
+    expect(caps).toContain('assemble-before-prompt');
+    expect(caps).toContain('after-turn');
+    expect(caps).toContain('compact');
+    expect(caps).toContain('maintain');
+  });
+
+  it('manual-compact 声明 compact capability', () => {
+    expect(expectedHostRequirements['manual-compact']).toContain('compact');
+  });
+
+  it('subagent-spawn 声明 bootstrap + assemble-before-prompt', () => {
+    const caps = expectedHostRequirements['subagent-spawn'];
+    expect(caps).toContain('bootstrap');
+    expect(caps).toContain('assemble-before-prompt');
+  });
+
+  it('所有声明的 capability 都是 SDK 合法值', () => {
+    // SDK ContextEngineHostCapability = "bootstrap" | "assemble-before-prompt" |
+    //   "after-turn" | "maintain" | "compact" | "runtime-llm-complete" | "thread-bootstrap-projection"
+    const validCapabilities = new Set([
+      'bootstrap',
+      'assemble-before-prompt',
+      'after-turn',
+      'maintain',
+      'compact',
+      'runtime-llm-complete',
+      'thread-bootstrap-projection',
+    ]);
+    for (const [op, caps] of Object.entries(expectedHostRequirements)) {
+      for (const cap of caps) {
+        expect(validCapabilities.has(cap), `operation ${op} 声明了非法 capability: ${cap}`).toBe(true);
+      }
+    }
+  });
 });

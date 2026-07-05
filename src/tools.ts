@@ -330,7 +330,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const format = params.format ?? "text";
       const limitParam = params.limit ?? 20;
@@ -369,7 +369,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         let usedExperienceNodes = false;
 
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         try {
           const expQuery = `MATCH (e:EXPERIENCE)
@@ -389,7 +389,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
         if (!usedExperienceNodes) {
           if (signal?.aborted) {
-            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           let query = `MATCH (e:EVENT)
             OPTIONAL MATCH (e)-[r:SOLVED_BY]->(fix:SKILL)
@@ -402,16 +402,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         }
 
         if (!result || result.records.length === 0) {
-          return { content: [{ type: "text" as const, text: "No experiences found." }] };
+          return { content: [{ type: "text" as const, text: "No experiences found." }], details: { ok: true } };
         }
 
         // S-8': summary 格式 —— LLM 生成自然语言摘要
         if (format === "summary") {
           if (signal?.aborted) {
-            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           const summaryText = await generateExperienceSummary(result.records, usedExperienceNodes, timeFilter);
-          return { content: [{ type: "text" as const, text: summaryText }] };
+          return { content: [{ type: "text" as const, text: summaryText }], details: { ok: true } };
         }
 
         if (format === "json") {
@@ -423,7 +423,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               .filter((s: any) => s.fix)
               .map((s: any) => ({ name: s.fix.properties.name, instruction: s.relation?.properties?.instruction })),
           }));
-          return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+          return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], details: { ok: true } };
         }
 
         const lines: string[] = [format === "markdown" ? "# Experience Report\n" : "Experience Report\n"];
@@ -461,7 +461,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           lines.push("");
         }
         lines.push(`---\nTotal: ${result.records.length} experiences`);
-        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { ok: true } };
       } finally {
         await closeNeo4j(driver, session);
       }
@@ -480,7 +480,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const outDir = params.outputPath ?? join(homedir(), ".openclaw", "lcm-graph-extra", "backup");
       // SEC-5 M-11: 校验输出路径必须在 ~/.openclaw 之下，防止路径穿越
@@ -488,7 +488,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       try {
         safeOutDir = validateBackupPath(outDir);
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], details: { ok: false, error: `Error: ${e.message}` }, isError: true };
       }
       mkdirSync(safeOutDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -505,14 +505,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const { driver, session } = await neo4jSession();
         try {
           if (signal?.aborted) {
-            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           const nodes = await session.run("MATCH (n) RETURN n");
           (backup.neo4j as any).entities = nodes.records.map((r: any) => {
             const p = r.get("n").properties; return { id: p.id, name: p.name, labels: r.get("n").labels };
           });
           if (signal?.aborted) {
-            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           const rels = await session.run("MATCH ()-[r]->() RETURN r");
           (backup.neo4j as any).relationships = rels.records.map((r: any) => {
@@ -568,6 +568,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             `  Size: ${(JSON.stringify(backup).length / 1024).toFixed(0)} KB`,
           ].join("\n"),
         }],
+        details: { ok: true },
       };
     },
   });
@@ -589,17 +590,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-5 M-12: 校验备份路径必须在 ~/.openclaw 之下，防止路径穿越
       let safeBackupPath: string;
       try {
         safeBackupPath = validateBackupPath(params.backupPath);
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], details: { ok: false, error: `Error: ${e.message}` }, isError: true };
       }
       if (!existsSync(safeBackupPath)) {
-        return { content: [{ type: "text" as const, text: `Backup not found: ${safeBackupPath}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `Backup not found: ${safeBackupPath}` }], details: { ok: false, error: `Backup not found: ${safeBackupPath}` }, isError: true };
       }
       const data = JSON.parse(readFileSync(safeBackupPath, "utf-8"));
       const targets = params.targets ?? "all";
@@ -612,21 +613,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // Neo4j
       if ((targets === "all" || targets === "neo4j_only") && !dryRun) {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         try {
           const { driver, session } = await neo4jSession();
           try {
             let nCount = 0, rCount = 0;
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             for (const ent of (data.neo4j as any)?.entities ?? []) {
               await session.run("MERGE (n {id: $id}) SET n.name = $name, n.labels = $labels", { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [] });
               nCount++;
             }
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             for (const rel of (data.neo4j as any)?.relationships ?? []) {
               await session.run("MATCH (a {id: $from}), (b {id: $to}) MERGE (a)-[r:SOLVED_BY]->(b)", { from: rel.fromId, to: rel.toId });
@@ -640,7 +641,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // lossless-claw DB
       if ((targets === "all" || targets === "lcm_only") && !dryRun) {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         let db: any = null;
         try {
@@ -669,7 +670,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // Files
       if ((targets === "all" || targets === "files_only") && !dryRun) {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         try {
           const memDir = resolve(join(homedir(), ".openclaw", "workspace", "main"));
@@ -707,7 +708,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       report.push("\n✅ Restore complete.");
-      return { content: [{ type: "text" as const, text: report.join("\n") }] };
+      return { content: [{ type: "text" as const, text: report.join("\n") }], details: { ok: true } };
     },
   });
 
@@ -725,7 +726,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const limit = params.limit ?? 50;
       const lines: string[] = [];
@@ -734,7 +735,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         let db: any = null;
         try {
@@ -743,7 +744,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           const { driver, session } = await neo4jSession();
           try {
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             for (const conv of convs) {
               const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 5").all(conv.conversation_id) as any[];
@@ -764,7 +765,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // 记忆文件导入
       if (params.source === "memory_files" || params.source === "all") {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         let fCount = 0;
         try {
@@ -773,7 +774,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           try {
             const files = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")).slice(0, limit) : [];
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             for (const file of files) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
@@ -785,7 +786,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
-      return { content: [{ type: "text" as const, text: lines.join("\n") || "No data imported." }] };
+      return { content: [{ type: "text" as const, text: lines.join("\n") || "No data imported." }], details: { ok: true } };
     },
   });
 
@@ -799,7 +800,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const L: string[] = [];
       const p = (s: string) => L.push(s);
@@ -849,7 +850,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p("2. qmd (Memory File Engine)");
       p(H);
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         const r = await fetch(getQmdBaseUrl() + "/health", { signal: AbortSignal.timeout(2000) });
@@ -876,7 +877,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p("3. graph-memory-pro (Neo4j)");
       p(H);
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         const { driver, session } = await neo4jSession();
@@ -906,7 +907,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p("4. Circuit Breakers");
       p(H);
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         const cb = await import("./circuit-breaker.js");
@@ -925,7 +926,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p("5. Health Metrics (N-4)");
       p(H);
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         const { healthMetrics } = await import('./health-metrics.js');
@@ -968,7 +969,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p("  Pass: " + pass + "  Warnings: " + warns + "  Failures: " + fails);
       p(fails === 0 ? "  Status: OK" : "  Status: DEGRADED (" + fails + " issues)");
 
-      return { content: [{ type: "text" as const, text: L.join("\n") }] };
+      return { content: [{ type: "text" as const, text: L.join("\n") }], details: { ok: true } };
     },
   });
 // ===================================================================
@@ -989,10 +990,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const query = params.query.trim();
-      if (!query) return { content: [{ type: "text" as const, text: "Error: query required" }], isError: true };
+      if (!query) return { content: [{ type: "text" as const, text: "Error: query required" }], details: { ok: false, error: "Error: query required" }, isError: true };
       const limit = params.limit ?? 10;
       const engines = params.engines ?? "all";
 
@@ -1024,14 +1025,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // (2) MCP 故障时无法自动降级到 CLI；(3) 与 retrieval-gateway 行为不一致。
       if (engines === "all" || engines === "qmd_only") {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         let qmd: any = null;
         try {
           const { QmdClient } = await import("./qmd-client.js");
           qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
           if (signal?.aborted) {
-            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           const qmdResults = await qmd.query({
             searches: [
@@ -1062,13 +1063,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // --- Neo4j ---
       if (engines === "all" || engines === "neo4j_only") {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         try {
           const { driver, session } = await neo4jSession();
           try {
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             const rows = await session.run(
               `MATCH (n)
@@ -1092,7 +1093,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       if (results.length === 1) results.push("(no results found)");
-      return { content: [{ type: "text" as const, text: results.join("\n") }] };
+      return { content: [{ type: "text" as const, text: results.join("\n") }], details: { ok: true } };
     },
   });
 
@@ -1110,7 +1111,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         const { driver, session } = await neo4jSession();
@@ -1122,10 +1123,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               type: "text" as const,
               text: `✅ Node "${params.id}" ${pinned ? "pinned" : "unpinned"}`,
             }],
+            details: { ok: true },
           };
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `❌ Pin error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `❌ Pin error: ${e.message}` }], details: { ok: false, error: `❌ Pin error: ${e.message}` }, isError: true };
       }
     },
   });
@@ -1146,7 +1148,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const mode = params.mode ?? "soft";
       const isHard = mode === "hard";
@@ -1158,12 +1160,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             type: "text" as const,
             text: "❌ Hard forget requires confirm=true. This is a safety check to prevent accidental data loss.",
           }],
+          details: { ok: true },
         };
       }
 
       try {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const { driver, session } = await neo4jSession();
         try {
@@ -1175,7 +1178,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           } else if (params.query) {
             // Search for nodes by query
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             const searchResult = await session.run(
               `MATCH (n) WHERE (n.name CONTAINS $q OR n.description CONTAINS $q OR n.title CONTAINS $q OR n.summary CONTAINS $q)
@@ -1185,17 +1188,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             );
             nodeIds = searchResult.records.map((r: any) => r.get("id")).filter(Boolean);
             if (nodeIds.length === 0) {
-              return { content: [{ type: "text" as const, text: "No matching nodes found (pinned nodes are protected)." }] };
+              return { content: [{ type: "text" as const, text: "No matching nodes found (pinned nodes are protected)." }], details: { ok: true } };
             }
           } else {
-            return { content: [{ type: "text" as const, text: "Provide either id or query parameter." }], isError: true };
+            return { content: [{ type: "text" as const, text: "Provide either id or query parameter." }], details: { ok: false, error: "Provide either id or query parameter." }, isError: true };
           }
 
           let affected = 0;
           if (isHard) {
             // Hard: mark as superseded (excluded from search, retained for audit)
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             const result = await session.run(
               `UNWIND $ids AS nodeId
@@ -1213,7 +1216,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             // Soft: reduce weight (relevanceScore * 0.3, pagerank * 0.3)
             // G10-P2 修复: 加 0.05 下限，避免多次软遗忘后权重无限趋近 0（隐式硬遗忘）
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             const result = await session.run(
               `UNWIND $ids AS nodeId
@@ -1236,10 +1239,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 ? `✅ ${affected} node(s) ${modeText}.\nIDs: ${nodeIds.slice(0, 5).join(", ")}${nodeIds.length > 5 ? ` ... (+${nodeIds.length - 5})` : ""}\n${isHard ? "Nodes are retained for audit but excluded from search." : "Nodes remain searchable but deprioritized."}`
                 : `⚠️ No nodes affected (they may be pinned or not found).`,
             }],
+            details: { ok: true },
           };
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `❌ Forget error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `❌ Forget error: ${e.message}` }], details: { ok: false, error: `❌ Forget error: ${e.message}` }, isError: true };
       }
     },
   });
@@ -1263,7 +1267,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const mode = params.mode ?? "check";
       const isDryRun = params.dryRun ?? true;
@@ -1290,7 +1294,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       try {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const { driver, session } = await neo4jSession();
         try {
@@ -1334,7 +1338,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // --- Phase 2: Check TTL-expired nodes (pinned? expired?) ---
       push("\n## Phase 2: TTL & pin status\n");
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         const { driver, session } = await neo4jSession();
@@ -1356,12 +1360,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } else {
           try {
             if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             const { driver, session } = await neo4jSession();
             try {
               if (signal?.aborted) {
-                return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
               for (const id of orphanedIds) {
                 await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
@@ -1373,7 +1377,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               // 正确语义：删除那些 id 在 lossless-claw 会话消息表中已不存在的 ConversationMessage 节点。
               // 此处 orphanedIds 已在上面逐个删除，批量清理作为补充：删除剩余无任何关系的孤立 ConversationMessage。
               if (signal?.aborted) {
-                return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
               const relCleanup = await session.run(
                 `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
@@ -1392,7 +1396,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       push("\n✅ Sync check complete.");
-      return { content: [{ type: "text" as const, text: lines.join("") }] };
+      return { content: [{ type: "text" as const, text: lines.join("") }], details: { ok: true } };
     },
   });
   // ===================================================================
@@ -1406,7 +1410,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
       let qmd: any = null;
@@ -1425,9 +1429,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } else {
           lines.push("\nStatus: unavailable");
         }
-        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { ok: true } };
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], details: { ok: false, error: `❌ Error: ${e.message}` }, isError: true };
       } finally {
         if (qmd) { try { qmd.dispose(); } catch {} }
       }
@@ -1447,7 +1451,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
       let qmd: any = null;
@@ -1456,11 +1460,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const content = await qmd.get(params.file);
         if (content) {
-          return { content: [{ type: "text" as const, text: content }] };
+          return { content: [{ type: "text" as const, text: content }], details: { ok: true } };
         }
-        return { content: [{ type: "text" as const, text: `Document not found: ${params.file}` }] };
+        return { content: [{ type: "text" as const, text: `Document not found: ${params.file}` }], details: { ok: true } };
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], details: { ok: false, error: `❌ Error: ${e.message}` }, isError: true };
       } finally {
         if (qmd) { try { qmd.dispose(); } catch {} }
       }
@@ -1480,7 +1484,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
       let qmd: any = null;
@@ -1489,12 +1493,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
         const results = await qmd.multiGet(params.pattern);
         if (results.length === 0) {
-          return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }] };
+          return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }], details: { ok: true } };
         }
         const lines = results.map((doc: string, i: number) => `--- Document ${i + 1} ---\n${doc}`);
-        return { content: [{ type: "text" as const, text: lines.join("\n\n") }] };
+        return { content: [{ type: "text" as const, text: lines.join("\n\n") }], details: { ok: true } };
       } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], isError: true };
+        return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], details: { ok: false, error: `❌ Error: ${e.message}` }, isError: true };
       } finally {
         if (qmd) { try { qmd.dispose(); } catch {} }
       }
@@ -1513,11 +1517,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       try {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const driver = await getNeo4jDriver();
         // P3-3: 复用 graph-adapter 的统一路径解析（去除重复逻辑），并记录实际路径
@@ -1535,7 +1539,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           { recallMaxNodes: 10, pagerankIterations: 20 },
         );
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const result = await gm.runMaintenance(driver, cfg);
         const lines = [];
@@ -1551,7 +1555,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         // lcmg_maintain 是手动维护入口，应覆盖债务表清理而不仅是图分析。
         try {
           if (signal?.aborted) {
-            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           const { reconcileDebtTable } = await import("./core/debt-manager.js");
           const r = reconcileDebtTable();
@@ -1567,10 +1571,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lines.push("");
         lines.push("[OK] Maintenance complete.");
 
-        return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { ok: true } };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], isError: true };
+        return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], details: { ok: false, error: "Maintenance failed: " + msg }, isError: true };
       }
     },
   });
@@ -1591,18 +1595,19 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       if (!dashboardContext?.runDistillation) {
         return {
           content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
+          details: { ok: false, error: "Error: dashboard context not available" },
           isError: true,
         };
       }
       const limit = params.limit ?? 50;
       try {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         await dashboardContext.runDistillation(limit);
         return {
@@ -1610,10 +1615,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             type: "text" as const,
             text: `✅ Distillation triggered for up to ${limit} pending experience(s).`,
           }],
+          details: { ok: true },
         };
       } catch (e: any) {
         return {
           content: [{ type: "text" as const, text: `❌ Distillation failed: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ Distillation failed: ${e?.message ?? String(e)}` },
           isError: true,
         };
       }
@@ -1634,17 +1641,18 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       if (!dashboardContext?.triggerCompact) {
         return {
           content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
+          details: { ok: false, error: "Error: dashboard context not available" },
           isError: true,
         };
       }
       try {
         if (signal?.aborted) {
-          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const ok = await dashboardContext.triggerCompact(params.conversationId);
         const target = params.conversationId != null
@@ -1657,10 +1665,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               ? `✅ Compact completed for ${target}.`
               : `⚠️ Compact triggered for ${target} but did not produce a summary (may retry).`,
           }],
+          details: { ok: true },
         };
       } catch (e: any) {
         return {
           content: [{ type: "text" as const, text: `❌ Compact failed: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ Compact failed: ${e?.message ?? String(e)}` },
           isError: true,
         };
       }
@@ -1679,12 +1689,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       const name = params.name;
       if (!['lcm', 'qmd', 'neo4j'].includes(name)) {
         return {
           content: [{ type: "text" as const, text: `Error: 无效的子系统名: ${name}（支持 lcm/qmd/neo4j）` }],
+          details: { ok: false, error: `Error: 无效的子系统名: ${name}（支持 lcm/qmd/neo4j）` },
           isError: true,
         };
       }
@@ -1704,10 +1715,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               ? `✅ Circuit breaker reset for "${name}"${name === 'neo4j' ? (adapterReset ? ' + GraphAdapter connect flag reset' : '') : ''}.`
               : `❌ Failed to reset circuit breaker for "${name}".`,
           }],
+          details: { ok: true },
         };
       } catch (e: any) {
         return {
           content: [{ type: "text" as const, text: `❌ Reset breaker failed: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ Reset breaker failed: ${e?.message ?? String(e)}` },
           isError: true,
         };
       }
