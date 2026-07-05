@@ -468,15 +468,18 @@ export async function startScheduler(
   apiContext: { config: any; logger?: any },
   config?: DebtSchedulerConfig,
 ): Promise<void> {
+  // M-3: 重复启动保护 —— 已在运行时直接 return，避免重启打断在途 activeJobs
+  // （原代码仅 warn 后继续 stopScheduler + 重启，可能导致正在执行的 compact 被打断）
   if (schedulerTimer !== null) {
-    apiContext.logger?.warn?.("debt-manager: scheduler already running, updating config");
+    apiContext.logger?.warn?.("debt-manager: scheduler already running, ignoring duplicate startScheduler call");
+    return;
   }
 
   _onCompactionFn = onCompactionFn;
   _apiContext = apiContext;
   _config = { ...DEFAULT_SCHEDULER_CONFIG, ...config };
 
-  // Stop old timer if exists
+  // Stop old timer if exists（防御性：正常路径不会到这里，M-3 已早返回）
   stopScheduler();
 
   // P1-5: 启动时重置 stale running=1 债务，防止进程重启后僵尸债务永久卡住。

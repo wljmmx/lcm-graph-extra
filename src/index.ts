@@ -742,14 +742,14 @@ function getSessionDedup(sessionKey: string) {
                 : '';
               const preCompactConversationId = getConversationId(preCompactSessionKey);
               if (preCompactConversationId != null) {
-                _losslessClawAdapter.compact({
+                backgroundTasks.register('compact:pre-emptive', _losslessClawAdapter.compact({
                   sessionId: preCompactConversationId,
                   sessionKey: preCompactSessionKey,
                   sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                   force: true,
                   currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
-                }).catch(() => {});
+                }).then(() => {}, () => {}));
               }
             }
           }
@@ -767,7 +767,8 @@ function getSessionDedup(sessionKey: string) {
               : '';
             const conversationId = getConversationId(sessionKey);
             if (conversationId != null) {
-              const compactTimeout = (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') || ((wm as any)?.compactTimeout as number)) ?? 300_000;
+              // M-9: fallback 与 schema 默认值 (60_000) 保持一致，避免误导
+              const compactTimeout = (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') || ((wm as any)?.compactTimeout as number)) ?? 60_000;
               const maxSummaryRatio = (wm as any)?.maxSummaryTokenRatio ?? 0.45;
               const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
 
@@ -779,11 +780,11 @@ function getSessionDedup(sessionKey: string) {
 
               if (tier === 'medium') {
                 // Medium: fire-and-forget compact, assemble summaries + all raw msgs, write debt if needed
-                _losslessClawAdapter.compact({
+                backgroundTasks.register('compact:medium-tier', _losslessClawAdapter.compact({
                   sessionId: conversationId, sessionKey, sessionFile, force: true,
                   tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
-                }).catch(() => {});
+                }).then(() => {}, () => {}));
 
                 if (hasExistingSummary) {
                   const summaryMsgs = convSummaries.map((s) => ({
@@ -841,11 +842,11 @@ function getSessionDedup(sessionKey: string) {
                     conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                   'proactive_' + tier + '_pressure',
                 );
-                _losslessClawAdapter.compact({
+                backgroundTasks.register('compact:low-tier', _losslessClawAdapter.compact({
                   sessionId: conversationId, sessionKey, sessionFile, force: true,
                   tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                   compactionTarget: 'threshold',
-                }).catch(() => {});
+                }).then(() => {}, () => {}));
               }
             }
           } else if (needsCompact) {
@@ -1200,7 +1201,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 const tier2Query = qmdQuery;
                 const tier2Scenario = scenarioTag;
                 const tier2Results = [...allResults].slice(0, 5);
-                (async () => {
+                backgroundTasks.register('r2:tier2-llm', (async () => {
                   try {
                     const llm = resolveDistillationLlm(api);
                     if (!llm?.model) return;
@@ -1228,7 +1229,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       logger?.debug?.("R-2 Tier 2 LLM judgment completed", { judged: judgments.length, relevant: judgments.filter(j => j.relevant).length });
                     }
                   } catch { /* Tier 2 failed, non-fatal */ }
-                })().catch(() => { /* swallowed */ });
+                })().then(() => {}, () => {}));
               }
             }
           } catch (r2Err) {
@@ -1304,7 +1305,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
             const expBody = personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
             addSection('## \ud83d\udca1 经验总结', expBody, 5);
-            for (const e of personalizedResults) expStore.incrementMatchCount(e.experience.id).catch(() => {});
+            for (const e of personalizedResults) backgroundTasks.register('exp:increment-match', expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}));
 
             // G-8: 记录本轮 assemble 返回的经验，供 afterTurn 异步验证
             // B-1 修复: 使用 sessionKey-scoped Map，避免多 session 竞态
@@ -1749,9 +1750,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                   if (!trigger) continue;
                   const raw = extractRawExperience(trigger, msg, sessionId);
                   // saveRaw 是 async，但此处 fire-and-forget，不阻塞 afterTurn
-                  expStore.saveRaw(raw).catch((saveErr: any) => {
+                  backgroundTasks.register('exp:save-raw', expStore.saveRaw(raw).then(() => {}, (saveErr: any) => {
                     logger?.warn?.('[afterTurn] experience saveRaw failed', { err: String(saveErr) });
-                  });
+                  }));
                   logger?.debug?.(`[afterTurn] experience extracted: source=${trigger}, id=${raw.id}`);
                 } catch { /* single message extraction failure, non-fatal */ }
               }
@@ -2118,10 +2119,18 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // 3. 停止 debt scheduler（等待活跃任务完成）
         try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {}
 
+        // 4. Close SQLite DB 连接（healthMetrics / debt-manager / lcm-bridge）
+        //    必须在 Neo4j driver 之前或同时关闭，避免 dispose 后被 fire-and-forget 写入
+        try { healthMetrics.close(); } catch {}
+        try { const { closeDebtDb } = await import('./core/debt-manager.js'); closeDebtDb(); } catch {}
+        try { const { closeLcmDb } = await import('./lcm-bridge.js'); closeLcmDb(); } catch {}
+
         // 4. Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         try { (graphAdapter as any)?.close?.(); } catch {}
         tracker?.close?.();
         try { await closeNeo4jDriver(); } catch {}
+        // 6. M-2: 重置熔断器状态（避免热重载/测试复用进程时残留旧 state）
+        try { const { resetAllCircuitBreakers } = await import('./circuit-breaker.js'); resetAllCircuitBreakers(); } catch {}
         initialized = false;
         initPromise = null;
         qmdClient = null;
@@ -2177,7 +2186,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // providers 全部用函数形式延迟访问闭包变量，每次请求读取最新状态
     // -------------------------------------------------------------------
     try {
-      const dashCfg = (api.config as any)?.dashboardSnapshot;
+      const dashCfg = api.pluginConfig?.dashboardSnapshot;
       const enabled = dashCfg?.enabled !== false; // 默认启用，显式 false 关闭
       if (enabled) {
         const port = dashCfg?.port ?? 7423;
@@ -2616,7 +2625,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     }
     
     // ── Start resident debt scheduler (fire-and-forget, picks up debts every 60s) ──
-    (async () => {
+    backgroundTasks.register('debt-scheduler-start', (async () => {
       try {
         const { startScheduler } = await import("./core/debt-manager.js");
         await startScheduler(
@@ -2624,14 +2633,14 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             const { onCompaction } = await import("./hooks/compaction.js");
             await onCompaction(instance);
           },
-          { config: api.config, logger: logger },
+          { config: api.pluginConfig, logger: logger },
           { pollIntervalMs: 60_000, maxConcurrent: 2, urgentThreshold: 0.7 }
         );
         logger?.info?.("debt-manager: resident scheduler started");
       } catch (schedErr) {
         logger?.warn?.("debt-manager: failed to start scheduler", { err: String(schedErr) });
       }
-    })();
+    })().then(() => {}, () => {}));
 
     lastDistillationRun = Date.now();
 

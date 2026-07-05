@@ -146,3 +146,17 @@ export function resetCircuitBreaker(name: string): boolean {
   s.lastFailureAt = null;
   return true;
 }
+
+/**
+ * M-2: 重置所有子系统的熔断器状态（供插件 dispose / 测试隔离使用）。
+ * 模块级 state Map 在插件 dispose 后不会自动清空，
+ * 热重载或测试复用进程时会残留旧的熔断状态（如测试中人为触发的 failure）。
+ */
+export function resetAllCircuitBreakers(): void {
+  for (const [, s] of state) {
+    s.failures = 0;
+    s.open = false;
+    s.halfOpenAt = null;
+    s.lastFailureAt = null;
+  }
+}

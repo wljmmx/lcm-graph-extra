@@ -18,6 +18,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { getGlobalLogger } from './utils/logger.js';
 
 /** Dashboard 快照聚合数据结构 */
 export interface DashboardSnapshot {
@@ -164,9 +165,21 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           resolve();
           return;
         }
-        server.close(() => resolve());
+        // M-12: 未 listen 的 server 调 close 回调可能不触发，
+        // 检查 server.listening 避免依赖兜底 setTimeout（节省 1s 延迟）
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        // M-1: 保存兜底 timer handle，close 回调触发后 clearTimeout
+        // 避免进程退出时 timer 仍存活导致延迟 1s
+        let fallbackTimer: NodeJS.Timeout | undefined;
+        server.close(() => {
+          if (fallbackTimer) clearTimeout(fallbackTimer);
+          resolve();
+        });
         // 兜底：即使 close 回调未触发也 resolve
-        setTimeout(() => resolve(), 1000);
+        fallbackTimer = setTimeout(() => resolve(), 1000);
       }),
   };
 
@@ -226,8 +239,18 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           handle.started = false;
           server = null;
         } else {
-          // 运行中出错（罕见），仅记录，不停止服务
-          // 下次请求可能仍能正常响应
+          // C-4: 运行时出错（如 ECONNRESET、socket 异常），上报 logger 不再静默
+          // 不停止服务，下次请求可能仍能正常响应
+          try {
+            getGlobalLogger().warn('dashboard snapshot server runtime error', {
+              code: err.code,
+              message: err.message,
+            });
+          } catch {
+            // logger 自身不可用时降级 console.warn，避免静默
+            // eslint-disable-next-line no-console
+            console.warn('[dashboard-snapshot] runtime error:', err.code, err.message);
+          }
         }
       });
 
