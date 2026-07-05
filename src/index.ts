@@ -352,7 +352,10 @@ const pluginEntry: any = definePluginEntry({
     let _modelRegistry: Record<string, number> | undefined;
     // Dashboard 快照服务停止函数（register 时启动，dispose 时调用）；null 表示未启动
     let snapshotServerStop: (() => Promise<void>) | null = null;
-    // 最近一次 assemble 的检索 query，供 dashboard /internal/snapshot 只读访问
+    // Snapshot server handle（heartbeat 中检查状态 + 重试启动）
+    let snapshotHandle: import('./dashboard-snapshot.js').SnapshotServerHandle | null = null;
+    let snapshotConfig: { port: number; host: string; providers: import('./dashboard-snapshot.js').SnapshotProviders } | null = null;
+    // 最近一次检索 query，供 dashboard /internal/snapshot 只读访问
     let lastRetrievalQuery: string = '';
     // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
 // Each session tracks hashes for up to 24 rounds of conversation
@@ -2397,15 +2400,17 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             return { ...base, embedAvailable: _lastEmbedHealth };
           },
         };
-        const snapshotHandle = startDashboardSnapshotServer({ port, host, providers });
+        snapshotHandle = startDashboardSnapshotServer({ port, host, providers });
+        snapshotConfig = { port, host, providers };
         snapshotServerStop = snapshotHandle.stop;
         // 启动是异步的（含端口探测 + listen），不能立即 log "listening"。
         // 用一个延迟检查：500ms 后读取 handle.started 判断最终状态。
+        const handleForLog = snapshotHandle;
         setTimeout(() => {
-          if (snapshotHandle.started) {
+          if (handleForLog.started) {
             logger?.info?.(`[lcm-graph-extra] dashboard snapshot server listening on ${host}:${port}`);
           } else {
-            logger?.warn?.(`[lcm-graph-extra] dashboard snapshot server NOT started on ${host}:${port}: ${snapshotHandle.failureReason || 'unknown reason'} (non-fatal, plugin continues)`);
+            logger?.warn?.(`[lcm-graph-extra] dashboard snapshot server NOT started on ${host}:${port}: ${handleForLog.failureReason || 'unknown reason'} (non-fatal, plugin continues)`);
           }
         }, 600);
       }
@@ -2418,6 +2423,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     //   2. qmd MCP health check (auto-recovery via scheduleRecovery)
     //   2b. Graph / Neo4j health check + auto reconnect
     //   2c. Embedding API health check
+    //   2d. Snapshot server health check + auto-restart
     //   3. Experience distillation (every ~2h) + TTL cleanup (every ~24h)
     //   4. Neo4j TTL weight decay + expired cleanup (every ~24h)
     //   5. Debt table reconcile — orphan/tombstone cleanup (every ~24h)
@@ -2710,6 +2716,29 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
           }
         } catch { /* embedding health check failed, non-fatal */ }
+
+        // --- 2d. Snapshot server health check + auto-restart ---
+        // 插件启动时 snapshot server 可能因端口被占等原因启动失败，
+        // heartbeat 中定期检查并重试启动，确保端口释放后能自动恢复。
+        if (snapshotConfig && snapshotHandle && !snapshotHandle.started) {
+          try {
+            const handle = startDashboardSnapshotServer(snapshotConfig);
+            // 等待启动完成（最多 1.5s，探测+listen 通常很快）
+            const waitStart = Date.now();
+            while (Date.now() - waitStart < 1500) {
+              if (handle.started) break;
+              if (handle.failureReason) break;
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            if (handle.started) {
+              snapshotHandle = handle;
+              snapshotServerStop = handle.stop;
+              logger?.info?.(`heartbeat: dashboard snapshot server recovered, listening on ${snapshotConfig.host}:${snapshotConfig.port}`);
+            }
+          } catch (snapRetryErr) {
+            logger?.debug?.("heartbeat: snapshot server retry failed (will try again next cycle)", { err: String(snapRetryErr) });
+          }
+        }
         
         // --- 3. Experience distillation (scheduled async, default every 2h) ---
         const distillIntervalMs = api.pluginConfig?.distillationIntervalMs ?? 2 * 60 * 60 * 1000;
