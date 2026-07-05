@@ -53,65 +53,10 @@ import {
 } from "./lcm-bridge.js";
 
 // ---------------------------------------------------------------------------
-// S-9': 关键词提取（轻量版）
+// S-9': 关键词提取（轻量版）—— 实现已抽出到 src/plugin/keywords.ts
 // ---------------------------------------------------------------------------
 
-const TOPIC_STOP_WORDS = new Set([
-  'the','a','an','is','are','was','were','be','been','being',
-  'have','has','had','do','does','did','will','would','could','should',
-  'may','might','can','this','that','these','those','it','its','for',
-  'with','from','into','through','during','before','after','by','about',
-  'and','or','but','not','no','yes','so','if','then','else','when',
-  'what','which','who','whom','how','why','where','there','here',
-  '的','了','在','是','我','有','和','就','不','人','都','一','一个','上',
-  '也','很','到','说','要','去','你','会','着','没有','看','好','自己','这',
-  '他','她','它','们','那','些','什么','怎么','吗','呢','吧','啊','哦',
-  'please','just','need','want','like','get','make','use','using','used',
-  'help','know','think','还是','可以','已经','现在','因为','所以','但是',
-]);
-
-/**
- * S-9': 从消息列表中提取 top-N 关键词，用于话题漂移检测。
- * 简单的词频统计 + 停用词过滤，零延迟。
- */
-function extractTopKeywords(messages: any[], topN: number = 15): string[] {
-  if (!Array.isArray(messages) || messages.length === 0) return [];
-  const freq = new Map<string, number>();
-  for (const msg of messages) {
-    const content = msg?.content;
-    let text = '';
-    if (typeof content === 'string') text = content;
-    else if (Array.isArray(content)) {
-      text = content.map((c: any) => typeof c === 'string' ? c : c?.text ?? '').join(' ');
-    }
-    if (!text) continue;
-    const tokens = text
-      .replace(/[\s,;.，；。.、:：!?！？\\/\\[\\](){}|~`@#$%^&*=+<>-]+/g, ' ')
-      .split(/\s+/)
-      .filter((t) => {
-        const w = t.toLowerCase();
-        return !TOPIC_STOP_WORDS.has(w) && w.length >= 2;
-      });
-    for (const tok of tokens) {
-      const w = tok.toLowerCase();
-      freq.set(w, (freq.get(w) || 0) + 1);
-    }
-  }
-  return [...freq.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, topN)
-    .map(([word]) => word);
-}
-
-/** Simple string hash for cross-turn dedup */
-function quickHash(s: string): string {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) - h) + s.charCodeAt(i);
-    h |= 0;
-  }
-  return h.toString(36);
-}
+import { extractTopKeywords, quickHash } from "./plugin/keywords.js";
 
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -137,192 +82,24 @@ const LAST_EXP_MAP_MAX = 200; // 防止无界增长，LRU 上限
 // R-2: 成本感知级联管理器 —— 全局单例
 import { cascadeManager, CascadeManager } from './cascade-manager.js';
 
-function applyTotalControl(
-  injected: string,
-  maxChars: number,
-  removedSections?: { label: string; chars: number }[],
-): string {
-  if (!injected || injected.length <= maxChars) return injected;
+// applyTotalControl 已抽出到 src/plugin/token-control.ts
+import { applyTotalControl } from "./plugin/token-control.js";
 
-  // 按 section 标题分割
-  const sections: { label: string; content: string; priority: number }[] = [];
-  const lines = injected.split('\n');
-  let currentLabel = '';
-  let currentLines: string[] = [];
-  let currentPriority = 0;
+// Tool-aware retrieval strategy helpers 已抽出到 src/plugin/tool-guidance.ts
+import {
+  extractAvailableTools,
+  hasSelfCategory,
+  hasToolCategory,
+  listActiveCategories,
+  buildToolGuidance,
+} from "./plugin/tool-guidance.js";
 
-  for (const line of lines) {
-    // Match any Markdown H2 header: ## anything (emoji or plain text)
-    const headerMatch = line.match(/^## (.+)/);
-    if (headerMatch) {
-      if (currentLines.length > 0 && currentLabel) {
-        sections.push({
-          label: currentLabel,
-          content: currentLines.join('\n'),
-          priority: currentPriority,
-        });
-      }
-      // Priority by keyword matching (emoji-independent)
-      const headerText = headerMatch[1];
-      if (headerText.includes('完整文档')) {
-        currentPriority = 1;  // 最低优先级，超限时最先被 trim
-      } else if (headerText.includes('经验')) {
-        currentPriority = 2;  // 较低优先级
-      } else if (headerText.includes('知识图谱')) {
-        currentPriority = 3;  // 较高优先级
-      } else if (headerText.includes('记忆文件') || headerText.includes('📄')) {
-        currentPriority = 4;  // 最高优先级，最后被 trim（通常保留）
-      } else if (headerText.includes('工具') || headerText.includes('Tool')) {
-        currentPriority = 5;  // 工具指引可安全删除
-      } else {
-        currentPriority = 3;
-      }
-      currentLabel = line;
-      currentLines = [line];
-    } else {
-      currentLines.push(line);
-    }
-  }
-  if (currentLines.length > 0 && currentLabel) {
-    sections.push({
-      label: currentLabel,
-      content: currentLines.join('\n'),
-      priority: currentPriority,
-    });
-  }
+// Session-isolated dedup & overhead caches
+import { getSessionDedup, setMaxDedupRounds, evictStaleDedupPublic } from "./plugin/dedup-cache.js";
+import { getOverhead, setOverhead } from "./plugin/overhead-cache.js";
 
-  if (sections.length === 0) return injected;
-
-  // 按优先级升序排列（数字小的先被 trim，即完整文档→经验→知识图谱→记忆文件）
-  sections.sort((a, b) => a.priority - b.priority);
-
-  // 阶段1：从低优先级整段移除
-  let result = injected;
-  const removedStats: { label: string; chars: number }[] = [];
-  for (let i = 0; i < sections.length && result.length > maxChars; i++) {
-    // 只移除当前最低优先级的非最高优先级段
-    const lowestPriority = sections[i].priority;
-    const candidates = sections.filter(s => s.priority === lowestPriority);
-    for (const candidate of candidates) {
-      if (result.length <= maxChars) break;
-      // SEC-L: 修复前用 result.replace(candidate.content, '') —— String.replace 首个出现
-      // 不一定是目标段（若段内容在多处重复会误删）。改为 indexOf 精确定位 + slice 移除。
-      const idx = result.indexOf(candidate.content);
-      if (idx !== -1) {
-        result = (result.slice(0, idx) + result.slice(idx + candidate.content.length))
-          .replace(/\n{3,}/g, '\n\n').trim();
-      }
-      removedStats.push({ label: candidate.label, chars: candidate.content.length });
-    }
-  }
-  if (removedSections) {
-    for (const rs of removedStats) removedSections.push(rs);
-  }
-
-  // 阶段2：如果还超，截断最后的保留内容
-  if (result.length > maxChars) {
-    result = result.slice(0, maxChars) + '\n\n...（上下文字段过长，已裁剪）';
-  }
-
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Tool-aware retrieval strategy helpers
-// ---------------------------------------------------------------------------
-
-/** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
-function extractAvailableTools(params: any): string[] {
-  const tools = params.availableTools;
-  // P2-14: 修复拼写错误 lcmg_batch_get_documents → lcmg_batch_get，
-  // 并补全遗漏的 lcmg_diagnose（与 SELF_REGISTERED_TOOLS 保持一致）。
-  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get","lcmg_maintain","lcmg_diagnose"];
-  if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
-  if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
-  return [];
-}
-
-/** Self-registered tool names — mirrors openclaw.plugin.json contracts.tools. */
-const SELF_REGISTERED_TOOLS = new Set([
-  "lcmg_search", "lcmg_pin", "lcmg_import",
-  "lcmg_experience_report",
-  "lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get",
-  "lcmg_maintain", "lcmg_diagnose",
-  "lcmg_backup", "lcmg_restore", "lcmg_sync",
-]);
-
-/** Tool category to tool name mapping. */
-const TOOL_CATEGORIES_SELF: Record<string, Set<string>> = {
-  graph: new Set(["lcmg_search"]),
-  experience: new Set(["lcmg_experience_report"]),
-  qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
-};
-
-/** Check if a category tool is self-registered (independent of Tool Search). */
-function hasSelfCategory(category: string): boolean {
-  const names = TOOL_CATEGORIES_SELF[category];
-  if (!names) return false;
-  return [...names].some(n => SELF_REGISTERED_TOOLS.has(n));
-}
-
-/** Exact tool name sets per category — derived from contracts.tools. */
-const TOOL_CATEGORIES: Record<string, ReadonlySet<string>> = {
-  graph: new Set(["lcmg_search", "lcmg_pin", "lcmg_import"]),
-  experience: new Set(["lcmg_experience_report"]),
-  qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
-  maintenance: new Set(["lcmg_maintain", "lcmg_diagnose"]),
-  lifecycle: new Set(["lcmg_backup", "lcmg_restore", "lcmg_sync"]),
-};
-
-/** Check if a tool category is available (exact match, no fallback). */
-function hasToolCategory(availableTools: string[], category: string): boolean {
-  const exactNames = TOOL_CATEGORIES[category];
-  if (!exactNames) return false;
-  return availableTools.some(t => exactNames.has(t));
-}
-
-function listActiveCategories(availableTools: string[]): string[] {
-  const active: string[] = [];
-  for (const [cat, names] of Object.entries(TOOL_CATEGORIES)) {
-    if (availableTools.some(t => names.has(t))) {
-      active.push(cat);
-    }
-  }
-  return active;
-}
-
-/** Build tool guidance section for systemPromptAddition. */
-function buildToolGuidance(availableTools: string[]): string {
-  const activeCategories = listActiveCategories(availableTools);
-  if (activeCategories.length === 0 && availableTools.length === 0) {
-    return "";
-  }
-
-  const categoryLabels: Record<string, { label: string; desc: string }> = {
-    graph: { label: "知识图谱", desc: "实体关系查询" },
-    experience: { label: "经验检索", desc: "历史解决方案检索" },
-    qmd: { label: "记忆文件", desc: "QMD 文档管理" },
-    maintenance: { label: "系统维护", desc: "健康检查与修复" },
-    lifecycle: { label: "生命周期", desc: "备份/恢复/同步" },
-  };
-
-  const lines = ["## [Available Tools]"];
-  for (const cat of Object.keys(TOOL_CATEGORIES)) {
-    const info = categoryLabels[cat];
-    if (!info) continue;
-    if (activeCategories.includes(cat)) {
-      lines.push("- [OK] **" + info.label + "** -- " + info.desc);
-    } else {
-      lines.push("- [AUTO] **" + info.label + "** -- auto-injected, no manual call needed");
-    }
-  }
-
-  if (availableTools.length === 0) {
-    lines.push("\n> Tip: no lcm-graph-extra tools available, context auto-injected.");
-  }
-
-  return lines.join("\n");
-}
+// Distillation helpers
+import * as distillationModule from "./plugin/distillation.js";
 
 const pluginEntry: any = definePluginEntry({
   id: "lcm-graph-extra",
@@ -357,108 +134,8 @@ const pluginEntry: any = definePluginEntry({
     let snapshotConfig: { port: number; host: string; providers: import('./dashboard-snapshot.js').SnapshotProviders } | null = null;
     // 最近一次检索 query，供 dashboard /internal/snapshot 只读访问
     let lastRetrievalQuery: string = '';
-    // Session-isolated dedup: LRU cache, max 500 sessions, 1h TTL
-// Each session tracks hashes for up to 24 rounds of conversation
-// P2-3 H-16: dedup 容量/TTL/轮次常量改接 DEFAULTS，单一来源，避免魔术数字散落。
-const MAX_DEDUP_CAPACITY = DEFAULTS.dedup.maxCapacity;
-const DEDUP_TTL_MS = DEFAULTS.dedup.ttlMs;
-const sessionDedupCache = new Map<string, { window: string[][]; maxRounds: number; lastAccess: number }>();
-const dedupAccessOrder: string[] = [];
-let MAX_DEDUP_ROUNDS = DEFAULTS.dedup.maxRounds;  // S5-2: updated from config during init()
-// P1-4 M-6: _sessionOverheadCache 加 LRU 淘汰。修复前是无界 Map，随 session 数线性增长。
-// 容量/TTL 与 sessionDedupCache 对齐，避免活跃 session 长期堆积。
-const MAX_OVERHEAD_CAPACITY = DEFAULTS.dedup.maxCapacity;
-const OVERHEAD_TTL_MS = DEFAULTS.dedup.ttlMs;
-const _sessionOverheadCache = new Map<string, { tokens: number; lastAccess: number }>();
-const _overheadAccessOrder: string[] = [];
-
-function evictStaleOverhead(): void {
-  const now = Date.now();
-  while (_overheadAccessOrder.length > 0) {
-    const key = _overheadAccessOrder[0];
-    const entry = _sessionOverheadCache.get(key);
-    if (!entry || (now - entry.lastAccess) > OVERHEAD_TTL_MS) {
-      _overheadAccessOrder.shift();
-      _sessionOverheadCache.delete(key);
-    } else {
-      break;
-    }
-  }
-  while (_sessionOverheadCache.size > MAX_OVERHEAD_CAPACITY) {
-    // SEC-L2: 修复前用 `shift()!` 非空断言，显式 if-break 更稳健。
-    const lru = _overheadAccessOrder.shift();
-    if (lru === undefined) break;
-    _sessionOverheadCache.delete(lru);
-  }
-}
-
-function touchOverhead(sessionKey: string): void {
-  const idx = _overheadAccessOrder.indexOf(sessionKey);
-  if (idx !== -1) _overheadAccessOrder.splice(idx, 1);
-  _overheadAccessOrder.push(sessionKey);
-}
-
-function getOverhead(sessionKey: string): number {
-  const entry = _sessionOverheadCache.get(sessionKey);
-  if (!entry) return 0;
-  entry.lastAccess = Date.now();
-  touchOverhead(sessionKey);
-  return entry.tokens;
-}
-
-function setOverhead(sessionKey: string, tokens: number): void {
-  const existing = _sessionOverheadCache.get(sessionKey);
-  if (existing) {
-    existing.tokens = tokens;
-    existing.lastAccess = Date.now();
-  } else {
-    evictStaleOverhead();
-    _sessionOverheadCache.set(sessionKey, { tokens, lastAccess: Date.now() });
-  }
-  touchOverhead(sessionKey);
-}
-
-function evictStaleDedup(): void {
-  const now = Date.now();
-  let evicted = 0;
-  while (dedupAccessOrder.length > 0) {
-    const key = dedupAccessOrder[0];
-    const entry = sessionDedupCache.get(key);
-    if (!entry || (now - entry.lastAccess) > DEDUP_TTL_MS) {
-      dedupAccessOrder.shift();
-      sessionDedupCache.delete(key);
-      evicted++;
-    } else {
-      break;
-    }
-  }
-  while (sessionDedupCache.size > MAX_DEDUP_CAPACITY) {
-    // SEC-L2: 修复前用 `shift()!` 非空断言，显式 if-break 更稳健。
-    const lru = dedupAccessOrder.shift();
-    if (lru === undefined) break;
-    sessionDedupCache.delete(lru);
-    evicted++;
-  }
-}
-
-function touchDedup(sessionKey: string): void {
-  const idx = dedupAccessOrder.indexOf(sessionKey);
-  if (idx !== -1) dedupAccessOrder.splice(idx, 1);
-  dedupAccessOrder.push(sessionKey);
-}
-
-function getSessionDedup(sessionKey: string) {
-  let entry = sessionDedupCache.get(sessionKey);
-  if (!entry) {
-    evictStaleDedup();
-    entry = { window: [], maxRounds: MAX_DEDUP_ROUNDS, lastAccess: Date.now() };
-    sessionDedupCache.set(sessionKey, entry);
-  } else {
-    entry.lastAccess = Date.now();
-  }
-  touchDedup(sessionKey);
-  return entry;
-}
+    // Session-isolated dedup & overhead caches 已抽出到
+    // src/plugin/dedup-cache.ts 与 src/plugin/overhead-cache.ts
 
     async function ensureInitialized() {
       if (initialized) return;
@@ -536,7 +213,7 @@ function getSessionDedup(sessionKey: string) {
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
         // WindowMonitor config is at api.pluginConfig.lcmMonitor (not nested under plugins.entries)
         if (api.pluginConfig?.lcmMonitor?.dedupRounds) {
-          MAX_DEDUP_ROUNDS = api.pluginConfig.lcmMonitor.dedupRounds;
+          setMaxDedupRounds(api.pluginConfig.lcmMonitor.dedupRounds);
         }
 
         // Read provider model context window from openclaw.json
@@ -2260,7 +1937,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
           // 2. Local: evict stale dedup via LRU cache
           try {
-            evictStaleDedup();
+            evictStaleDedupPublic();
           } catch {}
 
           return { changed, bytesFreed, rewrittenEntries };
@@ -2467,153 +2144,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // 清理孤儿债务（会话已删除）与 7 天前墓碑，防止 conversation_compaction_maintenance 无限增长。
     let lastDebtReconcileRun = 0;
     const DEBT_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-    // Distillation helpers
-
-    function isOllamaModel(model: string): boolean {
-      // 判断主会话模型是否为 Ollama 本地模型。
-      // 识别依据：
-      //   1. 显式 provider 前缀：`ollama/...`、`ollama-256k/...`
-      //   2. Ollama 默认 tag 后缀：`:latest`
-      // 注意：原逻辑 `!model.includes('/')` 会把 `gpt-4o-mini`、`claude-3-5-sonnet`
-      // 等不含 `/` 的远程模型名误判为 Ollama，导致错误地走 Ollama baseURL。
-      // 已去除该过宽分支。
-      return model.startsWith('ollama/') || model.startsWith('ollama-256k/') || model.endsWith(':latest');
-    }
-
-    function resolveDistillationLlm(apiRef: any) {
-      const runtimeLlm = apiRef.runtimeContext?.llm;
-      // 默认 keepAlive（可被 distillationLlm.keepAlive 覆盖）
-      const defaultKeepAlive = (apiRef.config as any)?.distillationLlm?.keepAlive
-        || (apiRef.config as any)?.embedding?.keepAlive
-        || '1h';
-      // Session model is local Ollama → reuse it to avoid GPU model swapping
-      if (runtimeLlm?.model && isOllamaModel(runtimeLlm.model)) {
-        return {
-          model: runtimeLlm.model,
-          apiKey: runtimeLlm.apiKey || '',
-          baseURL: cleanBaseURL(runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1'),
-          keepAlive: defaultKeepAlive,
-        };
-      }
-      const dLlm = (apiRef.config as any)?.distillationLlm;
-      if (dLlm?.provider === 'openclaw_hooks') return {
-        model: dLlm.model || 'ollama/qwen3.6:27b',
-        apiKey: '',
-        baseURL: cleanBaseURL('http://127.0.0.1:18789/v1'),
-        keepAlive: dLlm.keepAlive || defaultKeepAlive,
-      };
-      return {
-        model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini',
-        apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
-        baseURL: cleanBaseURL(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
-        keepAlive: defaultKeepAlive,
-      };
-    }
-
-    async function distillOne(raw: { id: string; source: string; context: string; detail: string }, llm: { model: string; apiKey: string; baseURL: string; keepAlive?: string }): Promise<any | null> {
-      // P1-4: prompt 增加 tags 字段，让 LLM 同时产出多维度标签（scenario/techStack/severity/freeTags）。
-      // S-11': Zettelkasten 增强 — 增加 relatedConcepts 字段，提取 2-5 个相关概念/关键词，
-      // 用于后续在经验网络中建立 RELATED_TO 边，形成知识图谱连接。
-      const prompt = 'Summarize the following experience into a concise lesson.' + '\nSource: ' + raw.source + '\nContext: ' + raw.context + '\nDetail: ' + raw.detail
-        + '\nReturn a JSON with: title, summary, type (lesson|failure|correction|fix|best_practice), relevanceScore (0-1),'
-        + ' scenario (array, subset of: bug-fix|feature-dev|code-review|config-debug|deployment|performance-opt|security-audit|refactor),'
-        + ' techStack (array, subset of: frontend|backend|devops|database|mobile|ai-ml|infrastructure|general),'
-        + ' severity (one of: critical|major|minor), freeTags (array of short strings),'
-        + ' relatedConcepts (array of 2-5 short keywords/phrases representing closely related topics or concepts for cross-linking).'
-        + ' Return ONLY JSON.';
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15_000);
-      try {
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
-        // 仅 Ollama 端点注入 keep_alive，避免模型 5 分钟后卸载导致冷启动延迟
-        const body = withKeepAliveIfOllama(
-          llm.baseURL,
-          { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 512 },
-          llm.keepAlive,
-        );
-        const resp = await fetch(llm.baseURL + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
-        clearTimeout(timer);
-        if (!resp.ok) return null;
-        const data: any = await resp.json();
-        const text = data?.choices?.[0]?.message?.content;
-        if (!text) return null;
-        const parsed = JSON.parse(text);
-        // P1-4: 校验并收敛 tags，防止 LLM 返回非法值写入 Neo4j。
-        const SCENARIO_SET = new Set(['bug-fix', 'feature-dev', 'code-review', 'config-debug', 'deployment', 'performance-opt', 'security-audit', 'refactor']);
-        const TECH_SET = new Set(['frontend', 'backend', 'devops', 'database', 'mobile', 'ai-ml', 'infrastructure', 'general']);
-        const SEVERITY_SET = new Set(['critical', 'major', 'minor']);
-        const filterArr = (v: any, allowed: Set<string>): string[] | undefined => {
-          if (!Array.isArray(v)) return undefined;
-          const out = v.map(String).filter((x) => allowed.has(x));
-          return out.length > 0 ? out : undefined;
-        };
-        let severity: 'critical' | 'major' | 'minor' | undefined;
-        if (typeof parsed.severity === 'string' && SEVERITY_SET.has(parsed.severity)) severity = parsed.severity as any;
-        let freeTags: string[] | undefined;
-        if (Array.isArray(parsed.freeTags)) {
-          const ft = parsed.freeTags.map(String).filter((s: string) => s.trim().length > 0 && s.length <= 40).slice(0, 10);
-          freeTags = ft.length > 0 ? ft : undefined;
-        }
-        const tags = (parsed.scenario || parsed.techStack || severity || freeTags)
-          ? {
-              scenario: filterArr(parsed.scenario, SCENARIO_SET) as any,
-              techStack: filterArr(parsed.techStack, TECH_SET) as any,
-              severity,
-              freeTags,
-            }
-          : undefined;
-        // S-11': 提取 relatedConcepts（Zettelkasten 关联概念）
-        let relatedConcepts: string[] | undefined;
-        if (Array.isArray(parsed.relatedConcepts)) {
-          const rc = parsed.relatedConcepts
-            .map(String)
-            .filter((s: string) => s.trim().length > 0 && s.length <= 50)
-            .slice(0, 5);
-          relatedConcepts = rc.length > 0 ? rc : undefined;
-        }
-
-        // 校验 relevanceScore 范围 [0,1]，越界回退 0.5
-        let rs = typeof parsed.relevanceScore === 'number' ? parsed.relevanceScore : 0.5;
-        if (!isFinite(rs) || rs < 0) rs = 0; else if (rs > 1) rs = 1;
-        return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: rs, createdAt: new Date(), matchCount: 0, tags, relatedConcepts };
-      } catch { clearTimeout(timer); return null; }
-    }
-
-    async function runDistillation(expStoreRef: any, apiRef: any, log: any, limit?: number): Promise<void> {
-      try {
-        // limit 控制单批拉取数量，默认 5（与历史行为一致），dashboard lcmg_distill 可传入更大值
-        const fetchLimit = limit && limit > 0 ? limit : 5;
-        const pending = await expStoreRef.fetchPending(fetchLimit);
-        if (!pending.length) return;
-        log?.info?.('distillation: processing ' + String(pending.length) + ' pending');
-        const llm = resolveDistillationLlm(apiRef);
-        for (const raw of pending) {
-          try {
-            const distilled = await distillOne(raw, llm);
-            if (distilled) {
-              await expStoreRef.saveDistilled(distilled);
-              await expStoreRef.deleteById(raw.id);
-
-              // S-11': Zettelkasten evolve — 建立 RELATED_TO 关联
-              // 用 LLM 提取的 relatedConcepts 搜索已有经验并建立关联，
-              // 让经验网络自组织生长（类似卡片盒笔记法）。
-              const concepts: string[] | undefined = distilled.relatedConcepts;
-              if (concepts?.length && typeof expStoreRef.linkRelated === 'function') {
-                try {
-                  const linked = await expStoreRef.linkRelated(distilled.id, concepts, 3);
-                  if (linked > 0) {
-                    log?.debug?.("distillation: zettelkasten evolve linked", { id: distilled.id, linked, concepts: concepts.slice(0, 3) });
-                  }
-                } catch (linkErr) {
-                  log?.debug?.("distillation: zettelkasten evolve skipped", { err: String(linkErr) });
-                }
-              }
-            }
-          } catch (e) { log?.warn?.("distillation item failed", { err: String(e) }); }
-        }
-      } catch (e) { log?.warn?.("distillation batch failed", { err: String(e) }); }
-    }
+    // Distillation helpers 已抽出到 src/plugin/distillation.ts
+    const { distillOne, runDistillation, resolveDistillationLlm } = distillationModule;
 
     async function runHeartbeat() {
       if (!initialized) return;
@@ -2872,8 +2404,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
         // Periodic dedup cache cleanup (every 15 heartbeats)
         hbDedupCleanupCounter++;
-        if (hbDedupCleanupCounter >= 15 && typeof evictStaleDedup === "function") {
-          evictStaleDedup();
+        if (hbDedupCleanupCounter >= 15) {
+          evictStaleDedupPublic();
           hbDedupCleanupCounter = 0;
         }
       } catch (hbErr) {

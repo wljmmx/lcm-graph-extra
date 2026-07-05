@@ -27,10 +27,25 @@ jobs:
 
       - name: Lint
         run: npm run lint
-        continue-on-error: true
 
       - name: Test
         run: npm test -- --reporter=verbose
+
+  version-check:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify main and dashboard versions match
+        run: |
+          MAIN_VER=$(node -p "require('./package.json').version")
+          DASH_VER=$(node -p "require('./packages/dashboard/package.json').version")
+          echo "main=$MAIN_VER dashboard=$DASH_VER"
+          if [ "$MAIN_VER" != "$DASH_VER" ]; then
+            echo "ERROR: version mismatch"
+            exit 1
+          fi
 
   dashboard-test:
     name: Test & Typecheck (dashboard)
@@ -58,7 +73,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test, dashboard-test]
+    needs: [test, dashboard-test, version-check]
     steps:
       - uses: actions/checkout@v4
 

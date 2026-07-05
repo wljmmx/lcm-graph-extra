@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/lcm-dashboard",
-  "version": "0.1.0",
+  "version": "2.1.10",
   "private": true,
   "type": "module",
   "description": "LCM Dashboard: Vue 3 + Fastify 前台，覆盖性能监控/经验/记忆/维护四大模块",

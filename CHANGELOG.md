@@ -95,7 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **新增 7 测试用例**:
   - `dashboard-snapshot.test.ts`: 5 个（Prometheus /metrics + /internal/graph-health 端点覆盖）
   - `health-metrics.test.ts`: 3 个（recordCascadeConfidence 单元测试）
-- **全量测试**: 424 通过（主包）+ 56 通过（dashboard），无回归
+- **全量测试**: 458 通过（主包）+ 63 通过（dashboard），无回归
 
 ### 生产就绪（P0/P1/P2 全量补齐）
 
