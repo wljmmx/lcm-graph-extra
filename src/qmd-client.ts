@@ -141,27 +141,13 @@ export class QmdClient {
   async get(file: string): Promise<string | null> {
     if (this.mcpAvailable !== false) {
       try {
-        const body = {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
-          params: { name: "get", arguments: { file } },
-        };
-        const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "mcp-session-id": await this.mcpInitialize(),
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(this.mcpTimeout),
-        });
-        if (resp.ok) {
-          const data: any = await resp.json();
-          const text = data?.result?.content?.[0]?.resource?.text
-            ?? data?.result?.content?.[0]?.text;
-          if (typeof text === "string") return text;
+        const data = await this.mcpCall("get", { file });
+        const text = data?.result?.content?.[0]?.resource?.text
+          ?? data?.result?.content?.[0]?.text;
+        if (typeof text === "string") {
+          this.mcpAvailable = true;
+          this.clearRecovery();
+          return text;
         }
       } catch {
         this.mcpAvailable = false;
@@ -185,29 +171,14 @@ export class QmdClient {
   async multiGet(pattern: string): Promise<string[]> {
     if (this.mcpAvailable !== false) {
       try {
-        const body = {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
-          params: { name: "multi_get", arguments: { pattern } },
-        };
-        const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "mcp-session-id": await this.mcpInitialize(),
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(this.mcpTimeout),
-        });
-        if (resp.ok) {
-          const data: any = await resp.json();
-          const items = data?.result?.content ?? [];
-          return items
-            .filter((c: any) => c.type === "resource")
-            .map((c: any) => c.resource?.text ?? "");
-        }
+        const data = await this.mcpCall("multi_get", { pattern });
+        const items = data?.result?.content ?? [];
+        const result = items
+          .filter((c: any) => c.type === "resource")
+          .map((c: any) => c.resource?.text ?? "");
+        this.mcpAvailable = true;
+        this.clearRecovery();
+        return result;
       } catch {
         this.mcpAvailable = false;
         this.scheduleRecovery();
@@ -246,24 +217,7 @@ export class QmdClient {
    */
   async status(): Promise<string | null> {
     try {
-      const body = {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: { name: "status", arguments: {} },
-      };
-      const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-          "mcp-session-id": await this.mcpInitialize(),
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.mcpTimeout),
-      });
-      if (!resp.ok) return null;
-      const data = await resp.json() as McpToolsCallResponse;
+      const data = await this.mcpCall("status", {}) as McpToolsCallResponse;
       const text = data?.result?.content?.[0]?.text;
       return typeof text === "string" ? text : null;
     } catch {
@@ -273,10 +227,81 @@ export class QmdClient {
 
   // ===================== internal — MCP path ==============================
 
+  /** 判断错误是否由 session 过期/失效导致 */
+  private isSessionExpiredError(resp: Response, body?: any): boolean {
+    if (resp.status === 401 || resp.status === 403) return true;
+    const statusText = resp.statusText?.toLowerCase() ?? '';
+    if (statusText.includes('session') && statusText.includes('expired')) return true;
+    if (statusText.includes('invalid') && statusText.includes('session')) return true;
+    const errMsg = String(body?.error?.message ?? body?.error ?? '').toLowerCase();
+    if (errMsg.includes('session') && (errMsg.includes('expired') || errMsg.includes('invalid') || errMsg.includes('closed'))) return true;
+    return false;
+  }
+
+  /**
+   * 通用 MCP 请求包装：自动处理 session 初始化 + 过期重连
+   * @param toolName MCP tool 名称
+   * @param args tool 参数
+   * @param retried 内部使用，是否已经是重试（防止无限递归）
+   */
+  private async mcpCall(toolName: string, args: Record<string, unknown>, retried = false): Promise<any> {
+    const sessionId = await this.mcpInitialize();
+    const body = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: toolName, arguments: args },
+    };
+    const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": sessionId,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.mcpTimeout),
+    });
+
+    if (!resp.ok) {
+      let respBody: any = null;
+      try { respBody = await resp.json(); } catch {}
+
+      if (!retried && this.isSessionExpiredError(resp, respBody)) {
+        this.logger?.warn?.('[qmd-client] MCP session expired, reinitializing...');
+        await this.mcpReinitialize();
+        return this.mcpCall(toolName, args, true);
+      }
+      throw new Error(`MCP HTTP ${resp.status}`);
+    }
+
+    const data = await resp.json() as any;
+    if (data?.error && !retried) {
+      if (this.isSessionExpiredError(resp, data)) {
+        this.logger?.warn?.('[qmd-client] MCP session expired (from response error), reinitializing...');
+        await this.mcpReinitialize();
+        return this.mcpCall(toolName, args, true);
+      }
+    }
+    return data;
+  }
+
   /** Initialize MCP session via initialize handshake */
   private async mcpInitialize(): Promise<string> {
     if (this.mcpSessionId) return this.mcpSessionId;
 
+    const sessionId = await this._doInitialize();
+    this.mcpSessionId = sessionId;
+    return sessionId;
+  }
+
+  /** 强制重新初始化 session（session 过期/服务重启时调用） */
+  private async mcpReinitialize(): Promise<string> {
+    this.mcpSessionId = null;
+    return this.mcpInitialize();
+  }
+
+  private async _doInitialize(): Promise<string> {
     const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
       method: "POST",
       headers: {
@@ -301,45 +326,20 @@ export class QmdClient {
     const sessionId = resp.headers.get("mcp-session-id");
     if (!sessionId) throw new Error("MCP initialize: no mcp-session-id header");
 
-    this.mcpSessionId = sessionId;
     return sessionId;
   }
 
   private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
-    const sessionId = await this.mcpInitialize();
-    const body = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "query",
-        arguments: {
-          searches: params.searches,
-          limit: params.limit ?? 10,
-          minScore: params.minScore ?? 0,
-          rerank: params.rerank ?? true,
-        } as Record<string, unknown>,
-      },
+    const args: Record<string, unknown> = {
+      searches: params.searches,
+      limit: params.limit ?? 10,
+      minScore: params.minScore ?? 0,
+      rerank: params.rerank ?? true,
     };
-    if (params.collections) (body.params.arguments as Record<string, unknown>).collections = params.collections;
-    if (params.intent) (body.params.arguments as Record<string, unknown>).intent = params.intent;
+    if (params.collections) args.collections = params.collections;
+    if (params.intent) args.intent = params.intent;
 
-    const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "mcp-session-id": sessionId,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.mcpTimeout),
-    });
-
-    if (!resp.ok) {
-      throw new Error(`MCP HTTP ${resp.status}`);
-    }
-
-    const data = await resp.json() as McpToolsCallResponse;
+    const data = await this.mcpCall("query", args) as McpToolsCallResponse;
     const textContent = data?.result?.content?.[0]?.text;
     if (!textContent) {
       throw new Error("MCP query returned empty response");

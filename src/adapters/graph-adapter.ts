@@ -793,20 +793,97 @@ export class GraphAdapter {
 
   /**
    * PageRank re-ranking
+   *
+   * 优先使用 gm-pro 的 personalizedPageRank，失败时回退到本地 Cypher 实现
+   * （gm-pro 内部可能因 session 管理问题报 "closed session" 错误）。
    */
   async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
-    if (!this.mod || !this.driver || nodeIds.length < 2) return new Map();
-    try {
-      // P2-17: 用 buildGmConfig 统一构建（PPR 只用 pagerank* 字段）
-      // P0-AUDIT: 不传 undefined 覆盖值，buildGmConfig 内部 spread 会
-        // 把 undefined 写进配置对象，导致下游 PPR 算法收到 undefined 而非默认值。
+    if (!this.driver || nodeIds.length < 2) return new Map();
+
+    // 优先尝试 gm-pro PPR
+    if (this.mod?.personalizedPageRank) {
+      try {
         const cfg = buildGmConfig(this.neo4jConfig);
-      const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
-      // gm-pro returns PPRResult with scores Map
-      return result.scores ?? new Map();
-    } catch (err) {
-      this.logger?.error?.('[lcm-graph-extra] PPR rerank failed', { err });
+        const result = await this.mod.personalizedPageRank(this.driver, nodeIds, nodeIds, cfg);
+        if (result?.scores && result.scores.size > 0) {
+          return result.scores;
+        }
+      } catch (err) {
+        this.logger?.warn?.('[lcm-graph-extra] gm-pro PPR failed, falling back to Cypher PageRank', { err: String(err) });
+      }
+    }
+
+    // Fallback: 本地 Cypher 实现 — 用 gds.pageRank.stream 或简单关系遍历
+    try {
+      return await this.fallbackPageRank(nodeIds);
+    } catch (fallbackErr) {
+      this.logger?.error?.('[lcm-graph-extra] PPR rerank failed (both gm-pro and fallback)', { err: String(fallbackErr) });
       return new Map();
+    }
+  }
+
+  /**
+   * Fallback PageRank 实现：用 Cypher 投影 + gds.pageRank.stream（如果可用），
+   * 不可用时退化为简单的 degree-based 排序。
+   */
+  private async fallbackPageRank(nodeIds: string[]): Promise<Map<string, number>> {
+    if (!this.driver) return new Map();
+    const session = this.driver.session();
+    try {
+      // 尝试 GDS PageRank（如果 Neo4j 安装了 GDS 插件）
+      const gdsResult = await session.run(
+        `
+        MATCH (n)
+        WHERE n.id IN $ids
+        WITH collect(n) AS nodes
+        CALL gds.pageRank.stream({
+          nodeProjection: nodes,
+          relationshipProjection: { REL: { type: '*', orientation: 'NATURAL' } },
+          dampingFactor: 0.85,
+          maxIterations: 20
+        })
+        YIELD nodeId, score
+        WITH gds.util.asNode(nodeId) AS n, score
+        WHERE n.id IN $ids
+        RETURN n.id AS id, score
+        `,
+        { ids: nodeIds },
+      ).catch(() => null);
+
+      if (gdsResult && gdsResult.records.length > 0) {
+        const scores = new Map<string, number>();
+        for (const rec of gdsResult.records) {
+          scores.set(rec.get('id'), rec.get('score'));
+        }
+        return scores;
+      }
+
+      // 无 GDS 时退化：用 degree（关系数）作为权重
+      const degreeResult = await session.run(
+        `
+        MATCH (n)-[r]-(m)
+        WHERE n.id IN $ids AND m.id IN $ids
+        RETURN n.id AS id, count(r) AS degree
+        `,
+        { ids: nodeIds },
+      );
+      const scores = new Map<string, number>();
+      let maxDegree = 1;
+      for (const rec of degreeResult.records) {
+        const d = rec.get('degree').toNumber ? rec.get('degree').toNumber() : Number(rec.get('degree'));
+        if (d > maxDegree) maxDegree = d;
+      }
+      for (const rec of degreeResult.records) {
+        const d = rec.get('degree').toNumber ? rec.get('degree').toNumber() : Number(rec.get('degree'));
+        scores.set(rec.get('id'), d / maxDegree);
+      }
+      // 没出现在结果中的节点给默认分
+      for (const id of nodeIds) {
+        if (!scores.has(id)) scores.set(id, 0.1);
+      }
+      return scores;
+    } finally {
+      await session.close().catch(() => {});
     }
   }
 
