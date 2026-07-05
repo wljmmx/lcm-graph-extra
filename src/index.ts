@@ -2070,8 +2070,11 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // 1. Delegate to lossless-claw adapter.maintain if connected
           if (_losslessClawAdapter?.connected) {
             try {
+              // P0-2: maintain 也需 String 化 sessionId，与 compact 一致
+              // （lossless-claw maintain 内部同样调用 sessionId?.trim()）
+              const _maintainSid = params.sessionId ?? params.session_id;
               const lcResult = await _losslessClawAdapter.maintain({
-                sessionId: params.sessionId ?? params.session_id ?? '',
+                sessionId: _maintainSid != null ? String(_maintainSid) : '',
                 sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
                 sessionKey: params.sessionKey ?? '',
                 runtimeContext: {},
