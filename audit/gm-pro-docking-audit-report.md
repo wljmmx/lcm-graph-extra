@@ -181,11 +181,30 @@ TypeScript 编译无错误。
 
 ### 8.2 启用 gm-pro 的条件
 
-当 `@openclaw/graph-memory-pro` 包可用后，可通过以下方式启用：
+gm-pro 作为 OpenClaw extension 通过 extensions 目录安装管理，安装后 lcm-graph-extra 会自动探测并启用。
 
-1. 安装 gm-pro: `npm install @openclaw/graph-memory-pro`
-2. 配置环境变量（可选）: `GM_PRO_PATH=/path/to/graph-memory-pro`
-3. 重启服务，lcm-graph-extra 会自动探测并启用 gm-pro 高级功能
+**安装方式**（通过 OpenClaw extensions 目录）：
+
+```bash
+# 方式 1: 全局安装（推荐生产环境）
+openclaw plugins install graph-memory-pro
+# 安装后位于 ~/.openclaw/extensions/graph-memory-pro/
+
+# 方式 2: 工作区安装（推荐开发环境）
+cd <workspace>
+openclaw plugins install graph-memory-pro
+# 安装后位于 <workspace>/.openclaw/extensions/graph-memory-pro/
+```
+
+**路径解析优先级**（与 OpenClaw 框架 `resolvePluginSourceRoots` 一致）：
+
+1. 环境变量 `GM_PRO_PATH`（显式覆盖，用于调试）
+2. global extensions: `~/.openclaw/extensions/graph-memory-pro/`
+3. workspace extensions: `<cwd>/.openclaw/extensions/graph-memory-pro/`
+4. stock extensions: `<openclaw-pkg>/dist/extensions/graph-memory-pro/`
+5. `require.resolve` 降级（兼容旧 npm install 方式）
+
+安装后重启服务，lcm-graph-extra 会自动探测并启用 gm-pro 高级功能，无需额外配置。
 
 ---
 
@@ -194,7 +213,7 @@ TypeScript 编译无错误。
 | 文件 | 修改类型 | 说明 |
 |-----|---------|------|
 | `src/adapters/gm-pro-fallback.ts` | 重写 | 完善 API 探测、fallback 机制、类型定义 |
-| `src/adapters/graph-adapter.ts` | 修复 | `getEdgesForNodes` 不存在时的 Cypher fallback |
+| `src/adapters/graph-adapter.ts` | 修复 | `getEdgesForNodes` 不存在时的 Cypher fallback；`resolveGmProPath` 改为优先从 extensions 目录查找 |
 
 ---
 

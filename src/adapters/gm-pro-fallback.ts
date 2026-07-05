@@ -2,7 +2,7 @@
  * graph-memory-pro API 调用统一入口（graceful degradation wrapper）。
  *
  * 设计：
- * - graph-memory-pro 在运行时可能未安装（optional peerDep），需优雅降级
+ * - graph-memory-pro 作为 OpenClaw extension 通过 extensions 目录安装管理
  * - 支持的扩展 API：judgeRecall / upsertFeedback / getNodesByTimeRange /
  *   evolveNode / getGraphHealth
  * - 所有调用采用 "优先 gm-pro → 失败/不可用降级到现有 Cypher/本地实现" 模式
@@ -10,7 +10,8 @@
  *
  * 架构说明：
  * - graph-memory（SQLite 版，npm: graph-memory）：基础图谱记忆，自带 Recaller/维护
- * - graph-memory-pro（Neo4j 版，可选扩展）：高级能力（judgeRecall/evolveNode 等）
+ * - graph-memory-pro（Neo4j 版，OpenClaw extension）：高级能力（judgeRecall/evolveNode 等）
+ * - 路径解析优先从 extensions 目录查找（global/workspace/stock），兼容 require.resolve 降级
  * - 本 wrapper 兼容两种形态：探测到任一形态均标记为可用，但扩展 API 按需检测
  *
  * @module adapters/gm-pro-fallback
@@ -20,11 +21,14 @@ import { resolveGmProPath } from './graph-adapter.js';
 import { resolveLogger } from '../utils/logger.js';
 import type { Logger } from '../utils/logger.js';
 
+/** gm-pro 路径解析来源类型 */
+type GmProSource = 'env' | 'extensions-global' | 'extensions-workspace' | 'extensions-stock' | 'require';
+
 /** 缓存的 gm-pro 模块（成功 import 后缓存） */
 let _gmProMod: any = null;
 let _gmProProbed = false;
 let _gmProAvailable = false;
-let _gmProSource: 'env' | 'require' | 'fallback' = 'fallback';
+let _gmProSource: GmProSource = 'extensions-global';
 
 /**
  * 探测 graph-memory-pro 是否可用，成功后缓存模块实例。
@@ -71,7 +75,7 @@ export function _resetGmProProbe(): void {
   _gmProMod = null;
   _gmProProbed = false;
   _gmProAvailable = false;
-  _gmProSource = 'fallback';
+  _gmProSource = 'extensions-global';
 }
 
 /**

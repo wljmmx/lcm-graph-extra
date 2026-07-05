@@ -8,8 +8,9 @@
 
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import * as neo4jDriver from 'neo4j-driver';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
@@ -54,26 +55,58 @@ const _gmpRequire = createRequire(import.meta.url);
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || join(homedir(), '.openclaw');
 
+/** gm-pro 插件 ID（在 extensions 目录中的子目录名） */
+const GM_PRO_PLUGIN_ID = 'graph-memory-pro';
+
 /**
- * P3-3: 解析 graph-memory-pro 模块路径（单一来源，去除 graph-adapter / tools 重复逻辑）。
+ * 解析 graph-memory-pro 模块路径（单一来源，去除 graph-adapter / tools 重复逻辑）。
  *
- * 解析优先级：
- *   1. 环境变量 GM_PRO_PATH
- *   2. require.resolve('@openclaw/graph-memory-pro/dist/index.js') —— 取其目录
- *   3. 回退到 ${OPENCLAW_DIR}/extensions/graph-memory-pro
+ * gm-pro 作为 OpenClaw extension 通过 extensions 目录安装管理，
+ * 解析优先级与 OpenClaw 框架 `resolvePluginSourceRoots` 一致：
+ *
+ *   1. 环境变量 GM_PRO_PATH（显式覆盖）
+ *   2. global extensions: ${OPENCLAW_DIR}/extensions/graph-memory-pro
+ *   3. workspace extensions: ${cwd}/.openclaw/extensions/graph-memory-pro
+ *   4. stock extensions: <openclaw-pkg>/dist/extensions/graph-memory-pro
+ *   5. require.resolve 降级（兼容旧 npm install 方式）
  *
  * 返回 { path, source } 供调用方记录实际使用的路径与来源。
  */
-export function resolveGmProPath(): { path: string; source: 'env' | 'require' | 'fallback' } {
+export function resolveGmProPath(): { path: string; source: 'env' | 'extensions-global' | 'extensions-workspace' | 'extensions-stock' | 'require' } {
+  // 1. 环境变量显式覆盖
   if (process.env.GM_PRO_PATH) {
     return { path: process.env.GM_PRO_PATH, source: 'env' };
   }
+
+  // 2. global extensions: ~/.openclaw/extensions/graph-memory-pro
+  const globalExtPath = join(OPENCLAW_DIR, 'extensions', GM_PRO_PLUGIN_ID);
+  if (existsSync(join(globalExtPath, 'dist', 'index.js'))) {
+    return { path: globalExtPath, source: 'extensions-global' };
+  }
+
+  // 3. workspace extensions: <cwd>/.openclaw/extensions/graph-memory-pro
+  const workspaceExtPath = join(process.cwd(), '.openclaw', 'extensions', GM_PRO_PLUGIN_ID);
+  if (existsSync(join(workspaceExtPath, 'dist', 'index.js'))) {
+    return { path: workspaceExtPath, source: 'extensions-workspace' };
+  }
+
+  // 4. stock extensions: <openclaw-pkg>/dist/extensions/graph-memory-pro
+  try {
+    const openclawPkgRoot = dirname(_gmpRequire.resolve('openclaw/package.json'));
+    const stockExtPath = join(openclawPkgRoot, 'dist', 'extensions', GM_PRO_PLUGIN_ID);
+    if (existsSync(join(stockExtPath, 'dist', 'index.js'))) {
+      return { path: stockExtPath, source: 'extensions-stock' };
+    }
+  } catch { /* openclaw package not found */ }
+
+  // 5. require.resolve 降级（兼容旧 npm install 方式）
   try {
     const resolved = _gmpRequire.resolve('@openclaw/graph-memory-pro/dist/index.js');
     const dir = resolved.endsWith('/dist/index.js') ? resolved.slice(0, -'/dist/index.js'.length) : resolved;
     return { path: dir, source: 'require' };
   } catch {
-    return { path: `${OPENCLAW_DIR}/extensions/graph-memory-pro`, source: 'fallback' };
+    // 所有方式都失败，返回 global extensions 路径作为默认（probeGmPro 会处理不存在的情况）
+    return { path: globalExtPath, source: 'extensions-global' };
   }
 }
 
