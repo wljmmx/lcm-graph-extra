@@ -26,6 +26,9 @@ export interface HealthSnapshot {
   tierLow: number;
   tierMedium: number;
   tierHigh: number;
+  // R-2: cascade Tier 1 置信度（仅内存态，来自 :7423 snapshot）
+  cascadeTier1Confidence?: number;
+  cascadeJudgeSource?: 'gm-pro' | 'local';
 }
 
 export interface CascadeSnapshot {

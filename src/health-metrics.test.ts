@@ -133,6 +133,33 @@ describe('HealthMetricsCollector', () => {
     });
   });
 
+  describe('recordCascadeConfidence (R-2)', () => {
+    it('无快照时自动创建占位快照', () => {
+      collector.recordCascadeConfidence(0.85, 'gm-pro');
+      const latest = collector.getLatest();
+      expect(latest).not.toBeNull();
+      expect(latest!.cascadeTier1Confidence).toBe(0.85);
+      expect(latest!.cascadeJudgeSource).toBe('gm-pro');
+    });
+
+    it('更新已有快照的 cascade 字段（不持久化，仅内存态）', () => {
+      collector.collect({ pendingMessages: 5 });
+      collector.recordCascadeConfidence(0.42, 'local');
+      const latest = collector.getLatest();
+      expect(latest!.pendingMessages).toBe(5); // 原有字段保留
+      expect(latest!.cascadeTier1Confidence).toBe(0.42);
+      expect(latest!.cascadeJudgeSource).toBe('local');
+    });
+
+    it('多次调用覆盖前一次值', () => {
+      collector.recordCascadeConfidence(0.3, 'local');
+      collector.recordCascadeConfidence(0.9, 'gm-pro');
+      const latest = collector.getLatest();
+      expect(latest!.cascadeTier1Confidence).toBe(0.9);
+      expect(latest!.cascadeJudgeSource).toBe('gm-pro');
+    });
+  });
+
   describe('ring buffer', () => {
     it('超过 MAX_SNAPSHOTS 时丢弃最旧的', () => {
       // MAX_SNAPSHOTS = 144

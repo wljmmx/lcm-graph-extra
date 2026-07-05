@@ -1229,6 +1229,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
               // R-2: 优先调用 graph-memory-pro judgeRecall API（更准的 Tier 1 置信度）
               // 失败/不可用时使用本地 cascadeManager.evaluateTier1 的结果
+              let r2JudgeSource: 'gm-pro' | 'local' = 'local';
               try {
                 const { withGmProFallback } = await import('./adapters/gm-pro-fallback.js');
                 const judgeResult = await withGmProFallback(
@@ -1246,10 +1247,16 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 if (judgeResult && typeof judgeResult.tier1Confidence === 'number') {
                   confidence.tier1Score = judgeResult.tier1Confidence;
                   confidence.needsTier2 = judgeResult.tier1Confidence < 0.7;
+                  r2JudgeSource = 'gm-pro';
                 }
               } catch (r2JudgeErr) {
                 logger?.debug?.("R-2 judgeRecall fallback to local evaluateTier1", { err: String(r2JudgeErr) });
               }
+              // 上报 cascade Tier 1 置信度到 healthMetrics（仅内存态，通过 :7423 snapshot + Prometheus 暴露）
+              try {
+                const { healthMetrics } = await import('./health-metrics.js');
+                healthMetrics.recordCascadeConfidence(confidence.tier1Score ?? 0, r2JudgeSource);
+              } catch { /* non-fatal */ }
 
               // 低置信度时用 Thompson 采样重排，引入探索性
               if (confidence.needsTier2 && tier === 'low') {

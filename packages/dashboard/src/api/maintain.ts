@@ -14,6 +14,11 @@ export function invokeMaintain(): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_maintain', {});
 }
 
+/** 系统诊断（lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics 全栈自检） */
+export function invokeDiagnose(): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_diagnose', {});
+}
+
 /** 触发经验蒸馏：limit 控制单次处理数量 */
 export function invokeDistill(limit: number): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_distill', { limit });

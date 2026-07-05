@@ -34,6 +34,9 @@ export interface HealthSnapshot {
   tierLow: number;
   tierMedium: number;
   tierHigh: number;
+  // R-2 cascade judgeRecall（仅内存态，不持久化到 lcm.db 避免 ALTER TABLE 风险）
+  cascadeTier1Confidence?: number;
+  cascadeJudgeSource?: 'gm-pro' | 'local';
 }
 
 const MAX_SNAPSHOTS = 144; // ~12h of 5min heartbeats
@@ -136,6 +139,31 @@ export class HealthMetricsCollector {
     if (this.dbInitialized && this.db) {
       this.persistToDb({ ...latest }).catch(() => { /* non-fatal */ });
     }
+  }
+
+  /**
+   * R-2: 记录 cascade Tier 1 置信度评估结果（仅内存态）。
+   * - confidence: 0-1 浮点
+   * - source: 'gm-pro'（gm-pro judgeRecall 可用）/ 'local'（本地 evaluateTier1）
+   * 不持久化到 lcm.db（避免 ALTER TABLE 风险），通过 :7423 snapshot + Prometheus 暴露。
+   */
+  recordCascadeConfidence(confidence: number, source: 'gm-pro' | 'local'): void {
+    let latest = this.snapshots[this.snapshots.length - 1];
+    if (!latest) {
+      latest = {
+        timestamp: Date.now(),
+        pendingMessages: 0, summaryFragments: 0, maxTokenRatio: 0,
+        cbLcmAvailable: true, cbQmdAvailable: true, cbNeo4jAvailable: true,
+        cbLcmFailures: 0, cbQmdFailures: 0, cbNeo4jFailures: 0,
+        lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
+        pendingExperienceCount: 0, distilledExperienceCount: 0,
+        tierLow: 0, tierMedium: 0, tierHigh: 0,
+      };
+      this.snapshots.push(latest);
+    }
+    latest.cascadeTier1Confidence = confidence;
+    latest.cascadeJudgeSource = source;
+    // 仅内存态字段，不触发 dirtySinceLastPersist（不持久化）
   }
 
   /** 确保数据库已初始化（幂等，并发安全） */

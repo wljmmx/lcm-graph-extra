@@ -35,9 +35,11 @@ import {
   fetchHealthLatest,
   fetchHealthHistory,
   fetchAgentStatus,
+  fetchGraphHealth,
   type HealthSnapshot,
   type DashboardSnapshot,
   type AgentStatus,
+  type GraphHealthResponse,
 } from '../api/health';
 
 // ===== 数据获取（轮询） =====
@@ -56,6 +58,12 @@ const { data: agentData, isLoading: agentLoading } = useQuery({
   queryFn: fetchAgentStatus,
   refetchInterval: 30_000,
 });
+// G-5: 图谱健康（gm-pro getGraphHealth，降级到本地 graphAdapter 推断）
+const { data: graphHealthData, isLoading: graphHealthLoading } = useQuery({
+  queryKey: ['graph-health'],
+  queryFn: fetchGraphHealth,
+  refetchInterval: 30_000,
+});
 
 // ===== 派生数据 =====
 const db = computed<HealthSnapshot | null>(() => latestData.value?.db ?? null);
@@ -68,6 +76,24 @@ const historyAsc = computed<HealthSnapshot[]>(() => {
   return [...snaps].reverse();
 });
 const agent = computed<AgentStatus | null>(() => agentData.value ?? null);
+const graphHealth = computed<GraphHealthResponse | null>(
+  () => graphHealthData.value ?? null,
+);
+
+// G-5: 图谱健康 status → tag type 映射
+const graphHealthTagType = computed<'success' | 'warning' | 'error' | 'default'>(() => {
+  const s = graphHealth.value?.status;
+  if (s === 'healthy') return 'success';
+  if (s === 'degraded') return 'warning';
+  if (s === 'unhealthy') return 'error';
+  return 'default';
+});
+const graphHealthSourceTagType = computed<'success' | 'warning' | 'default'>(() => {
+  const s = graphHealth.value?.source;
+  if (s === 'gm-pro') return 'success';
+  if (s === 'local') return 'warning';
+  return 'default';
+});
 
 // ===== KPI 值（db 为 null 时显示 "—"） =====
 const kpiPending = computed<number | string>(() =>
@@ -207,6 +233,14 @@ const tierOption = computed(() => ({
 // ===== Cascade top 10 Beta 分布柱状图 =====
 const cascadeTopArms = computed(
   () => memory.value?.cascade?.topArms?.slice(0, 10) ?? [],
+);
+// R-2: cascade Tier 1 置信度（来自 memory.health.latest，仅内存态）
+const cascadeTier1Confidence = computed<number | null>(() => {
+  const v = memory.value?.health?.latest?.cascadeTier1Confidence;
+  return typeof v === 'number' ? Math.round(v * 1000) / 1000 : null;
+});
+const cascadeJudgeSource = computed<'gm-pro' | 'local' | null>(
+  () => memory.value?.health?.latest?.cascadeJudgeSource ?? null,
 );
 const betaOption = computed(() => {
   const arms = cascadeTopArms.value;
@@ -375,6 +409,20 @@ const panelCols = '1 s:1 m:2 l:3';
                 <NDescriptionsItem label="置信阈值">
                   {{ memory.cascade?.confidenceThreshold ?? '—' }}
                 </NDescriptionsItem>
+                <NDescriptionsItem label="Tier1 置信度">
+                  <span v-if="cascadeTier1Confidence !== null" class="mono">
+                    {{ cascadeTier1Confidence }}
+                  </span>
+                  <span v-else class="muted">—</span>
+                  <NTag
+                    v-if="cascadeJudgeSource"
+                    size="small"
+                    :type="cascadeJudgeSource === 'gm-pro' ? 'success' : 'default'"
+                    style="margin-left: 6px"
+                  >
+                    {{ cascadeJudgeSource }}
+                  </NTag>
+                </NDescriptionsItem>
               </NDescriptions>
               <EChart
                 v-if="cascadeTopArms.length"
@@ -481,6 +529,48 @@ const panelCols = '1 s:1 m:2 l:3';
               </div>
             </template>
             <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- G-5: 图谱健康卡片（gm-pro getGraphHealth，降级到本地 graphAdapter） -->
+        <NGi>
+          <NCard title="图谱健康" size="small">
+            <NSpin v-if="graphHealthLoading && !graphHealth" size="small" style="padding: 12px 0">
+              <template #default>加载中…</template>
+            </NSpin>
+            <template v-else-if="graphHealth">
+              <div class="profile-section">
+                <NTag :type="graphHealthTagType" size="small">
+                  {{ graphHealth.status }}
+                </NTag>
+                <NTag
+                  :type="graphHealthSourceTagType"
+                  size="small"
+                  style="margin-left: 6px"
+                >
+                  source: {{ graphHealth.source }}
+                </NTag>
+              </div>
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="nodeCount">
+                  {{ graphHealth.nodeCount ?? '—' }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="relationshipCount">
+                  {{ graphHealth.relationshipCount ?? '—' }}
+                </NDescriptionsItem>
+                <NDescriptionsItem label="graphAdapter">
+                  <StatusIndicator
+                    label="connected"
+                    :available="!!graphHealth.graphAdapterConnected"
+                    :failures="0"
+                  />
+                </NDescriptionsItem>
+              </NDescriptions>
+              <div v-if="graphHealth.error" class="muted mono" style="margin-top: 6px">
+                {{ graphHealth.error }}
+              </div>
+            </template>
+            <NEmpty v-else description="无图谱健康数据" style="padding: 12px 0" />
           </NCard>
         </NGi>
 

@@ -26,6 +26,7 @@ import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
 import {
   invokeMaintain,
+  invokeDiagnose,
   invokeDistill,
   invokeCompact,
   invokeResetBreaker,
@@ -180,6 +181,15 @@ function executeMaintain(): void {
   });
 }
 
+function executeDiagnose(): void {
+  mutation.mutate({
+    cardKey: 'diagnose',
+    tool: 'lcmg_diagnose',
+    params: {},
+    invokeFn: () => invokeDiagnose(),
+  });
+}
+
 function executeDistill(): void {
   mutation.mutate({
     cardKey: 'distill',
@@ -267,7 +277,7 @@ function executeImport(): void {
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">9 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">10 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">
@@ -282,6 +292,18 @@ function executeImport(): void {
             :confirm-level="1"
             :loading="!!loadingMap.maintain"
             @execute="executeMaintain"
+          />
+        </NGi>
+
+        <!-- 卡片 1.5: 系统诊断 -->
+        <NGi>
+          <OperationCard
+            title="系统诊断"
+            description="全栈自检：lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics，输出多段 markdown 报告。"
+            icon="🩺"
+            :confirm-level="0"
+            :loading="!!loadingMap.diagnose"
+            @execute="executeDiagnose"
           />
         </NGi>
 

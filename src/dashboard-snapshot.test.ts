@@ -358,4 +358,123 @@ describe('DashboardSnapshotServer', () => {
       expect(handle.failureReason).toBeUndefined();
     });
   });
+
+  // N-4: Prometheus /metrics + G-5 /internal/graph-health 端点覆盖
+  describe('GET /metrics (Prometheus)', () => {
+    it('返回 200 + text/plain + 包含 R-2 cascade_tier1_confidence 指标', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders({
+          getHealthLatest: () => ({
+            pendingMessages: 5,
+            summaryFragments: 2,
+            maxTokenRatio: 0.3,
+            cbLcmAvailable: true,
+            cbQmdAvailable: false,
+            cbNeo4jAvailable: true,
+            cbLcmFailures: 0,
+            cbQmdFailures: 3,
+            cbNeo4jFailures: 0,
+            lastAssembleMs: 100,
+            lastL2Ms: 50,
+            lastL3Ms: 30,
+            lastL4Ms: 20,
+            pendingExperienceCount: 4,
+            distilledExperienceCount: 10,
+            tierLow: 8,
+            tierMedium: 2,
+            tierHigh: 0,
+            // R-2 字段
+            cascadeTier1Confidence: 0.85,
+            cascadeJudgeSource: 'gm-pro',
+          }),
+        }),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/metrics`);
+      expect(resp.status).toBe(200);
+      const ct = resp.headers.get('content-type') ?? '';
+      expect(ct).toContain('text/plain');
+      const body = await resp.text();
+      // 压力信号
+      expect(body).toContain('lcm_pressure_pending_messages 5');
+      expect(body).toContain('lcm_pressure_summary_fragments 2');
+      expect(body).toContain('lcm_pressure_max_token_ratio 0.3');
+      // 熔断器
+      expect(body).toContain('lcm_circuit_breaker_available{engine="qmd"} 0');
+      expect(body).toContain('lcm_circuit_breaker_failures{engine="qmd"} 3');
+      // R-2: cascade Tier 1 置信度（含 source label）
+      expect(body).toContain('lcm_cascade_tier1_confidence{source="gm-pro"} 0.85');
+      // Graph adapter
+      expect(body).toContain('lcm_graph_adapter_connected 1');
+    });
+
+    it('health 为 null 时不抛错，输出零值指标', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders({
+          getHealthLatest: () => null,
+        }),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/metrics`);
+      expect(resp.status).toBe(200);
+      const body = await resp.text();
+      // 零值兜底
+      expect(body).toContain('lcm_pressure_pending_messages 0');
+      expect(body).toContain('lcm_cascade_tier1_confidence{source="local"} 0');
+    });
+  });
+
+  describe('GET /internal/graph-health (G-5)', () => {
+    it('返回 200 + application/json + 含 status/source 字段（降级到 local）', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders({
+          getGraphAdapterState: () => ({ connected: true, connectFailed: false }),
+        }),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/graph-health`);
+      expect(resp.status).toBe(200);
+      const ct = resp.headers.get('content-type') ?? '';
+      expect(ct).toContain('application/json');
+      const body = await resp.json();
+      // gm-pro 不可用时降级到 local 推断
+      expect(body.source).toBe('local');
+      expect(body.status).toBe('healthy');
+      expect(body.graphAdapterConnected).toBe(true);
+    });
+
+    it('graphAdapter 未连接时 status=unhealthy', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders({
+          getGraphAdapterState: () => ({ connected: false, connectFailed: true }),
+        }),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/graph-health`);
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.status).toBe('unhealthy');
+      expect(body.source).toBe('local');
+    });
+  });
 });
