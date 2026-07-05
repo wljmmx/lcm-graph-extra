@@ -118,16 +118,16 @@ const UPDATE_QUALITY_SCORE = `
  */
 const SEARCH_QUERY_TAIL = `
         WITH e,
-          CASE WHEN toLower(COALESCE(e.summary, '')) CONTAINS toLower($queryKeyword) THEN 1.0 ELSE 0.0 END
-          + CASE WHEN toLower(COALESCE(e.context, '')) CONTAINS toLower($queryKeyword) THEN 0.5 ELSE 0.0 END
-          + CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END
-          + CASE WHEN size($queryFreeTags) > 0
+          (CASE WHEN toLower(COALESCE(e.summary, '')) CONTAINS toLower($queryKeyword) THEN 1.0 ELSE 0.0 END)
+          + (CASE WHEN toLower(COALESCE(e.context, '')) CONTAINS toLower($queryKeyword) THEN 0.5 ELSE 0.0 END)
+          + (CASE WHEN toLower(COALESCE(e.title, '')) CONTAINS toLower($queryKeyword) THEN 0.7 ELSE 0.0 END)
+          + (CASE WHEN size($queryFreeTags) > 0
             AND coalesce(e.tags_free, '') <> ''
             THEN ANY(f IN split(coalesce(e.tags_free, ''), ',')
                WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
                ? 0.3
                : 0.0
-            ELSE 0.0 END
+            ELSE 0.0 END) AS queryMatch
         RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
                e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
                e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,

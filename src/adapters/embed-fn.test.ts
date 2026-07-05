@@ -132,7 +132,7 @@ describe('createLocalEmbedFn', () => {
     });
 
     const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://h/v1' });
-    await expect(embed('text')).rejects.toThrow('missing data[0].embedding');
+    await expect(embed('text')).rejects.toThrow('missing embedding');
   });
 
   it('Ollama 格式响应缺少 embedding 字段时抛错', async () => {

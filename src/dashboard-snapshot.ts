@@ -11,8 +11,8 @@
  * - 启动前探测端口是否被占
  *   - 若被占且响应 /internal/health 为 ok → 视为上一个实例残留
  *     （常见场景：插件进程被 kill -9 未走 dispose），
- *     放弃启动并返回 started:false，让上层降级（不阻塞插件）
- *   - 若被占且非自身实例 → 同样放弃启动，记录 warn
+ *     尝试发送 /internal/shutdown 让旧实例退出，然后重试 listen
+ *   - 若被占且非自身实例 → 放弃启动，记录 warn
  * - listen 失败（含 EADDRINUSE）通过 error 事件 + Promise reject 捕获，
  *   不再作为 unhandled error 抛出
  */
@@ -302,6 +302,28 @@ async function probePort(host: string, port: number, timeoutMs: number): Promise
 }
 
 /**
+ * 请求旧实例关闭（self-stale 场景）。
+ * 发送 POST /internal/shutdown，等待旧实例退出后端口释放。
+ */
+async function shutdownStaleInstance(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  const url = `http://${host}:${port}/internal/shutdown`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fetch(url, { method: 'POST', signal: controller.signal });
+  } catch {
+    // 旧实例关闭后连接断开是正常的
+  } finally {
+    clearTimeout(timer);
+  }
+  // 等待端口释放（旧实例 close 需要一点时间）
+  await new Promise((r) => setTimeout(r, 200));
+  // 验证端口是否已释放
+  const reprobe = await probePort(host, port, timeoutMs);
+  return reprobe === 'free';
+}
+
+/**
  * 启动 dashboard 快照 HTTP 服务。
  *
  * 路由：
@@ -361,7 +383,19 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
   // 如果探测+listen 未完成时 dashboard 就 fetch，会被 catch 降级（fetchPluginSnapshot 已有 5s 超时 + null 降级）。
   (async () => {
     try {
-      const probeResult = await probePort(host, port, probeTimeoutMs);
+      let probeResult = await probePort(host, port, probeTimeoutMs);
+      if (probeResult === 'self-stale') {
+        // 尝试让旧实例关闭，然后重试
+        try {
+          getGlobalLogger().info('[dashboard-snapshot] detected stale instance, sending shutdown request');
+          const recovered = await shutdownStaleInstance(host, port, 1000);
+          if (recovered) {
+            probeResult = 'free';
+          }
+        } catch {
+          // shutdown 失败，继续走放弃启动逻辑
+        }
+      }
       if (probeResult !== 'free') {
         handle.failureReason = probeResult === 'self-stale'
           ? `port ${host}:${port} occupied by a stale previous instance of this plugin (likely killed without dispose). Snapshot server disabled.`
@@ -396,6 +430,20 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
         if (url === '/internal/health') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ts: Date.now() }));
+          return;
+        }
+
+        // 优雅关闭端点（供新实例探测到 self-stale 时调用）
+        if (url === '/internal/shutdown') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, shuttingDown: true }));
+          // 延迟关闭，确保响应已发送
+          setTimeout(() => {
+            try {
+              server?.close();
+              getGlobalLogger().info('[dashboard-snapshot] shutdown requested by new instance');
+            } catch { /* ignore */ }
+          }, 50);
           return;
         }
 

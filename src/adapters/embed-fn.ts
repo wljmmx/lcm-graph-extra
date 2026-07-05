@@ -112,13 +112,19 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
       if (isOpenAiCompatible) {
         const embedding = data?.data?.[0]?.embedding;
         if (Array.isArray(embedding)) return embedding;
-        throw new Error('Embedding API: missing data[0].embedding in response');
+        // 兼容部分 OpenAI 兼容端点返回的扁平格式: { embedding: number[] }
+        const flatEmbedding = data?.embedding;
+        if (Array.isArray(flatEmbedding)) return flatEmbedding;
+        throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(data || {}).join(',')})`);
       }
 
       // Ollama 原生格式（新旧版响应相同）: { embedding: number[] }
       const embedding = data?.embedding;
       if (Array.isArray(embedding)) return embedding;
-      throw new Error('Embedding API: missing embedding in response');
+      // 兼容部分 Ollama 版本返回嵌套格式: { data: [{ embedding: number[] }] }
+      const nestedEmbedding = data?.data?.[0]?.embedding;
+      if (Array.isArray(nestedEmbedding)) return nestedEmbedding;
+      throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(data || {}).join(',')})`);
     }
     // 理论上不会到达
     throw new Error('Embedding API: exhausted retries');

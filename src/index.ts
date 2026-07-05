@@ -518,12 +518,16 @@ function getSessionDedup(sessionKey: string) {
         });
 
         // 创建全局 RetrievalGateway 单例，供 dashboard snapshot 读取检索性能
-        const { RetrievalGateway } = await import("./retrieval-gateway.js");
-        _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, {
-          maxResults: merger.config.maxResults,
-          fuzzyMatchThreshold: merger.config.fuzzyMatchThreshold,
-          decayHalfLifeDays: merger.config.decayHalfLifeDays,
-        });
+        try {
+          const { RetrievalGateway } = await import("./retrieval-gateway.js");
+          _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, {
+            maxResults: merger.config.maxResults,
+            fuzzyMatchThreshold: merger.config.fuzzyMatchThreshold,
+            decayHalfLifeDays: merger.config.decayHalfLifeDays,
+          });
+        } catch (gwErr) {
+          logger?.warn?.('[lcm-graph-extra] RetrievalGateway initialization failed, retrieval stats will show "not initialized"', { err: String(gwErr) });
+        }
 
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
         // WindowMonitor config is at api.pluginConfig.lcmMonitor (not nested under plugins.entries)
