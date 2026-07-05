@@ -9,7 +9,6 @@ import { Type } from "typebox";
 import * as neo4jDriver from 'neo4j-driver';
 import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
-const { DatabaseSync } = _lcmRequire("node:sqlite");
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
@@ -45,14 +44,21 @@ const LCM_DB = resolve(homedir(), '.openclaw', 'lcm.db');
 
 // P2-AUDIT: 单例 DB 连接，与 lcm-bridge.ts / debt-manager.ts 保持一致，
 // 避免 lcmg_diagnose 等工具连续查询时多次 open/close。
+// node:sqlite 延迟加载（兼容未启用 --experimental-sqlite 的环境）
 let _sharedDb: any = null;
-function openDb() {
+function openDb(): any {
   if (_sharedDb) {
     // 验证连接仍可用
     try { _sharedDb.prepare("SELECT 1").get(); return _sharedDb; } catch { _sharedDb = null; }
   }
-  _sharedDb = new DatabaseSync(LCM_DB);
-  return _sharedDb;
+  try {
+    const { DatabaseSync } = _lcmRequire('node:sqlite');
+    _sharedDb = new DatabaseSync(LCM_DB);
+    return _sharedDb;
+  } catch {
+    _sharedDb = null;
+    return null;
+  }
 }
 
 /**
