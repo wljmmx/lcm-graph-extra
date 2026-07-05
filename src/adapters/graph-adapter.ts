@@ -287,7 +287,11 @@ export class GraphAdapter {
       }
       await this.connect();
     }
-    if (!this.mod) return [];
+    // AUDIT: connect() 可能成功加载 mod 但 this.driver 仍为 null
+    // （gm-pro getDriver 返回 null + acquireDriver 失败），此时调用
+    // mod.searchNodes(this.driver, ...) 会把 null 传给 gm-pro，
+    // gm-pro 内部 driver.session() 抛 "Cannot read properties of null (reading 'session')"
+    if (!this.mod || !this.driver) return [];
     const rl = limit ?? this.config.searchLimit;
     try {
       let nodes: any[] = [];
@@ -361,6 +365,9 @@ export class GraphAdapter {
     // Community enrichment — batch findById via raw Cypher (avoids N round-trips)
     const nodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
     if (nodeIds.length > 0) {
+      // AUDIT: searchWithCache 虽标记 @deprecated，但仍需防 driver 为 null 时
+      // this.driver.session() 抛 "Cannot read properties of null (reading 'session')"
+      if (!this.driver) return results;
       try {
         const session = this.driver.session();
         const placeholder = nodeIds.map((_, i) => `$nid${i}`).join(',');
@@ -402,6 +409,8 @@ export class GraphAdapter {
       await this.connect();
     }
     if (!this.mod) return [];
+    // AUDIT: 同 search() —— mod 已加载但 driver 为 null 时不能调用 searchNodes
+    if (!this.driver) return [];
     // P3-9 GMR-3: 捕获到局部常量，跨 await 保持非空收窄，消除后续 this.mod! 非空断言
     const mod = this.mod;
     const rl = options?.limit ?? this.config.searchLimit;
@@ -717,7 +726,7 @@ export class GraphAdapter {
    * PageRank re-ranking
    */
   async rerankByPageRank(nodeIds: string[]): Promise<Map<string, number>> {
-    if (!this.mod || nodeIds.length < 2) return new Map();
+    if (!this.mod || !this.driver || nodeIds.length < 2) return new Map();
     try {
       // P2-17: 用 buildGmConfig 统一构建（PPR 只用 pagerank* 字段）
       // P0-AUDIT: 不传 undefined 覆盖值，buildGmConfig 内部 spread 会
