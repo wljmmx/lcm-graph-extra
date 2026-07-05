@@ -452,9 +452,41 @@ export class GraphAdapter {
       // P1-1 M-1: 消除 N+1 —— 原代码 per-event 调用 getEdgesForNodes（共 rl 次往返），
       // 改为一次性批量取所有 top events 的 edges，再在内存中按 source id 分组成 Map<eventId, edges[]>，
       // 遍历 topEvents 时从 Map 取对应 edges。
+      // gm-pro 兼容性：优先尝试 mod.getEdgesForNodes（Neo4j 版 API），
+      // 不存在时降级到 Cypher 批量查询，确保 graph-memory（SQLite 版）也能工作。
       const topEvents = ranked.slice(0, rl);
       const topIds = topEvents.map((evt: any) => evt.id).filter(Boolean);
-      const rawEdges = topIds.length > 0 ? await mod.getEdgesForNodes(this.driver, topIds) : [];
+      let rawEdges: any[] = [];
+      if (topIds.length > 0) {
+        if (typeof mod.getEdgesForNodes === 'function') {
+          rawEdges = await mod.getEdgesForNodes(this.driver, topIds);
+        } else {
+          // Fallback: 用 Cypher 批量查询所有边（兼容 Neo4j）
+          try {
+            const session = this.driver.session();
+            const placeholders = topIds.map((_: string, i: number) => `$id${i}`).join(',');
+            const params: Record<string, any> = {};
+            topIds.forEach((id: string, i: number) => { params[`id${i}`] = id; });
+            const result = await session.run(
+              `MATCH (a)-[r]->(b) WHERE a.id IN [${placeholders}] OR b.id IN [${placeholders}]
+               RETURN a.id AS fromId, b.id AS toId, type(r) AS type,
+                      coalesce(r.instruction, '') AS instruction,
+                      coalesce(r.name, '') AS targetName`,
+              params,
+            );
+            rawEdges = result.records.map((rec: any) => ({
+              fromId: rec.get('fromId'),
+              toId: rec.get('toId'),
+              type: rec.get('type'),
+              instruction: rec.get('instruction'),
+              targetName: rec.get('targetName'),
+            }));
+            await session.close();
+          } catch {
+            rawEdges = [];
+          }
+        }
+      }
       const allEdges: any[] = rawEdges ?? [];
       // 按 source id 分组（防御性多字段查找，兼容不同 edge 形态）
       const edgesBySource = new Map<string, any[]>();

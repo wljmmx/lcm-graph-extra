@@ -1,12 +1,17 @@
 /**
- * graph-memory-pro v2.1.10 新 API 调用统一入口（graceful degradation wrapper）。
+ * graph-memory-pro API 调用统一入口（graceful degradation wrapper）。
  *
  * 设计：
  * - graph-memory-pro 在运行时可能未安装（optional peerDep），需优雅降级
- * - v2.1.10 新增 5 个 API：judgeRecall / upsertFeedback / getNodesByTimeRange /
- *   evolveNode / G-5 图谱健康（getGraphHealth）
+ * - 支持的扩展 API：judgeRecall / upsertFeedback / getNodesByTimeRange /
+ *   evolveNode / getGraphHealth
  * - 所有调用采用 "优先 gm-pro → 失败/不可用降级到现有 Cypher/本地实现" 模式
  * - 单一来源避免散落 try-catch，提供统一日志与遥测
+ *
+ * 架构说明：
+ * - graph-memory（SQLite 版，npm: graph-memory）：基础图谱记忆，自带 Recaller/维护
+ * - graph-memory-pro（Neo4j 版，可选扩展）：高级能力（judgeRecall/evolveNode 等）
+ * - 本 wrapper 兼容两种形态：探测到任一形态均标记为可用，但扩展 API 按需检测
  *
  * @module adapters/gm-pro-fallback
  */
@@ -19,12 +24,13 @@ import type { Logger } from '../utils/logger.js';
 let _gmProMod: any = null;
 let _gmProProbed = false;
 let _gmProAvailable = false;
+let _gmProSource: 'env' | 'require' | 'fallback' = 'fallback';
 
 /**
  * 探测 graph-memory-pro 是否可用，成功后缓存模块实例。
  *
  * 探测结果：
- * - true：模块已加载，后续调用 v2.1.10 新 API 可走 gm-pro 路径
+ * - true：模块已加载，可尝试调用其 API
  * - false：模块未安装或 import 失败，所有调用走 fallback
  *
  * 行为幂等：首次调用后缓存，后续无 IO。
@@ -33,9 +39,14 @@ export async function probeGmPro(): Promise<boolean> {
   if (_gmProProbed) return _gmProAvailable;
   _gmProProbed = true;
   try {
-    const { path } = resolveGmProPath();
-    const mod = await import(`${path}/dist/index.js`);
-    if (mod && (typeof mod.runMaintenance === 'function' || typeof mod.Recaller === 'function')) {
+    const resolved = resolveGmProPath();
+    _gmProSource = resolved.source;
+    const mod = await import(`${resolved.path}/dist/index.js`);
+    if (mod && (
+      typeof mod.runMaintenance === 'function' ||
+      typeof mod.Recaller === 'function' ||
+      typeof mod.searchNodes === 'function'
+    )) {
       _gmProMod = mod;
       _gmProAvailable = true;
     }
@@ -50,27 +61,52 @@ export function getGmProMod(): any {
   return _gmProMod;
 }
 
+/** 获取 gm-pro 解析来源（用于诊断） */
+export function getGmProSource(): string {
+  return _gmProSource;
+}
+
 /** 重置探测状态（仅供测试使用） */
 export function _resetGmProProbe(): void {
   _gmProMod = null;
   _gmProProbed = false;
   _gmProAvailable = false;
+  _gmProSource = 'fallback';
 }
 
 /**
- * 统一调用 gm-pro 新 API，失败时降级到 fallback。
+ * 检查 gm-pro 模块上是否存在指定 API 函数。
+ * 支持 dot 路径（如 'Recaller.prototype.recall'），但默认直接查顶层函数。
+ */
+function _hasApi(mod: any, apiName: string): boolean {
+  if (!mod) return false;
+  if (typeof mod[apiName] === 'function') return true;
+  if (apiName.includes('.')) {
+    const parts = apiName.split('.');
+    let cur: any = mod;
+    for (const p of parts) {
+      if (cur == null) return false;
+      cur = cur[p];
+    }
+    return typeof cur === 'function';
+  }
+  return false;
+}
+
+/**
+ * 统一调用 gm-pro API，失败时降级到 fallback。
  *
  * 行为：
  * 1. 首次调用前自动 probe gm-pro
  * 2. gm-pro 不可用 → 直接 fallback
- * 3. gm-pro 可用但 API 缺失（mod 上无对应函数） → fallback
+ * 3. gm-pro 可用但 API 缺失 → fallback
  * 4. gm-pro 可用且 API 存在 → 调用，异常时 fallback
  *
  * @param apiName 调用的 gm-pro 函数名（用于日志/遥测）
  * @param gmProFn 调用 gm-pro API 的闭包，参数为已加载的 mod
  * @param fallbackFn 降级实现的闭包
- * @param logger 可选日志器
- * @param label 调用标签（出现在 debug 日志中）
+ * @param opts.logger 可选日志器
+ * @param opts.label 调用标签（出现在 debug 日志中）
  */
 export async function withGmProFallback<T>(
   apiName: string,
@@ -87,9 +123,7 @@ export async function withGmProFallback<T>(
       return await fallbackFn();
     }
 
-    const fn = _gmProMod[apiName];
-    if (typeof fn !== 'function') {
-      // gm-pro 不存在该 API（旧版本或未升级到 v2.1.10）
+    if (!_hasApi(_gmProMod, apiName)) {
       return await fallbackFn();
     }
 
@@ -102,7 +136,7 @@ export async function withGmProFallback<T>(
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 类型定义：v2.1.10 新 API 的入参/出参契约（lcm-graph-extra 期望形态）
+// 类型定义：扩展 API 的入参/出参契约（lcm-graph-extra 期望形态）
 // ──────────────────────────────────────────────────────────────────
 
 /** judgeRecall 入参：评估召回结果是否有效 */
@@ -176,4 +210,56 @@ export interface GraphHealthSnapshot {
   avgQueryLatencyMs?: number;
   errorRate?: number;
   details?: Record<string, unknown>;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 基础 API 类型契约（graph-memory / graph-memory-pro 通用核心能力）
+// ──────────────────────────────────────────────────────────────────
+
+/** 图谱节点基础类型 */
+export interface GmNode {
+  id: string;
+  type: string;
+  name: string;
+  description: string;
+  content: string;
+  status?: string;
+  validatedCount?: number;
+  communityId?: string | null;
+  pagerank?: number;
+  createdAt?: number;
+  updatedAt?: number;
+  [key: string]: any;
+}
+
+/** 图谱边基础类型 */
+export interface GmEdge {
+  id: string;
+  fromId: string;
+  toId: string;
+  type: string;
+  instruction: string;
+  condition?: string;
+  sessionId?: string;
+  createdAt?: number;
+  [key: string]: any;
+}
+
+/** 召回结果 */
+export interface RecallResult {
+  nodes: GmNode[];
+  edges: GmEdge[];
+  tokenEstimate?: number;
+}
+
+/** PPR 结果 */
+export interface PPRResult {
+  scores: Map<string, number>;
+}
+
+/** 社区检测结果 */
+export interface CommunityResult {
+  labels: Map<string, string>;
+  communities: Map<string, string[]>;
+  count: number;
 }
