@@ -61,6 +61,14 @@ function openDb(): any {
   }
 }
 
+/** 关闭共享 DB 连接（dispose 时调用，避免热重载后 SQLite 连接泄漏） */
+export function closeSharedDb(): void {
+  if (_sharedDb) {
+    try { _sharedDb.close(); } catch {}
+    _sharedDb = null;
+  }
+}
+
 /**
  * SEC-5 M-11/M-12: 校验 backup/restore 路径必须在 ~/.openclaw 之下，
  * 防止用户提供的路径穿越到任意文件系统位置。

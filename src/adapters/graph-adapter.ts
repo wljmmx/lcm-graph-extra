@@ -212,6 +212,8 @@ export class GraphAdapter {
   }
 
   async connect(): Promise<boolean> {
+    // 防止重复 acquire 导致 refCount 失衡
+    if (this.driver && this.mod) return true;
     try {
       // P3-3: 记录实际使用的 graph-memory-pro 路径与解析来源
       this.logger?.info?.('[graph-adapter] loading graph-memory-pro', { path: GM_PRO_PATH, source: _GM_PRO_RESOLVED.source });
@@ -405,8 +407,9 @@ export class GraphAdapter {
       // AUDIT: searchWithCache 虽标记 @deprecated，但仍需防 driver 为 null 时
       // this.driver.session() 抛 "Cannot read properties of null (reading 'session')"
       if (!this.driver) return results;
+      let session: any = null;
       try {
-        const session = this.driver.session();
+        session = this.driver.session();
         const placeholder = nodeIds.map((_, i) => `$nid${i}`).join(',');
         const batchResult = await session.run(
           `MATCH (n:Task|Skill|Event) WHERE n.id IN $ids RETURN n.id AS id, n.communityId AS communityId`,
@@ -425,8 +428,11 @@ export class GraphAdapter {
             if (r.metadata) { r.metadata.communityId = communityMap.get(nid)!; }
           }
         }
-        await session.close();
-      } catch {}
+      } catch (err) {
+        this.logger?.warn?.('[graph-adapter] community enrichment failed', { err: String(err) });
+      } finally {
+        if (session) { try { await session.close(); } catch {} }
+      }
     }
     this.searchCache.set(key, results);
     return results;
@@ -495,8 +501,9 @@ export class GraphAdapter {
           rawEdges = await mod.getEdgesForNodes(this.driver, topIds);
         } else {
           // Fallback: 用 Cypher 批量查询所有边（兼容 Neo4j）
+          let session: any = null;
           try {
-            const session = this.driver.session();
+            session = this.driver.session();
             const placeholders = topIds.map((_: string, i: number) => `$id${i}`).join(',');
             const params: Record<string, any> = {};
             topIds.forEach((id: string, i: number) => { params[`id${i}`] = id; });
@@ -514,9 +521,11 @@ export class GraphAdapter {
               instruction: rec.get('instruction'),
               targetName: rec.get('targetName'),
             }));
-            await session.close();
-          } catch {
+          } catch (err) {
             rawEdges = [];
+            this.logger?.warn?.('[graph-adapter] edges batch query failed', { err: String(err) });
+          } finally {
+            if (session) { try { await session.close(); } catch {} }
           }
         }
       }
@@ -988,7 +997,13 @@ async health(): Promise<boolean> {
     } catch (relErr) {
       this.logger?.warn?.(`[graph-adapter] releaseDriver failed: ${relErr}`);
     }
-    this.driver = null; this.mod = null;
+    this.driver = null;
+    this.mod = null;
+    this._recaller = null;
+    this._embedFn = null;
+    this._connectFailed = false;
+    this._connectRetryCount = 0;
+    this._lastFailTime = 0;
   }
 
   async detectCommunities(maxIter = 50): Promise<{ labels: Map<string, string>; communities: Map<string, string[]>; count: number } | null> {

@@ -39,6 +39,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TypeScript 'health' is of type 'unknown'**: 新增 `HealthSnapshotLite` 接口，修复 `buildPrometheusMetrics` 中访问 health 字段的类型错误
 - **'await' expressions are only allowed within async functions**: `/internal/graph-health` 路由改用 `.then/.catch` 链处理
 
+### Resource Leak & Lifecycle Audit (2026-07-05)
+
+**P0 - 严重资源泄漏修复（8 项）**
+
+- **Neo4j Session 泄漏** (`graph-adapter.ts`): `searchWithCache` / `searchExperience` 中 `session.close()` 从 try 块移至 finally，避免异常路径 session 不释放导致连接池耗尽
+- **dispose 完整性** (`index.ts`): 新增 `_losslessClawAdapter.dispose()` 调用（触发底层 engine.dispose）；新增 `qmdClient.dispose()` 调用（清理 recoveryTimer）；`graphAdapter.close()` 改为 await（确保 TCP 连接优雅关闭）
+- **SQLite 连接泄漏** (`tools.ts`): 新增 `closeSharedDb()` 导出函数，dispose 时关闭模块级单例 `_sharedDb`
+- **MCP Session 并发竞态** (`qmd-client.ts`): 新增 `_initPromise` inflight promise 去重，避免并发请求各自调用 `_doInitialize()` 导致服务端 session 泄漏
+- **Promise.race timer 泄漏** (`cascade-manager.ts`): `evaluateTier2` 中 `setTimeout` 句柄提取并在 race 后 `clearTimeout`，预吞 rejection 防 unhandledRejection
+
+**P1 - 稳定性与竞态修复（5 项）**
+
+- **连接池兜底清理** (`index.ts`): dispose 中新增 `await drainPool()` 调用，防止 refCount 失衡导致连接池条目泄漏
+- **dispose 幂等性** (`index.ts`): 开头增加 `if (!initialized && !snapshotServerStop && !hbTimer) return;` 短路，避免重复执行动态 import 和清理逻辑
+- **dispose 单例置 null** (`index.ts`): 末尾统一置 null `_retrievalGateway` / `tracker` / `_modelRegistry` / `snapshotHandle` / `snapshotConfig`，避免热重载后旧实例残留
+- **connect() 重复 acquire 守卫** (`graph-adapter.ts`): 开头增加 `if (this.driver && this.mod) return true;`，防止 refCount 失衡
+- **MCP 恢复后清空 sessionId** (`qmd-client.ts`): `scheduleRecovery` 恢复回调中 `this.mcpSessionId = null`，使首请求主动重新初始化
+
+**审计报告**: 完整审计报告见 `docs/resource-leak-audit-2026-07-05.md`
+
 ### Testing
 
 - **新增 7 测试用例**:

@@ -84,6 +84,8 @@ export class QmdClient {
   private readonly mcpBaseUrl: string;
   private readonly mcpTimeout: number;
   private mcpSessionId: string | null = null;
+  /** inflight initialize promise 去重，防止并发初始化创建多个 session */
+  private _initPromise: Promise<string> | null = null;
   private readonly cliTimeout: number;
   private readonly cliFallbackSearchType: string;
   private readonly pingInterval: number;
@@ -289,15 +291,21 @@ export class QmdClient {
   /** Initialize MCP session via initialize handshake */
   private async mcpInitialize(): Promise<string> {
     if (this.mcpSessionId) return this.mcpSessionId;
-
-    const sessionId = await this._doInitialize();
-    this.mcpSessionId = sessionId;
-    return sessionId;
+    if (this._initPromise) return this._initPromise;
+    this._initPromise = this._doInitialize().finally(() => { this._initPromise = null; });
+    try {
+      this.mcpSessionId = await this._initPromise;
+      return this.mcpSessionId;
+    } catch (err) {
+      this._initPromise = null;
+      throw err;
+    }
   }
 
   /** 强制重新初始化 session（session 过期/服务重启时调用） */
   private async mcpReinitialize(): Promise<string> {
     this.mcpSessionId = null;
+    this._initPromise = null;
     return this.mcpInitialize();
   }
 
@@ -455,6 +463,7 @@ export class QmdClient {
         const ok = await this.ping();
         if (ok) {
           this.mcpAvailable = true;
+          this.mcpSessionId = null;
           this.clearRecovery();
           this.logger.info("[qmd-client] MCP recovered, switching back");
         } else {

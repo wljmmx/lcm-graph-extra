@@ -2264,6 +2264,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
       },
 
       async dispose() {
+        // 幂等短路：已 dispose 则直接返回
+        if (!initialized && !snapshotServerStop && !hbTimer) return;
         // 1. 先停止 heartbeat timer，避免新任务进入
         if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
         // 关闭 dashboard 快照 HTTP 服务（幂等，可多次调用）
@@ -2289,24 +2291,42 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // 3. 停止 debt scheduler（等待活跃任务完成）
         try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {}
 
-        // 4. Close SQLite DB 连接（healthMetrics / debt-manager / lcm-bridge）
+        // 4. Close SQLite DB 连接（healthMetrics / debt-manager / lcm-bridge / tools sharedDb）
         //    必须在 Neo4j driver 之前或同时关闭，避免 dispose 后被 fire-and-forget 写入
         try { healthMetrics.close(); } catch {}
         try { const { closeDebtDb } = await import('./core/debt-manager.js'); closeDebtDb(); } catch {}
         try { const { closeLcmDb } = await import('./lcm-bridge.js'); closeLcmDb(); } catch {}
+        try { const { closeSharedDb } = await import('./tools.js'); closeSharedDb(); } catch {}
 
-        // 4. Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
-        try { (graphAdapter as any)?.close?.(); } catch {}
+        // 5. Dispose lossless-claw adapter（触发底层 engine.dispose）
+        try { await _losslessClawAdapter?.dispose?.(); } catch {}
+        _losslessClawAdapter = null;
+
+        // 6. Dispose QmdClient（清理 recoveryTimer，避免 timer 泄漏）
+        try { qmdClient?.dispose?.(); } catch {}
+
+        // 7. Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
+        //    必须 await，确保 driver 底层 TCP 连接被优雅关闭
+        try { await graphAdapter?.close?.(); } catch {}
         tracker?.close?.();
         try { await closeNeo4jDriver(); } catch {}
-        // 6. M-2: 重置熔断器状态（避免热重载/测试复用进程时残留旧 state）
+        // 兜底：强制清理连接池中所有条目（防止 refCount 失衡导致泄漏）
+        try { const { drainPool } = await import('./adapters/connection-pool.js'); await drainPool(); } catch {}
+
+        // 8. M-2: 重置熔断器状态（避免热重载/测试复用进程时残留旧 state）
         try { const { resetAllCircuitBreakers } = await import('./circuit-breaker.js'); resetAllCircuitBreakers(); } catch {}
         initialized = false;
         initPromise = null;
         qmdClient = null;
         graphAdapter = null;
         expStore = null;
+        _retrievalGateway = null;
         lastRetrievalQuery = '';
+        _lastEmbedHealth = true;
+        _modelRegistry = undefined;
+        tracker = null;
+        snapshotHandle = null;
+        snapshotConfig = null;
       },
     }));
 

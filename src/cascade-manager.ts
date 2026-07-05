@@ -181,10 +181,13 @@ export class CascadeManager {
 
     try {
       // 加 10s 超时，防止 LLM 挂起导致 Promise 永久 pending
-      const response = await Promise.race([
-        llmFn(prompt),
-        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('Tier2 LLM timeout')), 10_000)),
-      ]);
+      let tier2Timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<string>((_, reject) => {
+        tier2Timer = setTimeout(() => reject(new Error('Tier2 LLM timeout')), 10_000);
+      });
+      timeoutPromise.catch(() => {}); // 预吞 rejection 防 unhandledRejection
+      const response = await Promise.race([llmFn(prompt), timeoutPromise]);
+      if (tier2Timer) clearTimeout(tier2Timer);
       const parsed = JSON.parse(response);
       if (Array.isArray(parsed)) {
         return parsed
