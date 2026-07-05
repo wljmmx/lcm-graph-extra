@@ -572,6 +572,39 @@ function getSessionDedup(sessionKey: string) {
         },
       },
 
+      // SDK ContextEngine.bootstrap（可选）：会话启动时 SDK 主动调用，
+      // 我们委托给 lossless-claw 的 bootstrap 完成会话初始化。
+      // 若 adapter 未连接或 engine 未实现 bootstrap，返回安全默认值。
+      async bootstrap(params: {
+        sessionId: string;
+        sessionKey?: string;
+        sessionFile: string;
+        runtimeSettings?: unknown;
+      }): Promise<{ bootstrapped: boolean; importedMessages?: number; reason?: string }> {
+        try {
+          if (!_losslessClawAdapter?.bootstrap) {
+            return { bootstrapped: false, reason: 'adapter_not_connected' };
+          }
+          // SDK 注入的 sessionId 必须是字符串（防御性 String 化）
+          const sid = typeof params.sessionId === 'string'
+            ? params.sessionId
+            : String(params.sessionId);
+          const result = await _losslessClawAdapter.bootstrap({
+            sessionId: sid,
+            sessionKey: params.sessionKey,
+            sessionFile: params.sessionFile,
+            messages: [],
+          });
+          return {
+            bootstrapped: !!(result as any)?.bootstrapped,
+            importedMessages: (result as any)?.importedMessages,
+            reason: (result as any)?.reason,
+          };
+        } catch (err: any) {
+          return { bootstrapped: false, reason: 'bootstrap_error: ' + (err?.message ?? String(err)) };
+        }
+      },
+
       async ingest(params: { sessionId: string; sessionKey?: string; message: any; isHeartbeat?: boolean }) {
         // Forward to lossless-claw for actual message storage
         try {
@@ -1681,15 +1714,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           const wordRatio = (userContent.match(/[\w]+/g) || []).length / userContent.trim().length;
           if (wordRatio < 0.3) return;
 
-          // Prefer runtimeContext.llm (SDK-provided LLM config), fallback to custom config
-          // 复用 resolveDistillationLlm 统一处理：
-          //   - 主会话是 Ollama 模型 → 沿用主会话模型，避免 GPU 切换
-          //   - 主会话不是 Ollama → 用 distillationLlm 配置（环境变量/openclaw.json/pluginConfig）
-          //   - 自动清洗 baseURL + 注入 keepAlive（仅 Ollama 端点）
+          // 优先级（高 → 低）：
+          //   1. SDK runtimeContext.llm.complete（已认证、跟随主会话模型，无需配置）
+          //   2. resolveDistillationLlm(api)（Ollama 主会话沿用 / distillationLlm 显式配置）
+          //   3. api.pluginConfig.llm / ~/.openclaw/openclaw.json graph-memory-pro 配置
+          //   4. 环境变量 OPENAI_API_KEY 等兜底
+          const sdkLlmComplete = (params as any)?.runtimeContext?.llm?.complete;
           const distillLlm = resolveDistillationLlm(api);
-          // graphAdapter.extractAndUpsertFromTurn 期望 { apiKey, baseURL, model } 结构，
-          // 这里附加 keepAlive 让 buildLlmFn 能读到
-          const llmConfig = (distillLlm?.model || distillLlm?.apiKey)
+          // graphAdapter.extractAndUpsertFromTurn 期望 { apiKey, baseURL, model, complete? } 结构。
+          // 若 SDK 提供 complete 函数，包装传入；buildLlmFn 会优先用它而非自建 fetch。
+          const llmConfig = sdkLlmComplete
+            ? {
+                complete: sdkLlmComplete,
+                // 同时携带 distillationLlm 的 model 信息作为 fallback / 审计用途
+                model: distillLlm?.model,
+                apiKey: distillLlm?.apiKey,
+                baseURL: distillLlm?.baseURL,
+                keepAlive: distillLlm?.keepAlive,
+              }
+            : (distillLlm?.model || distillLlm?.apiKey)
             ? {
                 model: distillLlm.model,
                 apiKey: distillLlm.apiKey,
@@ -1933,6 +1976,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---
           let summaryContent: string | undefined;
           let adapterCompacted = false;
+          // 保存 lossless-claw compact 返回的额外字段（firstKeptEntryId/sessionId/sessionFile），
+          // 供成功 return 时透传给 SDK CompactResult.result。声明在 if 块外避免 scope 问题。
+          let compactResultExtra: { firstKeptEntryId?: string; sessionId?: string; sessionFile?: string } = {};
           if (_adapterConnected) {
             // P0-3b H-4 + SEC-10 M-16: 捕获 timer/abort listener handle，finally 中清理，
             // 避免高压超时后定时器与 abort listener 泄漏；并对未决的 timeout/abort promise 预吞 reject。
@@ -1962,6 +2008,13 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               // ActionTaken may be false even if summary was created (no DAG reduction needed)
               // Use createdSummaryId as the authoritative indicator of compaction success
               adapterCompacted = !!compactResult?.createdSummaryId || compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
+              // 透传 lossless-claw 返回的 SDK CompactResult.result 可选字段
+              const _extra = compactResult?.result ?? {};
+              compactResultExtra = {
+                firstKeptEntryId: _extra.firstKeptEntryId,
+                sessionId: _extra.sessionId,
+                sessionFile: _extra.sessionFile,
+              };
             } catch (ceErr) {
               const msg = String(ceErr);
               if (msg.includes('aborted')) {
@@ -2055,6 +2108,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               },
             };
           }
+          // SDK CompactResult.result 期望的可选字段：
+          // - firstKeptEntryId: 压缩后保留的第一条消息 ID（lossless-claw 提供）
+          // - sessionId/sessionFile: runtime 轮换 transcripts 时的新会话标识
+          // 从 compactResultExtra 透传，缺失时回退到 params 原值
           return {
             ok: true,
             compacted,
@@ -2066,6 +2123,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 ? estimateTokensFromText(summaryContent)
                 : tokensBefore,
               summary: summaryContent,
+              firstKeptEntryId: compactResultExtra.firstKeptEntryId,
+              sessionId: compactResultExtra.sessionId ?? params.sessionId,
+              sessionFile: compactResultExtra.sessionFile ?? params.sessionFile,
             },
           };
         } catch (err) {

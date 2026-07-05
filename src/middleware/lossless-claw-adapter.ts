@@ -65,6 +65,7 @@ interface LosslessClawEngine {
     compactionTarget?: 'budget' | 'threshold';
     customInstructions?: string;
     runtimeContext?: any;
+    runtimeSettings?: any;
     legacyParams?: any;
   }): Promise<{
     ok: boolean;
@@ -86,6 +87,7 @@ interface LosslessClawEngine {
     tokenBudget?: number;
     currentTokenCount?: number;
     runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: any;
     legacyCompactionParams?: Record<string, unknown>;
   }): Promise<void>;
   bootstrap?(params: {
@@ -93,6 +95,7 @@ interface LosslessClawEngine {
     sessionKey?: string;
     sessionFile?: string;
     messages?: any[];
+    runtimeSettings?: any;
   }): Promise<{ bootstrapped: boolean; importedMessages: number; reason?: string }>;
   assemble?(params: {
     sessionId: string;
@@ -102,6 +105,7 @@ interface LosslessClawEngine {
     prompt?: string;
     model?: string;
     runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: any;
   }): Promise<{
     messages: any[];
     estimatedTokens: number;
@@ -113,6 +117,7 @@ interface LosslessClawEngine {
     sessionFile: string;
     sessionKey?: string;
     runtimeContext?: any;
+    runtimeSettings?: any;
   }): Promise<{ changed: boolean; bytesFreed: number; rewrittenEntries: number; reason?: string }>;
   dispose?(): Promise<void>;
   getConversationStore?(): any;
@@ -336,6 +341,7 @@ export class LosslessClawAdapter {
     tokenBudget?: number;
     currentTokenCount?: number;
     runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: any;
     legacyCompactionParams?: Record<string, unknown>;
   }): Promise<void> {
     if (!this._connected || !this.engine) return;
@@ -361,7 +367,8 @@ export class LosslessClawAdapter {
     sessionKey?: string;
     sessionFile?: string;
     messages?: any[];
-  }): Promise<{ bootstrapped: boolean; importedMessages: number }> {
+    runtimeSettings?: any;
+  }): Promise<{ bootstrapped: boolean; importedMessages: number; reason?: string }> {
     if (!this._connected || !this.engine) {
       return { bootstrapped: false, importedMessages: 0 };
     }
@@ -453,6 +460,7 @@ export class LosslessClawAdapter {
     compactionTarget?: 'budget' | 'threshold';
     customInstructions?: string;
     runtimeContext?: any;
+    runtimeSettings?: any;
     legacyParams?: any;
   }): Promise<{
     ok: boolean;
@@ -511,6 +519,10 @@ export class LosslessClawAdapter {
           condensed: false,
           createdSummaryId,
           summary: summaryContent,
+          // SDK CompactResult.result 期望的可选字段透传（lossless-claw 提供）
+          firstKeptEntryId: tokensInfo.firstKeptEntryId,
+          sessionId: tokensInfo.sessionId,
+          sessionFile: tokensInfo.sessionFile,
         },
         exhausted: lcResult.exhausted,
       };
@@ -571,6 +583,7 @@ export class LosslessClawAdapter {
     sessionFile: string;
     sessionKey?: string;
     runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: any;
   }): Promise<{ changed: boolean; bytesFreed: number; rewrittenEntries: number; reason?: string }> {
     if (!this._connected || !this.engine) {
       return { changed: false, bytesFreed: 0, rewrittenEntries: 0 };

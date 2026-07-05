@@ -745,7 +745,7 @@ export class GraphAdapter {
    * Extract triplets from a conversation turn and upsert to Neo4j graph.
    */
   async extractAndUpsertFromTurn(
-    llmConfig: { apiKey?: string; baseURL?: string; model?: string },
+    llmConfig: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string }) => Promise<{ text: string; provider?: string; model?: string }> },
     userContent: string,
     assistantContent: string,
   ): Promise<{ nodes: number; edges: number }> {
@@ -767,7 +767,23 @@ export class GraphAdapter {
     }
   }
 
-  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string }): ((system: string, user: string) => Promise<string>) | null {
+  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string }) => Promise<{ text: string; provider?: string; model?: string }> }): ((system: string, user: string) => Promise<string>) | null {
+    // 优先用 SDK 提供的 runtimeContext.llm.complete（已认证、已配置、跟随主会话模型）
+    // 包装成 extractTriplets 期望的 (system, user) => Promise<string> 签名
+    if (config?.complete && typeof config.complete === 'function') {
+      return async (system, user) => {
+        const result = await config.complete!({
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          maxTokens: 1024,
+          temperature: 0.3,
+          purpose: 'lcm-graph-extra:triplet-extraction',
+        });
+        return result?.text ?? '';
+      };
+    }
     if (!config?.model && !config?.apiKey) return null;
     // 清洗 baseURL：去掉反引号/引号/首尾空格/尾斜杠
     const baseUrl = cleanBaseURL(config.baseURL || 'https://api.openai.com/v1');

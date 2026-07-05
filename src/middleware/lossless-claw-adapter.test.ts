@@ -178,4 +178,88 @@ describe('LosslessClawAdapter', () => {
     mockEngine.dispose.mockRejectedValue(new Error('dispose error'));
     await expect(adapter.dispose()).resolves.toBeUndefined();
   });
+
+  // ─── SDK runtimeSettings 透传验证 ────────────────────────────────────
+  // SDK 在所有 ContextEngine 方法新增了 runtimeSettings 字段（含 schemaVersion/
+  // runtime/host/model 元数据），adapter 应透传给 lossless-claw engine。
+
+  it('compact 透传 runtimeSettings 给 engine', async () => {
+    mockEngine.compact.mockResolvedValue({ ok: true, compacted: true });
+    const runtimeSettings = { schemaVersion: '1.0', runtime: { host: 'openclaw' }, model: 'claude-sonnet-4' };
+    await adapter.compact({
+      sessionId: 'test',
+      sessionFile: '/test/session',
+      runtimeSettings,
+    });
+    expect(mockEngine.compact).toHaveBeenCalledWith(expect.objectContaining({ runtimeSettings }));
+  });
+
+  it('afterTurn 透传 runtimeSettings 给 engine', async () => {
+    const runtimeSettings = { schemaVersion: '1.0', runtime: { host: 'openclaw' } };
+    await adapter.afterTurn({
+      sessionId: 'test',
+      sessionFile: '/test/session',
+      messages: [],
+      runtimeSettings,
+    });
+    expect(mockEngine.afterTurn).toHaveBeenCalledWith(expect.objectContaining({ runtimeSettings }));
+  });
+
+  it('maintain 透传 runtimeSettings 给 engine', async () => {
+    const runtimeSettings = { schemaVersion: '1.0' };
+    await adapter.maintain({
+      sessionId: 'test',
+      sessionFile: '/test/session',
+      runtimeSettings,
+    });
+    expect(mockEngine.maintain).toHaveBeenCalledWith(expect.objectContaining({ runtimeSettings }));
+  });
+
+  it('bootstrap 透传 runtimeSettings 给 engine', async () => {
+    mockEngine.bootstrap = vi.fn().mockResolvedValue({ bootstrapped: true, importedMessages: 3 });
+    const runtimeSettings = { schemaVersion: '1.0', model: 'claude-sonnet-4' };
+    await adapter.bootstrap({
+      sessionId: 'test',
+      sessionFile: '/test/session',
+      runtimeSettings,
+    });
+    expect(mockEngine.bootstrap).toHaveBeenCalledWith(expect.objectContaining({ runtimeSettings }));
+  });
+
+  it('bootstrap 返回 reason 字段（SDK BootstrapResult 对齐）', async () => {
+    mockEngine.bootstrap = vi.fn().mockResolvedValue({
+      bootstrapped: false,
+      importedMessages: 0,
+      reason: 'already_bootstrapped',
+    });
+    const result = await adapter.bootstrap({ sessionId: 'test' });
+    expect(result.reason).toBe('already_bootstrapped');
+    expect(result.bootstrapped).toBe(false);
+  });
+
+  it('compact 透传 firstKeptEntryId/sessionId/sessionFile（SDK CompactResult 对齐）', async () => {
+    mockEngine.compact.mockResolvedValue({
+      ok: true,
+      compacted: true,
+      result: {
+        tokensBefore: 1000,
+        tokensAfter: 500,
+        firstKeptEntryId: 'msg-42',
+        sessionId: 'new-session-123',
+        sessionFile: '/new/session.json',
+      },
+    });
+    const result = await adapter.compact({ sessionId: 'test', sessionFile: '/test/session' });
+    expect(result.result?.firstKeptEntryId).toBe('msg-42');
+    expect(result.result?.sessionId).toBe('new-session-123');
+    expect(result.result?.sessionFile).toBe('/new/session.json');
+  });
+
+  it('sessionId number 类型时强制 String 化（coerceSessionId 防御）', async () => {
+    // 模拟 SDK 注入 number 类型的 sessionId（不应发生但防御性处理）
+    await adapter.compact({ sessionId: 12345 as any, sessionFile: '/test/session' });
+    expect(mockEngine.compact).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: '12345',
+    }));
+  });
 });

@@ -317,6 +317,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_experience_report",
+    label: "经验报告",
     description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown, summary (LLM natural language summary). default limit=20. tag filters by community label. S-8': supports from/to time range filtering (ISO 8601 or natural language like '7d', '24h')." +
       "Searches for EVENT nodes with SOLVED_BY relationships and formats as a report.",
     parameters: Type.Object({
@@ -327,7 +328,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       to: Type.Optional(Type.String({ description: "S-8': End time (ISO 8601 or relative, default now)" })),
       type: Type.Optional(Type.String({ description: "S-8': Filter by experience type (lesson|failure|correction|fix|best_practice)" })),
     }),
-    async execute(_id: string, params: { format?: string; limit?: number; tag?: string; from?: string; to?: string; type?: string }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const format = params.format ?? "text";
       const limitParam = params.limit ?? 20;
       const { driver, session } = await neo4jSession();
@@ -364,6 +368,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         let result: any;
         let usedExperienceNodes = false;
 
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         try {
           const expQuery = `MATCH (e:EXPERIENCE)
             WHERE e.status = 'DISTILLED'
@@ -381,6 +388,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } catch { /* EXPERIENCE label may not exist, fall through to EVENT */ }
 
         if (!usedExperienceNodes) {
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          }
           let query = `MATCH (e:EVENT)
             OPTIONAL MATCH (e)-[r:SOLVED_BY]->(fix:SKILL)
             WITH e, collect({fix: fix, relation: r}) AS solutions
@@ -397,6 +407,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
         // S-8': summary 格式 —— LLM 生成自然语言摘要
         if (format === "summary") {
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          }
           const summaryText = await generateExperienceSummary(result.records, usedExperienceNodes, timeFilter);
           return { content: [{ type: "text" as const, text: summaryText }] };
         }
@@ -460,11 +473,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_backup",
+    label: "全量备份",
     description: "Full system backup: exports Neo4j nodes+relationships, lossless-claw conversations, and all workspace memory/*.md into a single JSON file. Default output: /tmp/lcm-backup-<timestamp>.json. Use before destructive operations.",
     parameters: Type.Object({
       outputPath: Type.Optional(Type.String({ description: "Output directory" })),
     }),
-    async execute(_id: string, params: { outputPath?: string }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const outDir = params.outputPath ?? join(homedir(), ".openclaw", "lcm-graph-extra", "backup");
       // SEC-5 M-11: 校验输出路径必须在 ~/.openclaw 之下，防止路径穿越
       let safeOutDir: string;
@@ -487,10 +504,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       try {
         const { driver, session } = await neo4jSession();
         try {
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          }
           const nodes = await session.run("MATCH (n) RETURN n");
           (backup.neo4j as any).entities = nodes.records.map((r: any) => {
             const p = r.get("n").properties; return { id: p.id, name: p.name, labels: r.get("n").labels };
           });
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          }
           const rels = await session.run("MATCH ()-[r]->() RETURN r");
           (backup.neo4j as any).relationships = rels.records.map((r: any) => {
             const p = r.get("r").properties;
@@ -554,6 +577,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_restore",
+    label: "数据恢复",
     description: "Restore from lcmg_backup JSON file. targets=all (default), neo4j_only, lcm_only, files_only. dryRun=true previews without writing. NOTE: Neo4j restore uses MERGE (does NOT delete existing nodes).",
     parameters: Type.Object({
       backupPath: Type.String({ description: "Path to backup JSON file" }),
@@ -563,7 +587,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       })),
       dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default false)" })),
     }),
-    async execute(_id: string, params: { backupPath: string; targets?: string; dryRun?: boolean }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       // SEC-5 M-12: 校验备份路径必须在 ~/.openclaw 之下，防止路径穿越
       let safeBackupPath: string;
       try {
@@ -584,13 +611,22 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // Neo4j
       if ((targets === "all" || targets === "neo4j_only") && !dryRun) {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         try {
           const { driver, session } = await neo4jSession();
           try {
             let nCount = 0, rCount = 0;
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             for (const ent of (data.neo4j as any)?.entities ?? []) {
               await session.run("MERGE (n {id: $id}) SET n.name = $name, n.labels = $labels", { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [] });
               nCount++;
+            }
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
             }
             for (const rel of (data.neo4j as any)?.relationships ?? []) {
               await session.run("MATCH (a {id: $from}), (b {id: $to}) MERGE (a)-[r:SOLVED_BY]->(b)", { from: rel.fromId, to: rel.toId });
@@ -603,6 +639,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // lossless-claw DB
       if ((targets === "all" || targets === "lcm_only") && !dryRun) {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         let db: any = null;
         try {
           db = openDb();
@@ -629,6 +668,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // Files
       if ((targets === "all" || targets === "files_only") && !dryRun) {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         try {
           const memDir = resolve(join(homedir(), ".openclaw", "workspace", "main"));
           let fCount = 0;
@@ -674,25 +716,35 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_import",
+    label: "历史导入",
     description: "One-time import of historical data into Neo4j knowledge graph. source=lcm_messages imports chat history, source=memory_files imports *.md files, source=all does both. Uses LLM entity extraction when configured." +
       " Uses LLM entity extraction when configured.",
     parameters: Type.Object({
       source: Type.String({ description: '"lcm_messages", "memory_files", or "all"' }),
       limit: Type.Optional(Type.Number({ description: "Max items to process (default 50)", minimum: 1, maximum: 500 })),
     }),
-    async execute(_id: string, params: { source: string; limit?: number }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const limit = params.limit ?? 50;
       const lines: string[] = [];
       let total = 0;
 
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         let db: any = null;
         try {
           db = openDb();
           const convs = db.prepare("SELECT conversation_id, session_id FROM conversations WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) ORDER BY conversation_id DESC LIMIT ?").all(limit) as any[];
           const { driver, session } = await neo4jSession();
           try {
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             for (const conv of convs) {
               const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 5").all(conv.conversation_id) as any[];
               for (const msg of msgs) {
@@ -711,12 +763,18 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // 记忆文件导入
       if (params.source === "memory_files" || params.source === "all") {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         let fCount = 0;
         try {
           const memDir = join(homedir(), ".openclaw", "workspace", "main", "memory");
           const { driver, session } = await neo4jSession();
           try {
             const files = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")).slice(0, limit) : [];
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             for (const file of files) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
               await session.run("MERGE (n:MemoryFile {id: $id}) SET n.name = $name, n.content = $content", { id: `file-${file}`, name: file, content });
@@ -736,9 +794,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_diagnose",
+    label: "系统诊断",
     description: "Full system diagnostics: checks Neo4j connectivity + node/rel counts, lossless-claw DB size, QMD MCP health, and all circuit breaker states. Returns structured JSON with per-subsystem status (healthy/degraded/down). Use when troubleshooting memory or recall issues.",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const L: string[] = [];
       const p = (s: string) => L.push(s);
       const sep = () => p("");
@@ -786,6 +848,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p(H);
       p("2. qmd (Memory File Engine)");
       p(H);
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
         const r = await fetch(getQmdBaseUrl() + "/health", { signal: AbortSignal.timeout(2000) });
         ok("MCP 8081", "HTTP " + r.status); pass++;
@@ -810,6 +875,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p(H);
       p("3. graph-memory-pro (Neo4j)");
       p(H);
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
         const { driver, session } = await neo4jSession();
         try {
@@ -837,6 +905,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p(H);
       p("4. Circuit Breakers");
       p(H);
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
         const cb = await import("./circuit-breaker.js");
         const h = cb.getHealthSnapshot();
@@ -853,6 +924,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p(H);
       p("5. Health Metrics (N-4)");
       p(H);
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
         const { healthMetrics } = await import('./health-metrics.js');
         const latest = healthMetrics.getLatest();
@@ -902,6 +976,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_search",
+    label: "联合检索",
     description: "Unified search across all three memory backends: (1) lossless-claw FTS5 (conversation messages), (2) QMD BM25/vector (code/docs retrieval), (3) Neo4j knowledge graph (entities/relationships). Returns merged, deduplicated results with source-tagged entries. " +
       "Returns merged & deduplicated results across all three memory stores.",
     parameters: Type.Object({
@@ -912,7 +987,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         default: "all",
       })),
     }),
-    async execute(_id: string, params: { query: string; limit?: number; engines?: string }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const query = params.query.trim();
       if (!query) return { content: [{ type: "text" as const, text: "Error: query required" }], isError: true };
       const limit = params.limit ?? 10;
@@ -945,10 +1023,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // 熔断器、统一日志和 session 管理，导致：(1) 失去 MCP 性能优势；
       // (2) MCP 故障时无法自动降级到 CLI；(3) 与 retrieval-gateway 行为不一致。
       if (engines === "all" || engines === "qmd_only") {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         let qmd: any = null;
         try {
           const { QmdClient } = await import("./qmd-client.js");
           qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          }
           const qmdResults = await qmd.query({
             searches: [
               { type: "lex", query },
@@ -977,9 +1061,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // --- Neo4j ---
       if (engines === "all" || engines === "neo4j_only") {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         try {
           const { driver, session } = await neo4jSession();
           try {
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             const rows = await session.run(
               `MATCH (n)
                WHERE (n.name CONTAINS $k OR n.content CONTAINS $k OR toLower(n.name) CONTAINS toLower($k))
@@ -1011,13 +1101,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_pin",
+    label: "节点置顶",
     description: "Pin/unpin a Neo4j knowledge graph node. Pinned nodes are excluded from TTL-based memory decay and will never be auto-deleted. Use when a piece of knowledge should never be forgotten. " +
       "Use when a piece of knowledge should never be forgotten.",
     parameters: Type.Object({
       id: Type.String({ description: "Node ID to pin" }),
       unpin: Type.Optional(Type.Boolean({ description: "Set true to unpin instead of pin (default false)" })),
     }),
-    async execute(_id: string, params: { id: string; unpin?: boolean }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
         const { driver, session } = await neo4jSession();
         try {
@@ -1041,6 +1135,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_forget",
+    label: "主动遗忘",
     description: "Actively forget/supersede a knowledge graph node or experience. mode=soft: reduce relevanceScore/pagerank (node stays searchable but deprioritized). mode=hard: mark node as 'superseded' (excluded from search results, retained for audit). " +
       "G-10: Use when a piece of knowledge is outdated or incorrect and should be deprioritized or removed from active recall.",
     parameters: Type.Object({
@@ -1049,7 +1144,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       mode: Type.Optional(Type.String({ description: "'soft' (default): reduce weight. 'hard': mark as superseded", default: "soft" })),
       confirm: Type.Optional(Type.Boolean({ description: "Required true for hard mode (safety check)", default: false })),
     }),
-    async execute(_id: string, params: { id?: string; query?: string; mode?: string; confirm?: boolean }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const mode = params.mode ?? "soft";
       const isHard = mode === "hard";
 
@@ -1064,6 +1162,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         const { driver, session } = await neo4jSession();
         try {
           let nodeIds: string[] = [];
@@ -1073,6 +1174,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             nodeIds = [params.id];
           } else if (params.query) {
             // Search for nodes by query
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             const searchResult = await session.run(
               `MATCH (n) WHERE (n.name CONTAINS $q OR n.description CONTAINS $q OR n.title CONTAINS $q OR n.summary CONTAINS $q)
                AND NOT n.pinned = true
@@ -1090,6 +1194,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           let affected = 0;
           if (isHard) {
             // Hard: mark as superseded (excluded from search, retained for audit)
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             const result = await session.run(
               `UNWIND $ids AS nodeId
                MATCH (n {id: nodeId})
@@ -1105,6 +1212,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           } else {
             // Soft: reduce weight (relevanceScore * 0.3, pagerank * 0.3)
             // G10-P2 修复: 加 0.05 下限，避免多次软遗忘后权重无限趋近 0（隐式硬遗忘）
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             const result = await session.run(
               `UNWIND $ids AS nodeId
                MATCH (n {id: nodeId})
@@ -1139,6 +1249,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_sync",
+    label: "数据同步",
     description: "Cross-store consistency check and repair for lossless-claw, Neo4j, and memory files. mode=check: read-only audit (reports orphaned entities and missing refs). mode=repair: actively prunes orphans and re-imports missing data. " +
       "Detects stale Neo4j entities (orphaned after compaction), missing entities, and cross-reference drift.",
     parameters: Type.Object({
@@ -1150,7 +1261,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // 直接执行 DETACH DELETE 批量删除。改为默认 true，强制用户显式 dryRun:false 才执行删除。
       dryRun: Type.Optional(Type.Boolean({ description: "Preview without writing (default true). Set to false only after reviewing the dry-run report.", default: true })),
     }),
-    async execute(_id: string, params: { mode?: string; dryRun?: boolean }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const mode = params.mode ?? "check";
       const isDryRun = params.dryRun ?? true;
       const lines: string[] = [];
@@ -1175,6 +1289,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       finally { if (db) { try { db.close(); } catch {} } }
 
       try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         const { driver, session } = await neo4jSession();
         try {
           // Find Neo4j nodes with sessionId property
@@ -1216,6 +1333,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // --- Phase 2: Check TTL-expired nodes (pinned? expired?) ---
       push("\n## Phase 2: TTL & pin status\n");
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
         const { driver, session } = await neo4jSession();
         try {
@@ -1235,8 +1355,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           push(`  ❌ Aborted: ${orphanNodes} orphan nodes exceed safety limit (${MAX_DELETE}). Re-run with explicit smaller scope or contact admin.\n`);
         } else {
           try {
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+            }
             const { driver, session } = await neo4jSession();
             try {
+              if (signal?.aborted) {
+                return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              }
               for (const id of orphanedIds) {
                 await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
               }
@@ -1246,6 +1372,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               // 中，子查询用同一 label 匹配同 id，节点自身即满足 EXISTS，NOT EXISTS 恒为 false，导致清理永远 0 删除。
               // 正确语义：删除那些 id 在 lossless-claw 会话消息表中已不存在的 ConversationMessage 节点。
               // 此处 orphanedIds 已在上面逐个删除，批量清理作为补充：删除剩余无任何关系的孤立 ConversationMessage。
+              if (signal?.aborted) {
+                return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+              }
               const relCleanup = await session.run(
                 `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
               );
@@ -1271,10 +1400,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_qmd_status",
+    label: "QMD 状态",
     description: "Query QMD MCP service health: returns index stats (document count, vector dim), collection metadata, and service uptime. " +
       "Calls the 'status' tool on QMD's MCP server.",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
       let qmd: any = null;
       try {
@@ -1306,12 +1439,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_get_document",
+    label: "文档获取",
     description: "Fetch a single document from QMD document index. Accepts absolute file path or QMD docid. Returns full content with fuzzy matching suggestions when exact path is not found. " +
       "Returns full document content with fuzzy matching suggestions when exact path is not found.",
     parameters: Type.Object({
       file: Type.String({ description: "File path or docid to retrieve" }),
     }),
-    async execute(_id: string, params: { file: string }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
       let qmd: any = null;
       try {
@@ -1335,12 +1472,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_batch_get",
+    label: "批量获取",
     description: "Batch fetch documents from QMD index. Input formats: glob patterns (e.g. **/memory/*.md), comma-separated paths, or docid list. Max 50 docs per call. Returns array of {path, content, size}. " +
       "Returns multiple documents' content.",
     parameters: Type.Object({
       pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
     }),
-    async execute(_id: string, params: { pattern: string }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
       let qmd: any = null;
       try {
@@ -1367,10 +1508,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_maintain",
+    label: "图谱维护",
     description: "Trigger knowledge graph maintenance: dedup, PageRank, community detection. Also reconciles the compaction debt table (deletes orphaned debts for deleted conversations and tombstones older than 7 days).",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         const driver = await getNeo4jDriver();
         // P3-3: 复用 graph-adapter 的统一路径解析（去除重复逻辑），并记录实际路径
         const { resolveGmProPath } = await import("./adapters/graph-adapter.js");
@@ -1386,6 +1534,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           resolveNeo4jConfig(getPluginNeo4jConfig()),
           { recallMaxNodes: 10, pagerankIterations: 20 },
         );
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         const result = await gm.runMaintenance(driver, cfg);
         const lines = [];
         lines.push("# Graph Maintenance Report");
@@ -1399,6 +1550,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         // P0-3: 顺带对账债务表 —— 删除孤儿债务与过期墓碑，避免表无限增长。
         // lcmg_maintain 是手动维护入口，应覆盖债务表清理而不仅是图分析。
         try {
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+          }
           const { reconcileDebtTable } = await import("./core/debt-manager.js");
           const r = reconcileDebtTable();
           lines.push("");
@@ -1426,6 +1580,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_distill",
+    label: "经验蒸馏",
     description: "手动触发经验蒸馏。从 PENDING 经验中批量蒸馏为 DISTILLED，调用 LLM 提取结构化经验。limit 控制单次处理数量。",
     parameters: Type.Object({
       limit: Type.Optional(Type.Number({
@@ -1434,7 +1589,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         maximum: 200,
       })),
     }),
-    async execute(_id: string, params: { limit?: number }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       if (!dashboardContext?.runDistillation) {
         return {
           content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
@@ -1443,6 +1601,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
       const limit = params.limit ?? 50;
       try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         await dashboardContext.runDistillation(limit);
         return {
           content: [{
@@ -1464,13 +1625,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_compact",
+    label: "上下文压缩",
     description: "手动触发指定会话的 compact。无 conversationId 时触发最紧急的债务。用于手动控制上下文压缩。",
     parameters: Type.Object({
       conversationId: Type.Optional(Type.Number({
         description: "目标会话 ID，省略则处理最紧急债务",
       })),
     }),
-    async execute(_id: string, params: { conversationId?: number }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       if (!dashboardContext?.triggerCompact) {
         return {
           content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
@@ -1478,6 +1643,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
       try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+        }
         const ok = await dashboardContext.triggerCompact(params.conversationId);
         const target = params.conversationId != null
           ? `conversation ${params.conversationId}`
@@ -1504,11 +1672,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // ===================================================================
   api.registerTool({
     name: "lcmg_reset_breaker",
+    label: "熔断重置",
     description: "重置指定子系统的熔断器状态。name: lcm/qmd/neo4j。neo4j 还会重置 GraphAdapter 连接失败标志，允许立即重试连接。",
     parameters: Type.Object({
       name: Type.String({ description: "子系统名: lcm | qmd | neo4j" }),
     }),
-    async execute(_id: string, params: { name: string }) {
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+      }
       const name = params.name;
       if (!['lcm', 'qmd', 'neo4j'].includes(name)) {
         return {
