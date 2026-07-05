@@ -48,9 +48,31 @@ export interface DashboardSnapshot {
     perfSummary: string;
   };
   health: {
-    latest: unknown | null; // healthMetrics.getLatest()
+    latest: HealthSnapshotLite | null; // healthMetrics.getLatest()
   };
   timestamp: number;
+}
+
+/** N-4: 轻量健康指标子集，用于 Prometheus 端点暴露 */
+export interface HealthSnapshotLite {
+  pendingMessages: number;
+  summaryFragments: number;
+  maxTokenRatio: number;
+  cbLcmAvailable: boolean;
+  cbQmdAvailable: boolean;
+  cbNeo4jAvailable: boolean;
+  cbLcmFailures: number;
+  cbQmdFailures: number;
+  cbNeo4jFailures: number;
+  lastAssembleMs: number;
+  lastL2Ms: number;
+  lastL3Ms: number;
+  lastL4Ms: number;
+  pendingExperienceCount: number;
+  distilledExperienceCount: number;
+  tierLow: number;
+  tierMedium: number;
+  tierHigh: number;
 }
 
 /**
@@ -79,6 +101,125 @@ export function buildSnapshot(providers: SnapshotProviders): DashboardSnapshot {
     retrieval: providers.getRetrievalState(),
     health: { latest: providers.getHealthLatest() },
     timestamp: Date.now(),
+  };
+}
+
+/**
+ * N-4: 构建 Prometheus text exposition 格式指标。
+ * 输出格式遵循 Prometheus exposition format v0.0.4。
+ *
+ * 指标分组：
+ * - lcm_pressure_*：压力信号（pendingMessages / summaryFragments / tokenRatio）
+ * - lcm_circuit_breaker_*：三引擎熔断状态（lcm/qmd/neo4j）
+ * - lcm_retrieval_*：检索性能（last assemble ms + L2/L3/L4 分引擎）
+ * - lcm_experience_*：经验层统计（pending / distilled）
+ * - lcm_tier_*：压力 tier 分布（low/medium/high）
+ */
+export function buildPrometheusMetrics(providers: SnapshotProviders): string {
+  const lines: string[] = [];
+  const health = providers.getHealthLatest();
+  const graph = providers.getGraphAdapterState();
+  const ts = Date.now();
+
+  // 压力信号
+  lines.push('# HELP lcm_pressure_pending_messages Pending messages in lossless-claw');
+  lines.push('# TYPE lcm_pressure_pending_messages gauge');
+  lines.push(`lcm_pressure_pending_messages ${health.pendingMessages ?? 0} ${ts}`);
+  lines.push('# HELP lcm_pressure_summary_fragments Summary fragments count');
+  lines.push('# TYPE lcm_pressure_summary_fragments gauge');
+  lines.push(`lcm_pressure_summary_fragments ${health.summaryFragments ?? 0} ${ts}`);
+  lines.push('# HELP lcm_pressure_max_token_ratio Max token ratio (0-1)');
+  lines.push('# TYPE lcm_pressure_max_token_ratio gauge');
+  lines.push(`lcm_pressure_max_token_ratio ${health.maxTokenRatio ?? 0} ${ts}`);
+
+  // 熔断器状态（1=可用，0=熔断）
+  lines.push('# HELP lcm_circuit_breaker_available Circuit breaker available (1=yes, 0=no)');
+  lines.push('# TYPE lcm_circuit_breaker_available gauge');
+  lines.push(`lcm_circuit_breaker_available{engine="lcm"} ${health.cbLcmAvailable ? 1 : 0} ${ts}`);
+  lines.push(`lcm_circuit_breaker_available{engine="qmd"} ${health.cbQmdAvailable ? 1 : 0} ${ts}`);
+  lines.push(`lcm_circuit_breaker_available{engine="neo4j"} ${health.cbNeo4jAvailable ? 1 : 0} ${ts}`);
+
+  lines.push('# HELP lcm_circuit_breaker_failures Circuit breaker failure count');
+  lines.push('# TYPE lcm_circuit_breaker_failures gauge');
+  lines.push(`lcm_circuit_breaker_failures{engine="lcm"} ${health.cbLcmFailures ?? 0} ${ts}`);
+  lines.push(`lcm_circuit_breaker_failures{engine="qmd"} ${health.cbQmdFailures ?? 0} ${ts}`);
+  lines.push(`lcm_circuit_breaker_failures{engine="neo4j"} ${health.cbNeo4jFailures ?? 0} ${ts}`);
+
+  // 检索性能
+  lines.push('# HELP lcm_retrieval_last_assemble_ms Last assemble duration in ms');
+  lines.push('# TYPE lcm_retrieval_last_assemble_ms gauge');
+  lines.push(`lcm_retrieval_last_assemble_ms ${health.lastAssembleMs ?? 0} ${ts}`);
+  lines.push('# HELP lcm_retrieval_engine_ms Per-engine retrieval duration in ms');
+  lines.push('# TYPE lcm_retrieval_engine_ms gauge');
+  lines.push(`lcm_retrieval_engine_ms{engine="l2_qmd"} ${health.lastL2Ms ?? 0} ${ts}`);
+  lines.push(`lcm_retrieval_engine_ms{engine="l3_graph"} ${health.lastL3Ms ?? 0} ${ts}`);
+  lines.push(`lcm_retrieval_engine_ms{engine="l4_experience"} ${health.lastL4Ms ?? 0} ${ts}`);
+
+  // 经验层
+  lines.push('# HELP lcm_experience_pending Pending experience count');
+  lines.push('# TYPE lcm_experience_pending gauge');
+  lines.push(`lcm_experience_pending ${health.pendingExperienceCount ?? 0} ${ts}`);
+  lines.push('# HELP lcm_experience_distilled Distilled experience count');
+  lines.push('# TYPE lcm_experience_distilled gauge');
+  lines.push(`lcm_experience_distilled ${health.distilledExperienceCount ?? 0} ${ts}`);
+
+  // Tier 分布
+  lines.push('# HELP lcm_tier_count Pressure tier count');
+  lines.push('# TYPE lcm_tier_count gauge');
+  lines.push(`lcm_tier_count{tier="low"} ${health.tierLow ?? 0} ${ts}`);
+  lines.push(`lcm_tier_count{tier="medium"} ${health.tierMedium ?? 0} ${ts}`);
+  lines.push(`lcm_tier_count{tier="high"} ${health.tierHigh ?? 0} ${ts}`);
+
+  // Graph adapter 状态
+  lines.push('# HELP lcm_graph_adapter_connected Graph adapter connected (1=yes, 0=no)');
+  lines.push('# TYPE lcm_graph_adapter_connected gauge');
+  lines.push(`lcm_graph_adapter_connected ${graph?.connected ? 1 : 0} ${ts}`);
+
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * N-4: 解析图谱健康（优先 gm-pro G-5 getGraphHealth，降级到本地 GraphAdapter 状态）。
+ */
+export async function resolveGraphHealth(providers: SnapshotProviders): Promise<{
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
+  source: 'gm-pro' | 'local';
+  nodeCount?: number;
+  relationshipCount?: number;
+  graphAdapterConnected?: boolean;
+  details?: Record<string, unknown>;
+}> {
+  const local = providers.getGraphAdapterState();
+  // gm-pro 不可用时，仅基于 GraphAdapter 连接状态推断
+  const localStatus: 'healthy' | 'degraded' | 'unhealthy' =
+    local?.connected ? 'healthy' : (local?.connectFailed ? 'unhealthy' : 'degraded');
+
+  try {
+    const { withGmProFallback } = await import('./adapters/gm-pro-fallback.js');
+    const gmHealth = await withGmProFallback<any>(
+      'getGraphHealth',
+      async (mod) => await mod.getGraphHealth(),
+      async () => null,
+      { label: 'N-4 getGraphHealth' },
+    );
+    if (gmHealth && typeof gmHealth.status === 'string') {
+      return {
+        status: gmHealth.status,
+        source: 'gm-pro',
+        nodeCount: gmHealth.nodeCount,
+        relationshipCount: gmHealth.relationshipCount,
+        graphAdapterConnected: local?.connected,
+        details: gmHealth.details,
+      };
+    }
+  } catch {
+    // 降级到 local
+  }
+
+  return {
+    status: localStatus,
+    source: 'local',
+    graphAdapterConnected: local?.connected,
   };
 }
 
@@ -224,6 +365,33 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
         if (url === '/internal/health') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, ts: Date.now() }));
+          return;
+        }
+
+        // N-4: Prometheus text exposition format endpoint
+        // 暴露 healthMetrics + circuit breaker + retrieval 性能指标
+        if (url === '/metrics') {
+          try {
+            const metrics = buildPrometheusMetrics(providers);
+            res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
+            res.end(metrics);
+          } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'text/plain' });
+            res.end('# metrics build failed: ' + String(err));
+          }
+          return;
+        }
+
+        // N-4: G-5 图谱健康（优先 gm-pro getGraphHealth，降级到本地 GraphAdapter 状态）
+        if (url === '/internal/graph-health') {
+          try {
+            const graphHealth = await resolveGraphHealth(providers);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(graphHealth));
+          } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'unknown', error: String(err) }));
+          }
           return;
         }
 

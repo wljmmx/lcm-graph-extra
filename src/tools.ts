@@ -340,6 +340,31 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const timeFilter = parseTimeRange(params.from, params.to);
         const typeFilter = params.type?.trim();
 
+        // S-8': 优先调用 graph-memory-pro getNodesByTimeRange API（按时间范围高效检索）
+        // 失败/不可用时降级到原 Cypher 查询
+        let gmProNodes: any[] | null = null;
+        if (timeFilter.fromTs || timeFilter.toTs) {
+          try {
+            const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
+            gmProNodes = await withGmProFallback<any[] | null>(
+              'getNodesByTimeRange',
+              async (mod) => {
+                const r = await mod.getNodesByTimeRange({
+                  from: timeFilter.fromTs ?? 0,
+                  to: timeFilter.toTs ?? Date.now(),
+                  limit: Math.trunc(limitParam),
+                  label: 'EXPERIENCE',
+                });
+                return Array.isArray(r) ? r : (r?.nodes ?? null);
+              },
+              async () => null, // fallback 走 Cypher
+              { label: 'S-8 getNodesByTimeRange' },
+            );
+          } catch {
+            gmProNodes = null;
+          }
+        }
+
         // 构建查询 —— 支持 EVENT 和 EXPERIENCE 双类型
         // EVENT: 图谱事件节点（原逻辑），EXPERIENCE: 经验层节点（S-8' 新增）
         const conditions: string[] = [];
@@ -353,24 +378,49 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           conditions.push("e.type = $expType");
           queryParams.expType = typeFilter;
         }
-        if (timeFilter.fromTs) {
-          conditions.push("coalesce(e.createdAt, e.updatedAt, 0) >= $fromTs");
-          queryParams.fromTs = neo4jDriver.int(timeFilter.fromTs) as any;
-        }
-        if (timeFilter.toTs) {
-          conditions.push("coalesce(e.createdAt, e.updatedAt, 0) <= $toTs");
-          queryParams.toTs = neo4jDriver.int(timeFilter.toTs) as any;
+        // S-8': 当 gm-pro 已返回时间过滤结果时，Cypher 不再叠加时间条件（避免双过滤）
+        if (!gmProNodes) {
+          if (timeFilter.fromTs) {
+            conditions.push("coalesce(e.createdAt, e.updatedAt, 0) >= $fromTs");
+            queryParams.fromTs = neo4jDriver.int(timeFilter.fromTs) as any;
+          }
+          if (timeFilter.toTs) {
+            conditions.push("coalesce(e.createdAt, e.updatedAt, 0) <= $toTs");
+            queryParams.toTs = neo4jDriver.int(timeFilter.toTs) as any;
+          }
         }
 
         const whereClause = conditions.length > 0 ? " AND " + conditions.join(" AND ") : "";
 
-        // 优先查 EXPERIENCE 节点（经验层），无结果时回退到 EVENT 节点
+        // 优先使用 gm-pro 时间范围结果（已过滤，跳过 Cypher 时间过滤）
         let result: any;
         let usedExperienceNodes = false;
+        let usedGmProNodes = false;
 
-        if (signal?.aborted) {
+        if (gmProNodes && gmProNodes.length > 0) {
+          // gm-pro 返回的节点直接构造 records-like 对象供后续 format 处理
+          usedGmProNodes = true;
+          usedExperienceNodes = true;
+          result = {
+            records: gmProNodes.map((n: any) => ({
+              get: (key: string) => {
+                if (key === 'e.id') return n.id;
+                if (key === 'e.name') return n.title ?? n.name ?? 'Unknown';
+                if (key === 'e.description') return n.summary ?? n.description ?? '';
+                if (key === 'e.pagerank') return n.pagerank ?? n.relevanceScore ?? 0;
+                if (key === 'e.validatedCount') return n.matchCount ?? 0;
+                if (key === 'e.communityId') return n.type ?? '';
+                if (key === 'createdAt') return n.createdAt;
+                if (key === 'solutions') return [];
+                if (key === 'relatedIds') return n.relatedIds ?? [];
+                return undefined;
+              },
+            })),
+          };
+        } else if (signal?.aborted) {
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-        }
+        } else {
+        // 优先查 EXPERIENCE 节点（经验层），无结果时回退到 EVENT 节点
         try {
           const expQuery = `MATCH (e:EXPERIENCE)
             WHERE e.status = 'DISTILLED'
@@ -399,6 +449,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           query += ` RETURN e.id, e.name, e.description, e.pagerank, e.validatedCount, e.communityId, solutions
             ORDER BY e.pagerank DESC, e.validatedCount DESC LIMIT $limit`;
           result = await session.run(query, queryParams);
+        }
         }
 
         if (!result || result.records.length === 0) {
@@ -1196,22 +1247,50 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
           let affected = 0;
           if (isHard) {
-            // Hard: mark as superseded (excluded from search, retained for audit)
-            if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+            // G-10: 优先调用 graph-memory-pro evolveNode API（与 S-2 软替换 + G-3 重要性评分协同）
+            // 失败降级到原 Cypher 直接 SET（保留原行为）
+            const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
+            type EvolveResult = { evolved: boolean; previousState?: string; newState?: string; reason?: string } | null;
+            let gmProAffected = 0;
+            for (const nodeId of nodeIds) {
+              const result = await withGmProFallback<EvolveResult>(
+                'evolveNode',
+                async (mod) => {
+                  const r = await mod.evolveNode(nodeId, {
+                    state: 'superseded',
+                    supersededAt: Date.now(),
+                    relevanceScore: 0,
+                    pagerank: 0,
+                  });
+                  return r as EvolveResult;
+                },
+                async () => null, // fallback 不做（由后续 Cypher 处理）
+                { label: 'G-10 evolveNode' },
+              );
+              if (result?.evolved) gmProAffected++;
             }
-            const result = await session.run(
-              `UNWIND $ids AS nodeId
-               MATCH (n {id: nodeId})
-               WHERE NOT n.pinned = true
-               SET n.state = 'superseded',
-                   n.supersededAt = timestamp(),
-                   n.relevanceScore = 0,
-                   n.pagerank = 0
-               RETURN count(n) AS cnt`,
-              { ids: nodeIds },
-            );
-            affected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
+
+            // Fallback: Cypher 直接 SET（gm-pro 不可用或 evolveNode 失败的节点）
+            if (gmProAffected < nodeIds.length) {
+              if (signal?.aborted) {
+                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+              }
+              const result = await session.run(
+                `UNWIND $ids AS nodeId
+                 MATCH (n {id: nodeId})
+                 WHERE NOT n.pinned = true
+                 SET n.state = 'superseded',
+                     n.supersededAt = timestamp(),
+                     n.relevanceScore = 0,
+                     n.pagerank = 0
+                 RETURN count(n) AS cnt`,
+                { ids: nodeIds },
+              );
+              affected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
+              affected = Math.max(affected, gmProAffected);
+            } else {
+              affected = gmProAffected;
+            }
           } else {
             // Soft: reduce weight (relevanceScore * 0.3, pagerank * 0.3)
             // G10-P2 修复: 加 0.05 下限，避免多次软遗忘后权重无限趋近 0（隐式硬遗忘）
@@ -1334,6 +1413,103 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       } else {
         push(`  ✅ No orphaned nodes found\n`);
       }
+
+      // --- N-1 Phase 1.5: updatedAt timestamp drift detection ---
+      // 跨端时间戳一致性校验：对比 lcm.db messages.created_at 与 Neo4j ConversationMessage.updatedAt。
+      // 不一致 → 在 repair 模式下增量 MERGE 更新到 Neo4j（以 lcm.db 为权威源）。
+      push("\n## Phase 1.5: updatedAt timestamp drift (N-1)\n");
+      let driftCount = 0;
+      const driftIds: string[] = [];
+      let lcmDb2: any = null;
+      try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+        }
+        const { driver, session } = await neo4jSession();
+        try {
+          // 取 Neo4j 中所有 ConversationMessage 的 updatedAt 与 sessionId
+          const neo4jTsResult = await session.run(
+            `MATCH (n:ConversationMessage)
+             WHERE n.sessionId IS NOT NULL AND n.updatedAt IS NOT NULL
+             RETURN n.id AS id, n.sessionId AS sid, n.updatedAt AS updatedAt, n.content AS content
+             LIMIT 5000`
+          );
+          const neo4jRows = neo4jTsResult.records.map((r: any) => ({
+            id: r.get("id"),
+            sid: r.get("sid"),
+            updatedAt: typeof r.get("updatedAt")?.toNumber === 'function'
+              ? r.get("updatedAt").toNumber()
+              : Number(r.get("updatedAt") ?? 0),
+            content: r.get("content") ?? '',
+          }));
+
+          // 与 lcm.db 对比（取最新一条消息的 created_at 作为权威 updatedAt）
+          try {
+            lcmDb2 = openDb();
+            for (const row of neo4jRows) {
+              if (!row.sid) continue;
+              const lcmRow = lcmDb2.prepare(
+                "SELECT created_at AS ca, content AS c FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1"
+              ).get(row.sid) as any;
+              if (!lcmRow || !lcmRow.ca) continue;
+
+              // lcm.db created_at 是 'YYYY-MM-DD HH:MM:SS' 格式，转毫秒时间戳
+              const lcmTs = new Date(lcmRow.ca.replace(' ', 'T') + 'Z').getTime() || 0;
+              if (lcmTs === 0) continue;
+
+              // 时间戳差异超过 60s 视为 drift（容忍写延迟）
+              const diffMs = Math.abs(lcmTs - row.updatedAt);
+              if (diffMs > 60_000) {
+                driftCount++;
+                if (driftIds.length < 10) driftIds.push(row.id);
+              }
+            }
+          } finally { if (lcmDb2) { try { lcmDb2.close(); } catch {} } }
+
+          push(`  Neo4j ConversationMessage with updatedAt: ${neo4jRows.length}\n`);
+          push(`  Timestamp drift > 60s: ${driftCount}\n`);
+          if (driftIds.length > 0) {
+            push(`  Sample drift IDs: ${driftIds.join(", ")}\n`);
+          }
+
+          // N-1 Phase 1.5 repair: 增量 MERGE updatedAt（以 lcm.db 为权威源）
+          if (mode === "repair" && !isDryRun && driftCount > 0) {
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+            }
+            push(`\n  Repairing ${driftCount} drifted nodes via MERGE...\n`);
+            let merged = 0;
+            try {
+              lcmDb2 = openDb();
+              for (const row of neo4jRows) {
+                if (!row.sid) continue;
+                const lcmRow = lcmDb2.prepare(
+                  "SELECT created_at AS ca FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1"
+                ).get(row.sid) as any;
+                if (!lcmRow || !lcmRow.ca) continue;
+                const lcmTs = new Date(lcmRow.ca.replace(' ', 'T') + 'Z').getTime() || 0;
+                if (lcmTs === 0) continue;
+                const diffMs = Math.abs(lcmTs - row.updatedAt);
+                if (diffMs <= 60_000) continue;
+                // 增量 MERGE：以 lcm.db 为权威，更新 Neo4j updatedAt
+                await session.run(
+                  `MATCH (n:ConversationMessage {id: $id})
+                   SET n.updatedAt = $ts,
+                       n.syncSource = 'lcm-db-merge',
+                       n.syncedAt = timestamp()`,
+                  { id: row.id, ts: neo4jDriver.int(lcmTs) as any }
+                );
+                merged++;
+              }
+            } finally { if (lcmDb2) { try { lcmDb2.close(); } catch {} } }
+            push(`  ✅ MERGE'd ${merged} nodes with corrected updatedAt\n`);
+          } else if (mode === "repair" && isDryRun && driftCount > 0) {
+            push(`  (Dry run) Would MERGE ${driftCount} nodes with corrected updatedAt\n`);
+          } else if (driftCount === 0) {
+            push(`  ✅ No timestamp drift detected\n`);
+          }
+        } finally { await closeNeo4j(driver, session); }
+      } catch (e: any) { push(`  ❌ updatedAt drift check error: ${e.message}\n`); }
 
       // --- Phase 2: Check TTL-expired nodes (pinned? expired?) ---
       push("\n## Phase 2: TTL & pin status\n");

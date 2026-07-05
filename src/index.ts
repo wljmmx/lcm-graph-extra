@@ -1227,6 +1227,30 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 })),
               );
 
+              // R-2: 优先调用 graph-memory-pro judgeRecall API（更准的 Tier 1 置信度）
+              // 失败/不可用时使用本地 cascadeManager.evaluateTier1 的结果
+              try {
+                const { withGmProFallback } = await import('./adapters/gm-pro-fallback.js');
+                const judgeResult = await withGmProFallback(
+                  'judgeRecall',
+                  async (mod) => {
+                    return await mod.judgeRecall({
+                      query: qmdQuery,
+                      recalledNodeIds: allResults.map((r: any) => r?.id ?? r?.experience?.id).filter(Boolean),
+                      scenario: scenarioAdjust?.scenario,
+                    });
+                  },
+                  async () => null, // fallback 已有 confidence（来自 evaluateTier1）
+                  { logger, label: 'R-2 judgeRecall' },
+                );
+                if (judgeResult && typeof judgeResult.tier1Confidence === 'number') {
+                  confidence.tier1Score = judgeResult.tier1Confidence;
+                  confidence.needsTier2 = judgeResult.tier1Confidence < 0.7;
+                }
+              } catch (r2JudgeErr) {
+                logger?.debug?.("R-2 judgeRecall fallback to local evaluateTier1", { err: String(r2JudgeErr) });
+              }
+
               // 低置信度时用 Thompson 采样重排，引入探索性
               if (confidence.needsTier2 && tier === 'low') {
                 // 对经验结果应用 Thompson 重排（探索新经验）
@@ -1879,7 +1903,30 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     // 相关性 ≥ 0.5 视为有效召回 → +0.05
                     // 相关性 < 0.5 视为无效召回 → -0.05
                     const delta = score >= 0.5 ? 0.05 : -0.05;
-                    await store.updateQualityScore(exp.id, score, delta);
+                    // G-8: 优先调用 graph-memory-pro upsertFeedback API（与重要性评分协同）
+                    // 失败降级到 store.updateQualityScore（保留原行为）
+                    try {
+                      const { withGmProFallback } = await import('./adapters/gm-pro-fallback.js');
+                      await withGmProFallback(
+                        'upsertFeedback',
+                        async (mod) => {
+                          await mod.upsertFeedback({
+                            nodeId: exp.id,
+                            query: exp.query,
+                            relevant: score >= 0.5,
+                            score,
+                            delta,
+                          });
+                        },
+                        async () => {
+                          await store.updateQualityScore(exp.id, score, delta);
+                        },
+                        { logger, label: 'G-8 upsertFeedback' },
+                      );
+                    } catch {
+                      // gm-pro wrapper 自身已降级，再兜底
+                      await store.updateQualityScore(exp.id, score, delta);
+                    }
                     logger?.debug?.("G-8 quality validation", { id: exp.id, score, delta });
                   } catch { /* skip individual validation */ }
                 }

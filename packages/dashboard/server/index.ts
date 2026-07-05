@@ -19,6 +19,7 @@ import { registerHealthRoutes } from './routes/health';
 import { registerAgentRoutes } from './routes/agent';
 import { registerExperienceRoutes } from './routes/experience';
 import { registerMemoryRoutes } from './routes/memory';
+import { registerGraphHealthRoutes } from './routes/graph-health';
 import { closeNeo4j } from './lib/neo4j';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -85,6 +86,8 @@ async function main(): Promise<void> {
   await registerExperienceRoutes(app);
   // 注册模块 3 路由：记忆查询（跨引擎搜索 + 图谱浏览）
   await registerMemoryRoutes(app);
+  // 注册模块 4 路由：图谱健康（N-4: G-5 图谱健康对接）
+  await registerGraphHealthRoutes(app);
 
   // 优雅关闭
   const shutdown = async (signal: string) => {

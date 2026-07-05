@@ -94,3 +94,20 @@ export function fetchHealthHistory(n: number = 144): Promise<HealthHistoryRespon
 export function fetchAgentStatus(): Promise<AgentStatus> {
   return apiGet<AgentStatus>('/api/agent/status');
 }
+
+// ─── N-4: G-5 图谱健康 ────────────────────────────────────────────────────
+
+export interface GraphHealthResponse {
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
+  source: 'gm-pro' | 'local' | 'none';
+  nodeCount?: number;
+  relationshipCount?: number;
+  graphAdapterConnected?: boolean;
+  details?: Record<string, unknown>;
+  fetchedAt: number;
+  error?: string;
+}
+
+export function fetchGraphHealth(): Promise<GraphHealthResponse> {
+  return apiGet<GraphHealthResponse>('/api/graph/health');
+}
