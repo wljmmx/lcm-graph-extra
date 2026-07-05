@@ -138,6 +138,33 @@ export function getMessageStats(conversationId: number): { count: number; totalT
 }
 
 /**
+ * 用 conversation_id 反查 OpenClaw 会话标识（session_id / session_key）。
+ *
+ * BUG-AUDIT: debt-manager 后台调度触发 compact 时没有 SDK 上下文，无法直接拿到
+ * OpenClaw 注入的 sessionId（字符串）。原代码用 `String(debt.conversationId)`
+ * 当 sessionId 传给 lossless-claw，但 lossless-claw 用 sessionId 查
+ * conversations.session_id 列，永远查不到 number 主键。此函数用于反查正确的
+ * session_id / session_key 供 debt-manager 使用。
+ */
+export function getSessionInfoByConversationId(conversationId: number): {
+  sessionId: string | null;
+  sessionKey: string | null;
+} {
+  try {
+    const stmt = getStmt('getSessionInfoByConversationId',
+      'SELECT session_id, session_key FROM conversations WHERE conversation_id = ?');
+    if (!stmt) return { sessionId: null, sessionKey: null };
+    const row = stmt.get(conversationId) as { session_id: string; session_key: string | null } | undefined;
+    return {
+      sessionId: row?.session_id ?? null,
+      sessionKey: row?.session_key ?? null,
+    };
+  } catch {
+    return { sessionId: null, sessionKey: null };
+  }
+}
+
+/**
  * 写入 compaction_maintenance 表，触发 lossless-claw 后台 DAG 压缩
  */
 export function writeCompactionDebt(

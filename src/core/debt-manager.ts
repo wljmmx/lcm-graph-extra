@@ -344,8 +344,13 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
   }
 
   try {
-    // Resolve session info
-    const sessionKey = "conv:" + debt.conversationId;
+    // BUG-AUDIT: 用 conversationId 反查真实的 session_id / session_key，
+    // 不能用 `String(conversationId)` 当 sessionId（lossless-claw 用它查
+    // conversations.session_id 列，number 主键永远查不到）。
+    const { getSessionInfoByConversationId } = await import('../lcm-bridge.js');
+    const sessionInfo = getSessionInfoByConversationId(debt.conversationId);
+    const sessionKey = sessionInfo.sessionKey ?? "conv:" + debt.conversationId;
+    const realSessionId = sessionInfo.sessionId ?? String(debt.conversationId);
     let sessionFile: string | undefined;
 
     try {
@@ -357,7 +362,8 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
           for (const fname of files) {
             try {
               const data = JSON.parse(fs.readFileSync(path.join(losslessSessionDir, fname), "utf8"));
-              if (data.sessionId === String(debt.conversationId) || data.sessionKey === sessionKey) {
+              // BUG-AUDIT: 用反查到的真实 sessionId/sessionKey 匹配，而非 String(conversationId)
+              if (data.sessionId === realSessionId || data.sessionKey === sessionKey) {
                 sessionFile = path.join(wsDir, ".lossless", "sessions", fname);
                 break;
               }
@@ -380,7 +386,8 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
     const instance = {
       config: _apiContext.config,
       logger: _apiContext.logger,
-      context: { memoryDir, sessionKey, sessionFile, sessionId: String(debt.conversationId) },
+      // BUG-AUDIT: sessionId 用反查到的真实 OpenClaw 会话 ID，不是 String(conversationId)
+      context: { memoryDir, sessionKey, sessionFile, sessionId: realSessionId },
       unregister: () => {},
     };
 
