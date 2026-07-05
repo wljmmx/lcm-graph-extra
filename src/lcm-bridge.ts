@@ -83,8 +83,8 @@ function getStmt(key: string, sql: string): any {
   }
 }
 
-// P0-2 H-1: 关闭单例连接并清空缓存（用于测试隔离）
-function closeLcmDb(): void {
+// P0-2 H-1: 关闭单例连接并清空缓存（用于测试隔离 + 插件 dispose）
+export function closeLcmDb(): void {
   if (_lcmDb) {
     try { _lcmDb.close(); } catch { /* already closed or close failed */ }
   }

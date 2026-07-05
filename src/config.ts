@@ -100,6 +100,10 @@ export const PluginConfigSchema = Type.Object({
 
   tripletTimeoutMs: Type.Number({ default: 8000 }),
 
+  // M-10: experienceTtlIntervalMs 需在 schema 中声明，否则用户无法通过 openclaw.json 配置
+  // （heartbeat 中用 api.pluginConfig?.experienceTtlIntervalMs 读取，缺失则 fallback 24h）
+  experienceTtlIntervalMs: Type.Number({ default: 24 * 60 * 60 * 1000, minimum: 60_000 }),
+
   distillationLlm: Type.Optional(Type.Object({
     provider: Type.Union([
       Type.Literal('openclaw_hooks'),
@@ -108,6 +112,17 @@ export const PluginConfigSchema = Type.Object({
       Type.Literal('custom'),
     ], { default: 'openclaw_hooks' }),
     model: Type.String({ default: 'ollama/qwen3.6:27b' }),
+    apiKey: Type.Optional(Type.String()),
+    baseURL: Type.Optional(Type.String()),
+    keepAlive: Type.Optional(Type.String({ default: '1h' })),
+  })),
+
+  // Dashboard 快照服务配置（仅本机 dashboard 读取内存态用）
+  // 端口规划：dashboard 后端 :7421 / 前端 dev :7422 / 插件 snapshot :7423
+  dashboardSnapshot: Type.Optional(Type.Object({
+    enabled: Type.Boolean({ default: true }),
+    host: Type.String({ default: '127.0.0.1' }),
+    port: Type.Number({ default: 7423, minimum: 1, maximum: 65535 }),
   })),
 
   embedding: Type.Optional(Type.Object({
@@ -236,7 +251,7 @@ export function resolveContextProfile(
   // 修复策略：用户显式配置优先 → 自适应默认 → 兜底常量。
   return {
     contextWindow: ctxWindow,
-    compactTokenBudget: wm?.compactTokenBudget ?? Math.round(ctxWindow * COMPACT_RATIO) ?? 114_688,
+    compactTokenBudget: wm?.compactTokenBudget ?? Math.round(ctxWindow * COMPACT_RATIO),
     retrievalLimits: {
       qmd: wm?.retrievalLimits?.low?.qmd ?? adaptiveLimits.qmd,
       graph: wm?.retrievalLimits?.low?.graph ?? adaptiveLimits.graph,
@@ -267,6 +282,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   cliFallbackSearchType: 'search',
   distillationIntervalMs: 2 * 60 * 60 * 1000,
   tripletTimeoutMs: 8000,
+  experienceTtlIntervalMs: 24 * 60 * 60 * 1000,
 };
 
 export function validateConfig(input: unknown): PluginConfig {

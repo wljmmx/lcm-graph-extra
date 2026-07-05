@@ -16,6 +16,8 @@
  * - 不持久化任务状态
  */
 
+import { getGlobalLogger } from '../utils/logger.js';
+
 interface TrackedTask {
   name: string;
   promise: Promise<void>;
@@ -30,18 +32,32 @@ class BackgroundTaskRegistry {
 
   /**
    * 注册 fire-and-forget 任务。
-   * 自动吞掉 rejection（避免 unhandledRejection），并追踪引用。
-   * shuttingDown 后拒绝新任务（避免 dispose 后又起新活）。
+   * 自动捕获 rejection（避免 unhandledRejection），并通过 logger.warn 上报。
+   * shuttingDown 后拒绝新任务（避免 dispose 后又起活）。
    */
   register(name: string, promise: Promise<unknown>): void {
-    if (this.shuttingDown) return;
-    // 把任意 Promise 归一化为 Promise<void>，吞掉 rejection
+    if (this.shuttingDown) {
+      // dispose 进行中：直接吞掉新任务，避免又起活
+      // 但要 catch rejection 避免 unhandledRejection
+      promise.catch(() => {});
+      return;
+    }
+    // 把任意 Promise 归一化为 Promise<void>，捕获 rejection 并上报
     const normalized: Promise<void> = promise.then(
       () => {},
       (err) => {
-        // 错误已捕获，调用方仍可通过 onUnhandled 钩子观察（如需）
-        // 此处保持静默，与原 `.catch(() => {})` 语义一致
-        void err;
+        // 不再静默：上报到 logger，便于运维定位静默失败
+        // （如 distillation 写入失败、triplet 提取失败、debt reconcile 失败）
+        try {
+          getGlobalLogger().warn('background task rejected', {
+            name,
+            err: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          });
+        } catch {
+          // logger 自身不可用时降级为 console.warn，避免静默
+          // eslint-disable-next-line no-console
+          console.warn(`[background-task] ${name} rejected:`, err);
+        }
       },
     );
     const tracked: TrackedTask = { name, promise: normalized, startedAt: Date.now() };
@@ -61,10 +77,19 @@ class BackgroundTaskRegistry {
     // 拷贝当前快照（awaitAll 期间完成的任务会自动从 this.tasks 移除，
     // 但 allSettled 接收的是数组快照，不受影响）
     const snapshot = [...this.tasks];
-    await Promise.race([
-      Promise.allSettled(snapshot.map((t) => t.promise)),
-      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-    ]);
+    // 关键：超时 timer 必须在 allSettled 完成后 clearTimeout，
+    // 否则会延迟进程退出 timeoutMs 毫秒
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(snapshot.map((t) => t.promise)),
+        new Promise<void>((resolve) => {
+          timeoutHandle = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
   }
 
   /** 当前在途任务数（用于诊断） */

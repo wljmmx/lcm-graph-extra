@@ -149,6 +149,12 @@
         "type": "integer",
         "default": 8000
       },
+      "experienceTtlIntervalMs": {
+        "type": "integer",
+        "default": 86400000,
+        "minimum": 60000,
+        "description": "Experience TTL cleanup interval in milliseconds (default: 24h)"
+      },
       "retrieval": {
         "type": "object",
         "additionalProperties": false,
@@ -414,6 +420,37 @@
           "model": {
             "type": "string",
             "default": "ollama/qwen3.6:27b"
+          },
+          "apiKey": {
+            "type": "string",
+            "sensitive": true
+          },
+          "baseURL": {
+            "type": "string"
+          },
+          "keepAlive": {
+            "type": "string",
+            "default": "1h"
+          }
+        }
+      },
+      "dashboardSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "host": {
+            "type": "string",
+            "default": "127.0.0.1"
+          },
+          "port": {
+            "type": "integer",
+            "default": 7423,
+            "minimum": 1,
+            "maximum": 65535
           }
         }
       },

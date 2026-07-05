@@ -8,13 +8,30 @@
  * - providers 数据变化时反映最新值（延迟求值）
  * - stop() 后服务关闭
  * - 仅监听指定 host（127.0.0.1）
+ * - 端口被占时启动失败 + started=false（不抛错）
+ * - 端口被自身残留实例占用时识别为 self-stale
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboard-snapshot.js';
+import { startDashboardSnapshotServer, type SnapshotProviders, type SnapshotServerHandle } from './dashboard-snapshot.js';
 
 // 随机端口避免冲突
 function getRandomPort(): number {
   return 17000 + Math.floor(Math.random() * 1000);
+}
+
+/**
+ * 等待 handle.started 变为 true 或 false（启动完成）。
+ * 由于 startDashboardSnapshotServer 内部异步执行探测+listen，
+ * 调用方需要 await 这个状态才能保证后续 fetch 命中。
+ */
+async function waitForStartup(handle: SnapshotServerHandle, timeoutMs = 2000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (handle.started === true) return true;
+    if (handle.failureReason) return false;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return handle.started;
 }
 
 async function fetchJson(url: string): Promise<{ status: number; body: any }> {
@@ -82,6 +99,7 @@ describe('DashboardSnapshotServer', () => {
         providers: makeProviders(),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const { status, body } = await fetchJson(`http://127.0.0.1:${port}/internal/snapshot`);
       expect(status).toBe(200);
@@ -109,6 +127,7 @@ describe('DashboardSnapshotServer', () => {
         providers: makeProviders(),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const before = Date.now();
       const { body } = await fetchJson(`http://127.0.0.1:${port}/internal/snapshot`);
@@ -128,6 +147,7 @@ describe('DashboardSnapshotServer', () => {
         }),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const r1 = await fetchJson(`http://127.0.0.1:${port}/internal/snapshot`);
       expect(r1.body.cascade.armsCount).toBe(1);
@@ -145,6 +165,7 @@ describe('DashboardSnapshotServer', () => {
         providers: makeProviders(),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const resp = await fetch(`http://127.0.0.1:${port}/internal/snapshot`, { method: 'POST' });
       expect(resp.status).toBe(404);
@@ -160,6 +181,7 @@ describe('DashboardSnapshotServer', () => {
         providers: makeProviders(),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const { status, body } = await fetchJson(`http://127.0.0.1:${port}/internal/health`);
       expect(status).toBe(200);
@@ -177,6 +199,7 @@ describe('DashboardSnapshotServer', () => {
         providers: makeProviders(),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const { status } = await fetchText(`http://127.0.0.1:${port}/unknown`);
       expect(status).toBe(404);
@@ -190,6 +213,7 @@ describe('DashboardSnapshotServer', () => {
         providers: makeProviders(),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const { status } = await fetchText(`http://127.0.0.1:${port}/`);
       expect(status).toBe(404);
@@ -206,6 +230,7 @@ describe('DashboardSnapshotServer', () => {
       });
 
       // 先确认服务可用
+      expect(await waitForStartup(handle)).toBe(true);
       const before = await fetchJson(`http://127.0.0.1:${port}/internal/health`);
       expect(before.status).toBe(200);
 
@@ -222,7 +247,33 @@ describe('DashboardSnapshotServer', () => {
         host: '127.0.0.1',
         providers: makeProviders(),
       });
+      expect(await waitForStartup(handle)).toBe(true);
       await handle.stop();
+      await expect(handle.stop()).resolves.not.toThrow();
+    });
+
+    it('未启动（端口被占）时 stop 仍安全', async () => {
+      const port = getRandomPort();
+      // 先占住端口
+      const occupier = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(occupier.stop);
+      expect(await waitForStartup(occupier)).toBe(true);
+
+      // 再启动一个相同端口的实例 → 应启动失败
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      const started = await waitForStartup(handle);
+      expect(started).toBe(false);
+      expect(handle.failureReason).toBeTruthy();
+
+      // 即使未启动，stop 也应安全无错
       await expect(handle.stop()).resolves.not.toThrow();
     });
   });
@@ -238,9 +289,73 @@ describe('DashboardSnapshotServer', () => {
         }),
       });
       stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
 
       const resp = await fetch(`http://127.0.0.1:${port}/internal/snapshot`);
       expect(resp.status).toBe(500);
+    });
+  });
+
+  describe('端口冲突处理', () => {
+    it('端口被自身残留实例占用 → 识别为 self-stale 并放弃启动', async () => {
+      const port = getRandomPort();
+      // 起一个"残留实例"占住端口
+      const stale = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(stale.stop);
+      expect(await waitForStartup(stale)).toBe(true);
+
+      // 再启动一个，应识别为 self-stale
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+
+      const started = await waitForStartup(handle);
+      expect(started).toBe(false);
+      // failureReason 应包含 self-stale 提示
+      expect(handle.failureReason).toMatch(/stale previous instance/);
+    });
+
+    it('端口被非自身进程占用（响应非 health）→ 识别为 foreign 并放弃启动', async () => {
+      const port = getRandomPort();
+      // 用 node:http 起一个"外来"服务器，响应非 health 内容
+      const { createServer } = await import('node:http');
+      const foreignServer = createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('I am not openclaw');
+      });
+      await new Promise<void>((resolve) => foreignServer.listen(port, '127.0.0.1', resolve));
+      // 测试结束关闭 foreignServer
+      stoppers.push(async () => { await new Promise<void>((r) => foreignServer.close(() => r())); });
+
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+
+      const started = await waitForStartup(handle);
+      expect(started).toBe(false);
+      expect(handle.failureReason).toMatch(/occupied by unknown process/);
+    });
+
+    it('端口空闲时正常启动', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+      expect(handle.failureReason).toBeUndefined();
     });
   });
 });

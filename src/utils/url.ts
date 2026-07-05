@@ -60,13 +60,21 @@ export function isOllamaEndpoint(baseURL: string | undefined | null): boolean {
     const u = new URL(cleaned);
     const host = u.hostname;
     const port = u.port;
+    // M-5: 删除 port === '' 分支 —— localhost 无端口不能确定是 Ollama
+    // （vLLM、LM Studio、Ollama 的 OpenAI 兼容网关都可能监听 localhost:80/443）
+    // 仅在端口明确为 11434/18789 时判定
     if (host === '127.0.0.1' || host === 'localhost' || host === '0.0.0.0') {
-      if (port === '11434' || port === '18789' || port === '') return true;
+      if (port === '11434' || port === '18789') return true;
     }
-    // 端口匹配也认为是 Ollama
+    // 端口匹配也认为是 Ollama（无论 host）
     if (port === '11434' || port === '18789') return true;
-    // 路径包含 /api/ 是 Ollama 原生端点的特征
-    if (u.pathname.includes('/api/')) return true;
+    // M-6: 收紧 /api/ 路径判断 —— 仅匹配 Ollama 原生端点特征路径
+    // 避免 /v1/api/... 这类 OpenAI 兼容网关路径误判
+    const OLLAMA_API_PREFIXES = ['/api/generate', '/api/chat', '/api/embed',
+      '/api/tags', '/api/show', '/api/pull', '/api/push', '/api/version'];
+    if (OLLAMA_API_PREFIXES.some((p) => u.pathname === p || u.pathname.startsWith(p + '/') || u.pathname.startsWith(p + '?'))) {
+      return true;
+    }
     return false;
   } catch {
     // URL 解析失败，做兜底字符串匹配
