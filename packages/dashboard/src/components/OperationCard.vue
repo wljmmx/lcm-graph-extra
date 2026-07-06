@@ -168,7 +168,7 @@ const executeAriaLabel = computed(() => {
               执行
             </NButton>
           </template>
-          <span class="warn-text">⚠️ 危险操作：{{ title }}。第一次确认（共 2 次）。</span>
+          <span class="warn-text">⚠ 危险操作：{{ title }}。第一次确认（共 2 次）。</span>
         </NPopconfirm>
 
         <NPopconfirm
@@ -188,7 +188,7 @@ const executeAriaLabel = computed(() => {
               再次确认
             </NButton>
           </template>
-          <span class="warn-text-strong">🚨 最终确认：此操作不可逆！确定继续？</span>
+          <span class="warn-text-strong">⛔ 最终确认：此操作不可逆！确定继续？</span>
         </NPopconfirm>
       </template>
     </div>

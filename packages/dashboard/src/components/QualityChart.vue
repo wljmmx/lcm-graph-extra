@@ -11,6 +11,7 @@
 import { computed } from 'vue';
 import EChart from './EChart.vue';
 import type { QualityHistoryPoint } from '../api/experience';
+import { echartsThemeColors } from '../styles/theme';
 
 const props = withDefaults(
   defineProps<{
@@ -105,8 +106,8 @@ const option = computed(() => ({
       symbolSize: 8,
       data: gmProPoints.value,
       connectNulls: true,
-      lineStyle: { width: 2, color: '#18a058' },
-      itemStyle: { color: '#18a058' },
+      lineStyle: { width: 2, color: echartsThemeColors[1] }, // success 绿
+      itemStyle: { color: echartsThemeColors[1] },
     },
     {
       name: 'local',
@@ -116,8 +117,8 @@ const option = computed(() => ({
       symbolSize: 8,
       data: localPoints.value,
       connectNulls: true,
-      lineStyle: { width: 2, color: '#2080f0' },
-      itemStyle: { color: '#2080f0' },
+      lineStyle: { width: 2, color: echartsThemeColors[0] }, // primary 蓝
+      itemStyle: { color: echartsThemeColors[0] },
     },
   ],
 }));

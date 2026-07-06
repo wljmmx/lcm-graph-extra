@@ -14,7 +14,7 @@
  *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
  *          agent.error → 警告提示。
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
 import {
   NGrid,
@@ -27,6 +27,8 @@ import {
   NAlert,
   NSpace,
   NSpin,
+  NTabs,
+  NTabPane,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
 import KpiCard from '../components/KpiCard.vue';
@@ -337,6 +339,10 @@ const kpiCols = '2 s:2 m:2 l:4';
 const chartCols = '1 s:1 m:2';
 // 状态面板：小屏 1 列，中屏 2 列，宽屏（l≥1280）3 列
 const panelCols = '1 s:1 m:2 l:3';
+
+// S4-2: Tab 分组（KPI / 时序 / 状态面板），降低单屏信息密度
+// 默认激活 KPI tab；display-directive="show" 保持所有面板在 DOM（测试可访问文本）
+const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
 </script>
 
 <template>
@@ -347,81 +353,117 @@ const panelCols = '1 s:1 m:2 l:3';
       <span class="last-updated">最近更新: {{ lastUpdated }}</span>
     </div>
 
-    <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- KPI 卡片行 -->
-      <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
-        <NGi>
-          <KpiCard
-            label="待处理消息"
-            :value="kpiPending"
-            :threshold="100"
-            :loading="latestLoading"
-          />
-        </NGi>
-        <NGi>
-          <KpiCard
-            label="Token 占用比"
-            :value="kpiTokenRatio"
-            unit="%"
-            :threshold="80"
-            :loading="latestLoading"
-          />
-        </NGi>
-        <NGi>
-          <KpiCard
-            label="检索延迟 Assemble"
-            :value="kpiAssembleMs"
-            unit="ms"
-            :threshold="2000"
-            :loading="latestLoading"
-          />
-        </NGi>
-        <NGi>
-          <KpiCard
-            label="熔断失败总数"
-            :value="kpiCbFailures"
-            :threshold="0"
-            :loading="latestLoading"
-          />
-        </NGi>
-      </NGrid>
+    <NTabs
+      v-model:value="activeTab"
+      type="line"
+      animated
+      size="medium"
+      style="margin-top: 12px"
+      aria-label="监控视图分组"
+    >
+      <!-- ===== Tab 1: KPI 概览 ===== -->
+      <NTabPane
+        name="kpi"
+        tab="KPI 概览"
+        display-directive="show"
+      >
+        <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <NGi>
+            <KpiCard
+              label="待处理消息"
+              :value="kpiPending"
+              :threshold="100"
+              :loading="latestLoading"
+            />
+          </NGi>
+          <NGi>
+            <KpiCard
+              label="Token 占用比"
+              :value="kpiTokenRatio"
+              unit="%"
+              :threshold="80"
+              :loading="latestLoading"
+            />
+          </NGi>
+          <NGi>
+            <KpiCard
+              label="检索延迟 Assemble"
+              :value="kpiAssembleMs"
+              unit="ms"
+              :threshold="2000"
+              :loading="latestLoading"
+            />
+          </NGi>
+          <NGi>
+            <KpiCard
+              label="熔断失败总数"
+              :value="kpiCbFailures"
+              :threshold="0"
+              :loading="latestLoading"
+            />
+          </NGi>
+        </NGrid>
 
-      <!-- 时序图区：压力信号（全宽） -->
-      <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
-        <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
-        <NEmpty
-          v-else
-          :description="historyLoading ? '加载中…' : '无历史数据'"
-          style="padding: 24px 0"
+        <!-- 首次加载提示 -->
+        <NAlert
+          v-if="latestLoading && !latestData"
+          type="info"
+          :show-icon="true"
+          title="正在加载最新健康指标…"
+          style="margin-top: 12px"
         />
-      </NCard>
+      </NTabPane>
 
-      <!-- 时序图区：检索延迟 + tier 分布（2 列） -->
-      <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
-        <NGi>
-          <NCard title="检索延迟（Assemble + L2/L3/L4 堆叠）" size="small">
-            <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+      <!-- ===== Tab 2: 时序图 ===== -->
+      <NTabPane
+        name="charts"
+        tab="时序图"
+        display-directive="show"
+      >
+        <NSpace vertical :size="12">
+          <!-- 压力信号（全宽） -->
+          <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
+            <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
             <NEmpty
               v-else
               :description="historyLoading ? '加载中…' : '无历史数据'"
               style="padding: 24px 0"
             />
           </NCard>
-        </NGi>
-        <NGi>
-          <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
-            <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
-            <NEmpty
-              v-else
-              :description="historyLoading ? '加载中…' : '无历史数据'"
-              style="padding: 24px 0"
-            />
-          </NCard>
-        </NGi>
-      </NGrid>
 
-      <!-- 状态面板区（3 列） -->
-      <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <!-- 检索延迟 + tier 分布（2 列） -->
+          <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
+            <NGi>
+              <NCard title="检索延迟（Assemble + L2/L3/L4 堆叠）" size="small">
+                <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+                <NEmpty
+                  v-else
+                  :description="historyLoading ? '加载中…' : '无历史数据'"
+                  style="padding: 24px 0"
+                />
+              </NCard>
+            </NGi>
+            <NGi>
+              <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
+                <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
+                <NEmpty
+                  v-else
+                  :description="historyLoading ? '加载中…' : '无历史数据'"
+                  style="padding: 24px 0"
+                />
+              </NCard>
+            </NGi>
+          </NGrid>
+        </NSpace>
+      </NTabPane>
+
+      <!-- ===== Tab 3: 状态面板 ===== -->
+      <NTabPane
+        name="panels"
+        tab="状态面板"
+        display-directive="show"
+      >
+        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 熔断状态 -->
         <NGi>
           <NCard title="熔断状态" size="small">
@@ -728,15 +770,8 @@ const panelCols = '1 s:1 m:2 l:3';
           </NCard>
         </NGi>
       </NGrid>
-
-      <!-- 首次加载提示 -->
-      <NAlert
-        v-if="latestLoading && !latestData"
-        type="info"
-        :show-icon="true"
-        title="正在加载最新健康指标…"
-      />
-    </NSpace>
+      </NTabPane>
+    </NTabs>
   </div>
 </template>
 
@@ -750,56 +785,48 @@ const panelCols = '1 s:1 m:2 l:3';
   justify-content: space-between;
 }
 .last-updated {
-  font-size: 12px;
-  color: #909399;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
 }
 .profile-section {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 .profile-label {
-  font-size: 12px;
-  color: #909399;
-  margin-bottom: 4px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-xs);
 }
-.muted {
-  color: #909399;
-  font-size: 13px;
-}
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  word-break: break-all;
-}
+/* .muted / .mono 已在 tokens.css 全局定义，此处不重复 */
 .layer-grid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
+  gap: var(--space-sm);
 }
 .layer-cell {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 6px 2px;
-  border: 1px solid #eaecef;
-  border-radius: 4px;
+  gap: var(--space-xs);
+  padding: var(--space-sm) 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
 }
 .layer-cell .dot {
   width: 10px;
   height: 10px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   display: inline-block;
 }
 .layer-cell .dot-ok {
-  background: #18a058;
-  box-shadow: 0 0 4px rgba(24, 160, 88, 0.6);
+  background: var(--color-success);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-success) 60%, transparent);
 }
 .layer-cell .dot-fail {
-  background: #d03050;
-  box-shadow: 0 0 4px rgba(208, 48, 80, 0.6);
+  background: var(--color-danger);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-danger) 60%, transparent);
 }
 .layer-label {
-  font-size: 11px;
-  color: #606266;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
 }
 </style>

@@ -10,6 +10,7 @@ import { computed } from 'vue';
 import { NSpin, NEmpty } from 'naive-ui';
 import EChart from './EChart.vue';
 import type { MemoryGraphResponse } from '../api/memory';
+import { echartsThemeColors } from '../styles/theme';
 
 const props = defineProps<{
   graph: MemoryGraphResponse | null | undefined;
@@ -34,8 +35,8 @@ const graphOption = computed(() => {
     symbolSize: 15 + Math.min(45, Math.sqrt(n.pagerank ?? 0) * 25),
     category: n.type || 'UNKNOWN',
     value: n.pagerank ?? 0,
-    // 选中节点高亮边框
-    itemStyle: n.id === selId ? { borderColor: '#ff6b6b', borderWidth: 3 } : undefined,
+    // 选中节点高亮边框（用 warning 色，区别于分类色）
+    itemStyle: n.id === selId ? { borderColor: echartsThemeColors[2], borderWidth: 3 } : undefined,
   }));
   const edges = (props.graph?.edges ?? []).map((e) => ({
     source: e.source,

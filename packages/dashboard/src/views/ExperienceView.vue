@@ -186,7 +186,7 @@ function handleInvoke(tool: string, params: Record<string, unknown>): void {
   justify-content: space-between;
 }
 .muted {
-  font-size: 12px;
-  color: #909399;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
 }
 </style>

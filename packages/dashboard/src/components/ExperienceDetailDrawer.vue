@@ -314,6 +314,6 @@ function close(): void {
   word-break: break-word;
 }
 .muted {
-  color: #909399;
+  color: var(--color-text-secondary);
 }
 </style>

@@ -152,18 +152,18 @@ function fmtDuration(ms?: number): string {
 }
 .log-pre {
   margin: 2px 0 0 0;
-  padding: 6px 8px;
-  background: rgba(0, 0, 0, 0.03);
-  border-radius: 3px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-family-mono);
+  font-size: var(--fs-caption);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 200px;
   overflow: auto;
 }
 .log-error {
-  color: #d03050;
-  background: rgba(208, 48, 80, 0.06);
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 6%, transparent);
 }
 </style>

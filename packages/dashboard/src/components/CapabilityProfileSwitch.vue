@@ -86,7 +86,7 @@ onMounted(loadProfile);
     </template>
 
     <div v-if="errorMsg" class="cap-error">
-      ⚠️ {{ errorMsg }}
+      ⚠ {{ errorMsg }}
     </div>
 
     <div v-if="current" class="cap-current">
@@ -143,51 +143,51 @@ onMounted(loadProfile);
 
 <style scoped>
 .cap-error {
-  color: #d03050;
-  padding: 8px 0;
-  font-size: 13px;
+  color: var(--color-danger);
+  padding: var(--space-sm) 0;
+  font-size: var(--fs-label);
 }
 .cap-current {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-bottom: 4px;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-xs);
 }
 .cap-label {
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--fs-body);
 }
 .cap-desc {
-  color: #666;
-  font-size: 13px;
-  margin: 4px 0 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--fs-label);
+  margin: var(--space-xs) 0 var(--space-sm);
 }
 .cap-profile-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border: 1px solid #e0e0e6;
-  border-radius: 6px;
-  transition: border-color 0.2s;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--motion-base);
 }
 .cap-profile-row.active {
-  border-color: #18a058;
-  background: rgba(24, 160, 88, 0.05);
+  border-color: var(--color-success);
+  background: color-mix(in srgb, var(--color-success) 5%, transparent);
 }
 .cap-profile-info {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-sm);
   min-width: 160px;
 }
 .cap-profile-label {
   font-weight: 500;
-  font-size: 14px;
+  font-size: var(--fs-body);
 }
 .cap-profile-desc {
   flex: 1;
-  color: #888;
-  font-size: 12px;
+  color: var(--color-text-tertiary);
+  font-size: var(--fs-caption);
 }
 </style>
