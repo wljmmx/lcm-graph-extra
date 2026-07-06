@@ -20,6 +20,7 @@ import { registerAgentRoutes } from './routes/agent';
 import { registerExperienceRoutes } from './routes/experience';
 import { registerMemoryRoutes } from './routes/memory';
 import { registerGraphHealthRoutes } from './routes/graph-health';
+import { registerConfigRoutes } from './routes/config';
 import { closeNeo4j } from './lib/neo4j';
 import { requireAuth, isAuthEnabled } from './lib/auth';
 
@@ -106,6 +107,8 @@ async function main(): Promise<void> {
   await registerMemoryRoutes(app);
   // 注册模块 4 路由：图谱健康（N-4: G-5 图谱健康对接）
   await registerGraphHealthRoutes(app);
+  // v1.1.0-1/2/3: 配置管理路由（运行时配置查看 / schema 文档 / 白名单热更新）
+  await registerConfigRoutes(app);
 
   // 优雅关闭
   const shutdown = async (signal: string) => {

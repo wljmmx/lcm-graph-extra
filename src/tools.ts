@@ -2019,4 +2019,252 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
     },
   });
+
+  // ===================================================================
+  // 16. lcmg_config_get —— 查看运行时配置（脱敏）
+  // v1.1.0-6: 提供 MCP 工具读取 openclaw.json 配置
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_config_get",
+    label: "配置查看",
+    description: "查看 lcm-graph-extra 运行时配置（从 ~/.openclaw/openclaw.json 读取，敏感字段已脱敏）。可选指定 path 参数获取特定字段，例如 'neo4j' 或 'lcmMonitor.contextWindow'。",
+    parameters: Type.Object({
+      path: Type.Optional(Type.String({ description: "点分路径，例如 'neo4j' 或 'lcmMonitor.contextWindow'。省略则返回全部配置" })),
+    }),
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      try {
+        const configPath = join(homedir(), '.openclaw', 'openclaw.json');
+        if (!existsSync(configPath)) {
+          return {
+            content: [{ type: "text" as const, text: `⚠️ 配置文件不存在: ${configPath}` }],
+            details: { ok: false, error: 'config file not found' },
+          };
+        }
+        const raw = readFileSync(configPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        // 提取 lcm-graph-extra 配置段
+        let config: Record<string, unknown>;
+        const entriesConfig = parsed?.plugins?.entries?.['lcm-graph-extra']?.config;
+        if (entriesConfig && typeof entriesConfig === 'object') {
+          config = entriesConfig as Record<string, unknown>;
+        } else {
+          config = parsed as Record<string, unknown>;
+        }
+
+        // 脱敏敏感字段
+        const redacted = redactConfigSecrets(config) as Record<string, unknown>;
+
+        // 按路径提取子字段
+        let result: unknown = redacted;
+        if (params.path) {
+          result = getByPathConfig(redacted, params.path);
+          if (result === undefined) {
+            return {
+              content: [{ type: "text" as const, text: `❌ 字段不存在: ${params.path}` }],
+              details: { ok: false, error: `field not found: ${params.path}` },
+              isError: true,
+            };
+          }
+        }
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: `📋 运行时配置${params.path ? ` (${params.path})` : ''}:\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``,
+          }],
+          details: { ok: true, config: result, configPath },
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ 读取配置失败: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ 读取配置失败: ${e?.message ?? String(e)}` },
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 17. lcmg_config_set —— 更新配置字段（白名单）
+  // v1.1.0-6: 提供 MCP 工具热更新 openclaw.json 中的白名单字段
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_config_set",
+    label: "配置更新",
+    description: "更新 lcm-graph-extra 运行时配置（写入 ~/.openclaw/openclaw.json）。仅允许白名单内的性能/行为参数，禁止修改安全相关字段。path 用点分路径如 'lcmMonitor.contextWindow'，value 为新值。部分字段需重启插件进程生效。",
+    parameters: Type.Object({
+      path: Type.String({ description: "点分路径，如 'maxTokens'、'lcmMonitor.contextWindow'、'compaction.triggerThreshold'、'experience.enabled'" }),
+      value: Type.Any({ description: "新值（类型需匹配字段：number/boolean/string）" }),
+    }),
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      const { path: fieldPath, value } = params;
+      if (!fieldPath || typeof fieldPath !== 'string') {
+        return {
+          content: [{ type: "text" as const, text: '❌ path 参数必填' }],
+          details: { ok: false, error: 'path is required' },
+          isError: true,
+        };
+      }
+
+      // 白名单校验
+      const allowed = CONFIG_UPDATABLE_WHITELIST[fieldPath];
+      if (!allowed) {
+        const available = Object.keys(CONFIG_UPDATABLE_WHITELIST).sort();
+        return {
+          content: [{
+            type: "text" as const,
+            text: `❌ 字段 "${fieldPath}" 不在可更新白名单中。\n\n可更新字段:\n${available.map((p) => `  - ${p}: ${CONFIG_UPDATABLE_WHITELIST[p].description}`).join('\n')}`,
+          }],
+          details: { ok: false, error: `field not updatable: ${fieldPath}`, allowed: available },
+          isError: true,
+        };
+      }
+
+      // 类型校验
+      if (!validateConfigValue(value, allowed.type)) {
+        return {
+          content: [{ type: "text" as const, text: `❌ 值类型错误: 期望 ${allowed.type}, 实际 ${typeof value}` }],
+          details: { ok: false, error: `type mismatch: expected ${allowed.type}, got ${typeof value}` },
+          isError: true,
+        };
+      }
+
+      try {
+        const configPath = join(homedir(), '.openclaw', 'openclaw.json');
+        // 读取现有配置
+        let root: Record<string, unknown> = {};
+        if (existsSync(configPath)) {
+          root = JSON.parse(readFileSync(configPath, 'utf-8'));
+        }
+        // 确保路径结构
+        if (!root.plugins) root.plugins = {};
+        if (!(root.plugins as Record<string, unknown>).entries) {
+          (root.plugins as Record<string, unknown>).entries = {};
+        }
+        const entries = (root.plugins as Record<string, unknown>).entries as Record<string, unknown>;
+        if (!entries['lcm-graph-extra']) entries['lcm-graph-extra'] = {};
+        const pluginEntry = entries['lcm-graph-extra'] as Record<string, unknown>;
+        if (!pluginEntry.config) pluginEntry.config = {};
+        const config = pluginEntry.config as Record<string, unknown>;
+
+        // 设置嵌套值
+        setByPathConfig(config, fieldPath, value);
+        writeFileSync(configPath, JSON.stringify(root, null, 2), 'utf-8');
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: `✅ 配置已更新: ${fieldPath} = ${JSON.stringify(value)}\n\n⚠️ 部分字段需重启插件进程才能生效。`,
+          }],
+          details: { ok: true, path: fieldPath, value, configPath },
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ 更新配置失败: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ 更新配置失败: ${e?.message ?? String(e)}` },
+          isError: true,
+        };
+      }
+    },
+  });
 }
+
+// ---------------------------------------------------------------------------
+// v1.1.0-6: 配置工具辅助函数
+// ---------------------------------------------------------------------------
+
+/** 敏感字段 key 模式（与 operation-logs.ts redactSensitive 保持一致） */
+const CONFIG_SENSITIVE_KEYS = [
+  'password', 'passwd', 'pwd',
+  'apikey', 'api_key', 'api-key',
+  'token', 'secret',
+  'credential', 'auth',
+];
+
+/** 递归脱敏配置中的敏感字段 */
+function redactConfigSecrets(value: unknown, depth: number = 0): unknown {
+  if (depth > 10) return value;
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => redactConfigSecrets(v, depth + 1));
+  const obj = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(obj)) {
+    const lowerKey = key.toLowerCase();
+    const isSensitive = CONFIG_SENSITIVE_KEYS.some((p) => lowerKey.includes(p));
+    if (isSensitive) {
+      result[key] = '***REDACTED***';
+    } else {
+      result[key] = redactConfigSecrets(obj[key], depth + 1);
+    }
+  }
+  return result;
+}
+
+/** 按点分路径获取嵌套值 */
+function getByPathConfig(obj: Record<string, unknown>, path: string): unknown {
+  const parts = path.split('.');
+  let cur: unknown = obj;
+  for (const p of parts) {
+    if (cur && typeof cur === 'object' && p in (cur as Record<string, unknown>)) {
+      cur = (cur as Record<string, unknown>)[p];
+    } else {
+      return undefined;
+    }
+  }
+  return cur;
+}
+
+/** 按点分路径设置嵌套值 */
+function setByPathConfig(obj: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.');
+  let cur: Record<string, unknown> = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i];
+    if (!(p in cur) || typeof cur[p] !== 'object' || cur[p] === null) {
+      cur[p] = {};
+    }
+    cur = cur[p] as Record<string, unknown>;
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+/** 验证值类型 */
+function validateConfigValue(value: unknown, expected: 'number' | 'boolean' | 'string'): boolean {
+  if (expected === 'number') return typeof value === 'number' && Number.isFinite(value);
+  if (expected === 'boolean') return typeof value === 'boolean';
+  if (expected === 'string') return typeof value === 'string';
+  return false;
+}
+
+/** v1.1.0-6: 可热更新字段白名单 */
+const CONFIG_UPDATABLE_WHITELIST: Record<string, { type: 'number' | 'boolean' | 'string'; description: string }> = {
+  'summaryStrategy': { type: 'string', description: '摘要策略：strategy | hybrid | full' },
+  'maxGraphDepth': { type: 'number', description: '图谱最大遍历深度' },
+  'maxNodeCount': { type: 'number', description: '单次检索最大节点数' },
+  'maxTokens': { type: 'number', description: '上下文 token 预算' },
+  'budgetRatio': { type: 'number', description: '上下文预算占比（0-1）' },
+  'distillationIntervalMs': { type: 'number', description: '蒸馏间隔（毫秒）' },
+  'cliTimeout': { type: 'number', description: 'CLI 超时（毫秒）' },
+  'compaction.triggerThreshold': { type: 'number', description: '触发压缩的消息阈值' },
+  'compaction.softThresholdTokens': { type: 'number', description: '软阈值 token 数' },
+  'compaction.keepRecentTokens': { type: 'number', description: '保留近期 token 数' },
+  'experience.enabled': { type: 'boolean', description: '是否启用经验提取' },
+  'experience.relevanceThreshold': { type: 'number', description: '经验相关性阈值（0-1）' },
+  'ttl.enabled': { type: 'boolean', description: '是否启用 TTL 清理' },
+  'ttl.retentionDays': { type: 'number', description: 'TTL 保留天数' },
+  'ttl.cleanupIntervalHours': { type: 'number', description: '清理间隔（小时）' },
+  'retrieval.limits.qmd': { type: 'number', description: 'QMD 检索条数' },
+  'retrieval.limits.graph': { type: 'number', description: '图谱检索条数' },
+  'retrieval.limits.exp': { type: 'number', description: '经验检索条数' },
+  'lcmMonitor.contextWindow': { type: 'number', description: '上下文窗口大小（tokens）' },
+  'lcmMonitor.highPressureThreshold': { type: 'number', description: '高压阈值（0-1）' },
+  'lcmMonitor.mediumPressureThreshold': { type: 'number', description: '中压阈值（0-1）' },
+  'lcmMonitor.proactiveThreshold': { type: 'number', description: '主动触发阈值（0-1）' },
+};

@@ -370,7 +370,7 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
 
   // ===== MCP 写操作转发：lcmg_forget / lcmg_pin 等 =====
   app.post('/api/mcp/invoke', async (req, reply) => {
-    const body = (req.body as { tool?: string; params?: Record<string, unknown> }) ?? {};
+    const body = (req.body as { tool?: string; params?: Record<string, unknown>; user?: string; sessionId?: string }) ?? {};
     const tool = body.tool;
     const params = body.params ?? {};
     if (!tool || typeof tool !== 'string') {

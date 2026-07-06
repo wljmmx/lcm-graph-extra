@@ -24,6 +24,7 @@ import { useMutation } from '@tanstack/vue-query';
 import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
+import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
 import {
   invokeMaintain,
   invokeDiagnose,
@@ -508,6 +509,9 @@ function executeImport(): void {
           </OperationCard>
         </NGi>
       </NGrid>
+
+      <!-- v1.1.0-5: 能力档次切换 -->
+      <CapabilityProfileSwitch />
 
       <!-- 错误兜底提示（mutation 抛错时由日志区展示，此处保留全页提示） -->
       <NAlert
