@@ -90,6 +90,13 @@ vi.mock('/test-fake-gm-pro/dist/index.js', () => {
   });
 });
 
+// Mock capability-profiles.js：测试中所有 API 都视为已启用（绕过能力档次检查，
+// 避免默认 'balanced' 档次仅启用 judgeRecall/getGraphHealth 导致其余 API 走 fallback）
+vi.mock('../capability-profiles.js', () => ({
+  isApiEnabled: vi.fn(() => true),
+  getCurrentProfile: vi.fn(() => ({ enabledApis: [], features: {} })),
+}));
+
 // 测试用 logger（验证 debug 日志在异常路径被调用）
 const testLogger = {
   debug: vi.fn(),
