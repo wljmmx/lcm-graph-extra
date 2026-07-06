@@ -355,6 +355,7 @@ const panelCols = '1 s:1 m:2 l:3';
             label="待处理消息"
             :value="kpiPending"
             :threshold="100"
+            :loading="latestLoading"
           />
         </NGi>
         <NGi>
@@ -363,6 +364,7 @@ const panelCols = '1 s:1 m:2 l:3';
             :value="kpiTokenRatio"
             unit="%"
             :threshold="80"
+            :loading="latestLoading"
           />
         </NGi>
         <NGi>
@@ -371,6 +373,7 @@ const panelCols = '1 s:1 m:2 l:3';
             :value="kpiAssembleMs"
             unit="ms"
             :threshold="2000"
+            :loading="latestLoading"
           />
         </NGi>
         <NGi>
@@ -378,6 +381,7 @@ const panelCols = '1 s:1 m:2 l:3';
             label="熔断失败总数"
             :value="kpiCbFailures"
             :threshold="0"
+            :loading="latestLoading"
           />
         </NGi>
       </NGrid>

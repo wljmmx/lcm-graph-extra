@@ -6,6 +6,9 @@ import { VueQueryPlugin } from '@tanstack/vue-query';
 import App from './App.vue';
 import { router } from './router';
 
+// 设计令牌：必须在 App 渲染前注入，确保 CSS 变量可用
+import './styles/tokens.css';
+
 const app = createApp(App);
 
 // 注册路由

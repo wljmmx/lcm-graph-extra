@@ -10,7 +10,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
-import { ref } from 'vue';
+import { ref, defineComponent, h } from 'vue';
+import { NMessageProvider, NConfigProvider, zhCN, dateZhCN } from 'naive-ui';
 
 // happy-dom 缺失 matchMedia（naive-ui 响应式 grid 需要）
 if (!window.matchMedia) {
@@ -81,13 +82,32 @@ vi.mock('../../src/api/experience', () => ({
 
 import MaintainView from '../../src/views/MaintainView.vue';
 
+/**
+ * 用全局 Provider 包裹挂载 MaintainView。
+ *
+ * CapabilityProfileSwitch 在 setup 中调用 useMessage()，必须在
+ * NMessageProvider 后代中挂载，否则抛出 "No provider" 运行时错误。
+ * NConfigProvider 提供 locale，避免 naive-ui 控制台告警。
+ */
+function mountView() {
+  const Parent = defineComponent({
+    components: { NConfigProvider, NMessageProvider, MaintainView },
+    render() {
+      return h(NConfigProvider, { locale: zhCN, dateLocale: dateZhCN }, () =>
+        h(NMessageProvider, () => h(MaintainView)),
+      );
+    },
+  });
+  return mount(Parent);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
 describe('MaintainView', () => {
   it('挂载并渲染 9 张操作卡片标题', () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const text = wrapper.text();
     // 9 张卡片标题
     expect(text).toContain('图谱维护');
@@ -106,7 +126,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 distill 卡片执行按钮（confirmLevel=0）触发 invokeMcpTool', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     // distill 卡片：confirmLevel=0，按钮直接触发 execute
     // 通过标题定位卡片，再找其内部"执行"按钮
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
@@ -120,7 +140,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 backup 卡片执行按钮触发 invokeMcpTool', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const backupCard = cards.find((c) => c.props('title') === '备份');
     expect(backupCard).toBeTruthy();
@@ -130,7 +150,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 maintain 卡片执行按钮触发 lcmg_maintain', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const maintainCard = cards.find((c) => c.props('title') === '图谱维护');
     expect(maintainCard).toBeTruthy();
@@ -140,7 +160,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 ttl_cleanup 卡片也调用 lcmg_maintain（复用工具）', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const ttlCard = cards.find((c) => c.props('title') === 'TTL 清理');
     expect(ttlCard).toBeTruthy();
@@ -150,7 +170,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 restore 卡片执行按钮传递 dryRun=true（默认）+ 三次确认级别', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const restoreCard = cards.find((c) => c.props('title') === '恢复');
     expect(restoreCard).toBeTruthy();
@@ -167,7 +187,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 reset_breaker 卡片传递 name 参数', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const card = cards.find((c) => c.props('title') === '重置熔断器');
     expect(card).toBeTruthy();
@@ -182,7 +202,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 import 卡片传递 source + limit', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const card = cards.find((c) => c.props('title') === '历史导入');
     expect(card).toBeTruthy();
@@ -195,7 +215,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 compact 卡片传递空 params（conversationId 留空）', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const card = cards.find((c) => c.props('title') === '触发 compact');
     expect(card).toBeTruthy();
@@ -206,7 +226,7 @@ describe('MaintainView', () => {
   });
 
   it('点击 sync 卡片默认 mode=check 不视为 danger', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const card = cards.find((c) => c.props('title') === '同步修复');
     expect(card).toBeTruthy();
@@ -222,7 +242,7 @@ describe('MaintainView', () => {
   });
 
   it('执行后日志区出现成功记录', async () => {
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const distillCard = cards.find((c) => c.props('title') === '触发蒸馏');
     distillCard!.vm.$emit('execute');
@@ -237,7 +257,7 @@ describe('MaintainView', () => {
 
   it('invokeMcpTool 返回 ok=false 时日志记录失败', async () => {
     invokeMcpToolMock.mockResolvedValueOnce({ ok: false, error: 'mock 失败' });
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const distillCard = cards.find((c) => c.props('title') === '触发蒸馏');
     distillCard!.vm.$emit('execute');
@@ -250,7 +270,7 @@ describe('MaintainView', () => {
 
   it('invokeMcpTool 抛异常时日志记录 error', async () => {
     invokeMcpToolMock.mockRejectedValueOnce(new Error('网络错误'));
-    const wrapper = mount(MaintainView);
+    const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const distillCard = cards.find((c) => c.props('title') === '触发蒸馏');
     distillCard!.vm.$emit('execute');

@@ -3,32 +3,32 @@
  * ExperienceTable —— 经验列表表格。
  *
  * - NDataTable 渲染列表，列：title / type / status / relevanceScore / qualityScore / matchCount / createdAt
- * - state='superseded' 的行用灰色（rowClassName 控制）
+ * - 启用客户端分页（默认 10/页）+ striped 斑马纹 + hover 高亮
+ * - state='superseded' 的行用次要文本色（rowClassName 控制）
  * - 行点击触发 row-click 事件，传 id
+ * - 时间列统一使用 format.ts 的 formatDateTime（消除重复实现）
  */
 import { computed, h } from 'vue';
-import { NDataTable, NTag, NProgress, type DataTableColumns } from 'naive-ui';
+import {
+  NDataTable,
+  NTag,
+  NProgress,
+  type DataTableColumns,
+  type PaginationProps,
+} from 'naive-ui';
 import type { ExperienceItem } from '../api/experience';
+import { formatDateTime } from '../utils/format';
 
 const props = defineProps<{
   items: ExperienceItem[];
   loading?: boolean;
+  /** 每页条数，默认 10 */
+  pageSize?: number;
 }>();
 
 const emit = defineEmits<{
   (e: 'row-click', id: string): void;
 }>();
-
-function formatTs(ts: number): string {
-  if (!ts) return '—';
-  const d = new Date(ts);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
-}
 
 // type → NTag 颜色
 function typeColor(t: string): 'info' | 'error' | 'warning' | 'success' | 'default' {
@@ -107,9 +107,17 @@ const columns = computed<DataTableColumns<ExperienceItem>>(() => [
     title: '创建时间',
     key: 'createdAt',
     width: 150,
-    render: (row) => formatTs(row.createdAt ?? 0),
+    render: (row) => formatDateTime(row.createdAt ?? 0),
   },
 ]);
+
+// 客户端分页：默认 10/页，可由 pageSize prop 覆盖
+const pagination = computed<PaginationProps>(() => ({
+  pageSize: props.pageSize ?? 10,
+  showSizePicker: true,
+  pageSizes: [10, 20, 50],
+  showQuickJumper: true,
+}));
 
 function rowProps(row: ExperienceItem) {
   return {
@@ -118,7 +126,7 @@ function rowProps(row: ExperienceItem) {
   };
 }
 
-// 行样式：state='superseded' 用灰色
+// 行样式：state='superseded' 用次要文本色（去掉过弱的 opacity）
 function rowClassName(row: ExperienceItem): string {
   return row.state === 'superseded' ? 'row-superseded' : '';
 }
@@ -132,15 +140,21 @@ function rowClassName(row: ExperienceItem): string {
     :row-props="rowProps"
     :row-class-name="rowClassName"
     :bordered="false"
-    :pagination="false"
+    :striped="true"
+    :pagination="pagination"
+    :scroll-x="900"
     size="small"
   />
 </template>
 
 <style scoped>
+/* superseded 行：用次要文本色 + 斜体区分，不再用 opacity（过弱） */
 :deep(.row-superseded) {
-  color: #909399;
-  opacity: 0.6;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+:deep(.row-superseded .cell-title) {
+  font-weight: 400;
 }
 .cell-title {
   font-weight: 500;
