@@ -1,10 +1,15 @@
 <script setup lang="ts">
-// 根组件：NConfigProvider（含主题覆盖）+ 全局 Provider 包裹 + NLayout 导航 + router-view 内容区
+// 根组件：NConfigProvider（含主题覆盖 + 暗色切换）+ 全局 Provider 包裹 + NLayout 导航 + router-view 内容区
 //
 // 全局 Provider 说明（P0 修复）：
 //   NMessageProvider / NDialogProvider / NNotificationProvider 必须包裹
 //   router-view 内容，否则子组件调用 useMessage()/useDialog()/useNotification()
 //   会抛出 "No provider" 运行时错误。
+//
+// 暗色模式（S3-1）：
+//   useTheme 管理 light/dark/auto 三态，同步 document[data-theme] 属性，
+//   tokens.css 的 [data-theme="dark"] 覆盖块据此生效；同时驱动 naive-ui
+//   NConfigProvider 的 :theme（darkTheme / null）与 :theme-overrides。
 import { computed, h, type Component } from 'vue';
 import {
   NConfigProvider,
@@ -15,17 +20,41 @@ import {
   NMessageProvider,
   NDialogProvider,
   NNotificationProvider,
+  NButton,
+  NTooltip,
   zhCN,
   dateZhCN,
   type MenuOption,
 } from 'naive-ui';
 import { RouterLink, useRoute } from 'vue-router';
-import { lightThemeOverrides } from './styles/theme';
+import { useTheme, type ThemeMode } from './composables/useTheme';
 
 const route = useRoute();
 
-// 主题覆盖（与 styles/tokens.css 色板对齐）
-const themeOverrides = lightThemeOverrides;
+// 主题（light / dark / auto）
+const { mode, isDark, theme, themeOverrides, setMode } = useTheme();
+
+const themeModeLabel = computed<string>(() => {
+  switch (mode.value) {
+    case 'light': return '浅色';
+    case 'dark':  return '深色';
+    case 'auto':  return '跟随系统';
+    default:      return '';
+  }
+});
+
+// 主题切换按钮文案（用 Unicode 符号代替图标，避免引入 @vicons 依赖）
+const themeToggleIcon = computed<string>(() => {
+  if (mode.value === 'auto') return '◐';
+  return isDark.value ? '☾' : '☀';
+});
+
+// 切换器：light → dark → auto 循环
+function cycleTheme(): void {
+  const order: ThemeMode[] = ['light', 'dark', 'auto'];
+  const idx = order.indexOf(mode.value);
+  setMode(order[(idx + 1) % order.length]);
+}
 
 // 当前激活的菜单 key（与路由路径对齐）
 const activeKey = computed(() => route.path);
@@ -48,6 +77,7 @@ const menuOptions = computed<MenuOption[]>(() => [
   <NConfigProvider
     :locale="zhCN"
     :date-locale="dateZhCN"
+    :theme="theme"
     :theme-overrides="themeOverrides"
   >
     <NMessageProvider>
@@ -61,7 +91,28 @@ const menuOptions = computed<MenuOption[]>(() => [
               <div style="font-weight: 600; margin-right: 32px;">
                 LCM Dashboard
               </div>
-              <NMenu mode="horizontal" :options="menuOptions" :value="activeKey" />
+              <NMenu
+                mode="horizontal"
+                :options="menuOptions"
+                :value="activeKey"
+                aria-label="主导航"
+              />
+              <!-- 主题切换器：light → dark → auto 循环 -->
+              <NTooltip placement="bottom">
+                <template #trigger>
+                  <NButton
+                    quaternary
+                    circle
+                    :aria-label="`切换主题（当前：${themeModeLabel}）`"
+                    aria-haspopup="false"
+                    style="margin-left: auto;"
+                    @click="cycleTheme"
+                  >
+                    <span aria-hidden="true" style="font-size: 16px; line-height: 1;">{{ themeToggleIcon }}</span>
+                  </NButton>
+                </template>
+                主题：{{ themeModeLabel }}（点击切换）
+              </NTooltip>
             </NLayoutHeader>
             <NLayoutContent style="padding: 24px;">
               <RouterView />

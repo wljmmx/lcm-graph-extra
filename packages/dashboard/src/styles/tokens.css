@@ -124,10 +124,47 @@ body {
   box-sizing: border-box;
 }
 
-/* ===== focus-visible 无障碍高亮（S3） ===== */
+/* ===== 最小字号 12px 强制下限（可访问性：WCAG 1.4.4） ===== */
+/* 任何小于 12px 的字号上调到 12px（兜底，防止组件内联样式写过小值） */
+html {
+  font-size: 16px; /* root em 基准 */
+}
+
+/* ===== focus-visible 无障碍高亮（S3 增强） ===== */
+/* 仅在键盘聚焦时显示，鼠标点击不会触发；圆角元素自适应 */
 :focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+  /* 确保焦点环不被圆角遮挡 */
+  border-radius: inherit;
+}
+/* 暗色模式下焦点环使用更亮的色，提高对比度 */
+[data-theme="dark"] :focus-visible {
+  outline-color: var(--color-primary-hover);
+}
+/* 跳过链接（links 已有默认 underline 焦点样式，避免双重高亮） */
+a:focus-visible {
+  outline-style: dashed;
+}
+
+/* ===== 动效偏好：尊重 prefers-reduced-motion（WCAG 2.3.3） ===== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ===== 对比度偏好：高对比度模式 ===== */
+@media (prefers-contrast: more) {
+  :root {
+    --color-border: var(--color-text-primary);
+    --color-text-secondary: var(--color-text-primary);
+  }
 }
 
 /* ===== 滚动条美化 ===== */

@@ -78,8 +78,17 @@ const buttonType = computed<'error' | 'primary'>(() =>
   props.danger ? 'error' : 'primary',
 );
 const titleColor = computed<string | undefined>(() =>
-  props.danger ? '#d03050' : undefined,
+  props.danger ? 'var(--color-danger)' : undefined,
 );
+
+// 屏幕阅读器：执行按钮的语义化标签
+const executeAriaLabel = computed(() => {
+  const parts = [`执行 ${props.title}`];
+  if (props.danger) parts.push('危险操作');
+  if (props.confirmLevel === 1) parts.push('需二次确认');
+  if (props.confirmLevel === 2) parts.push('需三次确认');
+  return parts.join('，');
+});
 </script>
 
 <template>
@@ -91,7 +100,7 @@ const titleColor = computed<string | undefined>(() =>
     <!-- 标题 + 危险标签 -->
     <div class="card-header">
       <NSpace align="center" :size="6">
-        <span v-if="icon" class="card-icon">{{ icon }}</span>
+        <span v-if="icon" class="card-icon" aria-hidden="true">{{ icon }}</span>
         <span class="card-title" :style="{ color: titleColor }">{{ title }}</span>
         <NTag v-if="danger" size="small" type="error">危险</NTag>
         <NTag v-if="confirmLevel === 2" size="small" type="warning">三次确认</NTag>
@@ -115,6 +124,7 @@ const titleColor = computed<string | undefined>(() =>
         size="small"
         :loading="loading"
         :disabled="loading"
+        :aria-label="executeAriaLabel"
         @click="onDirectClick"
       >
         执行
@@ -132,6 +142,7 @@ const titleColor = computed<string | undefined>(() =>
             size="small"
             :loading="loading"
             :disabled="loading"
+            :aria-label="executeAriaLabel"
           >
             执行
           </NButton>
@@ -152,6 +163,7 @@ const titleColor = computed<string | undefined>(() =>
               size="small"
               :loading="loading"
               :disabled="loading"
+              :aria-label="`${executeAriaLabel}，第一次确认`"
             >
               执行
             </NButton>
@@ -171,6 +183,7 @@ const titleColor = computed<string | undefined>(() =>
               size="small"
               :loading="loading"
               :disabled="loading"
+              :aria-label="`${executeAriaLabel}，最终确认`"
             >
               再次确认
             </NButton>
@@ -187,36 +200,36 @@ const titleColor = computed<string | undefined>(() =>
   height: 100%;
 }
 .operation-card-danger {
-  border-color: rgba(208, 48, 80, 0.4);
+  border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
 }
 .card-header {
-  margin-bottom: 4px;
+  margin-bottom: var(--space-xs);
 }
 .card-icon {
-  font-size: 16px;
+  font-size: var(--fs-subtitle);
 }
 .card-title {
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 600;
 }
 .card-desc {
-  font-size: 12px;
-  color: #909399;
-  margin-bottom: 8px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-sm);
   line-height: 1.5;
 }
 .card-form {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 .card-footer {
   display: flex;
   justify-content: flex-end;
 }
 .warn-text {
-  color: #d03050;
+  color: var(--color-danger);
 }
 .warn-text-strong {
-  color: #d03050;
+  color: var(--color-danger);
   font-weight: 600;
 }
 </style>
