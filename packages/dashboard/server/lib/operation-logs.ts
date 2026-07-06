@@ -40,6 +40,46 @@ export interface OperationLogEntry {
   status: 'success' | 'failure';
   durationMs: number;
   error?: string;
+  // v1.0.1-6: 合规审计字段 —— user / session_id
+  user?: string;
+  sessionId?: string;
+}
+
+// v1.0.1-7: 敏感参数脱敏 —— 匹配 key 名中包含这些关键字的字段值会被替换为 ***REDACTED***
+const SENSITIVE_KEY_PATTERNS = [
+  'password', 'passwd', 'pwd',
+  'apikey', 'api_key', 'api-key',
+  'token', 'secret',
+  'credential', 'auth',
+  'neo4j_password', 'neo4j-password',
+];
+
+/**
+ * v1.0.1-7: 递归脱敏敏感参数。
+ * 匹配 key 名（不区分大小写）中包含 password/apiKey/token/secret/credential/auth 的字段，
+ * 将其值替换为 '***REDACTED***'。支持嵌套对象和数组。
+ */
+export function redactSensitive(value: unknown, depth: number = 0): unknown {
+  if (depth > 10) return value; // 防止循环引用
+  if (value === null || value === undefined) return value;
+  if (typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value.map((v) => redactSensitive(v, depth + 1));
+  }
+  const obj = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(obj)) {
+    const lowerKey = key.toLowerCase();
+    const isSensitive = SENSITIVE_KEY_PATTERNS.some((p) => lowerKey.includes(p));
+    if (isSensitive && typeof obj[key] === 'string') {
+      result[key] = '***REDACTED***';
+    } else if (isSensitive && typeof obj[key] === 'object' && obj[key] !== null) {
+      result[key] = '***REDACTED***';
+    } else {
+      result[key] = redactSensitive(obj[key], depth + 1);
+    }
+  }
+  return result;
 }
 
 const MAX_LOGS = 1000;
@@ -71,6 +111,17 @@ function getDb(): DatabaseSyncLike {
     CREATE INDEX IF NOT EXISTS idx_operation_logs_ts ON operation_logs(ts DESC);
     CREATE INDEX IF NOT EXISTS idx_operation_logs_tool ON operation_logs(tool);
   `);
+  // v1.0.1-6: 迁移 —— 添加 user / session_id 列（已有 DB 幂等）
+  try {
+    dbInstance.exec(`ALTER TABLE operation_logs ADD COLUMN user TEXT`);
+  } catch { /* 列已存在 */ }
+  try {
+    dbInstance.exec(`ALTER TABLE operation_logs ADD COLUMN session_id TEXT`);
+  } catch { /* 列已存在 */ }
+  // v1.0.1-6: 查询索引 —— 按操作者过滤
+  try {
+    dbInstance.exec(`CREATE INDEX IF NOT EXISTS idx_operation_logs_user ON operation_logs(user)`);
+  } catch { /* index 已存在 */ }
   return dbInstance;
 }
 
@@ -82,17 +133,22 @@ export function appendOperationLog(entry: OperationLogEntry): void {
   try {
     const db = getDb();
     const stmt = db.prepare(`
-      INSERT INTO operation_logs (ts, tool, params_json, result_json, status, duration_ms, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO operation_logs (ts, tool, params_json, result_json, status, duration_ms, error, user, session_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    // v1.0.1-7: 写入前脱敏敏感参数
+    const safeParams = redactSensitive(entry.params ?? {});
+    const safeResult = redactSensitive(entry.result ?? null);
     stmt.run(
       entry.ts,
       entry.tool,
-      JSON.stringify(entry.params ?? {}),
-      JSON.stringify(entry.result ?? null),
+      JSON.stringify(safeParams),
+      JSON.stringify(safeResult),
       entry.status,
       entry.durationMs,
       entry.error ?? null,
+      entry.user ?? null,
+      entry.sessionId ?? null,
     );
     // LRU 淘汰
     db.exec(`DELETE FROM operation_logs WHERE id NOT IN (SELECT id FROM operation_logs ORDER BY ts DESC LIMIT ${MAX_LOGS})`);
@@ -110,32 +166,42 @@ export interface OperationLogRow {
   status: string;
   duration_ms: number;
   error: string | null;
+  // v1.0.1-6: 合规审计字段
+  user?: string | null;
+  session_id?: string | null;
 }
 
-/** 查询最近 n 条操作日志（按 ts DESC） */
-export function queryOperationLogs(n: number = 50): OperationLogRow[] {
+/**
+ * 查询操作日志 —— v1.0.1-6 支持按 user / tool / 时间范围过滤。
+ */
+export function queryOperationLogs(opts: {
+  n?: number;
+  tool?: string;
+  user?: string;
+  fromTs?: number;
+  toTs?: number;
+} = {}): OperationLogRow[] {
   try {
     const db = getDb();
-    const limit = Number.isFinite(n) && n > 0 ? Math.trunc(n) : 50;
+    const limit = Number.isFinite(opts.n) && (opts.n ?? 0) > 0 ? Math.trunc(opts.n!) : 50;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts.tool) { conditions.push('tool = ?'); params.push(opts.tool); }
+    if (opts.user) { conditions.push('user = ?'); params.push(opts.user); }
+    if (opts.fromTs != null) { conditions.push('ts >= ?'); params.push(opts.fromTs); }
+    if (opts.toTs != null) { conditions.push('ts <= ?'); params.push(opts.toTs); }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     return db
-      .prepare('SELECT * FROM operation_logs ORDER BY ts DESC LIMIT ?')
-      .all(limit) as OperationLogRow[];
+      .prepare(`SELECT * FROM operation_logs ${where} ORDER BY ts DESC LIMIT ?`)
+      .all(...params, limit) as OperationLogRow[];
   } catch {
     return [];
   }
 }
 
-/** 按 tool 过滤查询 */
+/** 按 tool 过滤查询（向后兼容） */
 export function queryOperationLogsByTool(tool: string, n: number = 50): OperationLogRow[] {
-  try {
-    const db = getDb();
-    const limit = Number.isFinite(n) && n > 0 ? Math.trunc(n) : 50;
-    return db
-      .prepare('SELECT * FROM operation_logs WHERE tool = ? ORDER BY ts DESC LIMIT ?')
-      .all(tool, limit) as OperationLogRow[];
-  } catch {
-    return [];
-  }
+  return queryOperationLogs({ tool, n });
 }
 
 /** 关闭连接（用于测试 / 优雅关闭） */

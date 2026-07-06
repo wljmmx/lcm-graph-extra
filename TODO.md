@@ -3,15 +3,15 @@
 ## 🚀 v1.0.1 — 安全合规 Hotfix (P0)
 
 ### 🔒 安全修复
-- [ ] :7423 Snapshot服务添加Basic Auth认证
-- [ ] Docker默认强制启用DASHBOARD_AUTH环境变量
-- [ ] /internal/shutdown改为POST方法并添加token验证
-- [ ] 添加IP白名单中间件
+- [x] :7423 Snapshot服务添加Basic Auth认证
+- [x] Docker默认强制启用DASHBOARD_AUTH环境变量
+- [x] /internal/shutdown改为POST方法并添加token验证
+- [x] 添加IP白名单中间件
 
 ### 📊 合规审计
-- [ ] lcmg_*工具注入appendOperationLog操作审计
-- [ ] 操作日志增加user/session_id字段
-- [ ] 敏感参数脱敏（password/apiKey等）
+- [x] lcmg_*工具注入appendOperationLog操作审计
+- [x] 操作日志增加user/session_id字段
+- [x] 敏感参数脱敏（password/apiKey等）
 
 ## ✅ v1.1.0 — 运维便捷性 + 集成验证 (P1)
 
@@ -63,11 +63,11 @@
 
 | 版本 | 总任务 | 完成 | 进行中 | 待开始 | 完成率 |
 |------|--------|------|--------|--------|--------|
-| v1.0.1 | 7 | 0 | 0 | 7 | 0% |
+| v1.0.1 | 7 | 7 | 0 | 0 | 100% |
 | v1.1.0 | 7 | 0 | 0 | 7 | 0% |
 | v1.2.0 | 6 | 0 | 0 | 6 | 0% |
 | v2.0.0 | 6 | 0 | 0 | 6 | 0% |
-| **合计** | **26** | **0** | **0** | **26** | **0%** |
+| **合计** | **26** | **7** | **0** | **19** | **27%** |
 
 ---
 

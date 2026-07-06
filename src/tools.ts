@@ -329,6 +329,72 @@ export function registerOperationalToolsWithDashboard(api: any, dashboardContext
 }
 
 function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardToolContext | undefined): void {
+  // v1.0.1-5: 包装 api.registerTool —— 为每个 lcmg_* 工具注入操作审计日志
+  const originalRegisterTool = api.registerTool.bind(api);
+  api.registerTool = (toolDef: any) => {
+    if (!toolDef || !toolDef.name || typeof toolDef.execute !== 'function') {
+      return originalRegisterTool(toolDef);
+    }
+    const toolName: string = toolDef.name;
+    const originalExecute = toolDef.execute;
+    toolDef.execute = async function (toolCallId: string, params: any, signal?: AbortSignal) {
+      const startTs = Date.now();
+      let result: any;
+      let error: string | undefined;
+      let status: 'success' | 'failure' = 'success';
+      try {
+        result = await originalExecute.call(this, toolCallId, params, signal);
+        // 检测 execute 返回的 isError 标志
+        if (result?.isError === true) {
+          status = 'failure';
+        }
+      } catch (e) {
+        status = 'failure';
+        error = e instanceof Error ? e.message : String(e);
+        throw e;
+      } finally {
+        // 异步写入操作日志（fire-and-forget，不阻塞工具返回）
+        try {
+          // v1.0.1-5: 尝试多个候选路径解析 operation-logs 模块
+          // 开发态: packages/dashboard/server/lib/operation-logs.js (ts 编译到原位)
+          // 生产态: packages/dashboard/dist-server/lib/operation-logs.js (Docker 构建产物)
+          let appendOperationLog: ((entry: any) => void) | null = null;
+          for (const candidate of [
+            '../packages/dashboard/server/lib/operation-logs.js',
+            '../packages/dashboard/dist-server/lib/operation-logs.js',
+          ]) {
+            try {
+              const mod = _lcmRequire(candidate);
+              if (typeof mod?.appendOperationLog === 'function') {
+                appendOperationLog = mod.appendOperationLog;
+                break;
+              }
+            } catch { /* 尝试下一个路径 */ }
+          }
+          if (appendOperationLog) {
+            // v1.0.1-6: user/session_id 从 toolCallId 或 params 提取
+            const user = params?.user ?? params?._user ?? undefined;
+            const sessionId = toolCallId ?? params?._sessionId ?? undefined;
+            appendOperationLog({
+              ts: startTs,
+              tool: toolName,
+              params: params ?? {},
+              result: result ?? null,
+              status,
+              durationMs: Date.now() - startTs,
+              error,
+              user,
+              sessionId,
+            });
+          }
+        } catch {
+          /* operation-logs 模块不可用或写入失败 —— 静默，不阻塞工具 */
+        }
+      }
+      return result;
+    };
+    return originalRegisterTool(toolDef);
+  };
   // ===================================================================
   // 1. lcmg_experience_report
   // ===================================================================

@@ -20,6 +20,78 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { getGlobalLogger } from './utils/logger.js';
 
+// v1.0.1-1/4: Basic Auth + IP 白名单配置（与 dashboard 共用 DASHBOARD_AUTH）
+interface SnapshotAuthConfig {
+  enabled: boolean;
+  username: string;
+  password: string;
+}
+let _authConfig: SnapshotAuthConfig | null = null;
+function getSnapshotAuthConfig(): SnapshotAuthConfig {
+  if (_authConfig) return _authConfig;
+  const raw = process.env.DASHBOARD_AUTH;
+  if (!raw || !raw.includes(':')) {
+    _authConfig = { enabled: false, username: '', password: '' };
+    return _authConfig;
+  }
+  const [username, ...rest] = raw.split(':');
+  const password = rest.join(':');
+  _authConfig = {
+    enabled: Boolean(username && password),
+    username: username ?? '',
+    password: password ?? '',
+  };
+  return _authConfig;
+}
+export function _resetSnapshotAuthConfig(): void { _authConfig = null; }
+
+// v1.0.1-4: IP 白名单 —— 逗号分隔的 IP/CIDR，默认仅允许 127.0.0.1 / ::1
+function getAllowedIps(): string[] {
+  const raw = process.env.SNAPSHOT_ALLOWED_IPS;
+  if (!raw) return ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+function isIpAllowed(remoteAddr: string | undefined): boolean {
+  if (!remoteAddr) return false;
+  const allowed = getAllowedIps();
+  // 直接匹配（含 IPv4-mapped IPv6 形式 ::ffff:127.0.0.1）
+  if (allowed.includes(remoteAddr)) return true;
+  // 去掉 ::ffff: 前缀后再匹配
+  const normalized = remoteAddr.replace(/^::ffff:/, '');
+  return allowed.includes(normalized);
+}
+
+// v1.0.1-1: Basic Auth 校验
+function parseBasicAuth(authHeader: string | undefined): { username: string; password: string } | null {
+  if (!authHeader || !authHeader.startsWith('Basic ')) return null;
+  try {
+    const decoded = Buffer.from(authHeader.slice(6), 'base64').toString('utf-8');
+    const idx = decoded.indexOf(':');
+    if (idx < 0) return null;
+    return { username: decoded.slice(0, idx), password: decoded.slice(idx + 1) };
+  } catch {
+    return null;
+  }
+}
+function verifyBasicAuth(req: IncomingMessage): boolean {
+  const cfg = getSnapshotAuthConfig();
+  if (!cfg.enabled) return true; // 未启用 Auth 时放行
+  const creds = parseBasicAuth(req.headers.authorization);
+  if (!creds) return false;
+  return creds.username === cfg.username && creds.password === cfg.password;
+}
+function sendUnauthorized(res: ServerResponse): void {
+  res.writeHead(401, {
+    'Content-Type': 'application/json',
+    'WWW-Authenticate': 'Basic realm="LCM Snapshot"',
+  });
+  res.end(JSON.stringify({ ok: false, error: 'Authentication required' }));
+}
+function sendForbidden(res: ServerResponse): void {
+  res.writeHead(403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: false, error: 'IP not allowed' }));
+}
+
 /** Dashboard 快照聚合数据结构 */
 export interface DashboardSnapshot {
   cascade: {
@@ -362,7 +434,13 @@ async function shutdownStaleInstance(host: string, port: number, timeoutMs: numb
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    await fetch(url, { method: 'POST', signal: controller.signal });
+    // v1.0.1-3: 发送 POST + shutdown token（与安全端点对齐）
+    const headers: Record<string, string> = {};
+    const token = process.env.SNAPSHOT_SHUTDOWN_TOKEN;
+    if (token) headers['x-shutdown-token'] = token;
+    const auth = process.env.DASHBOARD_AUTH;
+    if (auth) headers['authorization'] = `Basic ${Buffer.from(auth).toString('base64')}`;
+    await fetch(url, { method: 'POST', headers, signal: controller.signal });
   } catch (e) {
     // 旧实例关闭后连接断开是正常的
     getGlobalLogger().debug('[dashboard-snapshot] shutdown stale instance request failed (expected)', { err: e instanceof Error ? e.message : String(e) });
@@ -461,6 +539,54 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
       server = createServer((req: IncomingMessage, res: ServerResponse) => {
         const url = req.url ?? '';
 
+        // v1.0.1-4: IP 白名单检查（最先执行）
+        const remoteAddr = req.socket.remoteAddress;
+        if (!isIpAllowed(remoteAddr)) {
+          getGlobalLogger().warn('[dashboard-snapshot] IP rejected by whitelist', { ip: remoteAddr });
+          sendForbidden(res);
+          return;
+        }
+
+        // v1.0.1-3: /internal/shutdown 改为 POST + token 验证（必须在 Auth 和方法检查之前）
+        if (url === '/internal/shutdown') {
+          if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'application/json', 'Allow': 'POST' });
+            res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed: use POST' }));
+            return;
+          }
+          // v1.0.1-3: token 验证 —— 防止未授权关闭
+          const expectedToken = process.env.SNAPSHOT_SHUTDOWN_TOKEN;
+          if (expectedToken) {
+            const provided = req.headers['x-shutdown-token'] as string | undefined;
+            if (provided !== expectedToken) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Invalid or missing shutdown token' }));
+              return;
+            }
+          }
+          // Basic Auth 仍然要求（若启用）
+          if (!verifyBasicAuth(req)) {
+            sendUnauthorized(res);
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, shuttingDown: true }));
+          // 延迟关闭，确保响应已发送
+          setTimeout(() => {
+            try {
+              server?.close();
+              getGlobalLogger().info('[dashboard-snapshot] shutdown requested by new instance');
+            } catch { /* ignore */ }
+          }, 50);
+          return;
+        }
+
+        // v1.0.1-1: Basic Auth（/internal/health 豁免，用于 stale instance 探测）
+        if (url !== '/internal/health' && !verifyBasicAuth(req)) {
+          sendUnauthorized(res);
+          return;
+        }
+
         // 能力档次控制端点（支持 GET 查看 + POST 设置）
         if (url === '/internal/capability-profile' || url.startsWith('/internal/capability-profile?')) {
           if (req.method === 'GET') {
@@ -523,19 +649,7 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           return;
         }
 
-        // 优雅关闭端点（供新实例探测到 self-stale 时调用）
-        if (url === '/internal/shutdown') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, shuttingDown: true }));
-          // 延迟关闭，确保响应已发送
-          setTimeout(() => {
-            try {
-              server?.close();
-              getGlobalLogger().info('[dashboard-snapshot] shutdown requested by new instance');
-            } catch { /* ignore */ }
-          }, 50);
-          return;
-        }
+        // v1.0.1-3: /internal/shutdown 已移至顶部（POST + token 验证）
 
         // N-4: Prometheus text exposition format endpoint
         // 暴露 healthMetrics + circuit breaker + retrieval 性能指标

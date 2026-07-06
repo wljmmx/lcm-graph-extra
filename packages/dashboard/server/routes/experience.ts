@@ -389,6 +389,9 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     // 持久化操作日志
     try {
       const { appendOperationLog } = await import('../lib/operation-logs');
+      // v1.0.1-6: 提取 user / session_id（从请求头或 body 透传）
+      const user = (req.headers['x-user'] as string) || (body.user as string) || undefined;
+      const sessionId = (req.headers['x-session-id'] as string) || (body.sessionId as string) || undefined;
       appendOperationLog({
         ts: startTs,
         tool,
@@ -397,6 +400,8 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         status: error ? 'failure' : 'success',
         durationMs: Date.now() - startTs,
         error,
+        user,
+        sessionId,
       });
     } catch {
       /* 日志写入失败不阻塞响应 */
@@ -404,16 +409,18 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     return result;
   });
 
-  // ===== 操作日志查询 =====
+  // ===== 操作日志查询（v1.0.1-6 增强：支持 user / from / to 过滤） =====
   app.get('/api/operation-logs', async (req, reply) => {
-    const query = req.query as { n?: string; tool?: string };
-    const n = query.n ? parseInt(query.n, 10) : 50;
-    const filterTool = query.tool;
+    const query = req.query as { n?: string; tool?: string; user?: string; from?: string; to?: string };
     try {
-      const { queryOperationLogs, queryOperationLogsByTool } = await import('../lib/operation-logs');
-      const rows = filterTool
-        ? queryOperationLogsByTool(filterTool, n)
-        : queryOperationLogs(n);
+      const { queryOperationLogs } = await import('../lib/operation-logs');
+      const rows = queryOperationLogs({
+        n: query.n ? parseInt(query.n, 10) : 50,
+        tool: query.tool || undefined,
+        user: query.user || undefined,
+        fromTs: query.from ? parseInt(query.from, 10) : undefined,
+        toTs: query.to ? parseInt(query.to, 10) : undefined,
+      });
       // 反序列化 JSON 字段
       const logs = rows.map((r) => ({
         id: r.id,
@@ -424,6 +431,9 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         status: r.status,
         durationMs: r.duration_ms,
         error: r.error,
+        // v1.0.1-6: 返回合规审计字段
+        user: r.user ?? null,
+        sessionId: r.session_id ?? null,
       }));
       return { logs };
     } catch (err) {
