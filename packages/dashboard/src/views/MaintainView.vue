@@ -289,7 +289,7 @@ function executeImport(): void {
           <OperationCard
             title="图谱维护"
             description="触发 dedup / PageRank / community detection + 债务表对账。建议低峰期执行。"
-            icon="❖"
+            icon="database"
             :confirm-level="1"
             :loading="!!loadingMap.maintain"
             @execute="executeMaintain"
@@ -301,7 +301,7 @@ function executeImport(): void {
           <OperationCard
             title="系统诊断"
             description="全栈自检：lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics，输出多段 markdown 报告。"
-            icon="✚"
+            icon="activity"
             :confirm-level="0"
             :loading="!!loadingMap.diagnose"
             @execute="executeDiagnose"
@@ -313,7 +313,7 @@ function executeImport(): void {
           <OperationCard
             title="触发蒸馏"
             description="从 PENDING 经验批量蒸馏为 DISTILLED（调用 LLM 提取结构化经验）。"
-            icon="⚗"
+            icon="flask"
             :confirm-level="0"
             :loading="!!loadingMap.distill"
             @execute="executeDistill"
@@ -337,7 +337,7 @@ function executeImport(): void {
           <OperationCard
             title="触发 compact"
             description="手动触发指定会话的上下文压缩；省略 conversationId 则处理最紧急债务。"
-            icon="▤"
+            icon="compress"
             :confirm-level="1"
             :loading="!!loadingMap.compact"
             @execute="executeCompact"
@@ -361,7 +361,7 @@ function executeImport(): void {
           <OperationCard
             title="重置熔断器"
             description="重置指定子系统熔断器状态。Neo4j 还会重置 GraphAdapter 连接失败标志。"
-            icon="⏻"
+            icon="power"
             danger
             :confirm-level="1"
             :loading="!!loadingMap.reset_breaker"
@@ -384,7 +384,7 @@ function executeImport(): void {
           <OperationCard
             title="TTL 清理"
             description="触发债务表对账：删除孤儿债务 + 清理 7 天前墓碑。复用 lcmg_maintain。"
-            icon="⌫"
+            icon="trash"
             :confirm-level="1"
             :loading="!!loadingMap.ttl_cleanup"
             @execute="executeTtlCleanup"
@@ -396,7 +396,7 @@ function executeImport(): void {
           <OperationCard
             title="备份"
             description="导出 Neo4j + LCM 对话 + memory/*.md 为单 JSON 文件。路径必须在 ~/.openclaw 之下。"
-            icon="↧"
+            icon="save"
             :confirm-level="0"
             :loading="!!loadingMap.backup"
             @execute="executeBackup"
@@ -418,7 +418,7 @@ function executeImport(): void {
           <OperationCard
             title="恢复"
             description="从备份 JSON 恢复到 Neo4j / LCM / 文件。Neo4j 用 MERGE 不删现有节点。强制 dryRun 默认 true。"
-            icon="↥"
+            icon="upload"
             danger
             :confirm-level="2"
             :loading="!!loadingMap.restore"
@@ -454,7 +454,7 @@ function executeImport(): void {
           <OperationCard
             title="同步修复"
             description="跨存储一致性检查/修复：检测孤儿 Neo4j 节点 + TTL/pin 状态。repair 模式实际删除孤儿。"
-            icon="⟳"
+            icon="refresh"
             :danger="syncDanger"
             :confirm-level="syncConfirmLevel"
             :loading="!!loadingMap.sync"
@@ -483,7 +483,7 @@ function executeImport(): void {
           <OperationCard
             title="历史导入"
             description="把 LCM 消息 / 记忆文件 / 全部一次性导入 Neo4j（LLM 实体抽取，未配置时降级直存）。"
-            icon="⇲"
+            icon="download"
             :confirm-level="1"
             :loading="!!loadingMap.import"
             @execute="executeImport"

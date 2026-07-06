@@ -17,12 +17,13 @@
  */
 import { computed, ref } from 'vue';
 import { NCard, NButton, NPopconfirm, NTag, NSpace } from 'naive-ui';
+import Icon from './Icon.vue';
 
 const props = withDefaults(
   defineProps<{
     title: string;
     description: string;
-    /** 可选图标（emoji 或文本字符） */
+    /** 图标名（Icon 组件 name，如 'refresh'/'trash'/'save'） */
     icon?: string;
     /** 危险操作：按钮 type=error，标题红色 */
     danger?: boolean;
@@ -100,7 +101,7 @@ const executeAriaLabel = computed(() => {
     <!-- 标题 + 危险标签 -->
     <div class="card-header">
       <NSpace align="center" :size="6">
-        <span v-if="icon" class="card-icon" aria-hidden="true">{{ icon }}</span>
+        <Icon v-if="icon" :name="icon" :size="16" />
         <span class="card-title" :style="{ color: titleColor }">{{ title }}</span>
         <NTag v-if="danger" size="small" type="error">危险</NTag>
         <NTag v-if="confirmLevel === 2" size="small" type="warning">三次确认</NTag>
@@ -168,7 +169,7 @@ const executeAriaLabel = computed(() => {
               执行
             </NButton>
           </template>
-          <span class="warn-text">⚠ 危险操作：{{ title }}。第一次确认（共 2 次）。</span>
+          <span class="warn-text"><Icon name="warning" :size="12" /> 危险操作：{{ title }}。第一次确认（共 2 次）。</span>
         </NPopconfirm>
 
         <NPopconfirm
@@ -188,7 +189,7 @@ const executeAriaLabel = computed(() => {
               再次确认
             </NButton>
           </template>
-          <span class="warn-text-strong">⛔ 最终确认：此操作不可逆！确定继续？</span>
+          <span class="warn-text-strong"><Icon name="danger" :size="12" /> 最终确认：此操作不可逆！确定继续？</span>
         </NPopconfirm>
       </template>
     </div>

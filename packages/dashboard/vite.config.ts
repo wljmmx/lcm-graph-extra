@@ -14,11 +14,10 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist-client',
-    // 拆分大体积依赖，避免 EChart chunk > 500KB 警告
     rollupOptions: {
       output: {
         manualChunks: {
-          // EChart 全家桶（core + charts + components + renderers + vue-echarts）
+          // EChart 按需模块（core + charts + components + renderers + vue-echarts）
           echarts: [
             'echarts/core',
             'echarts/renderers',
@@ -28,14 +27,13 @@ export default defineConfig({
           ],
           // Vue 运行时单独拆分
           vue: ['vue', 'vue-router', '@vue/runtime-core'],
-          // Naive UI 组件库
-          'naive-ui': ['naive-ui'],
-          // 图表/查询库
-          vendor: ['echarts', '@tanstack/vue-query'],
+          // @tanstack/vue-query
+          'vue-query': ['@tanstack/vue-query'],
         },
       },
     },
-    // 提升 chunk 大小警告阈值到 800KB（多模块拆分后仍可能合并接近 500KB）
+    // naive-ui 不强制分块：让 Rollup 基于 named import 自动 tree-shake，
+    // 仅实际被引用的组件会进入 bundle（避免整库 906KB 进单一 chunk）
     chunkSizeWarningLimit: 800,
   },
 });

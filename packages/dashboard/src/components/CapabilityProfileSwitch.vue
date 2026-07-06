@@ -15,6 +15,7 @@
 import { ref, onMounted } from 'vue';
 import { NCard, NSpace, NTag, NButton, NModal, useMessage } from 'naive-ui';
 import { fetchCapabilityProfile, switchCapabilityProfile, type CapabilityProfile } from '../api/config';
+import Icon from './Icon.vue';
 
 const message = useMessage();
 
@@ -86,7 +87,7 @@ onMounted(loadProfile);
     </template>
 
     <div v-if="errorMsg" class="cap-error">
-      ⚠ {{ errorMsg }}
+      <Icon name="warning" :size="14" /> {{ errorMsg }}
     </div>
 
     <div v-if="current" class="cap-current">

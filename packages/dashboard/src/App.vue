@@ -28,6 +28,7 @@ import {
 } from 'naive-ui';
 import { RouterLink, useRoute } from 'vue-router';
 import { useTheme, type ThemeMode } from './composables/useTheme';
+import Icon from './components/Icon.vue';
 
 const route = useRoute();
 
@@ -43,10 +44,10 @@ const themeModeLabel = computed<string>(() => {
   }
 });
 
-// 主题切换按钮文案（用 Unicode 符号代替图标，避免引入 @vicons 依赖）
+// 主题切换按钮图标（SVG，跟随 isDark/mode）
 const themeToggleIcon = computed<string>(() => {
-  if (mode.value === 'auto') return '◐';
-  return isDark.value ? '☾' : '☀';
+  if (mode.value === 'auto') return 'contrast';
+  return isDark.value ? 'moon' : 'sun';
 });
 
 // 切换器：light → dark → auto 循环
@@ -108,7 +109,7 @@ const menuOptions = computed<MenuOption[]>(() => [
                     style="margin-left: auto;"
                     @click="cycleTheme"
                   >
-                    <span aria-hidden="true" style="font-size: 16px; line-height: 1;">{{ themeToggleIcon }}</span>
+                    <Icon :name="themeToggleIcon" :size="16" />
                   </NButton>
                 </template>
                 主题：{{ themeModeLabel }}（点击切换）
