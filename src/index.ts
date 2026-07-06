@@ -1044,6 +1044,44 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     logger?.debug?.("Tier 2 LLM judgment failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
                   }
                 })().then(() => {}, () => {}));
+
+                // 异步 Tier 3: 工具验证（仅当 needsTier3 且有事实性声明时触发）
+                if (confidence.needsTier3 && confidence.hasFactualClaim) {
+                  const tier3Query = qmdQuery;
+                  const tier3Results = [...allResults].slice(0, 5);
+                  backgroundTasks.register('r2:tier3-verify', (async () => {
+                    try {
+                      // Tier 3 工具验证：使用搜索工具交叉验证事实性声明
+                      // 搜索函数复用 graph-memory 的 searchNodes（如果可用）
+                      const verdicts = await cascadeManager.evaluateTier3(tier3Query, tier3Results, {
+                        // 搜索验证函数（简化实现，实际可对接外部搜索 API）
+                        searchFn: async (q: string) => {
+                          // 尝试用 GraphAdapter 搜索相关节点作为验证源
+                          try {
+                            const searchResults = await graphAdapter?.search?.({ query: q, limit: 3 });
+                            return searchResults?.nodes?.map((n: any) => n.content ?? n.name ?? '').join('\n') ?? '';
+                          } catch { return ''; }
+                        },
+                      });
+                      // 用 Tier 3 结果更新 Beta 分布（verified=true → success, verified=false → failure）
+                      for (const v of verdicts) {
+                        if (v.id) {
+                          const armKey = CascadeManager.makeArmKey(scenarioTag, v.id);
+                          cascadeManager.recordFeedback(armKey, v.verified);
+                        }
+                      }
+                      if (verdicts.length > 0) {
+                        logger?.debug?.("R-2 Tier 3 tool verification completed", {
+                          verified: verdicts.filter(v => v.verified).length,
+                          total: verdicts.length,
+                          methods: verdicts.map(v => v.method),
+                        });
+                      }
+                    } catch (e) { /* Tier 3 failed, non-fatal */
+                      logger?.debug?.("Tier 3 verification failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                    }
+                  })().then(() => {}, () => {}));
+                }
               }
             }
           } catch (r2Err) {
@@ -1746,17 +1784,48 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       uncompressedCount,
                     });
                     const sk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
-                    // BUG-AUDIT: sessionId 用 SDK 字符串会话 ID（_sessionId），
-                    // 不是 getConversationId() 返回的 number 主键。
-                    // 原代码 `getConversationId(sk) ?? _sessionId` 优先用 number 主键，
-                    // lossless-claw 用它查 conversations.session_id 列永远查不到。
-                    // 同时移除接口不存在的 reason 字段。
-                    backgroundTasks.register('afterturn:s9-topic-shift', _losslessClawAdapter.compact({
-                      sessionId: _sessionId,
-                      sessionKey: sk,
-                      sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
-                      force: false,
-                    }));
+                    // S-9: 优先调用 gm-pro consolidateBuffer API（将情节缓冲整合到全局图谱）
+                    // 失败降级到 lossless-claw compact（仅压缩缓冲，不整合到图谱）
+                    backgroundTasks.register('afterturn:s9-topic-shift', (async () => {
+                      try {
+                        const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
+                        const consolidated = await withGmProFallback<{ consolidatedIds: string[] } | null>(
+                          'consolidateBuffer',
+                          async (mod) => {
+                            // 提取缓冲区节点（基于最近消息的关键信息）
+                            const bufferNodes = allMsgs
+                              .slice(preCount)
+                              .map((m: any, i: number) => ({
+                                id: `buf_${_sessionId}_${i}`,
+                                type: 'EPISODE',
+                                name: (m.content ?? '').slice(0, 100),
+                                description: '',
+                                content: m.content ?? '',
+                              }));
+                            return await mod.consolidateBuffer({ nodes: bufferNodes, sessionId: _sessionId });
+                          },
+                          async () => null, // fallback 到 lossless-claw compact
+                          { label: 'S-9 consolidateBuffer' },
+                        );
+                        if (!consolidated || !consolidated.consolidatedIds?.length) {
+                          // gm-pro 不可用或无节点整合，降级到 compact
+                          await _losslessClawAdapter.compact({
+                            sessionId: _sessionId,
+                            sessionKey: sk,
+                            sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                            force: false,
+                          });
+                        }
+                      } catch {
+                        // 兜底：consolidateBuffer 异常时仍执行 compact
+                        await _losslessClawAdapter.compact({
+                          sessionId: _sessionId,
+                          sessionKey: sk,
+                          sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                          force: false,
+                        });
+                      }
+                    })());
                   }
                 }
               }
@@ -2215,6 +2284,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // P0-2: TTL 清理节流。默认 24h 一次（与 DEFAULT_TTL_CONFIG.cleanupIntervalHours 对齐）。
     let lastTtlRun = 0;
     const TTL_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    // gm-pro 增量维护节流。默认 6h 一次。
+    let lastIncrementalMaintainRun = 0;
     // P0-3: 债务表对账节流。默认 24h 一次，与 TTL 同 cadence。
     // 清理孤儿债务（会话已删除）与 7 天前墓碑，防止 conversation_compaction_maintenance 无限增长。
     let lastDebtReconcileRun = 0;
@@ -2444,6 +2515,36 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 }
               } catch (ttlErr) {
                 logger?.warn?.("heartbeat: TTL cleanup failed (non-fatal)", { err: String(ttlErr) });
+              }
+            })());
+          }
+        }
+
+        // --- 5. gm-pro 增量维护（markDirty + incrementalMaintain，每 ~6h） ---
+        // gm-pro v2.2.1 新增增量维护能力，避免全量维护的大图谱性能开销。
+        // 与全量 TTL 维护分工：TTL 负责衰减/过期，增量维护负责图谱质量（去重/社区/重要性）。
+        if (graphAdapter && typeof graphAdapter.query === "function") {
+          const incrementalIntervalMs = api.pluginConfig?.incrementalMaintainIntervalMs ?? 6 * 60 * 60 * 1000;
+          const incrementalElapsed = Date.now() - lastIncrementalMaintainRun;
+          if (incrementalElapsed >= incrementalIntervalMs) {
+            lastIncrementalMaintainRun = Date.now();
+            backgroundTasks.register('hb:incremental-maintain', (async () => {
+              try {
+                const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
+                // 优先调用 gm-pro incrementalMaintain API
+                const result = await withGmProFallback<{ processedCount: number; remainingCount: number } | null>(
+                  'incrementalMaintain',
+                  async (mod) => {
+                    return await mod.incrementalMaintain({ maxBatchSize: 200 });
+                  },
+                  async () => null, // 无 gm-pro 时跳过（全量维护由 TTL 负责）
+                  { label: 'incremental-maintain' },
+                );
+                if (result?.processedCount && result.processedCount > 0) {
+                  logger?.info?.(`heartbeat: gm-pro incremental maintain processed ${result.processedCount} nodes (${result.remainingCount} remaining)`);
+                }
+              } catch (e) {
+                logger?.debug?.("heartbeat: incremental maintain skipped (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
               }
             })());
           }

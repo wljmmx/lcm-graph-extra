@@ -50,6 +50,10 @@ export interface DashboardSnapshot {
   health: {
     latest: HealthSnapshotLite | null; // healthMetrics.getLatest()
   };
+  capabilityProfile?: {
+    current: { id: string; label: string; description: string; estimatedOverhead: number };
+    available: Array<{ id: string; label: string; description: string; estimatedOverhead: number; apiCount: number }>;
+  };
   timestamp: number;
 }
 
@@ -106,6 +110,12 @@ export interface SnapshotProviders {
  * 单独导出便于测试（不依赖 HTTP 层）。
  */
 export function buildSnapshot(providers: SnapshotProviders): DashboardSnapshot {
+  let capabilityProfile: any = undefined;
+  try {
+    const { getCurrentProfile, listProfiles } = require('./capability-profiles.js');
+    capabilityProfile = { current: getCurrentProfile(), available: listProfiles() };
+  } catch { /* capability-profiles not available */ }
+
   return {
     cascade: providers.getCascadeSnapshot(),
     userProfile: providers.getUserProfile(),
@@ -113,6 +123,7 @@ export function buildSnapshot(providers: SnapshotProviders): DashboardSnapshot {
     debt: providers.getDebtStats(),
     retrieval: providers.getRetrievalState(),
     health: { latest: providers.getHealthLatest() },
+    capabilityProfile,
     timestamp: Date.now(),
   };
 }
@@ -233,6 +244,18 @@ export function buildPrometheusMetrics(providers: SnapshotProviders): string {
   lines.push('# HELP lcm_ux_assemble_total Total assemble count');
   lines.push('# TYPE lcm_ux_assemble_total counter');
   lines.push(`lcm_ux_assemble_total ${uxTotal} ${ts}`);
+
+  // 能力档次指标
+  try {
+    const { getCurrentProfile } = require('./capability-profiles.js');
+    const profile = getCurrentProfile();
+    lines.push('# HELP lcm_capability_profile_overhead Estimated overhead (1-10) of current capability profile');
+    lines.push('# TYPE lcm_capability_profile_overhead gauge');
+    lines.push(`lcm_capability_profile_overhead ${profile.estimatedOverhead} ${ts}`);
+    lines.push('# HELP lcm_capability_profile_enabled_apis Number of enabled gm-pro APIs in current profile');
+    lines.push('# TYPE lcm_capability_profile_enabled_apis gauge');
+    lines.push(`lcm_capability_profile_enabled_apis ${profile.enabledApis.length} ${ts}`);
+  } catch { /* capability-profiles not available */ }
 
   return lines.join('\n') + '\n';
 }
@@ -436,14 +459,50 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
       }
 
       server = createServer((req: IncomingMessage, res: ServerResponse) => {
-        // 仅允许 GET
+        const url = req.url ?? '';
+
+        // 能力档次控制端点（支持 GET 查看 + POST 设置）
+        if (url === '/internal/capability-profile' || url.startsWith('/internal/capability-profile?')) {
+          if (req.method === 'GET') {
+            try {
+              const { getCurrentProfile, listProfiles } = require('./capability-profiles.js');
+              const current = getCurrentProfile();
+              const profiles = listProfiles();
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ current, profiles }));
+            } catch (err) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: String(err) }));
+            }
+            return;
+          }
+          if (req.method === 'POST') {
+            // 读取请求体
+            let body = '';
+            req.on('data', (chunk) => { body += chunk; if (body.length > 1024) req.destroy(); });
+            req.on('end', () => {
+              try {
+                const { id } = JSON.parse(body);
+                const { setCurrentProfile } = require('./capability-profiles.js');
+                const profile = setCurrentProfile(id);
+                getGlobalLogger().info(`[dashboard-snapshot] capability profile set to ${id}`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, current: profile }));
+              } catch (err) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: String(err) }));
+              }
+            });
+            return;
+          }
+        }
+
+        // 非 GET 请求（能力档次端点除外）拒绝
         if (req.method !== 'GET') {
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           res.end('Not Found');
           return;
         }
-
-        const url = req.url ?? '';
 
         if (url === '/internal/snapshot') {
           try {

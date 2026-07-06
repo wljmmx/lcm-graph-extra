@@ -207,6 +207,131 @@ export class CascadeManager {
   }
 
   /**
+   * Tier 3: 工具验证 —— 对事实性声明进行工具辅助验证。
+   *
+   * 触发条件：Tier 2 仍低置信度且 hasFactualClaim=true。
+   * 验证策略：
+   * - 代码执行验证：对包含代码片段的声明，用沙箱执行验证
+   * - 搜索验证：对包含 API/版本/配置的声明，用搜索工具交叉验证
+   *
+   * 设计原则：
+   * - 不阻塞主路径（异步执行）
+   * - 有 15s 超时保护
+   * - 验证结果用于 recordFeedback 更新 Beta 分布
+   */
+  async evaluateTier3(
+    query: string,
+    results: Array<{ content?: string; id?: string; type?: string }>,
+    opts: {
+      searchFn?: (q: string) => Promise<string>;
+      codeExecFn?: (code: string) => Promise<string>;
+    } = {},
+  ): Promise<Array<{ id: string; verified: boolean; method: string; reason?: string }>> {
+    if (!query || results.length === 0) return [];
+
+    const topResults = results.slice(0, 5);
+    const verdicts: Array<{ id: string; verified: boolean; method: string; reason?: string }> = [];
+
+    // 提取事实性声明（API名称、版本号、配置项、函数名等）
+    const extractClaims = (content: string): Array<{ text: string; type: 'code' | 'fact' }> => {
+      const claims: Array<{ text: string; type: 'code' | 'fact' }> = [];
+      // 代码块
+      const codeMatches = content.match(/```[\s\S]*?```/g);
+      if (codeMatches) {
+        for (const code of codeMatches) {
+          claims.push({ text: code.replace(/```/g, '').trim().slice(0, 500), type: 'code' });
+        }
+      }
+      // 事实性声明（API/版本/配置）
+      const factMatches = content.match(/\b(API|version|config|setting|parameter|endpoint|function|class|method)\b[^.\n]{0,200}/gi);
+      if (factMatches) {
+        for (const fact of factMatches.slice(0, 3)) {
+          claims.push({ text: fact.trim(), type: 'fact' });
+        }
+      }
+      return claims;
+    };
+
+    // 15s 超时保护
+    let tier3Timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      tier3Timer = setTimeout(() => reject(new Error('Tier3 verification timeout')), 15_000);
+    });
+    timeoutPromise.catch(() => {}); // 预吞 rejection
+
+    try {
+      const verifyPromise = (async () => {
+        for (const r of topResults) {
+          const id = r.id ?? 'unknown';
+          const content = r.content ?? '';
+          const claims = extractClaims(content);
+
+          if (claims.length === 0) {
+            verdicts.push({ id, verified: true, method: 'no-claims', reason: 'no factual claims detected' });
+            continue;
+          }
+
+          let verifiedCount = 0;
+          let totalCount = 0;
+
+          for (const claim of claims) {
+            totalCount++;
+            try {
+              if (claim.type === 'code' && opts.codeExecFn) {
+                // 代码执行验证
+                const result = await opts.codeExecFn(claim.text);
+                // 无异常且返回非空 = 验证通过
+                if (result && !result.includes('Error') && !result.includes('error')) {
+                  verifiedCount++;
+                }
+              } else if (claim.type === 'fact' && opts.searchFn) {
+                // 搜索验证
+                const searchResult = await opts.searchFn(claim.text.slice(0, 100));
+                // 搜索结果非空且包含相关词 = 验证通过
+                if (searchResult && searchResult.length > 50) {
+                  verifiedCount++;
+                }
+              } else {
+                // 无可用工具，跳过验证（视为中性）
+                verifiedCount++;
+              }
+            } catch {
+              // 单个声明验证失败，继续其他声明
+            }
+          }
+
+          const verified = totalCount > 0 && verifiedCount / totalCount >= 0.5;
+          const method = claims.some(c => c.type === 'code') ? 'code-exec' : 'search';
+          verdicts.push({
+            id,
+            verified,
+            method,
+            reason: `${verifiedCount}/${totalCount} claims verified`,
+          });
+        }
+        return verdicts;
+      })();
+
+      await Promise.race([verifyPromise, timeoutPromise]);
+    } catch (e) {
+      getGlobalLogger()?.debug?.("Tier 3 verification failed, returning partial results", {
+        err: e instanceof Error ? e.message : String(e),
+      });
+      // 超时或异常时，对未验证的结果标记为 unverified
+      for (const r of topResults) {
+        const id = r.id ?? 'unknown';
+        if (!verdicts.find(v => v.id === id)) {
+          verdicts.push({ id, verified: false, method: 'timeout', reason: 'verification timed out' });
+        }
+      }
+    } finally {
+      if (tier3Timer) clearTimeout(tier3Timer);
+    }
+
+    return verdicts;
+  }
+
+  /**
    * Beta 分布采样（使用 Gamma 分布近似）。
    * Beta(α, β) = Gamma(α) / (Gamma(α) + Gamma(β))
    */

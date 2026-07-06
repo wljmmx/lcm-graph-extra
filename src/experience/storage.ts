@@ -406,6 +406,45 @@ export class ExperienceStorage {
   }
 
   /**
+   * S-11': 按概念重叠查找关联节点（不建边，供 gm-pro linkNodes 调用）
+   *
+   * @param experienceId 当前经验 ID（排除自身）
+   * @param concepts 相关概念关键词列表
+   * @param maxResults 最多返回多少个节点 ID
+   * @returns 关联节点 ID 列表
+   */
+  async findRelatedByConcepts(
+    experienceId: string,
+    concepts: string[],
+    maxResults: number = 3,
+  ): Promise<string[]> {
+    if (!experienceId || !Array.isArray(concepts) || concepts.length === 0) return [];
+    const lowerConcepts = concepts.map((c) => c.toLowerCase());
+    const result = await this.adapter.query<{ id: string }>(
+      `
+        MATCH (other:${LABEL})
+        WHERE other.status = 'DISTILLED'
+          AND other.id <> $id
+          AND other.relatedConcepts IS NOT NULL
+          AND size(other.relatedConcepts) > 0
+        WITH other,
+             [c IN split(toLower(other.relatedConcepts), ',') WHERE c IN $concepts] AS overlap
+        WHERE size(overlap) >= 1
+        WITH other, size(overlap) AS overlapScore
+        ORDER BY overlapScore DESC, other.relevanceScore DESC
+        LIMIT $maxResults
+        RETURN other.id AS id
+      `,
+      {
+        id: experienceId,
+        concepts: lowerConcepts,
+        maxResults: Math.trunc(maxResults),
+      },
+    );
+    return (result || []).map((r: any) => r.id).filter(Boolean);
+  }
+
+  /**
    * 获取所有 PENDING 经验的原始记录（供 dreaming/cron 批量总结）
    */
   async fetchPending(limit: number = 200): Promise<PendingRow[]> {

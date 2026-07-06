@@ -4,7 +4,7 @@
  * 设计：
  * - graph-memory-pro 作为 OpenClaw extension 通过 extensions 目录安装管理
  * - 支持的扩展 API：judgeRecall / upsertFeedback / getNodesByTimeRange /
- *   evolveNode / getGraphHealth
+ *   evolveNode / getGraphHealth / consolidateBuffer / linkNodes / markDirty / incrementalMaintain
  * - 所有调用采用 "优先 gm-pro → 失败/不可用降级到现有 Cypher/本地实现" 模式
  * - 单一来源避免散落 try-catch，提供统一日志与遥测
  *
@@ -122,6 +122,16 @@ export async function withGmProFallback<T>(
   const label = opts.label ?? apiName;
 
   try {
+    // 能力档次检查：如果当前档次未启用该 API，直接走 fallback
+    try {
+      const { isApiEnabled } = await import('../capability-profiles.js');
+      if (!isApiEnabled(apiName as any)) {
+        return await fallbackFn();
+      }
+    } catch {
+      // capability-profiles 模块不可用时，不阻止调用（向后兼容）
+    }
+
     const available = await probeGmPro();
     if (!available || !_gmProMod) {
       return await fallbackFn();
@@ -214,6 +224,53 @@ export interface GraphHealthSnapshot {
   avgQueryLatencyMs?: number;
   errorRate?: number;
   details?: Record<string, unknown>;
+}
+
+/** consolidateBuffer 入参：将情节缓冲中的节点整合到全局图谱（S-9） */
+export interface ConsolidateBufferParams {
+  nodes: GmNode[];
+  sessionId?: string;
+}
+
+/** consolidateBuffer 出参：成功整合的节点 ID 列表 */
+export interface ConsolidateBufferResult {
+  consolidatedIds: string[];
+  skippedIds?: string[];
+  reason?: string;
+}
+
+/** linkNodes 入参：创建语义链接（S-11 Zettelkasten） */
+export interface LinkNodesParams {
+  fromId: string;
+  toId: string;
+  type: string; // e.g. 'RELATED_TO' | 'DERIVED_FROM' | 'EVOLVED_FROM'
+  instruction?: string;
+}
+
+/** linkNodes 出参 */
+export interface LinkNodesResult {
+  created: boolean;
+  edgeId?: string;
+  reason?: string;
+}
+
+/** markDirty 入参：标记节点脏数据，触发增量维护（gm-pro v2.2.1） */
+export interface MarkDirtyParams {
+  nodeIds: string[];
+  reason?: string;
+}
+
+/** incrementalMaintain 入参：增量维护（gm-pro v2.2.1） */
+export interface IncrementalMaintainParams {
+  nodeIds?: string[]; // 为空则处理所有 dirty 节点
+  maxBatchSize?: number;
+}
+
+/** incrementalMaintain 出参 */
+export interface IncrementalMaintainResult {
+  processedCount: number;
+  remainingCount: number;
+  durationMs?: number;
 }
 
 // ──────────────────────────────────────────────────────────────────

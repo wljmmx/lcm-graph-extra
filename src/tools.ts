@@ -1301,7 +1301,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             // 失败降级到原 Cypher 直接 SET（保留原行为）
             const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
             type EvolveResult = { evolved: boolean; previousState?: string; newState?: string; reason?: string } | null;
-            let gmProAffected = 0;
+            const gmProEvolvedSet = new Set<string>(); // 已成功 evolve 的节点 ID（去重）
             for (const nodeId of nodeIds) {
               const result = await withGmProFallback<EvolveResult>(
                 'evolveNode',
@@ -1317,11 +1317,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 async () => null, // fallback 不做（由后续 Cypher 处理）
                 { label: 'G-10 evolveNode' },
               );
-              if (result?.evolved) gmProAffected++;
+              if (result?.evolved) gmProEvolvedSet.add(nodeId);
             }
 
-            // Fallback: Cypher 直接 SET（gm-pro 不可用或 evolveNode 失败的节点）
-            if (gmProAffected < nodeIds.length) {
+            // Fallback: Cypher 直接 SET（仅处理 gm-pro 未成功的节点，避免双重处理）
+            const remainingIds = nodeIds.filter((id: string) => !gmProEvolvedSet.has(id));
+            if (remainingIds.length > 0) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
@@ -1334,12 +1335,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                      n.relevanceScore = 0,
                      n.pagerank = 0
                  RETURN count(n) AS cnt`,
-                { ids: nodeIds },
+                { ids: remainingIds },
               );
-              affected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
-              affected = Math.max(affected, gmProAffected);
+              const cypherAffected = result.records[0]?.get("cnt")?.toNumber() ?? 0;
+              affected = gmProEvolvedSet.size + cypherAffected; // 精确求和，不重复计数
             } else {
-              affected = gmProAffected;
+              affected = gmProEvolvedSet.size;
             }
           } else {
             // Soft: reduce weight (relevanceScore * 0.3, pagerank * 0.3)
