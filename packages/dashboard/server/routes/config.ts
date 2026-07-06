@@ -365,4 +365,35 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       return { ok: false, error: `无法连接插件 snapshot 服务: ${msg}` };
     }
   });
+
+  // v1.2.0-5: GET /api/capability-profile/recommend —— 硬件资源自动推荐（代理到插件 snapshot）
+  app.get('/api/capability-profile/recommend', async (req, reply) => {
+    const SNAPSHOT_URL = process.env.PLUGIN_SNAPSHOT_URL ?? 'http://127.0.0.1:7423';
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const resp = await fetch(`${SNAPSHOT_URL}/internal/capability-profile/recommend`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) {
+        reply.code(resp.status);
+        return { ok: false, error: `snapshot server returned ${resp.status}` };
+      }
+      return await resp.json();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, '/api/capability-profile/recommend 代理失败');
+      reply.code(502);
+      return {
+        ok: false,
+        error: `无法连接插件 snapshot 服务: ${msg}`,
+        recommended: null,
+        current: null,
+        reasoning: '插件 snapshot 服务不可用，无法采集硬件资源',
+        hardware: null,
+        alternatives: [],
+      };
+    }
+  });
 }

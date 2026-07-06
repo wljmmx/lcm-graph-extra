@@ -82,3 +82,30 @@ export function fetchCapabilityProfile(): Promise<CapabilityProfileResponse> {
 export function switchCapabilityProfile(id: string): Promise<CapabilityProfileResponse> {
   return apiPost<CapabilityProfileResponse>('/api/capability-profile', { id });
 }
+
+// ─── 能力档次自动推荐（v1.2.0-5）─────────────────────────────────────────
+
+export interface HardwareSnapshot {
+  cpuCores: number;
+  cpuModel: string;
+  totalMemoryMB: number;
+  freeMemoryMB: number;
+  usedMemoryRatio: number;
+  availableMemoryMB: number;
+  nodeVersion: string;
+  platform: string;
+}
+
+export interface ProfileRecommendation {
+  ok?: boolean;
+  error?: string;
+  recommended: string | null;
+  current: string | null;
+  reasoning: string;
+  hardware: HardwareSnapshot | null;
+  alternatives: Array<{ id: string; reason: string }>;
+}
+
+export function fetchProfileRecommendation(): Promise<ProfileRecommendation> {
+  return apiGet<ProfileRecommendation>('/api/capability-profile/recommend');
+}

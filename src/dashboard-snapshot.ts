@@ -19,6 +19,8 @@
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { getGlobalLogger } from './utils/logger.js';
+// v1.2.0-1/3: 直方图与业务指标（用于 Prometheus /metrics 暴露）
+import { latencyHistograms, businessMetrics } from './health-metrics.js';
 
 // v1.0.1-1/4: Basic Auth + IP 白名单配置（与 dashboard 共用 DASHBOARD_AUTH）
 interface SnapshotAuthConfig {
@@ -90,6 +92,56 @@ function sendUnauthorized(res: ServerResponse): void {
 function sendForbidden(res: ServerResponse): void {
   res.writeHead(403, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: false, error: 'IP not allowed' }));
+}
+
+// v1.2.0-4: 轻量级内存速率限制器（滑动窗口）
+// snapshot server 使用 node:http，不依赖 fastify 插件，自实现 token bucket。
+// 配置：SNAPSHOT_RATE_LIMIT_MAX（每窗口最大请求数，默认 60）
+//       SNAPSHOT_RATE_LIMIT_WINDOW（窗口秒数，默认 60）
+interface RateLimitEntry {
+  count: number;
+  windowStart: number;
+}
+const rateLimitMap = new Map<string, RateLimitEntry>();
+const RATE_LIMIT_MAX = Number(process.env.SNAPSHOT_RATE_LIMIT_MAX) || 60;
+const RATE_LIMIT_WINDOW_MS = (Number(process.env.SNAPSHOT_RATE_LIMIT_WINDOW) || 60) * 1000;
+// 定期清理过期条目（每 5 分钟），防止内存泄漏
+let lastCleanupTs = 0;
+function checkRateLimit(ip: string): { allowed: boolean; remaining: number; resetIn: number } {
+  const now = Date.now();
+  // 惰性清理：每 5 分钟清理一次过期条目
+  if (now - lastCleanupTs > 5 * 60 * 1000) {
+    for (const [key, entry] of rateLimitMap) {
+      if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+        rateLimitMap.delete(key);
+      }
+    }
+    lastCleanupTs = now;
+  }
+  let entry = rateLimitMap.get(ip);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    // 新窗口
+    entry = { count: 0, windowStart: now };
+    rateLimitMap.set(ip, entry);
+  }
+  entry.count++;
+  const remaining = Math.max(0, RATE_LIMIT_MAX - entry.count);
+  const resetIn = Math.max(0, RATE_LIMIT_WINDOW_MS - (now - entry.windowStart));
+  return { allowed: entry.count <= RATE_LIMIT_MAX, remaining, resetIn };
+}
+function sendTooManyRequests(res: ServerResponse, remaining: number, resetIn: number): void {
+  res.writeHead(429, {
+    'Content-Type': 'application/json',
+    'X-RateLimit-Remaining': '0',
+    'X-RateLimit-Reset': String(Math.ceil(resetIn / 1000)),
+    'Retry-After': String(Math.ceil(resetIn / 1000)),
+  });
+  res.end(JSON.stringify({
+    ok: false,
+    error: 'Too Many Requests',
+    message: `请求频率超限：每 ${RATE_LIMIT_WINDOW_MS / 1000}s 内最多 ${RATE_LIMIT_MAX} 次。请稍后重试。`,
+    retryAfter: Math.ceil(resetIn / 1000),
+  }));
 }
 
 /** Dashboard 快照聚合数据结构 */
@@ -316,6 +368,68 @@ export function buildPrometheusMetrics(providers: SnapshotProviders): string {
   lines.push('# HELP lcm_ux_assemble_total Total assemble count');
   lines.push('# TYPE lcm_ux_assemble_total counter');
   lines.push(`lcm_ux_assemble_total ${uxTotal} ${ts}`);
+
+  // v1.2.0-1: 延迟直方图（summary 类型，暴露 P50/P90/P95/P99 + avg + count）
+  // Prometheus summary 适合百分位场景；histogram 类型需要 bucket 边界，我们用滑动窗口采样，
+  // 不预定义 bucket，因此用 summary 暴露 quantile 标签。
+  const histGroups: Array<{ name: string; help: string; hist: typeof latencyHistograms.assemble }> = [
+    { name: 'lcm_retrieval_assemble_ms', help: 'Assemble total duration latency (ms)', hist: latencyHistograms.assemble },
+    { name: 'lcm_retrieval_engine_l2_qmd_ms', help: 'L2 QMD engine retrieval latency (ms)', hist: latencyHistograms.l2_qmd },
+    { name: 'lcm_retrieval_engine_l3_graph_ms', help: 'L3 Graph engine retrieval latency (ms)', hist: latencyHistograms.l3_graph },
+    { name: 'lcm_retrieval_engine_l4_experience_ms', help: 'L4 Experience engine retrieval latency (ms)', hist: latencyHistograms.l4_experience },
+  ];
+  for (const g of histGroups) {
+    const stats = g.hist.getStats();
+    lines.push(`# HELP ${g.name} ${g.help}`);
+    lines.push(`# TYPE ${g.name} summary`);
+    if (stats.count > 0) {
+      lines.push(`${g.name}{quantile="0.5"} ${stats.p50} ${ts}`);
+      lines.push(`${g.name}{quantile="0.9"} ${stats.p90} ${ts}`);
+      lines.push(`${g.name}{quantile="0.95"} ${stats.p95} ${ts}`);
+      lines.push(`${g.name}{quantile="0.99"} ${stats.p99} ${ts}`);
+      lines.push(`${g.name}_sum ${Math.round(stats.avg * stats.count)} ${ts}`);
+      lines.push(`${g.name}_count ${stats.count} ${ts}`);
+      // 额外暴露 min/max 作为 gauge（非标准 summary 字段，便于 Dashboard 直读）
+      lines.push(`# HELP ${g.name}_min Min latency (ms)`);
+      lines.push(`# TYPE ${g.name}_min gauge`);
+      lines.push(`${g.name}_min ${stats.min} ${ts}`);
+      lines.push(`# HELP ${g.name}_max Max latency (ms)`);
+      lines.push(`# TYPE ${g.name}_max gauge`);
+      lines.push(`${g.name}_max ${stats.max} ${ts}`);
+    } else {
+      // 无采样时输出零值，保持指标 schema 稳定
+      lines.push(`${g.name}{quantile="0.5"} 0 ${ts}`);
+      lines.push(`${g.name}{quantile="0.9"} 0 ${ts}`);
+      lines.push(`${g.name}{quantile="0.95"} 0 ${ts}`);
+      lines.push(`${g.name}{quantile="0.99"} 0 ${ts}`);
+      lines.push(`${g.name}_sum 0 ${ts}`);
+      lines.push(`${g.name}_count 0 ${ts}`);
+    }
+  }
+
+  // v1.2.0-3: 业务指标 —— 经验质量分布 / TTL 命中率 / 蒸馏成功率
+  const biz = businessMetrics.getSummary();
+  lines.push('# HELP lcm_exp_quality_count Experience quality distribution by bucket (low/medium/high)');
+  lines.push('# TYPE lcm_exp_quality_count gauge');
+  lines.push(`lcm_exp_quality_count{bucket="low"} ${biz.expQuality.low} ${ts}`);
+  lines.push(`lcm_exp_quality_count{bucket="medium"} ${biz.expQuality.medium} ${ts}`);
+  lines.push(`lcm_exp_quality_count{bucket="high"} ${biz.expQuality.high} ${ts}`);
+
+  lines.push('# HELP lcm_ttl_hit_rate TTL cache hit rate (0-1)');
+  lines.push('# TYPE lcm_ttl_hit_rate gauge');
+  lines.push(`lcm_ttl_hit_rate ${biz.ttlHitRate.toFixed(4)} ${ts}`);
+  lines.push('# HELP lcm_ttl_accesses_total TTL cache total accesses (hits + misses)');
+  lines.push('# TYPE lcm_ttl_accesses_total counter');
+  lines.push(`lcm_ttl_accesses_total{result="hit"} ${biz.ttlHits} ${ts}`);
+  lines.push(`lcm_ttl_accesses_total{result="miss"} ${biz.ttlMisses} ${ts}`);
+
+  lines.push('# HELP lcm_distill_success_rate Distill success rate (0-1)');
+  lines.push('# TYPE lcm_distill_success_rate gauge');
+  lines.push(`lcm_distill_success_rate ${biz.distillSuccessRate.toFixed(4)} ${ts}`);
+  lines.push('# HELP lcm_distill_total Total distill operations');
+  lines.push('# TYPE lcm_distill_total counter');
+  lines.push(`lcm_distill_total{result="success"} ${biz.distillSuccess} ${ts}`);
+  lines.push(`lcm_distill_total{result="failure"} ${biz.distillFailure} ${ts}`);
 
   // 能力档次指标
   try {
@@ -547,6 +661,18 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           return;
         }
 
+        // v1.2.0-4: 速率限制（在 IP 白名单之后、Auth 之前，按客户端 IP 限流）
+        // /internal/health 豁免（用于存活探测和 stale instance 检测）
+        if (url !== '/internal/health') {
+          const clientIp = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0].trim() || remoteAddr || 'unknown';
+          const rl = checkRateLimit(clientIp);
+          if (!rl.allowed) {
+            getGlobalLogger().warn('[dashboard-snapshot] rate limit exceeded', { ip: clientIp });
+            sendTooManyRequests(res, rl.remaining, rl.resetIn);
+            return;
+          }
+        }
+
         // v1.0.1-3: /internal/shutdown 改为 POST + token 验证（必须在 Auth 和方法检查之前）
         if (url === '/internal/shutdown') {
           if (req.method !== 'POST') {
@@ -619,6 +745,22 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
                 res.end(JSON.stringify({ ok: false, error: String(err) }));
               }
             });
+            return;
+          }
+        }
+
+        // v1.2.0-5: 能力档次自动推荐（基于硬件资源）
+        if (url === '/internal/capability-profile/recommend' || url.startsWith('/internal/capability-profile/recommend?')) {
+          if (req.method === 'GET') {
+            try {
+              const { recommendProfileByHardware } = require('./capability-profiles.js');
+              const recommendation = recommendProfileByHardware();
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(recommendation));
+            } catch (err) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: String(err) }));
+            }
             return;
           }
         }

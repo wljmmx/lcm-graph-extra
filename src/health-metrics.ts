@@ -152,6 +152,12 @@ export class HealthMetricsCollector {
     // 非法 tier 值忽略（不静默归入 high）
     this.dirtySinceLastPersist = true;
 
+    // v1.2.0-1: 同步写入延迟直方图（用于 Prometheus P50/P90/P95/P99 暴露）
+    latencyHistograms.assemble.observe(assembleMs);
+    latencyHistograms.l2_qmd.observe(l2Ms);
+    latencyHistograms.l3_graph.observe(l3Ms);
+    latencyHistograms.l4_experience.observe(l4Ms);
+
     // 若已有 DB 初始化，立即把更新后的快照写回 DB（保证内存与 DB 一致）
     if (this.dbInitialized && this.db) {
       this.persistToDb({ ...latest }).catch(() => { /* non-fatal */ });
@@ -337,8 +343,9 @@ export class HealthMetricsCollector {
         snapshot.tierHigh,
       );
 
-      // 清理 7 天前的数据
-      const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      // v1.2.0-2: 健康历史保留期可配置（默认 30 天）
+      const retentionDays = Number(process.env.HEALTH_METRICS_RETENTION_DAYS) || 30;
+      const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
       this.db.prepare('DELETE FROM health_metrics WHERE ts < ?').run(cutoff);
     } catch (e) {
       // DB 写入失败不影响主流程
@@ -381,3 +388,157 @@ export class HealthMetricsCollector {
 
 // 全局单例
 export const healthMetrics = new HealthMetricsCollector();
+
+// ---------------------------------------------------------------------------
+// v1.2.0-1: 延迟直方图（P50/P90/P95/P99）—— Prometheus histogram 指标
+// ---------------------------------------------------------------------------
+
+/**
+ * 轻量延迟直方图 —— 滑动窗口保留最近 N 次采样，计算百分位。
+ * 不依赖外部库，纯内存计算。
+ */
+export class LatencyHistogram {
+  private samples: number[] = [];
+  private readonly maxSamples: number;
+
+  constructor(maxSamples = 500) {
+    this.maxSamples = maxSamples;
+  }
+
+  /** 记录一次延迟采样（毫秒） */
+  observe(latencyMs: number): void {
+    if (!Number.isFinite(latencyMs) || latencyMs < 0) return;
+    this.samples.push(latencyMs);
+    if (this.samples.length > this.maxSamples) {
+      this.samples.shift();
+    }
+  }
+
+  /** 计算百分位（0-100） */
+  percentile(p: number): number {
+    if (this.samples.length === 0) return 0;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    const idx = Math.ceil((p / 100) * sorted.length) - 1;
+    return sorted[Math.max(0, Math.min(idx, sorted.length - 1))];
+  }
+
+  /** 获取统计摘要 */
+  getStats(): { count: number; avg: number; p50: number; p90: number; p95: number; p99: number; min: number; max: number } {
+    if (this.samples.length === 0) {
+      return { count: 0, avg: 0, p50: 0, p90: 0, p95: 0, p99: 0, min: 0, max: 0 };
+    }
+    const sum = this.samples.reduce((a, b) => a + b, 0);
+    return {
+      count: this.samples.length,
+      avg: sum / this.samples.length,
+      p50: this.percentile(50),
+      p90: this.percentile(90),
+      p95: this.percentile(95),
+      p99: this.percentile(99),
+      min: Math.min(...this.samples),
+      max: Math.max(...this.samples),
+    };
+  }
+
+  /** 重置（测试用） */
+  reset(): void {
+    this.samples = [];
+  }
+}
+
+/** 全局延迟直方图 —— 分别跟踪 assemble / L2 / L3 / L4 */
+export const latencyHistograms = {
+  assemble: new LatencyHistogram(),
+  l2_qmd: new LatencyHistogram(),
+  l3_graph: new LatencyHistogram(),
+  l4_experience: new LatencyHistogram(),
+};
+
+// ---------------------------------------------------------------------------
+// v1.2.0-3: 业务指标 —— 经验质量分布 / TTL 命中率
+// ---------------------------------------------------------------------------
+
+/**
+ * 业务指标收集器 —— 跟踪经验质量分布和 TTL 命中率。
+ * 仅内存态，通过 Prometheus /metrics 端点暴露。
+ */
+export class BusinessMetricsCollector {
+  // 经验质量分布：低/中/高三个区间的计数
+  private expQualityBuckets = { low: 0, medium: 0, high: 0 };
+  // TTL 命中/未命中
+  private ttlHits = 0;
+  private ttlMisses = 0;
+  // 经验蒸馏成功/失败
+  private distillSuccess = 0;
+  private distillFailure = 0;
+
+  /** 记录经验质量分（0-1） */
+  recordExperienceQuality(score: number): void {
+    if (!Number.isFinite(score)) return;
+    if (score < 0.4) this.expQualityBuckets.low++;
+    else if (score < 0.7) this.expQualityBuckets.medium++;
+    else this.expQualityBuckets.high++;
+  }
+
+  /** 记录 TTL 命中/未命中 */
+  recordTtlAccess(hit: boolean): void {
+    if (hit) this.ttlHits++;
+    else this.ttlMisses++;
+  }
+
+  /** 记录蒸馏结果 */
+  recordDistill(success: boolean): void {
+    if (success) this.distillSuccess++;
+    else this.distillFailure++;
+  }
+
+  /** 获取经验质量分布 */
+  getExpQualityDistribution(): { low: number; medium: number; high: number } {
+    return { ...this.expQualityBuckets };
+  }
+
+  /** 获取 TTL 命中率 */
+  getTtlHitRate(): number {
+    const total = this.ttlHits + this.ttlMisses;
+    return total === 0 ? 0 : this.ttlHits / total;
+  }
+
+  /** 获取蒸馏成功率 */
+  getDistillSuccessRate(): number {
+    const total = this.distillSuccess + this.distillFailure;
+    return total === 0 ? 0 : this.distillSuccess / total;
+  }
+
+  /** 获取全部业务指标摘要 */
+  getSummary(): {
+    expQuality: { low: number; medium: number; high: number };
+    ttlHitRate: number;
+    ttlHits: number;
+    ttlMisses: number;
+    distillSuccessRate: number;
+    distillSuccess: number;
+    distillFailure: number;
+  } {
+    return {
+      expQuality: this.getExpQualityDistribution(),
+      ttlHitRate: this.getTtlHitRate(),
+      ttlHits: this.ttlHits,
+      ttlMisses: this.ttlMisses,
+      distillSuccessRate: this.getDistillSuccessRate(),
+      distillSuccess: this.distillSuccess,
+      distillFailure: this.distillFailure,
+    };
+  }
+
+  /** 重置（测试用） */
+  reset(): void {
+    this.expQualityBuckets = { low: 0, medium: 0, high: 0 };
+    this.ttlHits = 0;
+    this.ttlMisses = 0;
+    this.distillSuccess = 0;
+    this.distillFailure = 0;
+  }
+}
+
+/** 全局业务指标单例 */
+export const businessMetrics = new BusinessMetricsCollector();

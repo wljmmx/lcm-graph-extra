@@ -12,6 +12,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import rateLimit from '@fastify/rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -74,6 +75,36 @@ async function main(): Promise<void> {
     },
     credentials: true,
   });
+
+  // v1.2.0-4: Rate Limiting —— 防止暴力枚举 / 滥用 MCP 写操作
+  // 配置：DASHBOARD_RATE_LIMIT_MAX（每窗口最大请求数，默认 100）
+  //       DASHBOARD_RATE_LIMIT_WINDOW（窗口秒数，默认 60）
+  // 健康检查 /api/ping 豁免（避免影响监控探测）
+  const rlMax = Number(process.env.DASHBOARD_RATE_LIMIT_MAX) || 100;
+  const rlWindow = (Number(process.env.DASHBOARD_RATE_LIMIT_WINDOW) || 60) + ' seconds';
+  await app.register(rateLimit, {
+    max: rlMax,
+    timeWindow: rlWindow,
+    keyGenerator: (req) => {
+      // 优先用真实客户端 IP（穿透代理时读 x-forwarded-for 首段）
+      const xff = req.headers['x-forwarded-for'];
+      if (typeof xff === 'string' && xff.length > 0) {
+        return xff.split(',')[0].trim();
+      }
+      return req.ip;
+    },
+    // 健康检查豁免，避免被限流影响存活探测
+    allowList: (req) => {
+      const path = req.url.split('?')[0];
+      return path === '/api/ping' || path === '/ping';
+    },
+    errorResponseBuilder: (_req, context) => ({
+      statusCode: 429,
+      error: 'Too Many Requests',
+      message: `请求频率超限：每 ${context.after} 内最多 ${context.max} 次。请稍后重试。`,
+    }),
+  });
+  app.log.info({ max: rlMax, window: rlWindow }, 'Rate Limit 已启用');
 
   // 生产模式：serve 前端构建产物 dist-client
   const clientDist = resolve(__dirname, '..', 'dist-client');
