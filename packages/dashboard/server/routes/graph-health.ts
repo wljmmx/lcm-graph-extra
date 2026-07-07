@@ -31,20 +31,49 @@ export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<v
     // 多打一次 /internal/snapshot，插件不可达时把响应延迟拉到 5s+。
     // 现改为直接 fetch /internal/graph-health，失败时降级返回 unknown。
     const PLUGIN_SNAPSHOT_URL = process.env.PLUGIN_SNAPSHOT_URL ?? 'http://127.0.0.1:7423';
+    const targetUrl = `${PLUGIN_SNAPSHOT_URL}/internal/graph-health`;
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
-      const resp = await fetch(`${PLUGIN_SNAPSHOT_URL}/internal/graph-health`, {
+      const resp = await fetch(targetUrl, {
         headers: getOutboundAuthHeader(),
         signal: controller.signal,
       });
       clearTimeout(timer);
       if (resp.ok) {
-        const body = await resp.json() as Omit<GraphHealthResponse, 'fetchedAt'>;
-        return reply.send({
-          ...body,
-          fetchedAt: Date.now(),
-        } satisfies GraphHealthResponse);
+        // 健壮性: 校验 Content-Type 为 JSON，避免命中返回 HTML（SPA 兜底/端口被占/代理拦截）
+        const contentType = resp.headers.get('content-type') ?? '';
+        if (!contentType.toLowerCase().includes('application/json')) {
+          // 取前 200 字符帮助定位 HTML 来源（多为 <!DOCTYPE html>）
+          let snippet = '';
+          try { snippet = (await resp.text()).slice(0, 200); } catch { /* ignore */ }
+          req.log.error(
+            { url: targetUrl, status: resp.status, contentType, snippet },
+            'graph-health 响应非 JSON（疑似 PLUGIN_SNAPSHOT_URL 指错或端口被占）',
+          );
+          return reply.send({
+            status: 'unknown',
+            source: 'none',
+            fetchedAt: Date.now(),
+            error: `plugin 响应非 JSON (Content-Type=${contentType || '空'}, status=${resp.status}); 请检查 PLUGIN_SNAPSHOT_URL=${PLUGIN_SNAPSHOT_URL} 是否指向插件 snapshot :7423`,
+          } satisfies GraphHealthResponse);
+        }
+        try {
+          const body = await resp.json() as Omit<GraphHealthResponse, 'fetchedAt'>;
+          return reply.send({
+            ...body,
+            fetchedAt: Date.now(),
+          } satisfies GraphHealthResponse);
+        } catch (parseErr) {
+          // 200 + JSON Content-Type 但 body 仍非法（罕见）
+          req.log.error({ err: String(parseErr) }, 'graph-health JSON 解析失败');
+          return reply.send({
+            status: 'unknown',
+            source: 'none',
+            fetchedAt: Date.now(),
+            error: `plugin 响应 JSON 解析失败: ${String(parseErr)}`,
+          } satisfies GraphHealthResponse);
+        }
       }
       // 插件未实现 /internal/graph-health 端点（旧版本），降级返回 unknown
       return reply.send({
@@ -54,13 +83,13 @@ export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<v
         error: `plugin /internal/graph-health returned ${resp.status}`,
       } satisfies GraphHealthResponse);
     } catch (fetchErr) {
-      // 插件不可达
-      req.log.error({ err: String(fetchErr) }, 'graph-health fetch 失败');
+      // 插件不可达 / 超时
+      req.log.error({ err: String(fetchErr), url: targetUrl }, 'graph-health fetch 失败');
       return reply.send({
         status: 'unknown',
         source: 'none',
         fetchedAt: Date.now(),
-        error: '插件不可达，请查看服务端日志',
+        error: `插件不可达 (${targetUrl}): ${String(fetchErr)}`,
       } satisfies GraphHealthResponse);
     }
   });

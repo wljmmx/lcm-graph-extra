@@ -28,11 +28,25 @@ const mockGetOutboundAuthHeader = vi.mocked(getOutboundAuthHeader);
 
 let app: FastifyInstance;
 
-function makeResp(opts: { ok: boolean; status: number; body?: unknown }) {
+function makeResp(opts: {
+  ok: boolean;
+  status: number;
+  body?: unknown;
+  contentType?: string;
+  textBody?: string;
+}) {
+  const contentType = opts.contentType ?? 'application/json';
   return {
     ok: opts.ok,
     status: opts.status,
+    headers: {
+      get: (name: string) => {
+        if (name.toLowerCase() === 'content-type') return contentType;
+        return null;
+      },
+    },
     json: async () => opts.body ?? {},
+    text: async () => opts.textBody ?? JSON.stringify(opts.body ?? {}),
   };
 }
 
@@ -105,6 +119,25 @@ describe('graph-health 路由', () => {
       expect(body.status).toBe('unknown');
       expect(body.source).toBe('none');
       expect(body.error).toContain('404');
+    });
+
+    it('插件返回 HTML（如 SPA 兜底/端口被占）时应降级返回 status=unknown', async () => {
+      // 真实场景：PLUGIN_SNAPSHOT_URL 指错指向了 dev server，或 :7423 被别的 web 服务占用
+      mockFetch.mockResolvedValueOnce(makeResp({
+        ok: true,
+        status: 200,
+        contentType: 'text/html; charset=utf-8',
+        textBody: '<!DOCTYPE html><html><head><title>App</title></head><body>...</body></html>',
+      }));
+
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health' });
+      const body = resp.json();
+      expect(body.status).toBe('unknown');
+      expect(body.source).toBe('none');
+      // 错误信息应暴露 Content-Type 和 PLUGIN_SNAPSHOT_URL 提示
+      expect(body.error).toContain('text/html');
+      expect(body.error).toContain('PLUGIN_SNAPSHOT_URL');
+      expect(body.fetchedAt).toBeGreaterThan(0);
     });
 
     it('启用 auth 时出站 fetch 应携带 Authorization 头', async () => {
