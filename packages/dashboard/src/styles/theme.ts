@@ -188,7 +188,8 @@ export const echartsBaseOption = {
  *   - 次文本 rgba(255,255,255,0.72) = --color-text-secondary
  *   - 三级 rgba(255,255,255,0.52) = --color-text-tertiary
  *   - 边框 rgba(255,255,255,0.12) = --color-border
- *   - 分隔线 rgba(255,255,255,0.08) = --color-divider
+ *   - 分隔线 rgba(255,255,255,0.08) 直接以字面量给出（tokens.css 不再暴露 --color-divider，
+ *     由 naive-ui common.dividerColor 统一管控）
  */
 export const echartsDarkBaseOption = {
   textStyle: {

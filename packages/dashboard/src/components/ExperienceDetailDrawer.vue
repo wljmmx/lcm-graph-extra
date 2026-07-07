@@ -300,16 +300,10 @@ function close(): void {
 </template>
 
 <style scoped>
+/* font-family / color 由 tokens.css 全局 .mono / .muted 提供，
+   .cell-wrap 亦由全局提供；此处仅保留局部覆盖 */
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-caption);
   word-break: break-all;
-}
-.cell-wrap {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.muted {
-  color: var(--color-text-secondary);
 }
 </style>

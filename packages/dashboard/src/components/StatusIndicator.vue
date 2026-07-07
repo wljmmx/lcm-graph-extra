@@ -81,7 +81,7 @@ const symbol = computed(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 700;
   line-height: 1;
   color: #fff;

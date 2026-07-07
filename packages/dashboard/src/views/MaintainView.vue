@@ -587,7 +587,7 @@ function executeImport(): void {
   justify-content: space-between;
 }
 .muted {
+  /* color 由 tokens.css 全局 .muted 提供，此处仅追加 caption 字号 */
   font-size: var(--fs-caption);
-  color: var(--color-text-secondary);
 }
 </style>

@@ -535,7 +535,7 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
                   </NTag>
                 </NSpace>
               </div>
-              <div v-else class="muted" style="margin-top: 8px; font-size: 12px">
+              <div v-else class="muted" style="margin-top: 8px; font-size: var(--fs-caption)">
                 最近一次 assemble 未触发降级
               </div>
             </template>
@@ -812,7 +812,7 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: var(--fs-caption);
   font-weight: 700;
   line-height: 1;
   color: #fff;

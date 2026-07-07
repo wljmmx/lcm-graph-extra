@@ -213,15 +213,15 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
 
 export async function registerConfigRoutes(app: FastifyInstance): Promise<void> {
   // v1.1.0-1: GET /api/config —— 运行时配置查看（脱敏）
+  // 安全：不向客户端暴露 configPath（绝对路径会泄漏用户名/部署结构）
   app.get('/api/config', async (req, _reply) => {
     try {
       const raw = readRawConfig();
       const redacted = redactSensitive(raw);
-      const configPath = getConfigPath();
+      const configExists = existsSync(getConfigPath());
       return {
         ok: true,
-        configPath,
-        configExists: existsSync(configPath),
+        configExists,
         config: redacted,
       };
     } catch (err) {

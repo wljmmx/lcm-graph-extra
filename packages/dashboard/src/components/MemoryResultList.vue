@@ -166,11 +166,7 @@ const showSkeleton = computed(
 </template>
 
 <style scoped>
-.cell-wrap {
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.5;
-}
+/* .cell-wrap / .mono 已在 tokens.css 全局定义，此处不再重复声明 */
 /* 命中高亮：用 token 色板，支持暗色模式自动适配 */
 .hit {
   background-color: var(--color-bg-highlight);

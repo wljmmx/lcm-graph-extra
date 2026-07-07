@@ -116,15 +116,15 @@ function prettyJson(v: unknown): string {
 <style scoped>
 .log-time {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 .log-tool {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: var(--fs-label);
   font-weight: 600;
 }
 .log-duration {
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 .log-collapse {
   margin-top: 4px;
@@ -133,7 +133,7 @@ function prettyJson(v: unknown): string {
   margin-bottom: 6px;
 }
 .log-section-label {
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 .log-pre {
   margin: 2px 0 0 0;

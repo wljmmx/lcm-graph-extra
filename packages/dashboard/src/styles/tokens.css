@@ -8,66 +8,46 @@
  */
 :root {
   /* ===== 色板 ===== */
-  /* 主色（与 naive-ui primary 对齐） */
+  /* 主色（与 naive-ui primary 对齐；hover 由组件直接引用，pressed/suppl 由 naive-ui 派生） */
   --color-primary: #2080f0;
   --color-primary-hover: #4098fc;
-  --color-primary-pressed: #1060c5;
-  --color-primary-suppl: rgba(32, 128, 240, 0.12);
 
-  /* 语义色（success / warning / error / info） */
+  /* 语义色基色（hover/pressed/suppl 由 naive-ui 派生，CSS 不直接引用） */
   --color-success: #18a058;
-  --color-success-hover: #36ad6a;
   --color-warning: #f0a020;
-  --color-warning-hover: #fcb040;
   --color-danger: #d03050;
-  --color-danger-hover: #de5169;
-  --color-info: #7090c0;
 
   /* 文本（亮色背景） */
   --color-text-primary: #1f2329;
   --color-text-secondary: #4e5969;
   /* #6b7280 对比度 ~4.6:1，满足 WCAG AA 4.5:1（原 #86909c 仅 3.28:1） */
   --color-text-tertiary: #6b7280;
-  --color-text-disabled: #c9cdd4;
 
   /* 背景 */
   --color-bg-base: #ffffff;
-  --color-bg-elevated: #ffffff;
-  --color-bg-overlay: rgba(0, 0, 0, 0.45);
   --color-bg-highlight: #fff3a0; /* 命中高亮（搜索词 mark） */
   --color-bg-hover: rgba(0, 0, 0, 0.025);
 
-  /* 边框 / 分隔线 */
+  /* 边框（分隔线由 naive-ui dividerColor 提供，不暴露 token） */
   --color-border: #e5e6eb;
   --color-border-strong: #c9cdd4;
-  --color-divider: #f2f3f5;
 
   /* ===== 字号层级（4px 基准网格） ===== */
   --fs-caption: 12px; /* 辅助说明、tag */
   --fs-label: 13px; /* 表头、按钮 */
   --fs-body: 14px; /* 正文 */
   --fs-subtitle: 16px; /* 副标题 */
-  --fs-title: 18px; /* 卡片标题 */
   --fs-display: 26px; /* KPI 主数值 */
 
   /* ===== 间距（4px 基准网格） ===== */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 12px;
-  --space-lg: 16px;
-  --space-xl: 24px;
-  --space-2xl: 32px;
 
   /* ===== 圆角 ===== */
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 8px;
   --radius-full: 9999px;
-
-  /* ===== 阴影层级 ===== */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 6px 16px rgba(0, 0, 0, 0.12);
 
   /* ===== 字体栈（中英混排） ===== */
   --font-family-base:
@@ -78,17 +58,8 @@
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
     monospace;
 
-  /* ===== 动效 ===== */
-  --motion-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  /* ===== 动效（base 用于 transition；fast/slow 当前未引用，删除以避免死代码） ===== */
   --motion-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
-  --motion-slow: 320ms cubic-bezier(0.4, 0, 0.2, 1);
-
-  /* ===== z-index 层级 ===== */
-  --z-drawer: 1000;
-  --z-modal: 1100;
-  --z-popover: 1200;
-  --z-message: 1300;
-  --z-notification: 1400;
 }
 
 /* ===== 暗色模式预留（S3 启用） ===== */
@@ -96,16 +67,13 @@
   --color-text-primary: rgba(255, 255, 255, 0.92);
   --color-text-secondary: rgba(255, 255, 255, 0.72);
   --color-text-tertiary: rgba(255, 255, 255, 0.52);
-  --color-text-disabled: rgba(255, 255, 255, 0.38);
 
   --color-bg-base: #18181c;
-  --color-bg-elevated: #1f1f24;
   --color-bg-hover: rgba(255, 255, 255, 0.04);
   --color-bg-highlight: rgba(240, 160, 32, 0.28);
 
   --color-border: rgba(255, 255, 255, 0.12);
   --color-border-strong: rgba(255, 255, 255, 0.2);
-  --color-divider: rgba(255, 255, 255, 0.08);
 }
 
 /* ===== 全局基础样式 ===== */

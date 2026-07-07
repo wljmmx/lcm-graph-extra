@@ -1,62 +1,13 @@
 /**
- * 配置管理 API 封装（v1.1.0-1/2/3/5）。
+ * 配置管理 API 封装（v1.1.0-5）。
  *
- * - GET  /api/config              —— 运行时配置查看（脱敏）
- * - GET  /api/config/schema       —— 配置字段 schema 文档
- * - PATCH /api/config             —— 白名单字段热更新
  * - GET  /api/capability-profile  —— 能力档次查看
  * - POST /api/capability-profile  —— 能力档次切换
+ *
+ * 注：运行时配置 / schema / 热更新相关封装因暂无 UI 消费，已移除，
+ * 后端端点（GET /api/config 等）仍保留，需要时再补回 client 封装。
  */
-import { apiGet, apiPost, apiPatch } from './client';
-
-// ─── 运行时配置 ─────────────────────────────────────────────────────────
-
-export interface RuntimeConfigResponse {
-  ok: boolean;
-  configPath?: string;
-  configExists?: boolean;
-  config: Record<string, unknown>;
-  error?: string;
-}
-
-export function fetchRuntimeConfig(): Promise<RuntimeConfigResponse> {
-  return apiGet<RuntimeConfigResponse>('/api/config');
-}
-
-// ─── 配置 schema 文档 ────────────────────────────────────────────────────
-
-export interface ConfigSchemaField {
-  path: string;
-  type: string;
-  description: string;
-  updatable: boolean;
-  defaultValue?: unknown;
-}
-
-export interface ConfigSchemaResponse {
-  ok: boolean;
-  fields: ConfigSchemaField[];
-  updatablePaths: string[];
-}
-
-export function fetchConfigSchema(): Promise<ConfigSchemaResponse> {
-  return apiGet<ConfigSchemaResponse>('/api/config/schema');
-}
-
-// ─── 配置热更新 ───────────────────────────────────────────────────────────
-
-export interface ConfigPatchResponse {
-  ok: boolean;
-  applied: string[];
-  rejected: Array<{ path: string; reason: string }>;
-  config: Record<string, unknown>;
-  note?: string;
-  error?: string;
-}
-
-export function patchConfig(updates: Record<string, unknown>): Promise<ConfigPatchResponse> {
-  return apiPatch<ConfigPatchResponse>('/api/config', { updates });
-}
+import { apiGet, apiPost } from './client';
 
 // ─── 能力档次 ─────────────────────────────────────────────────────────────
 
@@ -81,31 +32,4 @@ export function fetchCapabilityProfile(): Promise<CapabilityProfileResponse> {
 
 export function switchCapabilityProfile(id: string): Promise<CapabilityProfileResponse> {
   return apiPost<CapabilityProfileResponse>('/api/capability-profile', { id });
-}
-
-// ─── 能力档次自动推荐（v1.2.0-5）─────────────────────────────────────────
-
-export interface HardwareSnapshot {
-  cpuCores: number;
-  cpuModel: string;
-  totalMemoryMB: number;
-  freeMemoryMB: number;
-  usedMemoryRatio: number;
-  availableMemoryMB: number;
-  nodeVersion: string;
-  platform: string;
-}
-
-export interface ProfileRecommendation {
-  ok?: boolean;
-  error?: string;
-  recommended: string | null;
-  current: string | null;
-  reasoning: string;
-  hardware: HardwareSnapshot | null;
-  alternatives: Array<{ id: string; reason: string }>;
-}
-
-export function fetchProfileRecommendation(): Promise<ProfileRecommendation> {
-  return apiGet<ProfileRecommendation>('/api/capability-profile/recommend');
 }
