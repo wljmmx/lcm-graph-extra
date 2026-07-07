@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { redactSensitive } from '../lib/operation-logs';
+import { getOutboundAuthHeader } from '../lib/auth';
 
 // ---------------------------------------------------------------------------
 // 配置文件路径
@@ -309,12 +310,15 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
   });
 
   // v1.1.0-5: GET /api/capability-profile —— 能力档次查看（代理到插件 snapshot）
+  // A1 修复: 插件 GET 返回 { current, profiles } 不含 ok 字段，前端永远走 else 分支
+  //          显示"加载失败"。此处包装 ok:true 后透传，与 POST 行为一致
   app.get('/api/capability-profile', async (req, reply) => {
     const SNAPSHOT_URL = process.env.PLUGIN_SNAPSHOT_URL ?? 'http://127.0.0.1:7423';
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
       const resp = await fetch(`${SNAPSHOT_URL}/internal/capability-profile`, {
+        headers: getOutboundAuthHeader(),
         signal: controller.signal,
       });
       clearTimeout(timer);
@@ -322,7 +326,9 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         reply.code(resp.status);
         return { ok: false, error: `snapshot server returned ${resp.status}` };
       }
-      return await resp.json();
+      const body = await resp.json() as Record<string, unknown>;
+      // 包装 ok:true（插件 GET 不返回 ok 字段，前端 CapabilityProfileResponse 依赖它）
+      return { ok: true, ...body };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ err: msg }, '/api/capability-profile 代理失败');
@@ -348,7 +354,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       const timer = setTimeout(() => controller.abort(), 5000);
       const resp = await fetch(`${SNAPSHOT_URL}/internal/capability-profile`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { ...getOutboundAuthHeader(), 'content-type': 'application/json' },
         body: JSON.stringify({ id: body.id }),
         signal: controller.signal,
       });
@@ -373,6 +379,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 5000);
       const resp = await fetch(`${SNAPSHOT_URL}/internal/capability-profile/recommend`, {
+        headers: getOutboundAuthHeader(),
         signal: controller.signal,
       });
       clearTimeout(timer);

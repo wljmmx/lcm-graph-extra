@@ -93,6 +93,25 @@ export function requireAuthForPath(path: string): boolean {
   return false;
 }
 
+/**
+ * 出站调用鉴权头（B1 修复）。
+ *
+ * 当 DASHBOARD_AUTH 启用时，dashboard 后端对插件 snapshot（:7423）等内部服务的
+ * fetch 调用也需要带上相同的 Basic Auth 凭据，否则插件侧的鉴权中间件会返回 401。
+ *
+ * 用法：
+ *   const headers = { ...getOutboundAuthHeader(), 'content-type': 'application/json' };
+ *   fetch(url, { headers, ... });
+ *
+ * @returns 包含 Authorization 头的对象；未启用鉴权时返回空对象（不污染调用方 headers）
+ */
+export function getOutboundAuthHeader(): Record<string, string> {
+  const cfg = getAuthConfig();
+  if (!cfg.enabled || !cfg.username || !cfg.password) return {};
+  const token = Buffer.from(`${cfg.username}:${cfg.password}`, 'utf-8').toString('base64');
+  return { Authorization: `Basic ${token}` };
+}
+
 export function _resetAuthConfig(): void {
   _config = null;
 }

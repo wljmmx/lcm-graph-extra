@@ -42,10 +42,16 @@ const props = defineProps<{
   show: boolean;
   detail: ExperienceDetail | null;
   detailLoading?: boolean;
+  /** C2 修复: 详情查询失败时展示错误而非"加载中" */
+  detailError?: boolean;
   graph: ExperienceGraph | null;
   graphLoading?: boolean;
+  /** C2 修复: 关联子图查询失败时展示错误 */
+  graphError?: boolean;
   historyPoints: QualityHistoryPoint[];
   historyLoading?: boolean;
+  /** C2 修复: 质量分历史查询失败时展示错误 */
+  historyError?: boolean;
   /** 写操作结果提示（成功/失败信息） */
   opResult?: { ok: boolean; message: string } | null;
 }>();
@@ -148,7 +154,15 @@ function close(): void {
     @update:show="emit('update:show', $event)"
   >
     <NDrawerContent title="经验详情" closable>
-      <NSpin v-if="props.detailLoading && !props.detail" size="small">
+      <NAlert
+        v-if="props.detailError"
+        type="error"
+        :show-icon="true"
+        title="详情加载失败"
+      >
+        详情查询失败（Neo4j 不可达？）。请查看后端日志或稍后重试。
+      </NAlert>
+      <NSpin v-else-if="props.detailLoading && !props.detail" size="small">
         <template #default>加载中…</template>
       </NSpin>
 
@@ -227,7 +241,15 @@ function close(): void {
 
           <!-- G-8 验证历史时间线（MVP 单点） -->
           <NCard title="G-8 验证历史" size="small">
-            <NSpin v-if="props.historyLoading" size="small" />
+            <NAlert
+              v-if="props.historyError"
+              type="error"
+              :show-icon="true"
+              title="验证历史加载失败"
+            >
+              质量分历史查询失败（Neo4j 不可达？）。
+            </NAlert>
+            <NSpin v-else-if="props.historyLoading" size="small" />
             <NTimeline v-else-if="props.historyPoints.length">
               <NTimelineItem
                 v-for="(p, i) in props.historyPoints"
@@ -243,7 +265,15 @@ function close(): void {
 
           <!-- 质量分趋势 mini 折线 -->
           <NCard title="质量分趋势" size="small">
-            <NSpin v-if="props.historyLoading" size="small" />
+            <NAlert
+              v-if="props.historyError"
+              type="error"
+              :show-icon="true"
+              title="质量分趋势加载失败"
+            >
+              质量分历史查询失败（Neo4j 不可达？）。
+            </NAlert>
+            <NSpin v-else-if="props.historyLoading" size="small" />
             <QualityChart
               v-else
               :points="props.historyPoints"
@@ -253,7 +283,15 @@ function close(): void {
 
           <!-- RELATED_TO 关联图谱 -->
           <NCard title="关联图谱（RELATED_TO）" size="small">
-            <NSpin v-if="props.graphLoading" size="small" />
+            <NAlert
+              v-if="props.graphError"
+              type="error"
+              :show-icon="true"
+              title="关联图谱加载失败"
+            >
+              关联子图查询失败（Neo4j 不可达？）。
+            </NAlert>
+            <NSpin v-else-if="props.graphLoading" size="small" />
             <EChart
               v-else-if="props.graph && props.graph.nodes.length"
               :option="graphOption"

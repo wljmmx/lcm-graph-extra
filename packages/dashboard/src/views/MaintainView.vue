@@ -326,7 +326,7 @@ function executeImport(): void {
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">10 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">9 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">

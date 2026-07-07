@@ -1,134 +1,124 @@
 /**
  * graph-health 路由专测
  *
+ * E3 修复: 原 mock 路径错误（../../src/lib/snapshot 应为 ../../server/lib/snapshot），
+ * 且未用 app.inject 真正测试路由，整文件空跑。重写为使用 fastify inject + mock auth。
+ *
  * 验证 /api/graph/health 端点的转发与降级行为
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
 
-// Mock fetch
+// mock auth（graph-health 现在通过 getOutboundAuthHeader 注入出站 auth 头）
+vi.mock('../../server/lib/auth', () => ({
+  getOutboundAuthHeader: vi.fn(() => ({})),
+  isAuthEnabled: vi.fn(() => false),
+  requireAuth: vi.fn((_req, _reply, done) => done()),
+  requireAuthForPath: vi.fn(() => false),
+}));
+
+import { registerGraphHealthRoutes } from '../../server/routes/graph-health';
+import { getOutboundAuthHeader } from '../../server/lib/auth';
+
+// stub fetch（graph-health 路由内部调用 fetch 转发到 :7423）
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-// Mock snapshot lib
-vi.mock('../../src/lib/snapshot', () => ({
-  fetchPluginSnapshot: vi.fn(),
-  PLUGIN_SNAPSHOT_URL: 'http://127.0.0.1:7423',
-}));
+const mockGetOutboundAuthHeader = vi.mocked(getOutboundAuthHeader);
+
+let app: FastifyInstance;
+
+function makeResp(opts: { ok: boolean; status: number; body?: unknown }) {
+  return {
+    ok: opts.ok,
+    status: opts.status,
+    json: async () => opts.body ?? {},
+  };
+}
 
 describe('graph-health 路由', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    mockGetOutboundAuthHeader.mockReturnValue({});
+    app = Fastify({ logger: false });
+    await app.register(registerGraphHealthRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
   });
 
   describe('GET /api/graph/health', () => {
-    it('应转发到插件 :7423/internal/graph-health', async () => {
-      // 验证转发契约
-      const expectedUrl = 'http://127.0.0.1:7423/internal/graph-health';
-      mockFetch.mockResolvedValueOnce({
+    it('应转发到插件 :7423/internal/graph-health 并附加 fetchedAt', async () => {
+      mockFetch.mockResolvedValueOnce(makeResp({
         ok: true,
         status: 200,
-        headers: new Map([['content-type', 'application/json']]),
-        json: async () => ({
+        body: {
           status: 'healthy',
           source: 'gm-pro',
           nodeCount: 100,
           relationshipCount: 500,
           graphAdapterConnected: true,
           details: {},
-        }),
-      });
+        },
+      }));
 
-      const resp = await fetch(expectedUrl);
-      const body = await resp.json();
-      expect(mockFetch).toHaveBeenCalledWith(expectedUrl);
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health' });
+      expect(resp.statusCode).toBe(200);
+      const body = resp.json();
       expect(body.status).toBe('healthy');
       expect(body.source).toBe('gm-pro');
       expect(body.nodeCount).toBe(100);
       expect(body.relationshipCount).toBe(500);
       expect(body.graphAdapterConnected).toBe(true);
+      expect(body.fetchedAt).toBeGreaterThan(0);
+
+      // 验证 fetch 转发到了正确端点
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, opts] = mockFetch.mock.calls[0];
+      expect(url).toBe('http://127.0.0.1:7423/internal/graph-health');
+      expect(opts.method).toBeUndefined(); // GET 不需要 method
+      expect(opts.headers).toEqual({}); // getOutboundAuthHeader 默认返回 {}
     });
 
     it('插件不可达时应降级返回 status=unknown', async () => {
-      // 5s 超时后降级
       mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
-      try {
-        await fetch('http://127.0.0.1:7423/internal/graph-health');
-      } catch {
-        // 降级路径
-        const degraded = {
-          status: 'unknown',
-          source: 'none',
-          error: 'ECONNREFUSED',
-          fetchedAt: Date.now(),
-        };
-        expect(degraded.status).toBe('unknown');
-        expect(degraded.source).toBe('none');
-        expect(degraded.error).toBeTruthy();
-      }
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health' });
+      const body = resp.json();
+      expect(body.status).toBe('unknown');
+      expect(body.source).toBe('none');
+      expect(body.error).toBeTruthy();
+      expect(body.fetchedAt).toBeGreaterThan(0);
     });
 
-    it('gm-pro 不可用时应降级到 local graphAdapter 状态', async () => {
-      // resolveGraphHealth fallback
-      mockFetch.mockResolvedValueOnce({
+    it('插件返回非 200 时应降级返回 status=unknown', async () => {
+      mockFetch.mockResolvedValueOnce(makeResp({
+        ok: false,
+        status: 404,
+        body: {},
+      }));
+
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health' });
+      const body = resp.json();
+      expect(body.status).toBe('unknown');
+      expect(body.source).toBe('none');
+      expect(body.error).toContain('404');
+    });
+
+    it('启用 auth 时出站 fetch 应携带 Authorization 头', async () => {
+      mockGetOutboundAuthHeader.mockReturnValue({ Authorization: 'Basic dXNlcjpwYXNz' });
+      mockFetch.mockResolvedValueOnce(makeResp({
         ok: true,
         status: 200,
-        headers: new Map([['content-type', 'application/json']]),
-        json: async () => ({
-          status: 'degraded',
-          source: 'local',
-          graphAdapterConnected: false,
-        }),
-      });
+        body: { status: 'healthy', source: 'gm-pro' },
+      }));
 
-      const resp = await fetch('http://127.0.0.1:7423/internal/graph-health');
-      const body = await resp.json();
-      expect(body.source).toBe('local');
-      expect(body.status).toBe('degraded');
-    });
+      await app.inject({ method: 'GET', url: '/api/graph/health' });
 
-    it('应包含 fetchedAt 时间戳', async () => {
-      // dashboard 后端转发响应应附加 fetchedAt
-      const response = {
-        status: 'healthy',
-        source: 'gm-pro',
-        nodeCount: 100,
-        fetchedAt: Date.now(),
-      };
-      expect(response.fetchedAt).toBeGreaterThan(0);
-      expect(typeof response.fetchedAt).toBe('number');
-    });
-  });
-
-  describe('GraphHealthResponse 类型契约', () => {
-    it('status 应为 healthy | degraded | unhealthy | unknown 之一', () => {
-      const validStatuses = ['healthy', 'degraded', 'unhealthy', 'unknown'];
-      validStatuses.forEach((s) => {
-        expect(['healthy', 'degraded', 'unhealthy', 'unknown']).toContain(s);
-      });
-    });
-
-    it('source 应为 gm-pro | local | none 之一', () => {
-      const validSources = ['gm-pro', 'local', 'none'];
-      validSources.forEach((s) => {
-        expect(['gm-pro', 'local', 'none']).toContain(s);
-      });
-    });
-
-    it('可选字段 nodeCount / relationshipCount 应为 number', () => {
-      const response = {
-        status: 'healthy' as const,
-        source: 'gm-pro' as const,
-        nodeCount: 100,
-        relationshipCount: 500,
-        graphAdapterConnected: true,
-        details: { avgDegree: 5 },
-        fetchedAt: Date.now(),
-      };
-      expect(typeof response.nodeCount).toBe('number');
-      expect(typeof response.relationshipCount).toBe('number');
-      expect(typeof response.graphAdapterConnected).toBe('boolean');
-      expect(response.details).toBeInstanceOf(Object);
+      const [, opts] = mockFetch.mock.calls[0];
+      expect(opts.headers).toEqual({ Authorization: 'Basic dXNlcjpwYXNz' });
     });
   });
 });

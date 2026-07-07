@@ -219,33 +219,47 @@ async function qmdInitialize(): Promise<string> {
 /** QMD 搜索：MCP tools/call "query"，返回 lex+vec 混合结果 */
 async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]> {
   const sid = await qmdInitialize();
-  const resp = await fetch(`${QMD_BASE_URL}/mcp`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-      'mcp-session-id': sid,
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'tools/call',
-      params: {
-        name: 'query',
-        arguments: {
-          searches: [
-            { type: 'lex', query: q },
-            { type: 'vec', query: q },
-          ],
-          limit,
-          minScore: 0,
-          rerank: true,
-        },
+  let resp: Response;
+  try {
+    resp = await fetch(`${QMD_BASE_URL}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'mcp-session-id': sid,
       },
-    }),
-    signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
-  });
-  if (!resp.ok) throw new Error(`QMD query HTTP ${resp.status}`);
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'query',
+          arguments: {
+            searches: [
+              { type: 'lex', query: q },
+              { type: 'vec', query: q },
+            ],
+            limit,
+            minScore: 0,
+            rerank: true,
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
+    });
+  } catch (e) {
+    // D1 修复: 网络错误也可能意味着 session 失效，重置以便下次重新握手
+    qmdSessionId = null;
+    throw e;
+  }
+  if (!resp.ok) {
+    // D1 修复: 401/403 表示 session 已失效，重置 qmdSessionId 以便下次重新 initialize
+    // 原代码仅 throw，session 永不复位 → QMD 引擎永久降级为空直到进程重启
+    if (resp.status === 401 || resp.status === 403) {
+      qmdSessionId = null;
+    }
+    throw new Error(`QMD query HTTP ${resp.status}`);
+  }
   const data = (await resp.json()) as {
     result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
   };

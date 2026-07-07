@@ -46,23 +46,24 @@ import {
 import { formatTime, formatTimeWithSeconds } from '../utils/format';
 
 // ===== 数据获取（轮询） =====
-const { data: latestData, isLoading: latestLoading } = useQuery({
+// E1 修复: 解构 isError，HTTP 错误不再被静默吞掉
+const { data: latestData, isLoading: latestLoading, isError: latestIsError } = useQuery({
   queryKey: ['health-latest'],
   queryFn: fetchHealthLatest,
   refetchInterval: 10_000,
 });
-const { data: historyData, isLoading: historyLoading } = useQuery({
+const { data: historyData, isLoading: historyLoading, isError: historyIsError } = useQuery({
   queryKey: ['health-history'],
   queryFn: () => fetchHealthHistory(144),
   refetchInterval: 60_000,
 });
-const { data: agentData, isLoading: agentLoading } = useQuery({
+const { data: agentData, isLoading: agentLoading, isError: agentIsError } = useQuery({
   queryKey: ['agent-status'],
   queryFn: fetchAgentStatus,
   refetchInterval: 30_000,
 });
 // G-5: 图谱健康（gm-pro getGraphHealth，降级到本地 graphAdapter 推断）
-const { data: graphHealthData, isLoading: graphHealthLoading } = useQuery({
+const { data: graphHealthData, isLoading: graphHealthLoading, isError: graphHealthIsError } = useQuery({
   queryKey: ['graph-health'],
   queryFn: fetchGraphHealth,
   refetchInterval: 30_000,
@@ -392,6 +393,44 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
             />
           </NGi>
         </NGrid>
+
+        <!-- E1 修复: 接口报错时显式提示，避免用户误判"无数据" -->
+        <NAlert
+          v-if="latestIsError"
+          type="error"
+          :show-icon="true"
+          title="健康指标加载失败"
+          style="margin-top: 12px"
+        >
+          后端 /api/health/latest 不可达或返回错误。请检查插件 snapshot 服务（:7423）是否运行。
+        </NAlert>
+        <NAlert
+          v-else-if="agentIsError"
+          type="error"
+          :show-icon="true"
+          title="Agent 状态加载失败"
+          style="margin-top: 12px"
+        >
+          后端 /api/agent/status 不可达。
+        </NAlert>
+        <NAlert
+          v-else-if="graphHealthIsError"
+          type="error"
+          :show-icon="true"
+          title="图谱健康加载失败"
+          style="margin-top: 12px"
+        >
+          后端 /api/graph/health 不可达。
+        </NAlert>
+        <NAlert
+          v-else-if="historyIsError"
+          type="error"
+          :show-icon="true"
+          title="时序图历史加载失败"
+          style="margin-top: 12px"
+        >
+          后端 /api/health/history 不可达。
+        </NAlert>
 
         <!-- 首次加载提示 -->
         <NAlert

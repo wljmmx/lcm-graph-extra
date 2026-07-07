@@ -58,21 +58,22 @@ const items = computed(() => listData.value?.items ?? []);
 const total = computed(() => listData.value?.total ?? 0);
 
 // ===== 详情查询（selectedId 存在时启用） =====
-const { data: detailData, isLoading: detailLoading } = useQuery({
+// C2 修复: 解构 isError，详情查询失败时在抽屉展示错误而非"加载中"
+const { data: detailData, isLoading: detailLoading, isError: detailIsError } = useQuery({
   queryKey: computed(() => ['experience-detail', selectedId.value]),
   queryFn: () => fetchExperienceDetail(selectedId.value as string),
   enabled: () => !!selectedId.value,
 });
 
 // ===== 关联子图查询 =====
-const { data: graphData, isLoading: graphLoading } = useQuery({
+const { data: graphData, isLoading: graphLoading, isError: graphIsError } = useQuery({
   queryKey: computed(() => ['experience-relations', selectedId.value]),
   queryFn: () => fetchExperienceRelations(selectedId.value as string),
   enabled: () => !!selectedId.value,
 });
 
 // ===== 质量分历史查询 =====
-const { data: historyData, isLoading: historyLoading } = useQuery({
+const { data: historyData, isLoading: historyLoading, isError: historyIsError } = useQuery({
   queryKey: computed(() => ['quality-history', selectedId.value]),
   queryFn: () => fetchQualityHistory(selectedId.value as string),
   enabled: () => !!selectedId.value,
@@ -166,10 +167,13 @@ function handleInvoke(tool: string, params: Record<string, unknown>): void {
       v-model:show="drawerShow"
       :detail="detailData ?? null"
       :detail-loading="detailLoading"
+      :detail-error="detailIsError"
       :graph="graphData ?? null"
       :graph-loading="graphLoading"
+      :graph-error="graphIsError"
       :history-points="historyPoints"
       :history-loading="historyLoading"
+      :history-error="historyIsError"
       :op-result="opResult"
       @invoke="handleInvoke"
     />

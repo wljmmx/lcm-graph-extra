@@ -8,6 +8,8 @@
  * 5s 超时，失败返回 null（降级：监控页 memory 面板显示"插件未响应"）。
  */
 
+import { getOutboundAuthHeader } from './auth';
+
 const SNAPSHOT_URL = process.env.PLUGIN_SNAPSHOT_URL ?? 'http://127.0.0.1:7423';
 
 // 5s 超时
@@ -15,6 +17,33 @@ const SNAPSHOT_TIMEOUT_MS = 5_000;
 
 /** 插件内存态快照（与设计文档 3.1 节 memory 字段对齐） */
 export interface PluginSnapshot {
+  // E4: 补齐插件实际返回的字段（src/dashboard-snapshot.ts DashboardSnapshot）
+  // 之前缺少 health / capabilityProfile / timestamp，运行时透传但 TS 类型不安全
+  health?: {
+    latest?: {
+      timestamp?: number;
+      tier?: string;
+      degraded?: string[];
+      lastAssembleMs?: number;
+      l2Ms?: number;
+      l3Ms?: number;
+      l4Ms?: number;
+      [key: string]: unknown;
+    };
+    history?: Array<{
+      timestamp?: number;
+      tier?: string;
+      assembleMs?: number;
+      [key: string]: unknown;
+    }>;
+    [key: string]: unknown;
+  };
+  capabilityProfile?: {
+    current?: { id?: string; label?: string; description?: string; estimatedOverhead?: number };
+    profiles?: Array<{ id: string; label: string; description: string; estimatedOverhead: number }>;
+    [key: string]: unknown;
+  };
+  timestamp?: number;
   cascade?: {
     armsCount: number;
     topArms: Array<{ armKey: string; alpha: number; beta: number; sample: number }>;
@@ -52,6 +81,7 @@ export async function fetchPluginSnapshot(): Promise<PluginSnapshot | null> {
   try {
     const resp = await fetch(`${SNAPSHOT_URL}/internal/snapshot`, {
       method: 'GET',
+      headers: getOutboundAuthHeader(),
       signal: controller.signal,
     });
     if (!resp.ok) {

@@ -105,9 +105,15 @@ async function main(): Promise<void> {
     // 若部署在反代后，应配置 Fastify trustProxy 让框架正确解析 req.ip
     keyGenerator: (req) => req.ip,
     // 健康检查豁免，避免被限流影响存活探测
+    // H2: 同时豁免前端 MonitorView 的只读轮询端点（health/agent/graph-health），
+    //     避免多 tab 叠加 + 用户交互接近 100/min 时被 429
     allowList: (req) => {
       const path = req.url.split('?')[0];
-      return path === '/api/ping' || path === '/ping';
+      if (path === '/api/ping' || path === '/ping') return true;
+      if (path.startsWith('/api/health/')) return true;
+      if (path === '/api/agent/status') return true;
+      if (path === '/api/graph/health') return true;
+      return false;
     },
     errorResponseBuilder: (_req, context) => ({
       statusCode: 429,
