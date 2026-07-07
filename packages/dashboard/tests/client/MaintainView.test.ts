@@ -171,6 +171,9 @@ describe('MaintainView', () => {
 
   it('点击 restore 卡片执行按钮传递 dryRun=true（默认）+ 三次确认级别', async () => {
     const wrapper = mountView();
+    // 设置有效的备份路径（~/.openclaw 之下，通过路径校验）
+    const restoreInput = wrapper.find('input[placeholder*="memory-full-backup"]');
+    await restoreInput.setValue('~/.openclaw/backup-test.json');
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const restoreCard = cards.find((c) => c.props('title') === '恢复');
     expect(restoreCard).toBeTruthy();

@@ -21,7 +21,7 @@
  */
 import { computed, reactive, ref } from 'vue';
 import { useMutation } from '@tanstack/vue-query';
-import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert } from 'naive-ui';
+import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, useMessage } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
 import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
@@ -37,6 +37,8 @@ import {
   invokeImport,
 } from '../api/maintain';
 import type { McpInvokeResponse } from '../api/experience';
+
+const message = useMessage();
 
 // ===== 各卡片表单状态 =====
 
@@ -94,6 +96,28 @@ const importSourceOptions = [
   { label: 'LCM 消息 (lcm_messages)', value: 'lcm_messages' },
   { label: '记忆文件 (memory_files)', value: 'memory_files' },
 ];
+
+// ===== 路径安全校验（前端轻量校验，后端 POST /api/mcp/invoke 有硬墙兜底） =====
+
+/**
+ * 校验路径必须位于 ~/.openclaw 之下。
+ * 浏览器无法获知真实 home 目录，仅做前缀 + 遍历检查；
+ * 后端用 path.resolve(os.homedir(), ...) 做权威校验。
+ *
+ * @returns null 表示通过，否则为错误文案
+ */
+function validateOpenclawPath(p: string): string | null {
+  const trimmed = p.trim();
+  if (!trimmed) return '路径不能为空';
+  // 统一为正斜杠便于匹配
+  const normalized = trimmed.replace(/\\/g, '/');
+  const prefix = '~/.openclaw';
+  const ok = normalized === prefix || normalized.startsWith(prefix + '/');
+  if (!ok) return `路径必须位于 ${prefix} 之下`;
+  // 拒绝路径遍历段
+  if (/(^|\/)\.\.(\/|$)/.test(normalized)) return '路径不能包含 .. 段';
+  return null;
+}
 
 // ===== 日志 + loading 状态 =====
 
@@ -233,6 +257,11 @@ function executeTtlCleanup(): void {
 }
 
 function executeBackup(): void {
+  const err = validateOpenclawPath(backupOutputPath.value);
+  if (err) {
+    message.error(err);
+    return;
+  }
   mutation.mutate({
     cardKey: 'backup',
     tool: 'lcmg_backup',
@@ -242,6 +271,11 @@ function executeBackup(): void {
 }
 
 function executeRestore(): void {
+  const err = validateOpenclawPath(restoreBackupPath.value);
+  if (err) {
+    message.error(err);
+    return;
+  }
   mutation.mutate({
     cardKey: 'restore',
     tool: 'lcmg_restore',

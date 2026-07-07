@@ -86,7 +86,11 @@ export const lightThemeOverrides: GlobalThemeOverrides = {
 };
 
 /**
- * 暗色主题覆盖（S3 启用，预留）。
+ * 暗色主题覆盖（S3 启用）。
+ *
+ * 注意：useTheme 中 `{ ...lightThemeOverrides, ...darkThemeOverrides }` 是浅合并，
+ * 因此 darkThemeOverrides 必须显式覆盖 light 中所有需要变更的组件级配置
+ * （如 DataTable.thColor），否则亮色字面值会穿透到暗色模式。
  */
 export const darkThemeOverrides: GlobalThemeOverrides = {
   common: {
@@ -102,6 +106,11 @@ export const darkThemeOverrides: GlobalThemeOverrides = {
 
     borderColor: 'rgba(255, 255, 255, 0.12)',
     dividerColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  DataTable: {
+    // 显式覆盖亮色 thColor，避免浅合并穿透导致暗色表头呈浅灰
+    thColor: 'rgba(255, 255, 255, 0.04)',
+    thTextColor: 'rgba(255, 255, 255, 0.72)',
   },
 };
 
@@ -136,6 +145,9 @@ export const echartsDarkThemeColors: string[] = [
  * ECharts 基础 option 片段：坐标轴 / tooltip / legend 样式。
  *
  * 用法：在 computed option 中展开 `...echartsBaseOption`，再合并 series。
+ *
+ * 注：axisLabel/legend fontSize 最小 12px，对齐 tokens.css 的 --fs-caption
+ * （WCAG 1.4.4 最小字号要求）。
  */
 export const echartsBaseOption = {
   textStyle: {
@@ -155,12 +167,53 @@ export const echartsBaseOption = {
   },
   xAxis: {
     axisLine: { lineStyle: { color: '#e5e6eb' } },
-    axisLabel: { color: '#86909c', fontSize: 11 },
+    axisLabel: { color: '#86909c', fontSize: 12 },
     splitLine: { show: false },
   },
   yAxis: {
     axisLine: { show: false },
-    axisLabel: { color: '#86909c', fontSize: 11 },
+    axisLabel: { color: '#86909c', fontSize: 12 },
     splitLine: { lineStyle: { color: '#f2f3f5', type: 'dashed' } },
+  },
+};
+
+/**
+ * ECharts 暗色基础 option 片段。
+ *
+ * 与 echartsDarkThemeColors 配套使用：暗色模式下坐标轴/splitLine/legend/tooltip
+ * 需切换为浅色字面值（ECharts 不支持 CSS var()，必须字面量）。
+ *
+ * 字色与 tokens.css [data-theme="dark"] 对齐：
+ *   - 主文本 rgba(255,255,255,0.92) = --color-text-primary
+ *   - 次文本 rgba(255,255,255,0.72) = --color-text-secondary
+ *   - 三级 rgba(255,255,255,0.52) = --color-text-tertiary
+ *   - 边框 rgba(255,255,255,0.12) = --color-border
+ *   - 分隔线 rgba(255,255,255,0.08) = --color-divider
+ */
+export const echartsDarkBaseOption = {
+  textStyle: {
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  },
+  tooltip: {
+    backgroundColor: 'rgba(50, 50, 55, 0.92)',
+    borderWidth: 0,
+    textStyle: { color: '#fff', fontSize: 12 },
+  },
+  legend: {
+    textStyle: { color: 'rgba(255, 255, 255, 0.72)', fontSize: 12 },
+    icon: 'roundRect',
+    itemWidth: 12,
+    itemHeight: 8,
+  },
+  xAxis: {
+    axisLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.12)' } },
+    axisLabel: { color: 'rgba(255, 255, 255, 0.52)', fontSize: 12 },
+    splitLine: { show: false },
+  },
+  yAxis: {
+    axisLine: { show: false },
+    axisLabel: { color: 'rgba(255, 255, 255, 0.52)', fontSize: 12 },
+    splitLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.08)', type: 'dashed' } },
   },
 };

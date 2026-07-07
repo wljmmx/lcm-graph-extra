@@ -10,8 +10,48 @@
  * 设计原则：只读 Neo4j，写操作走 MCP。前端通过 POST /api/mcp/invoke 触发遗忘/固定。
  */
 import type { FastifyInstance } from 'fastify';
+import os from 'node:os';
+import path from 'node:path';
 import { runReadQuery, toNumber, splitTag } from '../lib/neo4j';
 import { invokeMcpTool } from '../lib/mcp';
+
+// ---------------------------------------------------------------------------
+// 路径安全：backup/restore 工具的路径参数必须位于 ~/.openclaw 之下
+// ---------------------------------------------------------------------------
+
+const OPENCLAW_ROOT = path.join(os.homedir(), '.openclaw');
+
+/**
+ * 校验路径解析后位于 ~/.openclaw 之下（服务端硬墙，前端校验可被绕过）。
+ * @returns null 通过，否则为错误文案
+ */
+function validatePathUnderOpenclaw(p: unknown, field: string): string | null {
+  if (typeof p !== 'string' || !p.trim()) return `${field}不能为空`;
+  const home = os.homedir();
+  const root = path.join(home, '.openclaw');
+  // 展开 ~ 为 home 后 resolve
+  const expanded = p.replace(/^~(?=$|[/\\])/, home);
+  const resolved = path.resolve(expanded);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    return `${field}必须位于 ~/.openclaw 之下`;
+  }
+  return null;
+}
+
+/** MCP 工具名白名单：dashboard 仅允许转发以下工具（纵深防御） */
+const ALLOWED_MCP_TOOLS = new Set<string>([
+  'lcmg_maintain',
+  'lcmg_diagnose',
+  'lcmg_distill',
+  'lcmg_compact',
+  'lcmg_reset_breaker',
+  'lcmg_backup',
+  'lcmg_restore',
+  'lcmg_sync',
+  'lcmg_import',
+  'lcmg_forget',
+  'lcmg_pin',
+]);
 
 // ---------------------------------------------------------------------------
 // 类型定义（与 src/api/experience.ts 对齐）
@@ -376,6 +416,26 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     if (!tool || typeof tool !== 'string') {
       reply.code(400);
       return { ok: false, error: 'missing tool' };
+    }
+    // P1 安全：MCP 工具名白名单（纵深防御，阻止调用未在 UI 暴露的危险工具）
+    if (!ALLOWED_MCP_TOOLS.has(tool)) {
+      reply.code(400);
+      return { ok: false, error: `tool "${tool}" not allowed` };
+    }
+    // P0 安全：backup/restore 路径参数必须在 ~/.openclaw 之下（服务端硬墙）
+    if (tool === 'lcmg_backup') {
+      const err = validatePathUnderOpenclaw(params.outputPath, 'outputPath');
+      if (err) {
+        reply.code(400);
+        return { ok: false, error: err };
+      }
+    }
+    if (tool === 'lcmg_restore') {
+      const err = validatePathUnderOpenclaw(params.backupPath, 'backupPath');
+      if (err) {
+        reply.code(400);
+        return { ok: false, error: err };
+      }
     }
     const startTs = Date.now();
     let result: any;

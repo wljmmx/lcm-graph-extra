@@ -24,7 +24,13 @@ import {
   TitleComponent,
   DataZoomComponent,
 } from 'echarts/components';
-import { echartsThemeColors, echartsBaseOption } from '../styles/theme';
+import {
+  echartsThemeColors,
+  echartsDarkThemeColors,
+  echartsBaseOption,
+  echartsDarkBaseOption,
+} from '../styles/theme';
+import { useTheme } from '../composables/useTheme';
 
 // 按需注册 ECharts 模块（仅本仪表盘用到的图表与组件，避免全量引入）
 use([
@@ -55,17 +61,21 @@ const props = withDefaults(
 // 转发 echarts click 事件（节点点击等交互）
 defineEmits<{ (e: 'click', payload: unknown): void }>();
 
+// 主题感知：暗色模式下切换调色板 + base option
+const { isDark } = useTheme();
+
 // 合并主题调色板 + 基础样式（坐标轴/tooltip/legend）
 // 业务 option 优先级更高：若 option 已声明 color，则保留业务调色板
 const mergedOption = computed<Record<string, unknown>>(() => {
   if (props.skipTheme) return props.option;
   const opt = props.option;
+  const colors = isDark.value ? echartsDarkThemeColors : echartsThemeColors;
+  const baseOption = isDark.value ? echartsDarkBaseOption : echartsBaseOption;
   return {
-    color: Array.isArray(opt.color) ? opt.color : echartsThemeColors,
-    ...echartsBaseOption,
+    ...baseOption,
     ...opt,
-    // color 单独再覆盖一次，避免被 echartsBaseOption 的展开冲掉
-    color: Array.isArray(opt.color) ? opt.color : echartsThemeColors,
+    // color 放最后：若 opt.color 已定义则保留，否则用主题调色板
+    color: Array.isArray(opt.color) ? opt.color : colors,
   } as Record<string, unknown>;
 });
 
