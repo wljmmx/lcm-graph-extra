@@ -24,6 +24,34 @@
 import type { EmbeddingConfig } from '../types.js';
 import { cleanBaseURL } from '../utils/url.js';
 
+// ---------------------------------------------------------------------------
+// LRU 缓存：相同 query 文本的 embedding 结果缓存，避免重复请求 Ollama
+// （assemble 中相似/重复 query 可命中缓存，vec_embed 2.5s → ~0ms）
+// ---------------------------------------------------------------------------
+const EMBED_CACHE_CAPACITY = 64;
+const EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分钟
+
+class EmbedLRUCache {
+  private map = new Map<string, { value: number[]; expiresAt: number }>();
+  get(key: string): number[] | undefined {
+    const e = this.map.get(key);
+    if (!e) return undefined;
+    if (Date.now() > e.expiresAt) { this.map.delete(key); return undefined; }
+    // move-to-end（Map 迭代顺序 = 插入顺序 = LRU 顺序）
+    this.map.delete(key);
+    this.map.set(key, e);
+    return e.value;
+  }
+  set(key: string, value: number[]): void {
+    if (this.map.has(key)) this.map.delete(key);
+    else if (this.map.size >= EMBED_CACHE_CAPACITY) {
+      const first = this.map.keys().next().value;
+      if (first !== undefined) this.map.delete(first);
+    }
+    this.map.set(key, { value, expiresAt: Date.now() + EMBED_CACHE_TTL_MS });
+  }
+}
+
 /**
  * 创建一个 embed 函数：(text: string) => Promise<number[]>
  *
@@ -60,10 +88,17 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
   // false = 新版 /api/embed + input；true = 旧版 /api/embeddings + prompt
   let useLegacyOllama = false;
 
+  // LRU 缓存：相同 text 的 embedding 结果缓存（assemble 中相似 query 可命中）
+  const cache = new EmbedLRUCache();
+
   return async function embed(text: string): Promise<number[]> {
     if (text == null || text === '') {
       throw new Error('Embedding API: input text cannot be null, undefined, or empty');
     }
+    // 缓存命中：相同 query 文本的 embedding 是确定性的
+    const cacheKey = text.length > 500 ? text.slice(0, 500) + ':' + text.length : text;
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
     // 最多重试一次：新版端点 404 时回退到旧版
     for (let attempt = 0; attempt < 2; attempt++) {
       // v1 始终用 OpenAI 标准格式（input）；非 v1 根据 useLegacyOllama 选择端点和字段
@@ -119,25 +154,36 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
 
       const data: any = await resp.json();
 
-      // OpenAI 兼容格式: { data: [{ embedding: number[] }] }
+      // 统一提取 embedding 向量（支持多种响应格式），命中后写入缓存并返回
+      let result: number[] | null = null;
       if (isOpenAiCompatible) {
+        // OpenAI 兼容格式: { data: [{ embedding: number[] }] }
         const embedding = data?.data?.[0]?.embedding;
-        if (Array.isArray(embedding)) return embedding;
+        if (Array.isArray(embedding)) result = embedding;
         // 兼容部分 OpenAI 兼容端点返回的扁平格式: { embedding: number[] }
-        const flatEmbedding = data?.embedding;
-        if (Array.isArray(flatEmbedding)) return flatEmbedding;
-        throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(data || {}).join(',')})`);
+        if (!result) {
+          const flatEmbedding = data?.embedding;
+          if (Array.isArray(flatEmbedding)) result = flatEmbedding;
+        }
+      } else {
+        // Ollama 原生格式（新版）: { embedding: number[] }
+        const embedding = data?.embedding;
+        if (Array.isArray(embedding)) result = embedding;
+        // Ollama 新版 /api/embed 响应: { embeddings: number[][] }
+        if (!result) {
+          const embeddings = data?.embeddings;
+          if (Array.isArray(embeddings) && embeddings.length > 0 && Array.isArray(embeddings[0])) result = embeddings[0];
+        }
+        // 兼容部分 Ollama 版本返回嵌套格式: { data: [{ embedding: number[] }] }
+        if (!result) {
+          const nestedEmbedding = data?.data?.[0]?.embedding;
+          if (Array.isArray(nestedEmbedding)) result = nestedEmbedding;
+        }
       }
-
-      // Ollama 原生格式（新版）: { embedding: number[] }
-      const embedding = data?.embedding;
-      if (Array.isArray(embedding)) return embedding;
-      // Ollama 新版 /api/embed 响应: { embeddings: number[][] }
-      const embeddings = data?.embeddings;
-      if (Array.isArray(embeddings) && embeddings.length > 0 && Array.isArray(embeddings[0])) return embeddings[0];
-      // 兼容部分 Ollama 版本返回嵌套格式: { data: [{ embedding: number[] }] }
-      const nestedEmbedding = data?.data?.[0]?.embedding;
-      if (Array.isArray(nestedEmbedding)) return nestedEmbedding;
+      if (result) {
+        cache.set(cacheKey, result);
+        return result;
+      }
       throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(data || {}).join(',')})`);
     }
     // 理论上不会到达

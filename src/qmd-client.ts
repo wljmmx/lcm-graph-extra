@@ -70,7 +70,10 @@ interface McpToolsCallResponse {
 
 const DEFAULTS = {
   mcpBaseUrl: "http://127.0.0.1:8081",
-  mcpTimeout: 5000,
+  // 优化: 5000ms → 3000ms。MCP 超时后 CLI 回退仅需 ~500ms，
+  // 原 5s 超时导致 L2_qmd 经常 5.5s+，降至 3s 可节省 ~2s。
+  // 用户可通过 pluginConfig.qmdMcpTimeout 覆盖。
+  mcpTimeout: 3000,
   cliTimeout: 30_000,
   // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。

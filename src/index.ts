@@ -167,9 +167,13 @@ const pluginEntry: any = definePluginEntry({
         const pluginConfig = api.pluginConfig ?? {};
         const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? 'search';
         const cliTimeout = pluginConfig.cliTimeout ?? 30_000;
+        // 优化: 允许通过 pluginConfig.qmdMcpTimeout 覆盖 MCP 超时（默认 3000ms）
+        // 原 5000ms 导致 L2_qmd 经常 5.5s+（MCP 超时 + CLI 回退），降至 3s 节省 ~2s
+        const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? 3000;
 
         qmdClient = new QmdClient({
           mcpBaseUrl: qmdBaseUrl,
+          mcpTimeout: qmdMcpTimeout,
           cliTimeout: cliTimeout,
           cliFallbackSearchType: cliFallbackSearchType,
         });
