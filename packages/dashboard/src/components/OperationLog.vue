@@ -21,6 +21,7 @@ import {
   NCollapseItem,
   NText,
 } from 'naive-ui';
+import { formatTimeWithSeconds, formatDuration } from '../utils/format';
 
 export interface OperationLogEntry {
   id: number;
@@ -39,15 +40,6 @@ const props = defineProps<{
 
 // 反向副本用于"旧的在下"的视觉顺序展示（父组件传入已倒序，这里直接展示）
 const displayLogs = computed(() => props.logs);
-
-/** 时间格式化为 HH:mm:ss */
-function fmtTime(ts: number): string {
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  return `${hh}:${mm}:${ss}`;
-}
 
 /** 状态 tag 类型 */
 function statusType(s: OperationLogEntry['status']): 'success' | 'error' | 'info' {
@@ -70,13 +62,6 @@ function prettyJson(v: unknown): string {
     return String(v);
   }
 }
-
-/** 耗时格式化：<1s 显示 ms，否则显示 s */
-function fmtDuration(ms?: number): string {
-  if (ms === undefined || ms === null) return '';
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
-}
 </script>
 
 <template>
@@ -90,13 +75,13 @@ function fmtDuration(ms?: number): string {
     <NList v-else bordered clickable>
       <NListItem v-for="log in displayLogs" :key="log.id">
         <NSpace align="center" :size="8" wrap>
-          <NText depth="3" class="log-time">{{ fmtTime(log.ts) }}</NText>
+          <NText depth="3" class="log-time">{{ formatTimeWithSeconds(log.ts) }}</NText>
           <NText class="log-tool">{{ log.tool }}</NText>
           <NTag :type="statusType(log.status)" size="small">
             {{ statusLabel(log.status) }}
           </NTag>
           <NText v-if="log.durationMs !== undefined" depth="3" class="log-duration">
-            {{ fmtDuration(log.durationMs) }}
+            {{ formatDuration(log.durationMs) }}
           </NText>
         </NSpace>
 

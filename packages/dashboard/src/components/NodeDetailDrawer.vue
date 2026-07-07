@@ -38,7 +38,12 @@ function close(): void {
     :show="props.show"
     :width="480"
     placement="right"
+    :trap-focus="true"
+    :auto-focus="true"
+    :close-on-esc="true"
+    role="dialog"
     aria-modal="true"
+    aria-label="节点详情"
     @update:show="emit('update:show', $event)"
   >
     <NDrawerContent title="节点详情" closable>

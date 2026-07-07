@@ -61,6 +61,14 @@ function easeOutCubic(t: number): number {
 }
 
 function animateTo(target: number): void {
+  // P1 a11y：尊重 prefers-reduced-motion，直接跳到目标值（WCAG 2.3.3）
+  if (
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  ) {
+    displayedValue.value = target;
+    return;
+  }
   if (typeof window === 'undefined' || !('requestAnimationFrame' in window)) {
     displayedValue.value = target;
     return;

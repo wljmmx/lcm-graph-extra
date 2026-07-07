@@ -43,6 +43,7 @@ import {
   type AgentStatus,
   type GraphHealthResponse,
 } from '../api/health';
+import { formatTime, formatTimeWithSeconds } from '../utils/format';
 
 // ===== 数据获取（轮询） =====
 const { data: latestData, isLoading: latestLoading } = useQuery({
@@ -112,23 +113,11 @@ const kpiCbFailures = computed<number | string>(() => {
   return db.value.cbLcmFailures + db.value.cbQmdFailures + db.value.cbNeo4jFailures;
 });
 
-// ===== 工具：时间格式化 HH:mm =====
-function fmtTime(ts: number): string {
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
-}
+// ===== 最近更新时间（HH:mm:ss） =====
+const lastUpdated = computed(() => formatTimeWithSeconds(db.value?.timestamp));
 
-const lastUpdated = computed(() => {
-  const ts = db.value?.timestamp;
-  if (!ts) return '—';
-  const d = new Date(ts);
-  return `${fmtTime(ts)}:${String(d.getSeconds()).padStart(2, '0')}`;
-});
-
-// ===== 时序图 X 轴标签 =====
-const timeLabels = computed(() => historyAsc.value.map((s) => fmtTime(s.timestamp)));
+// ===== 时序图 X 轴标签（HH:mm） =====
+const timeLabels = computed(() => historyAsc.value.map((s) => formatTime(s.timestamp)));
 
 // 时序图1：压力信号（双 Y 轴，左：数量，右：比率 0-1）
 const pressureOption = computed(() => ({
@@ -492,29 +481,29 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         <NGi>
           <NCard title="降级链路状态" size="small">
             <template v-if="memory">
-              <!-- 各检索层状态指示灯 -->
-              <div class="layer-grid">
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L1 QMD</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L2 熔断</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L3 图谱</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L4 经验</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">gm-pro</span>
-                </div>
-              </div>
+              <!-- 各检索层状态指示灯（形状+符号双重编码，不单靠颜色） -->
+              <ul class="layer-grid" role="list">
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L1 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L1 QMD<span class="sr-only">{{ layerStatus.L1 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L2 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L2 熔断<span class="sr-only">{{ layerStatus.L2 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L3 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L3 图谱<span class="sr-only">{{ layerStatus.L3 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L4 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L4 经验<span class="sr-only">{{ layerStatus.L4 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.gmPro ? '✗' : '✓' }}</span>
+                  <span class="layer-label">gm-pro<span class="sr-only">{{ layerStatus.gmPro ? '降级' : '正常' }}</span></span>
+                </li>
+              </ul>
               <!-- UX 摘要 -->
               <NDescriptions :column="1" size="small" label-placement="left" bordered style="margin-top: 8px">
                 <NDescriptionsItem label="降级率">
@@ -801,6 +790,10 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: var(--space-sm);
+  /* 重置 ul 默认样式 */
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 .layer-cell {
   display: flex;
@@ -811,11 +804,18 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
+/* 状态点：符号居中，双重编码（颜色+符号） */
 .layer-cell .dot {
-  width: 10px;
-  height: 10px;
+  width: 16px;
+  height: 16px;
   border-radius: var(--radius-full);
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
 }
 .layer-cell .dot-ok {
   background: var(--color-success);

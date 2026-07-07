@@ -122,7 +122,17 @@ const pagination = computed<PaginationProps>(() => ({
 function rowProps(row: ExperienceItem) {
   return {
     style: 'cursor: pointer',
+    tabindex: 0,
+    role: 'button',
+    'aria-label': `查看 ${row.title || row.id} 详情`,
     onClick: () => emit('row-click', row.id),
+    onKeydown: (e: KeyboardEvent) => {
+      // P1 a11y：键盘可达 — Enter / Space 触发行点击（WCAG 2.1.1）
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        emit('row-click', row.id);
+      }
+    },
   };
 }
 

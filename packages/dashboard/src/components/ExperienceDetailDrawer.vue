@@ -30,6 +30,7 @@ import {
 } from 'naive-ui';
 import EChart from './EChart.vue';
 import QualityChart from './QualityChart.vue';
+import { formatDateTime } from '../utils/format';
 import type {
   ExperienceDetail,
   ExperienceGraph,
@@ -53,17 +54,6 @@ const emit = defineEmits<{
   (e: 'update:show', v: boolean): void;
   (e: 'invoke', tool: string, params: Record<string, unknown>): Promise<McpInvokeResponse> | void;
 }>();
-
-function formatTs(ts: number | null | undefined): string {
-  if (!ts) return '—';
-  const d = new Date(ts);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mi = String(d.getMinutes()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
-}
 
 function typeColor(t: string): 'info' | 'error' | 'warning' | 'success' | 'default' {
   switch (t) {
@@ -149,6 +139,12 @@ function close(): void {
     :show="props.show"
     :width="640"
     placement="right"
+    :trap-focus="true"
+    :auto-focus="true"
+    :close-on-esc="true"
+    role="dialog"
+    aria-modal="true"
+    aria-label="经验详情"
     @update:show="emit('update:show', $event)"
   >
     <NDrawerContent title="经验详情" closable>
@@ -202,8 +198,8 @@ function close(): void {
               {{ props.detail.qualityScore !== null ? props.detail.qualityScore.toFixed(2) : '—' }}
             </NDescriptionsItem>
             <NDescriptionsItem label="命中数">{{ props.detail.matchCount }}</NDescriptionsItem>
-            <NDescriptionsItem label="创建时间">{{ formatTs(props.detail.createdAt) }}</NDescriptionsItem>
-            <NDescriptionsItem label="最近验证">{{ formatTs(props.detail.lastValidatedAt) }}</NDescriptionsItem>
+            <NDescriptionsItem label="创建时间">{{ formatDateTime(props.detail.createdAt) }}</NDescriptionsItem>
+            <NDescriptionsItem label="最近验证">{{ formatDateTime(props.detail.lastValidatedAt) }}</NDescriptionsItem>
             <NDescriptionsItem label="标签">
               <NSpace :size="4">
                 <NTag v-for="s in props.detail.tags.scenario" :key="'s-' + s" size="small" type="info">{{ s }}</NTag>
@@ -237,7 +233,7 @@ function close(): void {
                 v-for="(p, i) in props.historyPoints"
                 :key="i"
                 :type="p.qualityScore === null ? 'default' : (p.qualityScore > 0.6 ? 'success' : 'warning')"
-                :time="formatTs(p.timestamp)"
+                :time="formatDateTime(p.timestamp)"
               >
                 qualityScore: {{ p.qualityScore !== null ? p.qualityScore.toFixed(2) : '—' }}
               </NTimelineItem>

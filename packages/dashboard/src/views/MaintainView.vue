@@ -195,10 +195,24 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
   },
 });
 
-// ===== 各卡片执行入口（封装 mutation.mutate） =====
+/**
+ * 统一执行入口（P1 竞态修复）。
+ *
+ * onMutate 由 TanStack Query 异步调度，若用户在首次调用的 onMutate
+ * 真正执行前再次触发同一卡片，pendingLogIds.set 会覆盖首条 logId，
+ * 导致首条 running 日志永不被回填。此处同步置位 loadingMap 作为硬守卫，
+ * 在 mutate 调用前就拒绝重入。
+ */
+function runMutation(vars: MutationVars): void {
+  if (loadingMap[vars.cardKey]) return;
+  loadingMap[vars.cardKey] = true;
+  mutation.mutate(vars);
+}
+
+// ===== 各卡片执行入口（封装 runMutation） =====
 
 function executeMaintain(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'maintain',
     tool: 'lcmg_maintain',
     params: {},
@@ -207,7 +221,7 @@ function executeMaintain(): void {
 }
 
 function executeDiagnose(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'diagnose',
     tool: 'lcmg_diagnose',
     params: {},
@@ -216,7 +230,7 @@ function executeDiagnose(): void {
 }
 
 function executeDistill(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'distill',
     tool: 'lcmg_distill',
     params: { limit: distillLimit.value },
@@ -229,7 +243,7 @@ function executeCompact(): void {
   if (compactConversationId.value !== null && compactConversationId.value !== undefined) {
     params.conversationId = compactConversationId.value;
   }
-  mutation.mutate({
+  runMutation({
     cardKey: 'compact',
     tool: 'lcmg_compact',
     params,
@@ -238,7 +252,7 @@ function executeCompact(): void {
 }
 
 function executeResetBreaker(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'reset_breaker',
     tool: 'lcmg_reset_breaker',
     params: { name: breakerName.value },
@@ -248,7 +262,7 @@ function executeResetBreaker(): void {
 
 function executeTtlCleanup(): void {
   // TTL 清理复用 lcmg_maintain（已内置债务表对账 + 孤儿清理）
-  mutation.mutate({
+  runMutation({
     cardKey: 'ttl_cleanup',
     tool: 'lcmg_maintain',
     params: {},
@@ -262,7 +276,7 @@ function executeBackup(): void {
     message.error(err);
     return;
   }
-  mutation.mutate({
+  runMutation({
     cardKey: 'backup',
     tool: 'lcmg_backup',
     params: { outputPath: backupOutputPath.value },
@@ -276,7 +290,7 @@ function executeRestore(): void {
     message.error(err);
     return;
   }
-  mutation.mutate({
+  runMutation({
     cardKey: 'restore',
     tool: 'lcmg_restore',
     params: {
@@ -290,7 +304,7 @@ function executeRestore(): void {
 }
 
 function executeSync(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'sync',
     tool: 'lcmg_sync',
     params: { mode: syncMode.value, dryRun: syncDryRun.value },
@@ -299,7 +313,7 @@ function executeSync(): void {
 }
 
 function executeImport(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'import',
     tool: 'lcmg_import',
     params: { source: importSource.value, limit: importLimit.value },

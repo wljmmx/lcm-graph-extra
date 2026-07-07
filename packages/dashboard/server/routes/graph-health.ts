@@ -24,7 +24,7 @@ export interface GraphHealthResponse {
 }
 
 export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/graph/health', async (_req, reply) => {
+  app.get('/api/graph/health', async (req, reply) => {
     try {
       const snapshot = await fetchPluginSnapshot();
       // fetchPluginSnapshot 返回完整 snapshot，但 graph-health 是独立端点
@@ -65,19 +65,21 @@ export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<v
         } satisfies GraphHealthResponse);
       } catch (fetchErr) {
         // 插件不可达
+        req.log.error({ err: String(fetchErr) }, 'graph-health fetch 失败');
         return reply.send({
           status: 'unknown',
           source: 'none',
           fetchedAt: Date.now(),
-          error: String(fetchErr),
+          error: '插件不可达，请查看服务端日志',
         } satisfies GraphHealthResponse);
       }
     } catch (err) {
+      req.log.error({ err: String(err) }, 'graph-health 查询失败');
       return reply.status(500).send({
         status: 'unknown',
         source: 'none',
         fetchedAt: Date.now(),
-        error: String(err),
+        error: '查询失败，请查看服务端日志',
       } satisfies GraphHealthResponse);
     }
   });

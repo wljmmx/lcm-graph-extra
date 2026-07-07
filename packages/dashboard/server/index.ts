@@ -56,7 +56,22 @@ async function main(): Promise<void> {
       }
     });
     app.log.info('Basic Auth 已启用（DASHBOARD_AUTH）');
+  } else if (isProd) {
+    // P1-5 安全：生产模式未配置鉴权时打印显著警告
+    app.log.warn(
+      '⚠ 生产模式未配置 DASHBOARD_AUTH，所有 API 完全开放！' +
+        '请设置 DASHBOARD_AUTH=user:pass 或限制 DASHBOARD_HOST=127.0.0.1',
+    );
   }
+
+  // P1-4 安全：安全响应头（替代 @fastify/helmet，避免新增依赖）
+  // X-Frame-Options 防点击劫持；X-Content-Type-Options 防 MIME 嗅探；
+  // Referrer-Policy 控制 Referer 泄露
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  });
 
   // 注册 CORS（仅本机）
   await app.register(cors, {
@@ -85,14 +100,10 @@ async function main(): Promise<void> {
   await app.register(rateLimit, {
     max: rlMax,
     timeWindow: rlWindow,
-    keyGenerator: (req) => {
-      // 优先用真实客户端 IP（穿透代理时读 x-forwarded-for 首段）
-      const xff = req.headers['x-forwarded-for'];
-      if (typeof xff === 'string' && xff.length > 0) {
-        return xff.split(',')[0].trim();
-      }
-      return req.ip;
-    },
+    // P1-2 安全：使用 req.ip 而非手动读 x-forwarded-for
+    // XFF 头可被客户端伪造，直接读取会绕过限流；
+    // 若部署在反代后，应配置 Fastify trustProxy 让框架正确解析 req.ip
+    keyGenerator: (req) => req.ip,
     // 健康检查豁免，避免被限流影响存活探测
     allowList: (req) => {
       const path = req.url.split('?')[0];

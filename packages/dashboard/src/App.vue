@@ -89,9 +89,9 @@ const menuOptions = computed<MenuOption[]>(() => [
               bordered
               style="padding: 0 24px; display: flex; align-items: center; height: 56px;"
             >
-              <div style="font-weight: 600; margin-right: 32px;">
+              <h1 style="font-weight: 600; margin: 0; margin-right: 32px; font-size: var(--fs-body);">
                 LCM Dashboard
-              </div>
+              </h1>
               <NMenu
                 mode="horizontal"
                 :options="menuOptions"
@@ -105,7 +105,6 @@ const menuOptions = computed<MenuOption[]>(() => [
                     quaternary
                     circle
                     :aria-label="`切换主题（当前：${themeModeLabel}）`"
-                    aria-haspopup="false"
                     style="margin-left: auto;"
                     @click="cycleTheme"
                   >

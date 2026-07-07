@@ -227,7 +227,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ err: msg }, '/api/config 读取失败');
-      return { ok: false, error: msg, config: {} };
+      return { ok: false, error: '配置读取失败，请查看服务端日志', config: {} };
     }
   });
 
@@ -304,7 +304,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ err: msg }, '/api/config PATCH 写入失败');
       reply.code(500);
-      return { ok: false, error: msg, applied, rejected };
+      return { ok: false, error: '配置写入失败，请查看服务端日志', applied, rejected };
     }
   });
 
@@ -362,7 +362,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ err: msg }, '/api/capability-profile POST 代理失败');
       reply.code(502);
-      return { ok: false, error: `无法连接插件 snapshot 服务: ${msg}` };
+      return { ok: false, error: '无法连接插件 snapshot 服务，请查看服务端日志' };
     }
   });
 

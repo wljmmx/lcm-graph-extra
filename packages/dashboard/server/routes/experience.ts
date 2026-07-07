@@ -404,7 +404,8 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ err: msg }, 'experience/:id 查询失败');
       reply.code(500);
-      return { error: msg };
+      // P1-3 安全：不向客户端透传原始错误（可能含 Neo4j 查询语句/文件路径）
+      return { error: '查询失败，请查看服务端日志' };
     }
   });
 

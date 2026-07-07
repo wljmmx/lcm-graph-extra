@@ -45,7 +45,7 @@ export const lightThemeOverrides: GlobalThemeOverrides = {
     textColorBase: '#1f2329',
     textColor1: '#1f2329',
     textColor2: '#4e5969',
-    textColor3: '#86909c',
+    textColor3: '#6b7280',
 
     bodyColor: '#ffffff',
     cardColor: '#ffffff',
