@@ -10,7 +10,14 @@ export function extractAvailableTools(params: any): string[] {
   const tools = params.availableTools;
   // P2-14: 修复拼写错误 lcmg_batch_get_documents → lcmg_batch_get，
   // 并补全遗漏的 lcmg_diagnose（与 SELF_REGISTERED_TOOLS 保持一致）。
-  if (!tools) return ["lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import","lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get","lcmg_maintain","lcmg_diagnose"];
+  // 2026-07: 进一步补全遗漏的 lcmg_forget/distill/compact/reset_breaker/config_get/config_set，
+  // 与 openclaw.plugin.json contracts.tools 完全对齐（18 个工具）。
+  if (!tools) return [
+    "lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import",
+    "lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get",
+    "lcmg_maintain","lcmg_diagnose","lcmg_forget","lcmg_distill","lcmg_compact",
+    "lcmg_reset_breaker","lcmg_config_get","lcmg_config_set",
+  ];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
   return [];
@@ -23,6 +30,8 @@ export const SELF_REGISTERED_TOOLS = new Set([
   "lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get",
   "lcmg_maintain", "lcmg_diagnose",
   "lcmg_backup", "lcmg_restore", "lcmg_sync",
+  "lcmg_forget", "lcmg_distill", "lcmg_compact", "lcmg_reset_breaker",
+  "lcmg_config_get", "lcmg_config_set",
 ]);
 
 /** Tool category to tool name mapping. */

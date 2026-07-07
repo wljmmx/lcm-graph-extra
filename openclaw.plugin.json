@@ -27,7 +27,9 @@
       "lcmg_forget",
       "lcmg_distill",
       "lcmg_compact",
-      "lcmg_reset_breaker"
+      "lcmg_reset_breaker",
+      "lcmg_config_get",
+      "lcmg_config_set"
     ]
   },
   "toolMetadata": {
@@ -78,6 +80,12 @@
     },
     "lcmg_reset_breaker": {
       "description": "Reset circuit breaker for a subsystem (lcm/qmd/neo4j)"
+    },
+    "lcmg_config_get": {
+      "description": "View runtime configuration (redacted)"
+    },
+    "lcmg_config_set": {
+      "description": "Update a configuration field (whitelist-controlled)"
     }
   },
   "configSchema": {
