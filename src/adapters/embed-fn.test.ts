@@ -40,7 +40,7 @@ describe('createLocalEmbedFn', () => {
     const body = JSON.parse(opts.body);
     expect(body.keep_alive).toBe('1h');
     expect(body.model).toBe('test-model');
-    expect(body.input).toBe('hello');
+    expect(body.input).toEqual(['hello']);
   });
 
   it('自定义 keep_alive 值被传递', async () => {
@@ -202,7 +202,7 @@ describe('createLocalEmbedFn', () => {
 
     expect(mockFetch.mock.calls[0][0]).toBe('http://h:11434/api/embed');
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.input).toBe('text');
+    expect(body.input).toEqual(['text']);
     expect(body.prompt).toBeUndefined();
     expect(body.keep_alive).toBe('1h');
     expect(result).toEqual([0.1, 0.2]);
@@ -226,7 +226,7 @@ describe('createLocalEmbedFn', () => {
 
     // 第一次: 新版端点
     expect(mockFetch.mock.calls[0][0]).toBe('http://h:11434/api/embed');
-    expect(JSON.parse(mockFetch.mock.calls[0][1].body).input).toBe('text');
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).input).toEqual(['text']);
     // 第二次: 旧版端点 + prompt 字段
     expect(mockFetch.mock.calls[1][0]).toBe('http://h:11434/api/embeddings');
     const legacyBody = JSON.parse(mockFetch.mock.calls[1][1].body);
@@ -303,7 +303,7 @@ describe('createLocalEmbedFn', () => {
     expect(body.temperature).toBeUndefined();
     // 核心字段保持不变
     expect(body.model).toBe('m');
-    expect(body.input).toBe('text');
+    expect(body.input).toEqual(['text']);
     expect(body.keep_alive).toBe('1h');
   });
 

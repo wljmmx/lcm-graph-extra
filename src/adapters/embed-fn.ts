@@ -64,15 +64,15 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
       let body: Record<string, unknown>;
       if (isOpenAiCompatible) {
         ep = baseClean + '/embeddings';
-        body = { model, input: text, keep_alive: keepAlive };
+        body = { model, input: [text], keep_alive: keepAlive };
       } else if (useLegacyOllama) {
         // 旧版 Ollama: /api/embeddings + prompt
         ep = baseClean + '/api/embeddings';
         body = { model, prompt: text, keep_alive: keepAlive };
       } else {
-        // 新版 Ollama: /api/embed + input
+        // 新版 Ollama: /api/embed + input (数组格式)
         ep = baseClean + '/api/embed';
-        body = { model, input: text, keep_alive: keepAlive };
+        body = { model, input: [text], keep_alive: keepAlive };
       }
       // 透传额外 options：
       // - OpenAI 兼容端点：平铺到 body 顶层（dimensions/encoding_format 等标准字段本就在顶层）
