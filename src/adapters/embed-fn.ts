@@ -33,7 +33,11 @@ import { cleanBaseURL } from '../utils/url.js';
 export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Promise<number[]> {
   const {
     model = 'Qwen3.5-Embedding-0.6B-GGUF',
-    baseURL = 'http://127.0.0.1:11434/v1',
+    // P2-B2: 默认改为 Ollama 原生端点（不带 /v1），走 /api/embed 而非 /v1/embeddings。
+    // 原因：Ollama 的 OpenAI 兼容层 (/v1/*) 是实验性支持，keep_alive 参数可能被忽略，
+    // 导致模型反复卸载加载（5m 默认 keep_alive）。原生 /api/embed 端点完整支持 keep_alive。
+    // 如果用户配置了云端 OpenAI 兼容 API（baseURL 含 /v1），仍走 /v1/embeddings。
+    baseURL = 'http://127.0.0.1:11434',
     apiKey,
     keepAlive = '1h',
     options,

@@ -2437,23 +2437,50 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
         // --- 2d. Snapshot server health check + auto-restart ---
         // 插件启动时 snapshot server 可能因端口被占等原因启动失败，
         // heartbeat 中定期检查并重试启动，确保端口释放后能自动恢复。
-        if (snapshotConfig && snapshotHandle && !snapshotHandle.started) {
-          try {
-            const handle = startDashboardSnapshotServer(snapshotConfig);
-            // 等待启动完成（最多 1.5s，探测+listen 通常很快）
-            const waitStart = Date.now();
-            while (Date.now() - waitStart < 1500) {
-              if (handle.started) break;
-              if (handle.failureReason) break;
-              await new Promise((r) => setTimeout(r, 100));
+        // 此外，server 可能启动后因运行时错误/崩溃而无响应（started 仍为 true），
+        // 通过主动 ping /internal/health 检测并触发重启。
+        if (snapshotConfig && snapshotHandle) {
+          // 主动健康检查：即使 started=true，也 ping 一次确认 server 真正可响应
+          if (snapshotHandle.started) {
+            try {
+              const pingUrl = `http://${snapshotConfig.host}:${snapshotConfig.port}/internal/health`;
+              const pingResp = await fetch(pingUrl, {
+                signal: AbortSignal.timeout(2000),
+              }).catch(() => null);
+              if (!pingResp || !pingResp.ok) {
+                // server 无响应，标记为未启动以触发重试
+                logger?.warn?.(`heartbeat: snapshot server health check failed (port ${snapshotConfig.port} unresponsive), marking for restart`);
+                snapshotHandle.started = false;
+                snapshotHandle.failureReason = 'health check failed: server unresponsive';
+                // 尝试停止旧 server（可能已僵死）
+                try { await snapshotServerStop?.(); } catch {}
+                snapshotServerStop = null;
+              }
+            } catch {
+              // ping 异常，标记为未启动
+              snapshotHandle.started = false;
+              snapshotHandle.failureReason = 'health check threw';
             }
-            if (handle.started) {
-              snapshotHandle = handle;
-              snapshotServerStop = handle.stop;
-              logger?.info?.(`heartbeat: dashboard snapshot server recovered, listening on ${snapshotConfig.host}:${snapshotConfig.port}`);
+          }
+          // 重试启动（started=false 时）
+          if (!snapshotHandle.started) {
+            try {
+              const handle = startDashboardSnapshotServer(snapshotConfig);
+              // 等待启动完成（最多 1.5s，探测+listen 通常很快）
+              const waitStart = Date.now();
+              while (Date.now() - waitStart < 1500) {
+                if (handle.started) break;
+                if (handle.failureReason) break;
+                await new Promise((r) => setTimeout(r, 100));
+              }
+              if (handle.started) {
+                snapshotHandle = handle;
+                snapshotServerStop = handle.stop;
+                logger?.info?.(`heartbeat: dashboard snapshot server recovered, listening on ${snapshotConfig.host}:${snapshotConfig.port}`);
+              }
+            } catch (snapRetryErr) {
+              logger?.debug?.("heartbeat: snapshot server retry failed (will try again next cycle)", { err: String(snapRetryErr) });
             }
-          } catch (snapRetryErr) {
-            logger?.debug?.("heartbeat: snapshot server retry failed (will try again next cycle)", { err: String(snapRetryErr) });
           }
         }
         

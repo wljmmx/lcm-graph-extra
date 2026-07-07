@@ -45,7 +45,7 @@ export interface QmdClientOptions {
   mcpTimeout?: number;
   cliTimeout?: number;
   pingInterval?: number;
-  cliFallbackSearchType?: 'search' | 'vsearch';
+  cliFallbackSearchType?: 'search' | 'vsearch' | 'hybrid';
   /** P3-B3: 注入统一 logger；未提供时降级到 globalLogger。 */
   logger?: Logger;
 }
@@ -72,7 +72,9 @@ const DEFAULTS = {
   mcpBaseUrl: "http://127.0.0.1:8081",
   mcpTimeout: 5000,
   cliTimeout: 30_000,
-  cliFallbackSearchType: 'search',
+  // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
+  // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。
+  cliFallbackSearchType: 'hybrid',
   pingInterval: 30_000,
 };
 
@@ -112,6 +114,22 @@ export class QmdClient {
    * Results are normalised to QmdSearchResult[] regardless of source.
    */
   async query(params: SearchParams): Promise<QmdSearchResult[]> {
+    // 清理 searches 中每个 query 的换行符。
+    // qmd structured search (lex 模式) 不支持多行查询，含 \n/\r 会报错：
+    //   "Structured search (lex): queries must be single-line. Remove newline characters."
+    // vec/hyde 模式同样做清理以保持一致，避免将原始多行用户消息直接传入。
+    // 处理：将 \r\n / \n / \r 替换为单个空格，并 trim 首尾空白。
+    if (Array.isArray(params.searches)) {
+      params = {
+        ...params,
+        searches: params.searches.map((s) => ({
+          ...s,
+          query: typeof s.query === 'string'
+            ? s.query.replace(/\r\n|\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
+            : s.query,
+        })),
+      };
+    }
     if (this.mcpAvailable !== false) {
       try {
         const results = await this.queryViaMcp(params);
