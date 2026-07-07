@@ -795,7 +795,7 @@ export class GraphAdapter {
         Object.entries(params).map(([k, v]) => {
           if (typeof v !== "number") return [k, v];
           // LIMIT/OFFSET/count params must be Neo4j integers
-          if (/^(limit|max_depth|iterations|timeout)$/.test(k)) {
+          if (/^(limit|batchSize|max_depth|iterations|timeout)$/.test(k)) {
             return [k, neo4jDriver.int(Math.trunc(v))];
           }
           // Score/threshold params keep float precision
