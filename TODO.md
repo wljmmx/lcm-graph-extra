@@ -3,32 +3,32 @@
 ## 🚀 v1.0.1 — 安全合规 Hotfix (P0)
 
 ### 🔒 安全修复
-- [ ] :7423 Snapshot服务添加Basic Auth认证
-- [ ] Docker默认强制启用DASHBOARD_AUTH环境变量
-- [ ] /internal/shutdown改为POST方法并添加token验证
-- [ ] 添加IP白名单中间件
+- [x] :7423 Snapshot服务添加Basic Auth认证
+- [x] Docker默认强制启用DASHBOARD_AUTH环境变量
+- [x] /internal/shutdown改为POST方法并添加token验证
+- [x] 添加IP白名单中间件
 
 ### 📊 合规审计
-- [ ] lcmg_*工具注入appendOperationLog操作审计
-- [ ] 操作日志增加user/session_id字段
-- [ ] 敏感参数脱敏（password/apiKey等）
+- [x] lcmg_*工具注入appendOperationLog操作审计
+- [x] 操作日志增加user/session_id字段
+- [x] 敏感参数脱敏（password/apiKey等）
 
 ## ✅ v1.1.0 — 运维便捷性 + 集成验证 (P1)
 
 ### 🛠️ 配置API
-- [ ] GET /api/config 运行时配置查看
-- [ ] PATCH /api/config 白名单热更新
-- [ ] GET /api/config/schema 配置schema文档
+- [x] GET /api/config 运行时配置查看
+- [x] PATCH /api/config 白名单热更新
+- [x] GET /api/config/schema 配置schema文档
 
 ### 🧪 集成测试
 - [ ] gm-pro真实集成测试（需gm-pro环境可用）
 
 ### 🎨 前端UI
-- [ ] Dashboard能力档次切换UI（Vue组件）
-- [ ] lcmg_config_get/set MCP工具
+- [x] Dashboard能力档次切换UI（Vue组件）
+- [x] lcmg_config_get/set MCP工具
 
 ### 📋 审计增强
-- [ ] 操作日志查询API增强（时间范围+操作者过滤）
+- [x] 操作日志查询API增强（时间范围+操作者过滤）
 
 ## 📈 v1.2.0 — 性能优化 + 监控增强 (P2)
 
@@ -40,7 +40,7 @@
 
 ### 🤖 自动化
 - [ ] 能力档次自动推荐（基于硬件资源）
-- [ ] Rate Limiting（@fastify/rate-limit）
+- [x] Rate Limiting（@fastify/rate-limit）✅ v1.0.1 安全加固已落地（全局 100 req/30s）
 
 ### 🧪 性能测试
 - [ ] 性能基准测试套件（4档对比）
@@ -63,11 +63,11 @@
 
 | 版本 | 总任务 | 完成 | 进行中 | 待开始 | 完成率 |
 |------|--------|------|--------|--------|--------|
-| v1.0.1 | 7 | 0 | 0 | 7 | 0% |
-| v1.1.0 | 7 | 0 | 0 | 7 | 0% |
-| v1.2.0 | 6 | 0 | 0 | 6 | 0% |
+| v1.0.1 | 7 | 7 | 0 | 0 | 100% |
+| v1.1.0 | 7 | 6 | 0 | 1 | 86% |
+| v1.2.0 | 6 | 1 | 0 | 5 | 17% |
 | v2.0.0 | 6 | 0 | 0 | 6 | 0% |
-| **合计** | **26** | **0** | **0** | **26** | **0%** |
+| **合计** | **26** | **14** | **0** | **12** | **54%** |
 
 ---
 

@@ -51,20 +51,38 @@ function onSearch(): void {
 </script>
 
 <template>
-  <NSpace align="center" :size="8" wrap>
+  <NSpace
+    align="center"
+    :size="8"
+    wrap
+    role="search"
+    aria-label="记忆搜索"
+  >
     <NInput
       v-model:value="q"
       placeholder="输入搜索词（回车搜索）"
       clearable
       style="width: 320px"
+      aria-label="搜索词"
       @keyup.enter="onSearch"
     />
     <NSelect
       v-model:value="engines"
       :options="enginesOptions"
       style="width: 140px"
+      aria-label="选择检索引擎"
     />
-    <NInputNumber v-model:value="limit" :min="1" :max="50" style="width: 110px" />
-    <NButton type="primary" @click="onSearch">搜索</NButton>
+    <NInputNumber
+      v-model:value="limit"
+      :min="1"
+      :max="50"
+      style="width: 110px"
+      aria-label="结果数量上限"
+    />
+    <NButton
+      type="primary"
+      aria-label="执行搜索"
+      @click="onSearch"
+    >搜索</NButton>
   </NSpace>
 </template>

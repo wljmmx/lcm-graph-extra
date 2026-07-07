@@ -14,7 +14,7 @@
  *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
  *          agent.error → 警告提示。
  */
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
 import {
   NGrid,
@@ -27,6 +27,8 @@ import {
   NAlert,
   NSpace,
   NSpin,
+  NTabs,
+  NTabPane,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
 import KpiCard from '../components/KpiCard.vue';
@@ -41,6 +43,7 @@ import {
   type AgentStatus,
   type GraphHealthResponse,
 } from '../api/health';
+import { formatTime, formatTimeWithSeconds } from '../utils/format';
 
 // ===== 数据获取（轮询） =====
 const { data: latestData, isLoading: latestLoading } = useQuery({
@@ -110,23 +113,11 @@ const kpiCbFailures = computed<number | string>(() => {
   return db.value.cbLcmFailures + db.value.cbQmdFailures + db.value.cbNeo4jFailures;
 });
 
-// ===== 工具：时间格式化 HH:mm =====
-function fmtTime(ts: number): string {
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
-}
+// ===== 最近更新时间（HH:mm:ss） =====
+const lastUpdated = computed(() => formatTimeWithSeconds(db.value?.timestamp));
 
-const lastUpdated = computed(() => {
-  const ts = db.value?.timestamp;
-  if (!ts) return '—';
-  const d = new Date(ts);
-  return `${fmtTime(ts)}:${String(d.getSeconds()).padStart(2, '0')}`;
-});
-
-// ===== 时序图 X 轴标签 =====
-const timeLabels = computed(() => historyAsc.value.map((s) => fmtTime(s.timestamp)));
+// ===== 时序图 X 轴标签（HH:mm） =====
+const timeLabels = computed(() => historyAsc.value.map((s) => formatTime(s.timestamp)));
 
 // 时序图1：压力信号（双 Y 轴，左：数量，右：比率 0-1）
 const pressureOption = computed(() => ({
@@ -337,6 +328,10 @@ const kpiCols = '2 s:2 m:2 l:4';
 const chartCols = '1 s:1 m:2';
 // 状态面板：小屏 1 列，中屏 2 列，宽屏（l≥1280）3 列
 const panelCols = '1 s:1 m:2 l:3';
+
+// S4-2: Tab 分组（KPI / 时序 / 状态面板），降低单屏信息密度
+// 默认激活 KPI tab；display-directive="show" 保持所有面板在 DOM（测试可访问文本）
+const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
 </script>
 
 <template>
@@ -347,77 +342,117 @@ const panelCols = '1 s:1 m:2 l:3';
       <span class="last-updated">最近更新: {{ lastUpdated }}</span>
     </div>
 
-    <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- KPI 卡片行 -->
-      <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
-        <NGi>
-          <KpiCard
-            label="待处理消息"
-            :value="kpiPending"
-            :threshold="100"
-          />
-        </NGi>
-        <NGi>
-          <KpiCard
-            label="Token 占用比"
-            :value="kpiTokenRatio"
-            unit="%"
-            :threshold="80"
-          />
-        </NGi>
-        <NGi>
-          <KpiCard
-            label="检索延迟 Assemble"
-            :value="kpiAssembleMs"
-            unit="ms"
-            :threshold="2000"
-          />
-        </NGi>
-        <NGi>
-          <KpiCard
-            label="熔断失败总数"
-            :value="kpiCbFailures"
-            :threshold="0"
-          />
-        </NGi>
-      </NGrid>
+    <NTabs
+      v-model:value="activeTab"
+      type="line"
+      animated
+      size="medium"
+      style="margin-top: 12px"
+      aria-label="监控视图分组"
+    >
+      <!-- ===== Tab 1: KPI 概览 ===== -->
+      <NTabPane
+        name="kpi"
+        tab="KPI 概览"
+        display-directive="show"
+      >
+        <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <NGi>
+            <KpiCard
+              label="待处理消息"
+              :value="kpiPending"
+              :threshold="100"
+              :loading="latestLoading"
+            />
+          </NGi>
+          <NGi>
+            <KpiCard
+              label="Token 占用比"
+              :value="kpiTokenRatio"
+              unit="%"
+              :threshold="80"
+              :loading="latestLoading"
+            />
+          </NGi>
+          <NGi>
+            <KpiCard
+              label="检索延迟 Assemble"
+              :value="kpiAssembleMs"
+              unit="ms"
+              :threshold="2000"
+              :loading="latestLoading"
+            />
+          </NGi>
+          <NGi>
+            <KpiCard
+              label="熔断失败总数"
+              :value="kpiCbFailures"
+              :threshold="0"
+              :loading="latestLoading"
+            />
+          </NGi>
+        </NGrid>
 
-      <!-- 时序图区：压力信号（全宽） -->
-      <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
-        <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
-        <NEmpty
-          v-else
-          :description="historyLoading ? '加载中…' : '无历史数据'"
-          style="padding: 24px 0"
+        <!-- 首次加载提示 -->
+        <NAlert
+          v-if="latestLoading && !latestData"
+          type="info"
+          :show-icon="true"
+          title="正在加载最新健康指标…"
+          style="margin-top: 12px"
         />
-      </NCard>
+      </NTabPane>
 
-      <!-- 时序图区：检索延迟 + tier 分布（2 列） -->
-      <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
-        <NGi>
-          <NCard title="检索延迟（Assemble + L2/L3/L4 堆叠）" size="small">
-            <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+      <!-- ===== Tab 2: 时序图 ===== -->
+      <NTabPane
+        name="charts"
+        tab="时序图"
+        display-directive="show"
+      >
+        <NSpace vertical :size="12">
+          <!-- 压力信号（全宽） -->
+          <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
+            <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
             <NEmpty
               v-else
               :description="historyLoading ? '加载中…' : '无历史数据'"
               style="padding: 24px 0"
             />
           </NCard>
-        </NGi>
-        <NGi>
-          <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
-            <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
-            <NEmpty
-              v-else
-              :description="historyLoading ? '加载中…' : '无历史数据'"
-              style="padding: 24px 0"
-            />
-          </NCard>
-        </NGi>
-      </NGrid>
 
-      <!-- 状态面板区（3 列） -->
-      <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <!-- 检索延迟 + tier 分布（2 列） -->
+          <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
+            <NGi>
+              <NCard title="检索延迟（Assemble + L2/L3/L4 堆叠）" size="small">
+                <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+                <NEmpty
+                  v-else
+                  :description="historyLoading ? '加载中…' : '无历史数据'"
+                  style="padding: 24px 0"
+                />
+              </NCard>
+            </NGi>
+            <NGi>
+              <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
+                <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
+                <NEmpty
+                  v-else
+                  :description="historyLoading ? '加载中…' : '无历史数据'"
+                  style="padding: 24px 0"
+                />
+              </NCard>
+            </NGi>
+          </NGrid>
+        </NSpace>
+      </NTabPane>
+
+      <!-- ===== Tab 3: 状态面板 ===== -->
+      <NTabPane
+        name="panels"
+        tab="状态面板"
+        display-directive="show"
+      >
+        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 熔断状态 -->
         <NGi>
           <NCard title="熔断状态" size="small">
@@ -446,29 +481,29 @@ const panelCols = '1 s:1 m:2 l:3';
         <NGi>
           <NCard title="降级链路状态" size="small">
             <template v-if="memory">
-              <!-- 各检索层状态指示灯 -->
-              <div class="layer-grid">
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L1 QMD</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L2 熔断</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L3 图谱</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">L4 经验</span>
-                </div>
-                <div class="layer-cell">
-                  <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" />
-                  <span class="layer-label">gm-pro</span>
-                </div>
-              </div>
+              <!-- 各检索层状态指示灯（形状+符号双重编码，不单靠颜色） -->
+              <ul class="layer-grid" role="list">
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L1 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L1 QMD<span class="sr-only">{{ layerStatus.L1 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L2 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L2 熔断<span class="sr-only">{{ layerStatus.L2 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L3 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L3 图谱<span class="sr-only">{{ layerStatus.L3 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L4 ? '✗' : '✓' }}</span>
+                  <span class="layer-label">L4 经验<span class="sr-only">{{ layerStatus.L4 ? '降级' : '正常' }}</span></span>
+                </li>
+                <li class="layer-cell">
+                  <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.gmPro ? '✗' : '✓' }}</span>
+                  <span class="layer-label">gm-pro<span class="sr-only">{{ layerStatus.gmPro ? '降级' : '正常' }}</span></span>
+                </li>
+              </ul>
               <!-- UX 摘要 -->
               <NDescriptions :column="1" size="small" label-placement="left" bordered style="margin-top: 8px">
                 <NDescriptionsItem label="降级率">
@@ -500,7 +535,7 @@ const panelCols = '1 s:1 m:2 l:3';
                   </NTag>
                 </NSpace>
               </div>
-              <div v-else class="muted" style="margin-top: 8px; font-size: 12px">
+              <div v-else class="muted" style="margin-top: 8px; font-size: var(--fs-caption)">
                 最近一次 assemble 未触发降级
               </div>
             </template>
@@ -724,15 +759,8 @@ const panelCols = '1 s:1 m:2 l:3';
           </NCard>
         </NGi>
       </NGrid>
-
-      <!-- 首次加载提示 -->
-      <NAlert
-        v-if="latestLoading && !latestData"
-        type="info"
-        :show-icon="true"
-        title="正在加载最新健康指标…"
-      />
-    </NSpace>
+      </NTabPane>
+    </NTabs>
   </div>
 </template>
 
@@ -746,56 +774,59 @@ const panelCols = '1 s:1 m:2 l:3';
   justify-content: space-between;
 }
 .last-updated {
-  font-size: 12px;
-  color: #909399;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
 }
 .profile-section {
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
 }
 .profile-label {
-  font-size: 12px;
-  color: #909399;
-  margin-bottom: 4px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-xs);
 }
-.muted {
-  color: #909399;
-  font-size: 13px;
-}
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  word-break: break-all;
-}
+/* .muted / .mono 已在 tokens.css 全局定义，此处不重复 */
 .layer-grid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
+  gap: var(--space-sm);
+  /* 重置 ul 默认样式 */
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 .layer-cell {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 6px 2px;
-  border: 1px solid #eaecef;
-  border-radius: 4px;
+  gap: var(--space-xs);
+  padding: var(--space-sm) 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
 }
+/* 状态点：符号居中，双重编码（颜色+符号） */
 .layer-cell .dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
 }
 .layer-cell .dot-ok {
-  background: #18a058;
-  box-shadow: 0 0 4px rgba(24, 160, 88, 0.6);
+  background: var(--color-success);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-success) 60%, transparent);
 }
 .layer-cell .dot-fail {
-  background: #d03050;
-  box-shadow: 0 0 4px rgba(208, 48, 80, 0.6);
+  background: var(--color-danger);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--color-danger) 60%, transparent);
 }
 .layer-label {
-  font-size: 11px;
-  color: #606266;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
 }
 </style>

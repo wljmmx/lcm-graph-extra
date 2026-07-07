@@ -1,0 +1,184 @@
+/**
+ * Design Tokens —— 设计令牌系统。
+ *
+ * 所有视觉原子（色板 / 字号 / 间距 / 圆角 / 阴影 / 动效）集中定义，
+ * 组件通过 var(--token) 引用，避免硬编码、便于主题切换。
+ *
+ * 暗色模式预留：[data-theme="dark"] 覆盖（S3 启用）。
+ */
+:root {
+  /* ===== 色板 ===== */
+  /* 主色（与 naive-ui primary 对齐；hover 由组件直接引用，pressed/suppl 由 naive-ui 派生） */
+  --color-primary: #2080f0;
+  --color-primary-hover: #4098fc;
+
+  /* 语义色基色（hover/pressed/suppl 由 naive-ui 派生，CSS 不直接引用） */
+  --color-success: #18a058;
+  --color-warning: #f0a020;
+  --color-danger: #d03050;
+
+  /* 文本（亮色背景） */
+  --color-text-primary: #1f2329;
+  --color-text-secondary: #4e5969;
+  /* #6b7280 对比度 ~4.6:1，满足 WCAG AA 4.5:1（原 #86909c 仅 3.28:1） */
+  --color-text-tertiary: #6b7280;
+
+  /* 背景 */
+  --color-bg-base: #ffffff;
+  --color-bg-highlight: #fff3a0; /* 命中高亮（搜索词 mark） */
+  --color-bg-hover: rgba(0, 0, 0, 0.025);
+
+  /* 边框（分隔线由 naive-ui dividerColor 提供，不暴露 token） */
+  --color-border: #e5e6eb;
+  --color-border-strong: #c9cdd4;
+
+  /* ===== 字号层级（4px 基准网格） ===== */
+  --fs-caption: 12px; /* 辅助说明、tag */
+  --fs-label: 13px; /* 表头、按钮 */
+  --fs-body: 14px; /* 正文 */
+  --fs-subtitle: 16px; /* 副标题 */
+  --fs-display: 26px; /* KPI 主数值 */
+
+  /* ===== 间距（4px 基准网格） ===== */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+
+  /* ===== 圆角 ===== */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-full: 9999px;
+
+  /* ===== 字体栈（中英混排） ===== */
+  --font-family-base:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial,
+    sans-serif;
+  --font-family-mono:
+    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+
+  /* ===== 动效（base 用于 transition；fast/slow 当前未引用，删除以避免死代码） ===== */
+  --motion-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ===== 暗色模式预留（S3 启用） ===== */
+[data-theme="dark"] {
+  --color-text-primary: rgba(255, 255, 255, 0.92);
+  --color-text-secondary: rgba(255, 255, 255, 0.72);
+  --color-text-tertiary: rgba(255, 255, 255, 0.52);
+
+  --color-bg-base: #18181c;
+  --color-bg-hover: rgba(255, 255, 255, 0.04);
+  --color-bg-highlight: rgba(240, 160, 32, 0.28);
+
+  --color-border: rgba(255, 255, 255, 0.12);
+  --color-border-strong: rgba(255, 255, 255, 0.2);
+}
+
+/* ===== 全局基础样式 ===== */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-family-base);
+  font-size: var(--fs-body);
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* ===== 最小字号 12px 强制下限（可访问性：WCAG 1.4.4） ===== */
+/* 任何小于 12px 的字号上调到 12px（兜底，防止组件内联样式写过小值） */
+html {
+  font-size: 16px; /* root em 基准 */
+}
+
+/* ===== focus-visible 无障碍高亮（S3 增强） ===== */
+/* 仅在键盘聚焦时显示，鼠标点击不会触发；圆角元素自适应 */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  /* 确保焦点环不被圆角遮挡 */
+  border-radius: inherit;
+}
+/* 暗色模式下焦点环使用更亮的色，提高对比度 */
+[data-theme="dark"] :focus-visible {
+  outline-color: var(--color-primary-hover);
+}
+/* 跳过链接（links 已有默认 underline 焦点样式，避免双重高亮） */
+a:focus-visible {
+  outline-style: dashed;
+}
+
+/* ===== 动效偏好：尊重 prefers-reduced-motion（WCAG 2.3.3） ===== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ===== 对比度偏好：高对比度模式 ===== */
+@media (prefers-contrast: more) {
+  :root {
+    --color-border: var(--color-text-primary);
+    --color-text-secondary: var(--color-text-primary);
+  }
+}
+
+/* ===== 滚动条美化 ===== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ===== 公共 CSS 类 ===== */
+/* 等宽字体（文件路径、代码、session id） */
+.mono {
+  font-family: var(--font-family-mono);
+}
+
+/* 弱化文本（次要信息） */
+.muted {
+  color: var(--color-text-secondary);
+}
+
+/* 长文本单元格换行 */
+.cell-wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+/* 屏幕阅读器专用文本：视觉隐藏但可访问（WCAG 1.3.1） */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

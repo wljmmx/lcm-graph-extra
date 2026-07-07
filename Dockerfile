@@ -55,6 +55,12 @@ ENV DASHBOARD_PORT=7421
 ENV DASHBOARD_HOST=0.0.0.0
 ENV PLUGIN_SNAPSHOT_URL=http://127.0.0.1:7423
 ENV OPENCLAW_MCP_URL=http://127.0.0.1:18789
+# v1.0.1-2: Docker 生产环境强制启用 Basic Auth（启动时检查）
+# 若未设置 DASHBOARD_AUTH，容器启动时打印 CRITICAL 警告
+
+# v1.0.1-2: 启动前安全检查脚本
+COPY scripts/docker-security-check.sh /usr/local/bin/docker-security-check.sh
+RUN chmod +x /usr/local/bin/docker-security-check.sh
 
 # 健康检查（dashboard 后端 ping）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
@@ -62,5 +68,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 EXPOSE 7421
 
-# 默认启动 dashboard 后端；插件本体由 OpenClaw host 加载
-CMD ["node", "packages/dashboard/dist-server/index.js"]
+# v1.0.1-2: 启动前执行安全检查，然后启动 dashboard 后端
+CMD ["sh", "-c", "/usr/local/bin/docker-security-check.sh && node packages/dashboard/dist-server/index.js"]

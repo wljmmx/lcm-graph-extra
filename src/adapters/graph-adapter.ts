@@ -23,6 +23,8 @@ import { resolveLogger, getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
 // P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
 import { DEFAULTS } from '../config/defaults.js';
+// v1.2.0-3: 业务指标 —— 跟踪 searchWithCache 的 TTL 命中率
+import { businessMetrics } from '../health-metrics.js';
 
 
 class LRUCache<K, V> {
@@ -397,7 +399,13 @@ export class GraphAdapter {
     const fullHash = hashString(query.toLowerCase().trim());
     const key = `s:${query.slice(0, 50).toLowerCase().trim()}:${fullHash}`;
     const cached = this.searchCache.get(key);
-    if (cached) return cached as RetrievalResult[];
+    if (cached) {
+      // v1.2.0-3: 记录 TTL 命中
+      businessMetrics.recordTtlAccess(true);
+      return cached as RetrievalResult[];
+    }
+    // v1.2.0-3: 记录 TTL 未命中
+    businessMetrics.recordTtlAccess(false);
     let results = await this.search(query, limit);
     if (!Array.isArray(results)) results = [];
     // PERF-M2 M-2: 移除重复 rerank。search() 内部已在 nodes.length >= 2 时执行过 rerankByPageRank，

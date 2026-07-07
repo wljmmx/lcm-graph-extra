@@ -21,6 +21,7 @@ import {
   NCollapseItem,
   NText,
 } from 'naive-ui';
+import { formatTimeWithSeconds, formatDuration } from '../utils/format';
 
 export interface OperationLogEntry {
   id: number;
@@ -39,15 +40,6 @@ const props = defineProps<{
 
 // 反向副本用于"旧的在下"的视觉顺序展示（父组件传入已倒序，这里直接展示）
 const displayLogs = computed(() => props.logs);
-
-/** 时间格式化为 HH:mm:ss */
-function fmtTime(ts: number): string {
-  const d = new Date(ts);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  return `${hh}:${mm}:${ss}`;
-}
 
 /** 状态 tag 类型 */
 function statusType(s: OperationLogEntry['status']): 'success' | 'error' | 'info' {
@@ -70,13 +62,6 @@ function prettyJson(v: unknown): string {
     return String(v);
   }
 }
-
-/** 耗时格式化：<1s 显示 ms，否则显示 s */
-function fmtDuration(ms?: number): string {
-  if (ms === undefined || ms === null) return '';
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
-}
 </script>
 
 <template>
@@ -90,13 +75,13 @@ function fmtDuration(ms?: number): string {
     <NList v-else bordered clickable>
       <NListItem v-for="log in displayLogs" :key="log.id">
         <NSpace align="center" :size="8" wrap>
-          <NText depth="3" class="log-time">{{ fmtTime(log.ts) }}</NText>
+          <NText depth="3" class="log-time">{{ formatTimeWithSeconds(log.ts) }}</NText>
           <NText class="log-tool">{{ log.tool }}</NText>
           <NTag :type="statusType(log.status)" size="small">
             {{ statusLabel(log.status) }}
           </NTag>
           <NText v-if="log.durationMs !== undefined" depth="3" class="log-duration">
-            {{ fmtDuration(log.durationMs) }}
+            {{ formatDuration(log.durationMs) }}
           </NText>
         </NSpace>
 
@@ -131,15 +116,15 @@ function fmtDuration(ms?: number): string {
 <style scoped>
 .log-time {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 .log-tool {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-size: var(--fs-label);
   font-weight: 600;
 }
 .log-duration {
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 .log-collapse {
   margin-top: 4px;
@@ -148,22 +133,22 @@ function fmtDuration(ms?: number): string {
   margin-bottom: 6px;
 }
 .log-section-label {
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 .log-pre {
   margin: 2px 0 0 0;
-  padding: 6px 8px;
-  background: rgba(0, 0, 0, 0.03);
-  border-radius: 3px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-family-mono);
+  font-size: var(--fs-caption);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 200px;
   overflow: auto;
 }
 .log-error {
-  color: #d03050;
-  background: rgba(208, 48, 80, 0.06);
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 6%, transparent);
 }
 </style>

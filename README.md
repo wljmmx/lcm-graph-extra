@@ -142,11 +142,11 @@ npm start
 ```bash
 npm run build         # 构建主插件
 npm run typecheck     # 类型检查
-npm test              # 运行测试（329 项）
+npm test              # 运行测试（458 项）
 
 cd packages/dashboard
 npm run typecheck     # dashboard 类型检查
-npm test              # dashboard 测试（56 项）
+npm test              # dashboard 测试（63 项）
 ```
 
 ## 测试

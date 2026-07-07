@@ -21,9 +21,10 @@
  */
 import { computed, reactive, ref } from 'vue';
 import { useMutation } from '@tanstack/vue-query';
-import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert } from 'naive-ui';
+import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, useMessage } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
+import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
 import {
   invokeMaintain,
   invokeDiagnose,
@@ -36,6 +37,8 @@ import {
   invokeImport,
 } from '../api/maintain';
 import type { McpInvokeResponse } from '../api/experience';
+
+const message = useMessage();
 
 // ===== 各卡片表单状态 =====
 
@@ -93,6 +96,28 @@ const importSourceOptions = [
   { label: 'LCM 消息 (lcm_messages)', value: 'lcm_messages' },
   { label: '记忆文件 (memory_files)', value: 'memory_files' },
 ];
+
+// ===== 路径安全校验（前端轻量校验，后端 POST /api/mcp/invoke 有硬墙兜底） =====
+
+/**
+ * 校验路径必须位于 ~/.openclaw 之下。
+ * 浏览器无法获知真实 home 目录，仅做前缀 + 遍历检查；
+ * 后端用 path.resolve(os.homedir(), ...) 做权威校验。
+ *
+ * @returns null 表示通过，否则为错误文案
+ */
+function validateOpenclawPath(p: string): string | null {
+  const trimmed = p.trim();
+  if (!trimmed) return '路径不能为空';
+  // 统一为正斜杠便于匹配
+  const normalized = trimmed.replace(/\\/g, '/');
+  const prefix = '~/.openclaw';
+  const ok = normalized === prefix || normalized.startsWith(prefix + '/');
+  if (!ok) return `路径必须位于 ${prefix} 之下`;
+  // 拒绝路径遍历段
+  if (/(^|\/)\.\.(\/|$)/.test(normalized)) return '路径不能包含 .. 段';
+  return null;
+}
 
 // ===== 日志 + loading 状态 =====
 
@@ -170,10 +195,24 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
   },
 });
 
-// ===== 各卡片执行入口（封装 mutation.mutate） =====
+/**
+ * 统一执行入口（P1 竞态修复）。
+ *
+ * onMutate 由 TanStack Query 异步调度，若用户在首次调用的 onMutate
+ * 真正执行前再次触发同一卡片，pendingLogIds.set 会覆盖首条 logId，
+ * 导致首条 running 日志永不被回填。此处同步置位 loadingMap 作为硬守卫，
+ * 在 mutate 调用前就拒绝重入。
+ */
+function runMutation(vars: MutationVars): void {
+  if (loadingMap[vars.cardKey]) return;
+  loadingMap[vars.cardKey] = true;
+  mutation.mutate(vars);
+}
+
+// ===== 各卡片执行入口（封装 runMutation） =====
 
 function executeMaintain(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'maintain',
     tool: 'lcmg_maintain',
     params: {},
@@ -182,7 +221,7 @@ function executeMaintain(): void {
 }
 
 function executeDiagnose(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'diagnose',
     tool: 'lcmg_diagnose',
     params: {},
@@ -191,7 +230,7 @@ function executeDiagnose(): void {
 }
 
 function executeDistill(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'distill',
     tool: 'lcmg_distill',
     params: { limit: distillLimit.value },
@@ -204,7 +243,7 @@ function executeCompact(): void {
   if (compactConversationId.value !== null && compactConversationId.value !== undefined) {
     params.conversationId = compactConversationId.value;
   }
-  mutation.mutate({
+  runMutation({
     cardKey: 'compact',
     tool: 'lcmg_compact',
     params,
@@ -213,7 +252,7 @@ function executeCompact(): void {
 }
 
 function executeResetBreaker(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'reset_breaker',
     tool: 'lcmg_reset_breaker',
     params: { name: breakerName.value },
@@ -223,7 +262,7 @@ function executeResetBreaker(): void {
 
 function executeTtlCleanup(): void {
   // TTL 清理复用 lcmg_maintain（已内置债务表对账 + 孤儿清理）
-  mutation.mutate({
+  runMutation({
     cardKey: 'ttl_cleanup',
     tool: 'lcmg_maintain',
     params: {},
@@ -232,7 +271,12 @@ function executeTtlCleanup(): void {
 }
 
 function executeBackup(): void {
-  mutation.mutate({
+  const err = validateOpenclawPath(backupOutputPath.value);
+  if (err) {
+    message.error(err);
+    return;
+  }
+  runMutation({
     cardKey: 'backup',
     tool: 'lcmg_backup',
     params: { outputPath: backupOutputPath.value },
@@ -241,7 +285,12 @@ function executeBackup(): void {
 }
 
 function executeRestore(): void {
-  mutation.mutate({
+  const err = validateOpenclawPath(restoreBackupPath.value);
+  if (err) {
+    message.error(err);
+    return;
+  }
+  runMutation({
     cardKey: 'restore',
     tool: 'lcmg_restore',
     params: {
@@ -255,7 +304,7 @@ function executeRestore(): void {
 }
 
 function executeSync(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'sync',
     tool: 'lcmg_sync',
     params: { mode: syncMode.value, dryRun: syncDryRun.value },
@@ -264,7 +313,7 @@ function executeSync(): void {
 }
 
 function executeImport(): void {
-  mutation.mutate({
+  runMutation({
     cardKey: 'import',
     tool: 'lcmg_import',
     params: { source: importSource.value, limit: importLimit.value },
@@ -288,7 +337,7 @@ function executeImport(): void {
           <OperationCard
             title="图谱维护"
             description="触发 dedup / PageRank / community detection + 债务表对账。建议低峰期执行。"
-            icon="🧭"
+            icon="database"
             :confirm-level="1"
             :loading="!!loadingMap.maintain"
             @execute="executeMaintain"
@@ -300,7 +349,7 @@ function executeImport(): void {
           <OperationCard
             title="系统诊断"
             description="全栈自检：lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics，输出多段 markdown 报告。"
-            icon="🩺"
+            icon="activity"
             :confirm-level="0"
             :loading="!!loadingMap.diagnose"
             @execute="executeDiagnose"
@@ -312,7 +361,7 @@ function executeImport(): void {
           <OperationCard
             title="触发蒸馏"
             description="从 PENDING 经验批量蒸馏为 DISTILLED（调用 LLM 提取结构化经验）。"
-            icon="⚗️"
+            icon="flask"
             :confirm-level="0"
             :loading="!!loadingMap.distill"
             @execute="executeDistill"
@@ -336,7 +385,7 @@ function executeImport(): void {
           <OperationCard
             title="触发 compact"
             description="手动触发指定会话的上下文压缩；省略 conversationId 则处理最紧急债务。"
-            icon="🗜️"
+            icon="compress"
             :confirm-level="1"
             :loading="!!loadingMap.compact"
             @execute="executeCompact"
@@ -360,7 +409,7 @@ function executeImport(): void {
           <OperationCard
             title="重置熔断器"
             description="重置指定子系统熔断器状态。Neo4j 还会重置 GraphAdapter 连接失败标志。"
-            icon="🔌"
+            icon="power"
             danger
             :confirm-level="1"
             :loading="!!loadingMap.reset_breaker"
@@ -383,7 +432,7 @@ function executeImport(): void {
           <OperationCard
             title="TTL 清理"
             description="触发债务表对账：删除孤儿债务 + 清理 7 天前墓碑。复用 lcmg_maintain。"
-            icon="🧹"
+            icon="trash"
             :confirm-level="1"
             :loading="!!loadingMap.ttl_cleanup"
             @execute="executeTtlCleanup"
@@ -395,7 +444,7 @@ function executeImport(): void {
           <OperationCard
             title="备份"
             description="导出 Neo4j + LCM 对话 + memory/*.md 为单 JSON 文件。路径必须在 ~/.openclaw 之下。"
-            icon="💾"
+            icon="save"
             :confirm-level="0"
             :loading="!!loadingMap.backup"
             @execute="executeBackup"
@@ -417,7 +466,7 @@ function executeImport(): void {
           <OperationCard
             title="恢复"
             description="从备份 JSON 恢复到 Neo4j / LCM / 文件。Neo4j 用 MERGE 不删现有节点。强制 dryRun 默认 true。"
-            icon="♻️"
+            icon="upload"
             danger
             :confirm-level="2"
             :loading="!!loadingMap.restore"
@@ -453,7 +502,7 @@ function executeImport(): void {
           <OperationCard
             title="同步修复"
             description="跨存储一致性检查/修复：检测孤儿 Neo4j 节点 + TTL/pin 状态。repair 模式实际删除孤儿。"
-            icon="🔧"
+            icon="refresh"
             :danger="syncDanger"
             :confirm-level="syncConfirmLevel"
             :loading="!!loadingMap.sync"
@@ -482,7 +531,7 @@ function executeImport(): void {
           <OperationCard
             title="历史导入"
             description="把 LCM 消息 / 记忆文件 / 全部一次性导入 Neo4j（LLM 实体抽取，未配置时降级直存）。"
-            icon="📥"
+            icon="download"
             :confirm-level="1"
             :loading="!!loadingMap.import"
             @execute="executeImport"
@@ -508,6 +557,9 @@ function executeImport(): void {
           </OperationCard>
         </NGi>
       </NGrid>
+
+      <!-- v1.1.0-5: 能力档次切换 -->
+      <CapabilityProfileSwitch />
 
       <!-- 错误兜底提示（mutation 抛错时由日志区展示，此处保留全页提示） -->
       <NAlert
@@ -535,7 +587,7 @@ function executeImport(): void {
   justify-content: space-between;
 }
 .muted {
-  font-size: 12px;
-  color: #909399;
+  /* color 由 tokens.css 全局 .muted 提供，此处仅追加 caption 字号 */
+  font-size: var(--fs-caption);
 }
 </style>

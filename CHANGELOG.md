@@ -41,6 +41,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Dashboard 安全审计与质量加固 (2026-07-07)
+
+对 `packages/dashboard` 进行 6 维度完整审计（安全/可访问性/暗色模式/代码质量/build/性能），按 P0 → P1 → P2 优先级分三批修复，共 3 个提交（`72adde0` / `2da25d7` / `636572e`）。
+
+**P0 — 暗色模式与安全硬伤（4 项）**
+
+- **ECharts 暗色模式** (`src/components/EChart.vue` + `src/styles/theme.ts`): 新增 `echartsDarkThemeColors` + `echartsDarkBaseOption`，暗色模式下坐标轴/splitLine/legend/tooltip 切换为浅色字面值（ECharts 不支持 CSS var()）
+- **DataTable 浅合并穿透** (`src/styles/theme.ts`): `darkThemeOverrides` 显式覆盖 `DataTable.thColor`/`thTextColor`，避免亮色表头字面值穿透到暗色模式
+- **build 警告** (`vite.config.ts`): `manualChunks` 拆分 echarts/vue/naive-ui/vendor + `chunkSizeWarningLimit=800`
+- **路径安全 + MCP 白名单** (`server/routes/mcp.ts` + `server/lib/path-security.ts`): 前端 `validateOpenclawPath` + 后端 `validatePathUnderOpenclaw` 双重校验；`ALLOWED_MCP_TOOLS` Set 限制 `POST /api/mcp/invoke` 仅转发 11 个已知工具
+
+**P1 — 安全加固 + 可访问性 + 代码质量（13 项）**
+
+- **安全加固（5 项）**:
+  - `@fastify/rate-limit` 速率限制（全局 100 req/30s，生产 200/30s）
+  - 错误响应脱敏（catch 块统一返回"请查看服务端日志"，不泄漏堆栈）
+  - 安全响应头（`X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer`，用 `onSend` hook 替代 `@fastify/helmet` 避免新增依赖）
+  - 生产模式未配置 `DASHBOARD_AUTH` 时打印显著警告
+  - rate-limit 信任 `X-Forwarded-For` 仅在显式 proxy 场景下
+- **可访问性 WCAG AA（6 项）**:
+  - 表格键盘导航（↑↓ 切换行 + Enter 打开详情）
+  - 抽屉 focus trap（`NDrawer` `trap-focus` + `auto-focus` + `close-on-esc`）
+  - 每页 `h1` 语义标题
+  - `layer-cell` 状态指示双重编码（形状 + 符号 + 颜色，不依赖颜色单一信号，WCAG 1.4.1）
+  - `--color-text-tertiary` 从 `#86909c`（3.28:1）提色到 `#6b7280`（~4.6:1，满足 WCAG AA 4.5:1）
+  - `KpiCard` count-up 动画尊重 `prefers-reduced-motion`
+- **代码质量（2 项）**:
+  - `format.ts` 去重：消除各组件重复的 `fmtTime`/`fmtDuration`/`formatTs`，统一为 `formatTime`/`formatTimeWithSeconds`/`formatDateTime`/`formatDuration`
+  - `MaintainView` `pendingLogIds` 重入竞态修复：`onMutate` 异步调度竞态，改为 `mutate` 调用前同步置位 `loadingMap` 硬守卫
+
+**P2 — 死代码清理 + 路径暴露 + token 收敛**
+
+- 删除未使用 API：`maintain.ts` 删除 `fetchOperationLogs*` + `OperationLog` 类型；`config.ts` 删除 `fetchRuntimeConfig`/`fetchConfigSchema`/`patchConfig`/`fetchProfileRecommendation` + 6 个未使用类型；`client.ts` 删除 `apiPatch`；`format.ts` 删除 5 个未使用导出
+- font-size token 化：7 处硬编码 `12px`/`13px`/`11px`/`10px` 替换为 `var(--fs-caption)`/`var(--fs-label)`
+- 重复样式清理：4 个文件的 scoped `.muted`/`.mono`/`.cell-wrap` 精简，统一依赖 `tokens.css` 全局定义
+- token 清理：删除 25 个闲置 CSS token（颜色 10 + 字号 1 + 间距 3 + 圆角 1 + 阴影 3 + 动效 2 + z-index 5）及暗色覆盖块对应 3 个覆盖
+- 安全：`/api/config` 不再返回 `configPath` 绝对路径（泄漏用户名/部署结构），仅保留 `configExists` 布尔
+
+**验证**：tsc --noEmit 通过；vite build 通过（13.4s）；63 个测试全部通过。
+
 ### PM × PD 双视角审计与 v1.1 演进路线
 
 - **审计报告** (`docs/pm-pd-audit-2026-07-06.md`): 并行启动项目经理（PM）与产品经理（PD）两路独立审计，覆盖代码质量/技术债务/CI-CD/文档/风险/资源进度（PM）与产品定位/功能完整度/UX/降级链路/竞品/演进建议（PD）双视角

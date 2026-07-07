@@ -9,6 +9,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
+// v1.2.0-3: 业务指标 —— 跟踪蒸馏成功率
+import { businessMetrics } from '../health-metrics.js';
 
 export function isOllamaModel(model: string): boolean {
   // 判断主会话模型是否为 Ollama 本地模型。
@@ -137,6 +139,10 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
         if (distilled) {
           await expStoreRef.saveDistilled(distilled);
           await expStoreRef.deleteById(raw.id);
+          // v1.2.0-3: 记录蒸馏成功
+          businessMetrics.recordDistill(true);
+          // v1.2.0-3: 记录经验质量分（基于 relevanceScore）
+          businessMetrics.recordExperienceQuality(distilled.relevanceScore);
 
           // S-11': Zettelkasten evolve — 建立 RELATED_TO 关联
           // 优先调用 gm-pro linkNodes API 创建语义链接，失败降级到 Cypher MERGE。
@@ -182,8 +188,15 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
               log?.debug?.("distillation: zettelkasten evolve skipped", { err: String(linkErr) });
             }
           }
+        } else {
+          // v1.2.0-3: distillOne 返回 null（LLM 解析失败或超时）→ 记录蒸馏失败
+          businessMetrics.recordDistill(false);
         }
-      } catch (e) { log?.warn?.("distillation item failed", { err: String(e) }); }
+      } catch (e) {
+        log?.warn?.("distillation item failed", { err: String(e) });
+        // v1.2.0-3: 记录蒸馏失败
+        businessMetrics.recordDistill(false);
+      }
     }
   } catch (e) { log?.warn?.("distillation batch failed", { err: String(e) }); }
 }

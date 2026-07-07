@@ -10,8 +10,48 @@
  * 设计原则：只读 Neo4j，写操作走 MCP。前端通过 POST /api/mcp/invoke 触发遗忘/固定。
  */
 import type { FastifyInstance } from 'fastify';
+import os from 'node:os';
+import path from 'node:path';
 import { runReadQuery, toNumber, splitTag } from '../lib/neo4j';
 import { invokeMcpTool } from '../lib/mcp';
+
+// ---------------------------------------------------------------------------
+// 路径安全：backup/restore 工具的路径参数必须位于 ~/.openclaw 之下
+// ---------------------------------------------------------------------------
+
+const OPENCLAW_ROOT = path.join(os.homedir(), '.openclaw');
+
+/**
+ * 校验路径解析后位于 ~/.openclaw 之下（服务端硬墙，前端校验可被绕过）。
+ * @returns null 通过，否则为错误文案
+ */
+function validatePathUnderOpenclaw(p: unknown, field: string): string | null {
+  if (typeof p !== 'string' || !p.trim()) return `${field}不能为空`;
+  const home = os.homedir();
+  const root = path.join(home, '.openclaw');
+  // 展开 ~ 为 home 后 resolve
+  const expanded = p.replace(/^~(?=$|[/\\])/, home);
+  const resolved = path.resolve(expanded);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    return `${field}必须位于 ~/.openclaw 之下`;
+  }
+  return null;
+}
+
+/** MCP 工具名白名单：dashboard 仅允许转发以下工具（纵深防御） */
+const ALLOWED_MCP_TOOLS = new Set<string>([
+  'lcmg_maintain',
+  'lcmg_diagnose',
+  'lcmg_distill',
+  'lcmg_compact',
+  'lcmg_reset_breaker',
+  'lcmg_backup',
+  'lcmg_restore',
+  'lcmg_sync',
+  'lcmg_import',
+  'lcmg_forget',
+  'lcmg_pin',
+]);
 
 // ---------------------------------------------------------------------------
 // 类型定义（与 src/api/experience.ts 对齐）
@@ -364,18 +404,39 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ err: msg }, 'experience/:id 查询失败');
       reply.code(500);
-      return { error: msg };
+      // P1-3 安全：不向客户端透传原始错误（可能含 Neo4j 查询语句/文件路径）
+      return { error: '查询失败，请查看服务端日志' };
     }
   });
 
   // ===== MCP 写操作转发：lcmg_forget / lcmg_pin 等 =====
   app.post('/api/mcp/invoke', async (req, reply) => {
-    const body = (req.body as { tool?: string; params?: Record<string, unknown> }) ?? {};
+    const body = (req.body as { tool?: string; params?: Record<string, unknown>; user?: string; sessionId?: string }) ?? {};
     const tool = body.tool;
     const params = body.params ?? {};
     if (!tool || typeof tool !== 'string') {
       reply.code(400);
       return { ok: false, error: 'missing tool' };
+    }
+    // P1 安全：MCP 工具名白名单（纵深防御，阻止调用未在 UI 暴露的危险工具）
+    if (!ALLOWED_MCP_TOOLS.has(tool)) {
+      reply.code(400);
+      return { ok: false, error: `tool "${tool}" not allowed` };
+    }
+    // P0 安全：backup/restore 路径参数必须在 ~/.openclaw 之下（服务端硬墙）
+    if (tool === 'lcmg_backup') {
+      const err = validatePathUnderOpenclaw(params.outputPath, 'outputPath');
+      if (err) {
+        reply.code(400);
+        return { ok: false, error: err };
+      }
+    }
+    if (tool === 'lcmg_restore') {
+      const err = validatePathUnderOpenclaw(params.backupPath, 'backupPath');
+      if (err) {
+        reply.code(400);
+        return { ok: false, error: err };
+      }
     }
     const startTs = Date.now();
     let result: any;
@@ -389,6 +450,9 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     // 持久化操作日志
     try {
       const { appendOperationLog } = await import('../lib/operation-logs');
+      // v1.0.1-6: 提取 user / session_id（从请求头或 body 透传）
+      const user = (req.headers['x-user'] as string) || (body.user as string) || undefined;
+      const sessionId = (req.headers['x-session-id'] as string) || (body.sessionId as string) || undefined;
       appendOperationLog({
         ts: startTs,
         tool,
@@ -397,6 +461,8 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         status: error ? 'failure' : 'success',
         durationMs: Date.now() - startTs,
         error,
+        user,
+        sessionId,
       });
     } catch {
       /* 日志写入失败不阻塞响应 */
@@ -404,16 +470,18 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     return result;
   });
 
-  // ===== 操作日志查询 =====
+  // ===== 操作日志查询（v1.0.1-6 增强：支持 user / from / to 过滤） =====
   app.get('/api/operation-logs', async (req, reply) => {
-    const query = req.query as { n?: string; tool?: string };
-    const n = query.n ? parseInt(query.n, 10) : 50;
-    const filterTool = query.tool;
+    const query = req.query as { n?: string; tool?: string; user?: string; from?: string; to?: string };
     try {
-      const { queryOperationLogs, queryOperationLogsByTool } = await import('../lib/operation-logs');
-      const rows = filterTool
-        ? queryOperationLogsByTool(filterTool, n)
-        : queryOperationLogs(n);
+      const { queryOperationLogs } = await import('../lib/operation-logs');
+      const rows = queryOperationLogs({
+        n: query.n ? parseInt(query.n, 10) : 50,
+        tool: query.tool || undefined,
+        user: query.user || undefined,
+        fromTs: query.from ? parseInt(query.from, 10) : undefined,
+        toTs: query.to ? parseInt(query.to, 10) : undefined,
+      });
       // 反序列化 JSON 字段
       const logs = rows.map((r) => ({
         id: r.id,
@@ -424,6 +492,9 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         status: r.status,
         durationMs: r.duration_ms,
         error: r.error,
+        // v1.0.1-6: 返回合规审计字段
+        user: r.user ?? null,
+        sessionId: r.session_id ?? null,
       }));
       return { logs };
     } catch (err) {

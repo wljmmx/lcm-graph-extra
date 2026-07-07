@@ -221,3 +221,134 @@ export function listProfiles(): Array<{ id: CapabilityProfileId; label: string; 
     };
   });
 }
+
+// ---------------------------------------------------------------------------
+// v1.2.0-5: 基于硬件资源的能力档次自动推荐
+// ---------------------------------------------------------------------------
+
+import { cpus, totalmem, freemem } from 'node:os';
+
+/** 硬件资源快照（用于推荐 + 审计） */
+export interface HardwareSnapshot {
+  cpuCores: number;
+  cpuModel: string;
+  totalMemoryMB: number;
+  freeMemoryMB: number;
+  usedMemoryRatio: number;
+  availableMemoryMB: number;
+  nodeVersion: string;
+  platform: string;
+}
+
+/** 推荐结果（含推荐理由，便于 Dashboard 展示 + 用户决策） */
+export interface ProfileRecommendation {
+  recommended: CapabilityProfileId;
+  current: CapabilityProfileId;
+  reasoning: string;
+  hardware: HardwareSnapshot;
+  /** 建议的备选档次（更高 / 更低），供用户参考 */
+  alternatives: Array<{ id: CapabilityProfileId; reason: string }>;
+}
+
+/** 采集硬件资源快照 */
+export function getHardwareSnapshot(): HardwareSnapshot {
+  const cpuList = cpus();
+  const totalMB = Math.round(totalmem() / 1024 / 1024);
+  const freeMB = Math.round(freemem() / 1024 / 1024);
+  return {
+    cpuCores: cpuList.length,
+    cpuModel: cpuList[0]?.model ?? 'unknown',
+    totalMemoryMB: totalMB,
+    freeMemoryMB: freeMB,
+    usedMemoryRatio: totalMB > 0 ? (totalMB - freeMB) / totalMB : 0,
+    availableMemoryMB: freeMB,
+    nodeVersion: process.version,
+    platform: process.platform,
+  };
+}
+
+/**
+ * v1.2.0-5: 基于硬件资源推荐能力档次。
+ *
+ * 推荐策略（保守偏向，优先保证系统稳定）：
+ * - minimal:  CPU < 2 核 或 可用内存 < 512MB（资源严重受限，如树莓派/CI 容器）
+ * - balanced: CPU 2-3 核 且 可用内存 512MB-2GB（典型开发机/小服务器）
+ * - performance: CPU 4-7 核 且 可用内存 2GB-6GB（中型服务器/工作站）
+ * - full: CPU >= 8 核 且 可用内存 >= 6GB（高性能服务器）
+ *
+ * 注意：可用内存而非总内存 —— 已被其他进程占用的内存不能用于 LLM 推理。
+ * 当 CPU/内存档位不一致时，取较低档（短板效应）。
+ */
+export function recommendProfileByHardware(): ProfileRecommendation {
+  const hw = getHardwareSnapshot();
+  const current = getCurrentProfileId();
+
+  // 评分：根据 CPU 核数和可用内存分别打分（0-3），取较低值为最终档位
+  let cpuScore: 0 | 1 | 2 | 3;
+  if (hw.cpuCores < 2) cpuScore = 0;
+  else if (hw.cpuCores < 4) cpuScore = 1;
+  else if (hw.cpuCores < 8) cpuScore = 2;
+  else cpuScore = 3;
+
+  let memScore: 0 | 1 | 2 | 3;
+  const availMB = hw.availableMemoryMB;
+  if (availMB < 512) memScore = 0;
+  else if (availMB < 2048) memScore = 1;
+  else if (availMB < 6144) memScore = 2;
+  else memScore = 3;
+
+  // 取较低分（短板效应），但内存充裕时允许 CPU 不达标的升一档
+  const finalScore = Math.min(cpuScore, memScore);
+  const recommendedMap: Record<number, CapabilityProfileId> = {
+    0: 'minimal',
+    1: 'balanced',
+    2: 'performance',
+    3: 'full',
+  };
+  const recommended = recommendedMap[finalScore];
+
+  // 生成推荐理由
+  const reasons: string[] = [];
+  reasons.push(`CPU ${hw.cpuCores} 核（${hw.cpuModel.slice(0, 40)}）`);
+  reasons.push(`可用内存 ${hw.availableMemoryMB}MB / 总 ${hw.totalMemoryMB}MB`);
+  if (hw.usedMemoryRatio > 0.7) {
+    reasons.push(`系统内存使用率 ${(hw.usedMemoryRatio * 100).toFixed(0)}% 偏高，已考虑安全余量`);
+  }
+
+  // 备选方案
+  const alternatives: Array<{ id: CapabilityProfileId; reason: string }> = [];
+  const scoreToId: Array<{ score: number; id: CapabilityProfileId }> = [
+    { score: 0, id: 'minimal' },
+    { score: 1, id: 'balanced' },
+    { score: 2, id: 'performance' },
+    { score: 3, id: 'full' },
+  ];
+  for (const alt of scoreToId) {
+    if (alt.id === recommended) continue;
+    if (alt.score > finalScore) {
+      alternatives.push({
+        id: alt.id,
+        reason: `更高开销档（若需更多 gm-pro 能力且接受额外延迟），当前 CPU/内存尚有余量`,
+      });
+      break; // 只推荐一个更高档
+    }
+  }
+  for (const alt of scoreToId) {
+    if (alt.id === recommended) continue;
+    if (alt.score < finalScore) {
+      alternatives.push({
+        id: alt.id,
+        reason: `更低开销档（若遇性能问题或部署到更弱机器），保证系统稳定运行`,
+      });
+      break; // 只推荐一个更抵挡
+    }
+  }
+
+  return {
+    recommended,
+    current,
+    reasoning: reasons.join('；') + '。',
+    hardware: hw,
+    alternatives,
+  };
+}

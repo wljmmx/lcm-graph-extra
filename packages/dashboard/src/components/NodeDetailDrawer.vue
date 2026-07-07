@@ -4,6 +4,8 @@
  *
  * - 展示节点 id / name / type / pagerank
  * - 点击图谱节点时由父组件打开
+ * - pagerank 用 format.ts 格式化（4 位小数）
+ * - role="dialog" + aria-label 暴露语义给屏幕阅读器
  */
 import {
   NDrawer,
@@ -15,6 +17,7 @@ import {
   NButton,
 } from 'naive-ui';
 import type { MemoryGraphNode } from '../api/memory';
+import { formatFloat2 } from '../utils/format';
 
 const props = defineProps<{
   show: boolean;
@@ -35,11 +38,23 @@ function close(): void {
     :show="props.show"
     :width="480"
     placement="right"
+    :trap-focus="true"
+    :auto-focus="true"
+    :close-on-esc="true"
+    role="dialog"
+    aria-modal="true"
+    aria-label="节点详情"
     @update:show="emit('update:show', $event)"
   >
     <NDrawerContent title="节点详情" closable>
       <template v-if="props.node">
-        <NDescriptions :column="1" bordered size="small" label-placement="left">
+        <NDescriptions
+          :column="1"
+          bordered
+          size="small"
+          label-placement="left"
+          aria-label="节点详情"
+        >
           <NDescriptionsItem label="ID">
             <span class="mono">{{ props.node.id }}</span>
           </NDescriptionsItem>
@@ -48,23 +63,17 @@ function close(): void {
             <NTag size="small">{{ props.node.type }}</NTag>
           </NDescriptionsItem>
           <NDescriptionsItem label="PageRank">
-            {{ (props.node.pagerank ?? 0).toFixed(4) }}
+            <span class="mono">{{ formatFloat2(props.node.pagerank ?? 0) }}</span>
           </NDescriptionsItem>
         </NDescriptions>
       </template>
       <NEmpty v-else description="未选中节点" />
 
       <template #footer>
-        <NButton size="small" @click="close">关闭</NButton>
+        <NButton size="small" aria-label="关闭节点详情抽屉" @click="close">关闭</NButton>
       </template>
     </NDrawerContent>
   </NDrawer>
 </template>
 
-<style scoped>
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  word-break: break-all;
-}
-</style>
+<!-- .mono 已在 tokens.css 全局定义，此处不再重复声明 -->

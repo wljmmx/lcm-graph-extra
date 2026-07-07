@@ -12,6 +12,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import rateLimit from '@fastify/rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -20,6 +21,7 @@ import { registerAgentRoutes } from './routes/agent';
 import { registerExperienceRoutes } from './routes/experience';
 import { registerMemoryRoutes } from './routes/memory';
 import { registerGraphHealthRoutes } from './routes/graph-health';
+import { registerConfigRoutes } from './routes/config';
 import { closeNeo4j } from './lib/neo4j';
 import { requireAuth, isAuthEnabled } from './lib/auth';
 
@@ -54,7 +56,22 @@ async function main(): Promise<void> {
       }
     });
     app.log.info('Basic Auth 已启用（DASHBOARD_AUTH）');
+  } else if (isProd) {
+    // P1-5 安全：生产模式未配置鉴权时打印显著警告
+    app.log.warn(
+      '⚠ 生产模式未配置 DASHBOARD_AUTH，所有 API 完全开放！' +
+        '请设置 DASHBOARD_AUTH=user:pass 或限制 DASHBOARD_HOST=127.0.0.1',
+    );
   }
+
+  // P1-4 安全：安全响应头（替代 @fastify/helmet，避免新增依赖）
+  // X-Frame-Options 防点击劫持；X-Content-Type-Options 防 MIME 嗅探；
+  // Referrer-Policy 控制 Referer 泄露
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  });
 
   // 注册 CORS（仅本机）
   await app.register(cors, {
@@ -73,6 +90,32 @@ async function main(): Promise<void> {
     },
     credentials: true,
   });
+
+  // v1.2.0-4: Rate Limiting —— 防止暴力枚举 / 滥用 MCP 写操作
+  // 配置：DASHBOARD_RATE_LIMIT_MAX（每窗口最大请求数，默认 100）
+  //       DASHBOARD_RATE_LIMIT_WINDOW（窗口秒数，默认 60）
+  // 健康检查 /api/ping 豁免（避免影响监控探测）
+  const rlMax = Number(process.env.DASHBOARD_RATE_LIMIT_MAX) || 100;
+  const rlWindow = (Number(process.env.DASHBOARD_RATE_LIMIT_WINDOW) || 60) + ' seconds';
+  await app.register(rateLimit, {
+    max: rlMax,
+    timeWindow: rlWindow,
+    // P1-2 安全：使用 req.ip 而非手动读 x-forwarded-for
+    // XFF 头可被客户端伪造，直接读取会绕过限流；
+    // 若部署在反代后，应配置 Fastify trustProxy 让框架正确解析 req.ip
+    keyGenerator: (req) => req.ip,
+    // 健康检查豁免，避免被限流影响存活探测
+    allowList: (req) => {
+      const path = req.url.split('?')[0];
+      return path === '/api/ping' || path === '/ping';
+    },
+    errorResponseBuilder: (_req, context) => ({
+      statusCode: 429,
+      error: 'Too Many Requests',
+      message: `请求频率超限：每 ${context.after} 内最多 ${context.max} 次。请稍后重试。`,
+    }),
+  });
+  app.log.info({ max: rlMax, window: rlWindow }, 'Rate Limit 已启用');
 
   // 生产模式：serve 前端构建产物 dist-client
   const clientDist = resolve(__dirname, '..', 'dist-client');
@@ -106,6 +149,8 @@ async function main(): Promise<void> {
   await registerMemoryRoutes(app);
   // 注册模块 4 路由：图谱健康（N-4: G-5 图谱健康对接）
   await registerGraphHealthRoutes(app);
+  // v1.1.0-1/2/3: 配置管理路由（运行时配置查看 / schema 文档 / 白名单热更新）
+  await registerConfigRoutes(app);
 
   // 优雅关闭
   const shutdown = async (signal: string) => {

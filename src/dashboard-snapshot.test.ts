@@ -252,18 +252,18 @@ describe('DashboardSnapshotServer', () => {
       await expect(handle.stop()).resolves.not.toThrow();
     });
 
-    it('未启动（端口被占）时 stop 仍安全', async () => {
+    it('未启动（端口被 foreign 进程占用）时 stop 仍安全', async () => {
       const port = getRandomPort();
-      // 先占住端口
-      const occupier = startDashboardSnapshotServer({
-        port,
-        host: '127.0.0.1',
-        providers: makeProviders(),
+      // 用 foreign http server 占住端口（非自身实例，不响应 /internal/health）
+      const { createServer } = await import('node:http');
+      const occupier = createServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('foreign occupier');
       });
-      stoppers.push(occupier.stop);
-      expect(await waitForStartup(occupier)).toBe(true);
+      await new Promise<void>((resolve) => occupier.listen(port, '127.0.0.1', resolve));
+      stoppers.push(async () => { await new Promise<void>((r) => occupier.close(() => r())); });
 
-      // 再启动一个相同端口的实例 → 应启动失败
+      // 再启动一个相同端口的实例 → 应启动失败（foreign 占用）
       const handle = startDashboardSnapshotServer({
         port,
         host: '127.0.0.1',
@@ -297,7 +297,7 @@ describe('DashboardSnapshotServer', () => {
   });
 
   describe('端口冲突处理', () => {
-    it('端口被自身残留实例占用 → 识别为 self-stale 并放弃启动', async () => {
+    it('端口被自身残留实例占用 → 识别为 self-stale 并通过 shutdown 恢复启动', async () => {
       const port = getRandomPort();
       // 起一个"残留实例"占住端口
       const stale = startDashboardSnapshotServer({
@@ -305,10 +305,10 @@ describe('DashboardSnapshotServer', () => {
         host: '127.0.0.1',
         providers: makeProviders(),
       });
-      stoppers.push(stale.stop);
+      // 注意：不把 stale.stop 加入 stoppers —— 它会被新实例的 shutdownStaleInstance 关闭
       expect(await waitForStartup(stale)).toBe(true);
 
-      // 再启动一个，应识别为 self-stale
+      // 再启动一个，应识别为 self-stale 并通过 POST /internal/shutdown 恢复
       const handle = startDashboardSnapshotServer({
         port,
         host: '127.0.0.1',
@@ -317,9 +317,9 @@ describe('DashboardSnapshotServer', () => {
       stoppers.push(handle.stop);
 
       const started = await waitForStartup(handle);
-      expect(started).toBe(false);
-      // failureReason 应包含 self-stale 提示
-      expect(handle.failureReason).toMatch(/stale previous instance/);
+      // v1.0.1-3: 恢复流程现在工作（shutdown 端点已移到方法守卫之前）
+      expect(started).toBe(true);
+      expect(handle.failureReason).toBeUndefined();
     });
 
     it('端口被非自身进程占用（响应非 health）→ 识别为 foreign 并放弃启动', async () => {
