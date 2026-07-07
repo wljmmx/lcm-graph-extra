@@ -94,7 +94,20 @@ npm start
 - 所有 `/api/*` 路由（`/api/ping` 除外，用于健康检查）
 - 生产模式下的前端静态资源（HTML/JS/CSS）
 
-**默认不启用**（单机内网无鉴权模式）。
+**默认不启用**（单机内网无鉴权模式）。生产模式下未配置 `DASHBOARD_AUTH` 时，服务启动会打印显著警告。
+
+### 安全加固（v1.0.1+）
+
+除可选 Basic Auth 外，dashboard 后端内置以下纵深防御措施：
+
+| 措施 | 实现位置 | 说明 |
+|------|---------|------|
+| 速率限制 | `server/index.ts` `@fastify/rate-limit` | 全局 100 req/30s（生产 200/30s），防爆破 |
+| 安全响应头 | `server/index.ts` `onSend` hook | `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` |
+| MCP 工具白名单 | `server/routes/mcp.ts` `ALLOWED_MCP_TOOLS` | `POST /api/mcp/invoke` 仅转发 11 个已知工具，拒绝任意工具调用 |
+| 路径安全校验 | 前端 `validateOpenclawPath` + 后端 `validatePathUnderOpenclaw` | backup/restore/import 路径必须落在 `~/.openclaw` 下，拒绝 `..` 穿越 |
+| 错误响应脱敏 | `server/routes/*.ts` | catch 块统一返回"请查看服务端日志"，不泄漏堆栈/内部路径 |
+| 配置路径不暴露 | `server/routes/config.ts` | `GET /api/config` 不再返回 `configPath` 绝对路径，仅返回 `configExists` 布尔 |
 
 ### 操作日志持久化
 
@@ -110,12 +123,13 @@ npm start
 
 - **后端**: Fastify 5 + node:sqlite + neo4j-driver
 - **前端**: Vue 3 + Vite + Naive UI + ECharts + TanStack Query
+- **设计系统**: CSS 自定义属性设计令牌（`tokens.css`）+ light/dark/auto 三态主题 + WCAG AA 可访问性（`:focus-visible` / `prefers-reduced-motion` / `prefers-contrast` / 双重编码状态指示）
 - **测试**: Vitest + @vue/test-utils + happy-dom
 
 ## 测试
 
 ```bash
-npm test           # 56 项测试
+npm test           # 63 项测试
 npm run typecheck  # 类型检查
 ```
 

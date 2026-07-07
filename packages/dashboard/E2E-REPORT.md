@@ -10,9 +10,9 @@
 
 | 包 | tsc 类型检查 | 单元/集成测试 | 构建产物 | 状态 |
 |----|------------|-------------|---------|------|
-| 主包 `@openclaw/lcm-graph-extra` | ✅ exit 0 | ✅ 20 文件 / 329 项通过 | dist/ (已有) | PASS |
-| 子包 `@openclaw/lcm-dashboard` | ✅ exit 0 | ✅ 7 文件 / 56 项通过 | dist-client/ (331KB gzip 主包) | PASS |
-| **合计** | — | **27 文件 / 385 项测试通过** | — | **ALL PASS** |
+| 主包 `@openclaw/lcm-graph-extra` | ✅ exit 0 | ✅ 26 文件 / 458 项通过 | dist/ (已有) | PASS |
+| 子包 `@openclaw/lcm-dashboard` | ✅ exit 0 | ✅ 8 文件 / 63 项通过 | dist-client/ (331KB gzip 主包) | PASS |
+| **合计** | — | **34 文件 / 521 项测试通过** | — | **ALL PASS** |
 
 ### 1.2 端到端 Smoke Test
 
@@ -122,7 +122,7 @@
 | 套件 | 耗时 | 测试数 |
 |------|------|--------|
 | 主包 vitest | 22.48s | 329 项 |
-| dashboard vitest | 15.84s | 56 项 |
+| dashboard vitest | 15.84s | 63 项 |
 | dashboard vite build | 9.60s | — |
 | dashboard tsc | <1s | — |
 
@@ -161,7 +161,7 @@
 ├── packages/dashboard/
 │   ├── server/ (Fastify 后端，5 路由文件)
 │   ├── src/ (Vue 3 前端，4 视图 + 8 组件)
-│   ├── tests/ (7 测试文件，56 项)
+│   ├── tests/ (8 测试文件，63 项)
 │   └── dist-client/ (构建产物)
 └── docs/superpowers/specs/2026-07-04-lcm-dashboard-design.md
 ```
@@ -182,8 +182,8 @@
 ### 5.2 限制
 
 - 仅支持单机部署（127.0.0.1 绑定）
-- 无鉴权（可选 Basic Auth，需配 DASHBOARD_AUTH）
-- 无持久化操作日志（仅内存最近 20 条）
+- 可选 Basic Auth（需配 `DASHBOARD_AUTH`）；未配置时生产模式启动会打印显著警告
+- 操作日志已持久化到 `~/.openclaw/operation_logs.db`（LRU 1000 条），见后续 v1.0.1/v1.1.0 迭代
 - 不支持多 Neo4j 实例
 
 ## 6. 交付物清单

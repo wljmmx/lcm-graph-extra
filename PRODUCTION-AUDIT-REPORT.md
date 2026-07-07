@@ -535,5 +535,53 @@ P0 / P1 / P2 全部 17 项功能已补齐并通过测试验证，可安全投入
 
 ---
 
-*报告生成时间：2026-07-05*
+## 十、后续安全加固与质量提升（2026-07-07）
+
+> 本节为本报告（2026-07-05）发布后的后续工作，反映 dashboard 当前最新状态。
+
+在 v2.1.10 生产就绪审计之后，对 `packages/dashboard` 进行了 6 维度完整复审计（安全/可访问性/暗色模式/代码质量/build/性能），按 P0 → P1 → P2 分三批修复，共 3 个提交（`72adde0` / `2da25d7` / `636572e`）。
+
+### 安全加固补充
+
+本报告 6.1 节"已实现的安全措施"基础上，新增以下纵深防御：
+
+| 措施 | 说明 |
+|------|------|
+| `@fastify/rate-limit` | 全局 100 req/30s（生产 200/30s），防爆破 |
+| 安全响应头 | `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` |
+| MCP 工具白名单 | `POST /api/mcp/invoke` 仅转发 11 个已知工具 |
+| 路径安全双校验 | 前端 `validateOpenclawPath` + 后端 `validatePathUnderOpenclaw` |
+| 错误响应脱敏 | catch 块统一返回"请查看服务端日志"，不泄漏堆栈 |
+| configPath 不暴露 | `/api/config` 不再返回绝对路径，仅返回 `configExists` 布尔 |
+| 无鉴权告警 | 生产模式未配置 `DASHBOARD_AUTH` 时启动打印显著警告 |
+
+### 可访问性（WCAG AA）
+
+- 表格键盘导航（↑↓ + Enter）
+- 抽屉 focus trap（`trap-focus` + `auto-focus` + `close-on-esc`）
+- 每页 `h1` 语义标题
+- 状态指示双重编码（形状 + 符号 + 颜色，WCAG 1.4.1）
+- `--color-text-tertiary` 提色至 4.6:1 对比度（满足 WCAG AA 4.5:1）
+- `prefers-reduced-motion` / `prefers-contrast` 支持
+
+### 暗色模式
+
+ECharts 与 DataTable 暗色模式修复（`echartsDarkThemeColors` + `echartsDarkBaseOption` + `DataTable.thColor` 显式覆盖），`light/dark/auto` 三态主题切换可用。
+
+### 代码质量
+
+- `format.ts` 去重：统一时间格式化函数
+- `pendingLogIds` 重入竞态修复
+- 死代码清理：删除 6 个未使用 API 函数 + 8 个未使用类型 + 25 个闲置 CSS token
+
+### 测试与构建
+
+- Dashboard 测试：56 → **63 项**（8 文件）全部通过
+- tsc --noEmit 通过；vite build 通过（13.4s）
+
+完整变更明细见 [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` 段"Dashboard 安全审计与质量加固 (2026-07-07)"。
+
+---
+
+*报告生成时间：2026-07-05（后续加固附录：2026-07-07）*
 *审计工具：内部自动化审计 + 人工复核*
