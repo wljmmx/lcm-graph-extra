@@ -82,6 +82,7 @@ export const PluginConfigSchema = Type.Object({
     ]), { default: [] }),
   })),
 
+
   llmProvider: Type.Optional(Type.Object({
     provider: Type.Union([
       Type.Literal('openclaw_hooks'),
@@ -293,6 +294,7 @@ export function validateConfig(input: unknown): PluginConfig {
   if (!config.backupConfig) config.backupConfig = { enabled: true, retentionDays: 30, maxBackups: 10, intervalHours: 24 };
   if (!config.ttl) config.ttl = { enabled: true, retentionDays: 90, cleanupIntervalHours: 24 };
   if (!config.webhook) config.webhook = { enabled: false, events: [] };
+  if (!config.dashboardSnapshot) config.dashboardSnapshot = { enabled: true, port: 7423, host: '127.0.0.1' };
   if (!config.llmProvider) config.llmProvider = { provider: 'openclaw_hooks', model: 'default', maxTokens: 4096 };
   if (!config.embedding) config.embedding = {};
   if (!config.experience) config.experience = { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 };
