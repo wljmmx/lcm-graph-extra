@@ -809,6 +809,9 @@ const pluginEntry: any = definePluginEntry({
                 // B-3 修复: 原 tier === 'low' 仍会在对话深入后阻塞 assemble 主路径
                 // （8s timeout）。收紧为 tokenRatio < 0.25，即仅 context 几乎空时
                 // （对话初期，用户可承受短暂延迟）才同步调用 LLM。
+                // perf: 超时从 8000ms 收紧到 1500ms —— 8s 是 assemble 尾部（P95/max）
+                //       的主要贡献者；1.5s 既给本地 Ollama 足够时间完成一次轻量重排，
+                //       又能避免网络抖动把单次 assemble 拖到 9s+
                 if (tier === 'low' && tokenRatio < 0.25 && merged.length >= 3 && typeof merger.llmRerank === 'function') {
                   try {
                     // 复用 resolveDistillationLlm 统一处理 baseURL 清洗 + keepAlive
@@ -826,7 +829,7 @@ const pluginEntry: any = definePluginEntry({
                         const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
                           method: 'POST', headers,
                           body: JSON.stringify(body),
-                          signal: AbortSignal.timeout(8000),
+                          signal: AbortSignal.timeout(1500),
                         });
                         if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
                         const data: any = await resp.json();
@@ -1255,15 +1258,27 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
           // ==================================================================
           // Final: Priority-based token budget trim (protect L4 > L3 > L2 > L1)
-          // Trim from sections array, then rebuild systemPromptAddition
+          // perf: 先确定保留集合，最后一次性拼接 systemPromptAddition，
+          //       替代原循环内每次 splice 后重建字符串的 O(S²) 模式
           // ==================================================================
           if (wm && sections.length > 0) {
             // P0-4 H-5: finalMessages 在此循环内不变，把 estimateTokensFromMessages(finalMessages)
             // 提到循环外只算一次。修复前 estimateTotal() 每次迭代都做 O(C) charCodeAt 全量遍历，
             // S 个 section 时整体 O(S×C)，且 finalMessages 在高压下体量很大，纯属重复浪费。
             const finalMsgTokens = estimateTokensFromMessages(finalMessages);
-            const estimateTotal = () => finalMsgTokens + Math.floor(systemPromptAddition.length / 4);
+            const sdkGuidance2 = buildMemorySystemPromptAddition({
+              availableTools: new Set(availableTools),
+              citationsMode,
+            });
+            // 预计算每个 section 的字符长度（用于增量扣减估算）
+            const sdkLen = sdkGuidance2 ? ('\n# Tool Guidance\n' + sdkGuidance2).length : 0;
+            let additionLen = sdkLen;
+            const sectionLens: number[] = sections.map((s: any) => ('\n---\n' + s.label + '\n' + s.body).length);
+            for (const sl of sectionLens) additionLen += sl;
             const budgetCeiling = contextWindow * 0.85;
+            const estimateTotal = () => finalMsgTokens + Math.floor(additionLen / 4);
+
+            // 识别最低优先级 section 的索引（layer 越小优先级越低）
             let trimmed = 0;
             while (estimateTotal() > budgetCeiling && sections.length > 0) {
               let worstIdx = -1;
@@ -1275,24 +1290,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 }
               }
               if (worstIdx < 0) break;
+              // 增量扣减：移除该 section 对应的字符长度
+              additionLen -= sectionLens[worstIdx];
+              // 从 sectionLens 中也移除该位置（保持索引同步）
+              sectionLens.splice(worstIdx, 1);
               sections.splice(worstIdx, 1);
               trimmed++;
-              const sdkGuidance2 = buildMemorySystemPromptAddition({
-                availableTools: new Set(availableTools),
-                citationsMode,
-              });
-              let rebuilt = '';
-              if (sdkGuidance2) {
-                rebuilt += '\n# Tool Guidance\n' + sdkGuidance2;
-              }
-              for (const sec of sections) {
-                rebuilt += '\n---\n' + sec.label + '\n' + sec.body;
-              }
-              systemPromptAddition = rebuilt || '';
             }
             if (trimmed > 0) {
               logger?.debug?.('[wm] priority-trimmed ' + String(trimmed) + ' injected section(s), remaining: ' + sections.map(function(s) { return s.label; }).join(','));
             }
+            // 一次性拼接 systemPromptAddition（替代原循环内每次重建）
+            let rebuilt = '';
+            if (sdkGuidance2) {
+              rebuilt += '\n# Tool Guidance\n' + sdkGuidance2;
+            }
+            for (const sec of sections) {
+              rebuilt += '\n---\n' + sec.label + '\n' + sec.body;
+            }
+            systemPromptAddition = rebuilt || '';
 
           // Hard guard: final budget enforcement after priority trim
           if (systemPromptAddition.length > maxContextChars) {
@@ -1377,16 +1393,24 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // P0: Final hard-truncation safety net
           // P2-15: 重写 minified 风格代码（var te=.../var bf/while splice）为可读形式。
           // 当总 token 超过 contextWindow 的 85% 时，从非 system 消息头部移除直到达标。
+          // perf: 改为增量扣减 —— 预计算每条消息的 token 估算，splice 时减去对应值，
+          //       替代原每次 splice 后全量调用 estimateTokensFromMessages(buffer) 的 O(N) 重算
           {
             const totalEst = messageTokens + additionTokens;
             if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
               const buffer: any[] = [...finalMessages];
               const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+              // 预计算每条消息的 token 估算（一次性 O(N)，替代原循环内 O(N²)）
+              const msgTokenEst: number[] = buffer.map((m: any) => estimateTokensFromMessages([m]));
+              let runningTokens = messageTokens; // 增量维护，splice 时减去对应 token
               while (buffer.length > systemCount + 1) {
                 const idx = buffer.findIndex((m: any) => m.role !== 'system');
                 if (idx < 0) break;
+                // 增量扣减：移除该消息的 token 估算
+                runningTokens -= msgTokenEst[idx];
                 buffer.splice(idx, 1);
-                if (estimateTokensFromMessages(buffer) + additionTokens <= contextWindow * 0.85) {
+                msgTokenEst.splice(idx, 1);
+                if (runningTokens + additionTokens <= contextWindow * 0.85) {
                   finalMessages = buffer;
                   break;
                 }

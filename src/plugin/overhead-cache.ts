@@ -11,31 +11,32 @@ import { DEFAULTS } from "../config/defaults.js";
 const MAX_OVERHEAD_CAPACITY = DEFAULTS.dedup.maxCapacity;
 const OVERHEAD_TTL_MS = DEFAULTS.dedup.ttlMs;
 const _sessionOverheadCache = new Map<string, { tokens: number; lastAccess: number }>();
-const _overheadAccessOrder: string[] = [];
+// perf: 直接用 Map 的插入顺序维护 LRU（O(1) move-to-end），替代原 indexOf+splice O(N=500)
 
 function evictStaleOverhead(): void {
   const now = Date.now();
-  while (_overheadAccessOrder.length > 0) {
-    const key = _overheadAccessOrder[0];
-    const entry = _sessionOverheadCache.get(key);
-    if (!entry || (now - entry.lastAccess) > OVERHEAD_TTL_MS) {
-      _overheadAccessOrder.shift();
+  // Map 迭代顺序 = 插入顺序 = LRU 顺序
+  for (const [key, entry] of _sessionOverheadCache) {
+    if ((now - entry.lastAccess) > OVERHEAD_TTL_MS) {
       _sessionOverheadCache.delete(key);
     } else {
       break;
     }
   }
   while (_sessionOverheadCache.size > MAX_OVERHEAD_CAPACITY) {
-    const lru = _overheadAccessOrder.shift();
-    if (lru === undefined) break;
-    _sessionOverheadCache.delete(lru);
+    const firstKey = _sessionOverheadCache.keys().next().value;
+    if (firstKey === undefined) break;
+    _sessionOverheadCache.delete(firstKey);
   }
 }
 
+// perf: O(1) move-to-end —— delete + re-set
 function touchOverhead(sessionKey: string): void {
-  const idx = _overheadAccessOrder.indexOf(sessionKey);
-  if (idx !== -1) _overheadAccessOrder.splice(idx, 1);
-  _overheadAccessOrder.push(sessionKey);
+  const entry = _sessionOverheadCache.get(sessionKey);
+  if (entry) {
+    _sessionOverheadCache.delete(sessionKey);
+    _sessionOverheadCache.set(sessionKey, entry);
+  }
 }
 
 export function getOverhead(sessionKey: string): number {

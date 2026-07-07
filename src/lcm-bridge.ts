@@ -56,11 +56,28 @@ let _lcmDb: any = null;
 const _lcmStmts = new Map<string, any>();
 
 // P0-2 H-1: 获取单例 DB 连接，若不存在则创建；创建失败返回 null
+// perf: 启用 WAL + synchronous=NORMAL + 内存缓存，消除写并发锁竞争
+//       （assemble 每次调用 4-6 次 sqlite 查询，缺 WAL 时写操作互斥阻塞）
 function getDb(): any {
   if (_lcmDb) return _lcmDb;
   try {
     const { DatabaseSync } = _lcmRequire('node:sqlite');
     _lcmDb = new DatabaseSync(LCM_DB_PATH);
+    // PRAGMA 仅在首次创建连接时执行一次（连接生命周期内有效）
+    // WAL：读写不互斥，显著降低写并发锁竞争
+    // synchronous=NORMAL：WAL 模式下安全且更快（相比 FULL 减少 fsync 次数）
+    // cache_size=-65536：64MB 内存缓存（负数=KB）
+    // mmap_size=268435456：256MB mmap（提升大表扫描性能）
+    // temp_store=MEMORY：临时表与排序在内存中
+    try {
+      _lcmDb.exec('PRAGMA journal_mode = WAL');
+      _lcmDb.exec('PRAGMA synchronous = NORMAL');
+      _lcmDb.exec('PRAGMA cache_size = -65536');
+      _lcmDb.exec('PRAGMA mmap_size = 268435456');
+      _lcmDb.exec('PRAGMA temp_store = MEMORY');
+    } catch {
+      /* PRAGMA 失败不阻塞主路径（可能是只读场景） */
+    }
     return _lcmDb;
   } catch {
     _lcmDb = null;
@@ -90,6 +107,7 @@ export function closeLcmDb(): void {
   }
   _lcmDb = null;
   _lcmStmts.clear();
+  _convIdCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -98,11 +116,29 @@ export function closeLcmDb(): void {
 
 /**
  * 获取当前会话的 conversation_id
+ *
+ * perf: 加 LRU 缓存（capacity=50, TTL=10min），避免每次 assemble 都查 sqlite。
+ *       sessionKey/sessionId → conversation_id 在会话生命周期内基本不变。
  */
+const _convIdCache = new Map<string, { convId: number | null; ts: number }>();
+const CONV_ID_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分钟
+const CONV_ID_CACHE_MAX = 50;
+
 export function getConversationId(sessionKey?: string, sessionId?: string): number | null {
   if (!sessionKey && !sessionId) return null;
+  // 缓存 key：sessionKey 优先，无则用 sessionId
+  const cacheKey = sessionKey ? `sk:${sessionKey}` : `si:${sessionId}`;
+  const now = Date.now();
+  const cached = _convIdCache.get(cacheKey);
+  if (cached && (now - cached.ts) < CONV_ID_CACHE_TTL_MS) {
+    // O(1) move-to-end：delete + re-set 维护 LRU 顺序
+    _convIdCache.delete(cacheKey);
+    _convIdCache.set(cacheKey, cached);
+    return cached.convId;
+  }
   // P1-9 BUG-6: 把 db 引用提到 try 外，close 移到 finally，防止 prepare 抛错时连接泄漏
   // P0-2 H-1: 改为单例 DB + 预编译 statement，不再每次 open/close
+  let convId: number | null = null;
   try {
     let row: { conversation_id: number } | undefined;
     if (sessionKey) {
@@ -115,10 +151,17 @@ export function getConversationId(sessionKey?: string, sessionId?: string): numb
         'SELECT conversation_id FROM conversations WHERE session_id = ? AND active = 1 ORDER BY conversation_id DESC LIMIT 1');
       if (stmt) row = stmt.get(sessionId) as { conversation_id: number } | undefined;
     }
-    return row?.conversation_id ?? null;
+    convId = row?.conversation_id ?? null;
   } catch {
-    return null;
+    convId = null;
   }
+  // 写入缓存（含 LRU 淘汰）
+  if (_convIdCache.size >= CONV_ID_CACHE_MAX) {
+    const firstKey = _convIdCache.keys().next().value;
+    if (firstKey !== undefined) _convIdCache.delete(firstKey);
+  }
+  _convIdCache.set(cacheKey, { convId, ts: now });
+  return convId;
 }
 
 /**

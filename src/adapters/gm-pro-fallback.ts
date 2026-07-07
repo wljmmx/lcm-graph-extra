@@ -30,6 +30,29 @@ let _gmProProbed = false;
 let _gmProAvailable = false;
 let _gmProSource: GmProSource = 'extensions-global';
 
+// perf: 缓存 capability-profiles 的 isApiEnabled 引用，避免每次
+// withGmProFallback 都 await import('../capability-profiles.js')
+// （assemble 主路径每次调用 judgeRecall 都会触发）
+// 注：isApiEnabled 实际签名为 (api: GmProApiName) => boolean，这里放宽为
+// (api: string) => boolean 以避免把 GmProApiName 类型耦合到本模块
+let _isApiEnabledFn: ((api: string) => boolean) | null = null;
+let _isApiEnabledProbed = false;
+
+async function getIsApiEnabled(): Promise<((api: string) => boolean) | null> {
+  if (_isApiEnabledProbed) return _isApiEnabledFn;
+  _isApiEnabledProbed = true;
+  try {
+    const mod = await import('../capability-profiles.js');
+    if (typeof mod.isApiEnabled === 'function') {
+      // 类型擦除：GmProApiName 是 string 字面量联合，运行时与 string 等价
+      _isApiEnabledFn = mod.isApiEnabled as (api: string) => boolean;
+    }
+  } catch {
+    /* capability-profiles 模块不可用时，保持 null（不阻止调用） */
+  }
+  return _isApiEnabledFn;
+}
+
 /**
  * 探测 graph-memory-pro 是否可用，成功后缓存模块实例。
  *
@@ -76,6 +99,8 @@ export function _resetGmProProbe(): void {
   _gmProProbed = false;
   _gmProAvailable = false;
   _gmProSource = 'extensions-global';
+  _isApiEnabledFn = null;
+  _isApiEnabledProbed = false;
 }
 
 /**
@@ -123,13 +148,10 @@ export async function withGmProFallback<T>(
 
   try {
     // 能力档次检查：如果当前档次未启用该 API，直接走 fallback
-    try {
-      const { isApiEnabled } = await import('../capability-profiles.js');
-      if (!isApiEnabled(apiName as any)) {
-        return await fallbackFn();
-      }
-    } catch {
-      // capability-profiles 模块不可用时，不阻止调用（向后兼容）
+    // perf: 使用缓存的 isApiEnabled 引用，避免每次动态 import
+    const isApiEnabled = await getIsApiEnabled();
+    if (isApiEnabled && !isApiEnabled(apiName as any)) {
+      return await fallbackFn();
     }
 
     const available = await probeGmPro();
