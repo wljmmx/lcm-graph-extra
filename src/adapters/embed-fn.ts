@@ -118,9 +118,12 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
         throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(data || {}).join(',')})`);
       }
 
-      // Ollama 原生格式（新旧版响应相同）: { embedding: number[] }
+      // Ollama 原生格式（新版）: { embedding: number[] }
       const embedding = data?.embedding;
       if (Array.isArray(embedding)) return embedding;
+      // Ollama 新版 /api/embed 响应: { embeddings: number[][] }
+      const embeddings = data?.embeddings;
+      if (Array.isArray(embeddings) && embeddings.length > 0 && Array.isArray(embeddings[0])) return embeddings[0];
       // 兼容部分 Ollama 版本返回嵌套格式: { data: [{ embedding: number[] }] }
       const nestedEmbedding = data?.data?.[0]?.embedding;
       if (Array.isArray(nestedEmbedding)) return nestedEmbedding;
