@@ -118,7 +118,7 @@ RETURN e.id AS id, e.title AS title, e.summary AS summary, e.type AS type,
        e.tags_severity AS tags_severity, e.tags_free AS tags_free,
        e.projectName AS projectName
 ORDER BY e.createdAt DESC
-SKIP $offset LIMIT $limit
+SKIP toInteger($offset) LIMIT toInteger($limit)
 `;
 
 const COUNT_CYPHER = `

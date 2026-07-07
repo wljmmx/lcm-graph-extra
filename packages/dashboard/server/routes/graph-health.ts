@@ -83,13 +83,14 @@ export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<v
         error: `plugin /internal/graph-health returned ${resp.status}`,
       } satisfies GraphHealthResponse);
     } catch (fetchErr) {
-      // 插件不可达 / 超时
-      req.log.error({ err: String(fetchErr), url: targetUrl }, 'graph-health fetch 失败');
+      // 插件不可达 / 超时 —— 预期的降级场景，降为 warn 避免 error 级别污染日志
+      // TypeError: fetch failed 通常是 ECONNREFUSED（:7423 未监听）或 ECONNRESET
+      req.log.warn({ err: String(fetchErr), url: targetUrl }, 'graph-health fetch 失败，插件 snapshot 服务不可达');
       return reply.send({
         status: 'unknown',
         source: 'none',
         fetchedAt: Date.now(),
-        error: `插件不可达 (${targetUrl}): ${String(fetchErr)}`,
+        error: `插件 snapshot 服务不可达 (${targetUrl}); 请检查插件是否已加载且 :7423 端口在监听`,
       } satisfies GraphHealthResponse);
     }
   });

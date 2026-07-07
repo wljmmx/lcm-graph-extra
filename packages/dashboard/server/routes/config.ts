@@ -330,11 +330,12 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       // 包装 ok:true（插件 GET 不返回 ok 字段，前端 CapabilityProfileResponse 依赖它）
       return { ok: true, ...body };
     } catch (err) {
+      // 插件 snapshot 不可达是预期降级场景，降为 warn 避免污染 error 日志
       const msg = err instanceof Error ? err.message : String(err);
-      req.log.error({ err: msg }, '/api/capability-profile 代理失败');
+      req.log.warn({ err: msg }, '/api/capability-profile 代理失败，插件 snapshot 服务不可达');
       return {
         ok: false,
-        error: `无法连接插件 snapshot 服务 (${SNAPSHOT_URL}): ${msg}`,
+        error: `无法连接插件 snapshot 服务 (${SNAPSHOT_URL}); 请检查插件是否已加载且 :7423 端口在监听`,
         current: null,
         profiles: [],
       };
@@ -366,9 +367,9 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       return await resp.json();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      req.log.error({ err: msg }, '/api/capability-profile POST 代理失败');
+      req.log.warn({ err: msg }, '/api/capability-profile POST 代理失败，插件 snapshot 服务不可达');
       reply.code(502);
-      return { ok: false, error: '无法连接插件 snapshot 服务，请查看服务端日志' };
+      return { ok: false, error: `无法连接插件 snapshot 服务 (${SNAPSHOT_URL}); 请检查插件是否已加载且 :7423 端口在监听` };
     }
   });
 
@@ -389,12 +390,13 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       }
       return await resp.json();
     } catch (err) {
+      // 插件 snapshot 不可达是预期降级场景，降为 warn 避免污染 error 日志
       const msg = err instanceof Error ? err.message : String(err);
-      req.log.error({ err: msg }, '/api/capability-profile/recommend 代理失败');
+      req.log.warn({ err: msg }, '/api/capability-profile/recommend 代理失败，插件 snapshot 服务不可达');
       reply.code(502);
       return {
         ok: false,
-        error: `无法连接插件 snapshot 服务: ${msg}`,
+        error: `无法连接插件 snapshot 服务 (${SNAPSHOT_URL}); 请检查插件是否已加载且 :7423 端口在监听`,
         recommended: null,
         current: null,
         reasoning: '插件 snapshot 服务不可用，无法采集硬件资源',

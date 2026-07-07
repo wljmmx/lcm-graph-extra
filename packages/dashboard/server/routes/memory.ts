@@ -67,7 +67,7 @@ WHERE (n.name CONTAINS $q OR n.title CONTAINS $q)
   AND NOT (n:EXPERIENCE AND n.state = 'superseded')
 RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
        coalesce(n.pagerank, 0) AS pagerank
-LIMIT $limit
+LIMIT toInteger($limit)
 `;
 
 /** 图谱浏览（q 非空）：含关系的子图，过滤 superseded */
@@ -78,7 +78,7 @@ WHERE ($q IS NULL OR $q = '' OR n.name CONTAINS $q OR n.title CONTAINS $q)
 OPTIONAL MATCH (n)-[r]-(m)
 WHERE NOT (m:EXPERIENCE AND m.state = 'superseded')
 WITH n, r, m
-LIMIT $limit
+LIMIT toInteger($limit)
 RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
        coalesce(n.pagerank, 0) AS pagerank,
        type(r) AS relType, m.id AS targetId, m.name AS targetName,
@@ -92,7 +92,7 @@ WHERE NOT (n:EXPERIENCE AND n.state = 'superseded')
 RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
        coalesce(n.pagerank, 0) AS pagerank
 ORDER BY pagerank DESC
-LIMIT $limit
+LIMIT toInteger($limit)
 `;
 
 // ---------------------------------------------------------------------------
@@ -183,7 +183,9 @@ function searchLcm(q: string, limit: number): MemorySearchResult[] {
 // ---------------------------------------------------------------------------
 
 const QMD_BASE_URL = process.env.QMD_URL ?? 'http://127.0.0.1:8081';
-const QMD_TIMEOUT_MS = 8_000;
+// 优化: 8000ms → 5000ms。assemble 主路径 L2 已降至 3000ms，
+// dashboard memory 搜索是用户主动查询，可稍宽松但仍需避免长时间阻塞
+const QMD_TIMEOUT_MS = 5_000;
 
 /** 缓存 MCP session id（与 qmd-client.ts 一致，避免重复 initialize） */
 let qmdSessionId: string | null = null;
