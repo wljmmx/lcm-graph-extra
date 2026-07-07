@@ -445,6 +445,12 @@ export class QmdClient {
       throw new Error("MCP query returned empty response");
     }
 
+    // MCP 返回错误时，textContent 是错误描述而非 JSON，直接返回空结果
+    if (data?.result?.isError) {
+      this.logger?.warn?.(`[qmd-client] MCP query returned error: ${textContent.slice(0, 200)}`);
+      return [];
+    }
+
     let raw: Array<{
       docid?: string; file?: string; title?: string;
       score?: number; snippet?: string; line?: number; context?: string | null;
