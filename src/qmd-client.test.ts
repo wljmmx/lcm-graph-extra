@@ -2,6 +2,8 @@
  * QmdClient — 单元测试
  *
  * 使用 vi.mock 模拟 fetch 和 execFile
+ *
+ * 降级顺序：MCP /mcp → REST /query → CLI (child_process)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -68,11 +70,44 @@ function mockMcpFail(status = 500): void {
   } as Response);
 }
 
+/** MCP initialize 阶段抛错（如超时、连接失败） */
+function mockMcpInitFail(): void {
+  mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
+}
+
+/** MCP tools/call 阶段抛错（如超时、embed 错误）—— 通过 reject 模拟异常向上传播 */
+function mockMcpCallReject(msg: string): void {
+  // initialize succeeds
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
+    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
+  } as Response);
+  // tools/call 抛异常（用于模拟 embed 维度错误等）
+  mockFetch.mockRejectedValueOnce(new Error(msg));
+}
+
+/** MCP tools/call 返回 JSON-RPC error（embed 错误等以 error 响应形式返回） */
+function mockMcpCallError(errorMessage: string): void {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
+    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
+  } as Response);
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      jsonrpc: "2.0", id: 1,
+      error: { code: -32603, message: errorMessage },
+    }),
+  } as Response);
+}
+
 function mockMcpTimeout(): void {
   mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
 }
 
-// REST /query mocks —— QmdClient 优先用 REST /query，需先 mock REST 行为
+// REST /query mocks —— QmdClient MCP 失败后用 REST /query 降级
 function mockRestOk(body: unknown): void {
   const results = body && (body as any).results ? (body as any).results : body;
   mockFetch.mockResolvedValueOnce({
@@ -125,9 +160,8 @@ describe("QmdClient", () => {
   // ===================== query ============================================
 
   describe("query()", () => {
-    it("returns results from MCP on success", async () => {
-      // REST /query 先失败，从而走 MCP 路径
-      mockRestFail(500);
+    it("returns results from MCP on success (no REST call)", async () => {
+      // MCP 优先：MCP 成功时不应走 REST
       mockMcpOk({
         results: [
           {
@@ -152,16 +186,22 @@ describe("QmdClient", () => {
         file: "test.md",
         score: 0.95,
       });
-      // REST(1) + MCP initialize(1) + MCP tools/call(1) = 3 次 fetch
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      // MCP 协议需 2 次 fetch（initialize + tools/call），REST 不应被调用
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      // 不应调用 REST /query 端点
+      expect(mockFetch).not.toHaveBeenCalledWith(
+        expect.stringContaining("/query"),
+        expect.anything(),
+      );
     });
 
-    it("falls back to CLI when MCP fails with HTTP error", async () => {
-      mockRestFail(500); // REST 先失败
+    it("falls back to REST when MCP fails with HTTP error", async () => {
       mockMcpFail(503);
-      mockCliOk(JSON.stringify([
-        { docid: "#def", file: "fallback.md", title: "Fallback", score: 0.8, snippet: "cli result", line: 5, context: null },
-      ]));
+      mockRestOk({
+        results: [
+          { docid: "#def", file: "fallback.md", title: "Fallback", score: 0.8, snippet: "cli result", line: 5, context: null },
+        ],
+      });
 
       const results = await client.query({
         searches: [{ type: "lex", query: "fallback" }],
@@ -169,14 +209,17 @@ describe("QmdClient", () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].docid).toBe("#def");
+      // MCP initialize(1) + MCP tools/call(1) + REST(1) = 3 次 fetch
+      expect(mockFetch).toHaveBeenCalledTimes(3);
     });
 
-    it("falls back to CLI when MCP times out", async () => {
-      mockRestFail(500); // REST 先失败（非超时），快速降级到 MCP
-      mockMcpTimeout(); // MCP initialize 超时
-      mockCliOk(JSON.stringify([
-        { docid: "#timeout", file: "t.md", title: "Timeout", score: 0.5, snippet: "", line: 1, context: null },
-      ]));
+    it("falls back to REST when MCP times out", async () => {
+      mockMcpInitFail(); // MCP initialize 超时
+      mockRestOk({
+        results: [
+          { docid: "#timeout", file: "t.md", title: "Timeout", score: 0.5, snippet: "", line: 1, context: null },
+        ],
+      });
 
       const results = await client.query({
         searches: [{ type: "lex", query: "timeout" }],
@@ -186,9 +229,24 @@ describe("QmdClient", () => {
       expect(results[0].docid).toBe("#timeout");
     });
 
-    it("throws when both MCP and CLI fail", async () => {
-      mockRestFail(500); // REST 先失败
+    it("falls back to CLI when both MCP and REST fail", async () => {
       mockMcpFail(500);
+      mockRestFail(500);
+      mockCliOk(JSON.stringify([
+        { docid: "#cli", file: "c.md", title: "CLI", score: 0.6, snippet: "", line: 1, context: null },
+      ]));
+
+      const results = await client.query({
+        searches: [{ type: "lex", query: "crash" }],
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#cli");
+    });
+
+    it("throws when MCP, REST, and CLI all fail", async () => {
+      mockMcpFail(500);
+      mockRestFail(500);
       mockCliFail("CLI crashed");
 
       await expect(
@@ -196,103 +254,95 @@ describe("QmdClient", () => {
       ).rejects.toThrow();
     });
 
-    it("marks MCP unavailable after failure and tries MCP again on next call", async () => {
-      // First call: REST fails + MCP fails, 走 CLI
-      mockRestFail(500);
+    it("marks MCP unavailable after failure and skips MCP on next call", async () => {
+      // First call: MCP fails + REST fails → CLI
       mockMcpFail(500);
+      mockRestFail(500);
       mockCliOk(JSON.stringify([{ docid: "#a", file: "a.md", title: "A", score: 0.5, snippet: "", line: 1, context: null }]));
 
       await client.query({ searches: [{ type: "lex", query: "a" }] });
 
-      // Second call: REST=false + MCP=false，跳过两者直接走 CLI
+      // Second call: MCP=false 跳过，REST=false（第一次失败已标记）跳过，直接走 CLI
       mockCliOk(JSON.stringify([{ docid: "#b", file: "b.md", title: "B", score: 0.5, snippet: "", line: 1, context: null }]));
 
       const results = await client.query({ searches: [{ type: "lex", query: "b" }] });
 
-      // 第一次 query: REST(1) + MCP initialize(1) + MCP tools/call(1) = 3 次 fetch
-      // 第二次 query: restAvailable=false + mcpAvailable=false，直接走 CLI，0 次 fetch
-      // 总计 3 次 fetch
+      // 第一次: MCP init(1) + MCP call(1) + REST(1) = 3 fetch
+      // 第二次: MCP=false + REST=false 都跳过，直接 CLI，0 fetch
+      // 总计 3 fetch
       expect(mockFetch).toHaveBeenCalledTimes(3);
       expect(results[0].docid).toBe("#b");
     });
+  });
 
-    // ===================== REST /query 优先路径 ===========================
+  // ===================== MCP embed 错误降级到 REST (avoidVec) =============
 
-    it("returns results from REST /query on success (skips MCP)", async () => {
-      mockRestOk({
-        results: [
-          {
-            docid: "#rest",
-            file: "rest.md",
-            title: "REST Result",
-            score: 0.88,
-            snippet: "via rest",
-            line: 3,
-            context: "ctx",
-          },
+  describe("MCP embed error → REST lex-only fallback", () => {
+    it("REST uses lex-only searches when MCP fails with dimension mismatch", async () => {
+      // MCP 失败：embed 维度错误
+      mockMcpCallError("Dimension mismatch for query vector for the embedding column. Expected 1024 dimensions but received 768.");
+      // REST 成功
+      mockRestOk({ results: [{ docid: "#lex", file: "l.md", title: "Lex", score: 0.7, snippet: "", line: 1, context: null }] });
+
+      const results = await client.query({
+        searches: [
+          { type: "lex", query: "lex-kw" },
+          { type: "vec", query: "vec-kw" },
         ],
       });
 
-      const results = await client.query({
-        searches: [{ type: "lex", query: "rest-test" }],
-      });
-
       expect(results).toHaveLength(1);
-      expect(results[0]).toMatchObject({
-        docid: "#rest",
-        file: "rest.md",
-        score: 0.88,
-      });
-      // REST 成功后只调用 1 次 fetch（POST /query），不应走 MCP
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("/query"),
-        expect.objectContaining({ method: "POST" }),
+      expect(results[0].docid).toBe("#lex");
+
+      // 验证 REST 调用时 body 只含 lex 子查询（avoidVec=true）
+      const restCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && c[0].includes("/query"),
       );
-      // 不应调用 MCP /mcp 端点
-      expect(mockFetch).not.toHaveBeenCalledWith(
-        expect.stringContaining("/mcp"),
-        expect.anything(),
-      );
+      expect(restCall).toBeDefined();
+      const restBody = JSON.parse((restCall![1] as any).body);
+      expect(restBody.searches).toHaveLength(1);
+      expect(restBody.searches[0].type).toBe("lex");
+      expect(restBody.rerank).toBe(false); // embed 错误时禁用 rerank
     });
 
-    it("falls back to MCP when REST /query times out", async () => {
-      mockRestTimeout(); // REST 超时
-      mockMcpOk({
-        results: [
-          { docid: "#mcp", file: "mcp.md", title: "MCP Result", score: 0.7, snippet: "via mcp", line: 1, context: null },
+    it("REST keeps all searches when MCP fails with non-embed error", async () => {
+      // MCP 失败：非 embed 错误（如 HTTP 500）
+      mockMcpFail(500);
+      mockRestOk({ results: [{ docid: "#r", file: "r.md", title: "R", score: 0.6, snippet: "", line: 1, context: null }] });
+
+      const results = await client.query({
+        searches: [
+          { type: "lex", query: "lex-kw" },
+          { type: "vec", query: "vec-kw" },
         ],
       });
 
-      const results = await client.query({
-        searches: [{ type: "vec", query: "fallback-test" }],
-      });
-
       expect(results).toHaveLength(1);
-      expect(results[0].docid).toBe("#mcp");
-      // REST 超时(1) + MCP initialize(1) + MCP tools/call(1) = 3 次 fetch
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(results[0].docid).toBe("#r");
+
+      // 验证 REST 调用时 body 含所有子查询（avoidVec=false）
+      const restCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && c[0].includes("/query"),
+      );
+      const restBody = JSON.parse((restCall![1] as any).body);
+      expect(restBody.searches).toHaveLength(2);
+      expect(restBody.rerank).toBe(true); // 非 embed 错误时保持 rerank
     });
 
-    it("marks REST unavailable and skips REST on next call", async () => {
-      // First call: REST fails + MCP succeeds
+    it("REST falls through to CLI when lex-only also fails (no lex subquery)", async () => {
+      // MCP 失败：embed 错误，但 searches 只有 vec（无 lex）
+      mockMcpCallError("Dimension mismatch for embedding");
+      // REST 尝试（无 lex 退化，保留原样 → 可能再次失败）
       mockRestFail(500);
-      mockMcpOk({ results: [{ docid: "#1", file: "a.md", title: "A", score: 1, snippet: "", line: 0, context: null }] });
-      await client.query({ searches: [{ type: "lex", query: "a" }] });
-      expect(mockFetch).toHaveBeenCalledTimes(3); // REST(1) + MCP(2)
+      // CLI 兜底
+      mockCliOk(JSON.stringify([{ docid: "#cli", file: "c.md", title: "C", score: 0.5, snippet: "", line: 1, context: null }]));
 
-      // Second call: restAvailable=false，跳过 REST，直接走 MCP（session 已缓存）
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          jsonrpc: "2.0", id: 1,
-          result: { content: [{ type: "text", text: JSON.stringify([{ docid: "#2", file: "b.md", title: "B", score: 1, snippet: "", line: 0, context: null }]) }] },
-        }),
-      } as Response);
-      const results = await client.query({ searches: [{ type: "lex", query: "b" }] });
-      // 第二次只调用 1 次 fetch（MCP tools/call，跳过 REST）
-      expect(mockFetch).toHaveBeenCalledTimes(4); // 3 + 1
-      expect(results[0].docid).toBe("#2");
+      const results = await client.query({
+        searches: [{ type: "vec", query: "vec-only" }],
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#cli");
     });
   });
 
@@ -332,11 +382,10 @@ describe("QmdClient", () => {
   // ===================== CLI command building ============================
 
   describe("CLI command building", () => {
-    it("uses qmd search for pure lex queries", async () => {
-      mockRestFail(500); // REST 先失败
+    it("uses MCP /mcp endpoint for pure lex queries on success", async () => {
       mockMcpOk({ results: [] });
       await client.query({ searches: [{ type: "lex", query: "keyword" }] });
-      // REST 失败后走 MCP /mcp 端点
+      // MCP 成功时端点是 /mcp（MCP JSON-RPC）
       expect(mockFetch).toHaveBeenCalledWith(
         expect.stringContaining("/mcp"),
         expect.objectContaining({
@@ -346,8 +395,8 @@ describe("QmdClient", () => {
     });
 
     it("builds 'qmd search' command for pure lex on CLI fallback", async () => {
-      mockRestFail(500); // REST 先失败
-      mockMcpFail(500); // MCP 也失败
+      mockMcpFail(500);
+      mockRestFail(500);
       mockCliOk(JSON.stringify([]));
       await client.query({ searches: [{ type: "lex", query: "lex-kw" }], limit: 5 });
       expect(mockExecFile).toHaveBeenCalledWith(
@@ -359,8 +408,8 @@ describe("QmdClient", () => {
     });
 
     it("builds 'qmd vsearch' command for pure vec on CLI fallback", async () => {
-      mockRestFail(500);
       mockMcpFail(500);
+      mockRestFail(500);
       mockCliOk(JSON.stringify([]));
       await client.query({ searches: [{ type: "vec", query: "vec-kw" }], limit: 3 });
       expect(mockExecFile).toHaveBeenCalledWith(
@@ -373,8 +422,8 @@ describe("QmdClient", () => {
 
     it("builds 'qmd search' for mixed queries when cliFallbackSearchType='search'", async () => {
       const c = new QmdClient({ pingInterval: 999_999, cliFallbackSearchType: "search" });
-      mockRestFail(500);
       mockMcpFail(500);
+      mockRestFail(500);
       mockCliOk(JSON.stringify([]));
       await c.query({
         searches: [{ type: "lex", query: "lex-kw" }, { type: "vec", query: "vec-kw" }],
@@ -389,8 +438,8 @@ describe("QmdClient", () => {
 
     it("builds 'qmd query' with real newlines for mixed when cliFallbackSearchType='vsearch'", async () => {
       const c = new QmdClient({ pingInterval: 999_999, cliFallbackSearchType: "vsearch" });
-      mockRestFail(500);
       mockMcpFail(500);
+      mockRestFail(500);
       mockCliOk(JSON.stringify([]));
       await c.query({
         searches: [{ type: "lex", query: "lex-kw" }, { type: "vec", query: "vec-kw" }],
@@ -410,8 +459,8 @@ describe("QmdClient", () => {
     });
 
     it("appends --no-rerank when rerank=false", async () => {
-      mockRestFail(500);
       mockMcpFail(500);
+      mockRestFail(500);
       mockCliOk(JSON.stringify([]));
       await client.query({ searches: [{ type: "lex", query: "kw" }], rerank: false });
       expect(mockExecFile).toHaveBeenCalledWith(
@@ -580,13 +629,12 @@ describe("QmdClient", () => {
 
   describe("session caching", () => {
     it("reuses mcp-session-id across multiple successful MCP calls", async () => {
-      // 第一次 query: REST 失败 + MCP initialize + tools/call = 3 fetches
-      mockRestFail(500);
+      // 第一次 query: MCP initialize + tools/call = 2 fetches
       mockMcpOk({ results: [{ docid: "#1", file: "a.md", title: "A", score: 1, snippet: "", line: 0, context: null }] });
       await client.query({ searches: [{ type: "lex", query: "a" }] });
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
 
-      // 第二次 query: restAvailable=false 跳过 REST, session 已缓存，只发 tools/call = 1 fetch
+      // 第二次 query: session 已缓存，只发 tools/call = 1 fetch
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -595,7 +643,7 @@ describe("QmdClient", () => {
         }),
       } as Response);
       const results = await client.query({ searches: [{ type: "lex", query: "b" }] });
-      expect(mockFetch).toHaveBeenCalledTimes(4); // 3 + 1
+      expect(mockFetch).toHaveBeenCalledTimes(3); // 2 + 1
       expect(results[0].docid).toBe("#2");
     });
   });
@@ -603,34 +651,32 @@ describe("QmdClient", () => {
   // ===================== mcpInitialize failures ==========================
 
   describe("mcpInitialize failures", () => {
-    it("throws and falls to CLI when initialize returns non-200", async () => {
-      // REST 先失败 → MCP initialize 失败 → CLI
-      mockRestFail(500);
-      // initialize 失败 → 抛错 → query() catch → mcpAvailable=false → CLI
+    it("throws and falls to REST when initialize returns non-200", async () => {
+      // MCP initialize 失败 → 抛错 → query() catch → mcpAvailable=false → REST
       mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 503,
         headers: { get: () => null },
         json: async () => ({}),
       } as Response);
-      mockCliOk(JSON.stringify([]));
+      mockRestOk({ results: [{ docid: "#r", file: "r.md", title: "R", score: 0.6, snippet: "", line: 1, context: null }] });
 
       const results = await client.query({ searches: [{ type: "lex", query: "test" }] });
-      expect(results).toEqual([]);
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#r");
     });
 
-    it("throws and falls to CLI when initialize has no mcp-session-id header", async () => {
-      // REST 先失败 → MCP initialize 无 session → CLI
-      mockRestFail(500);
+    it("throws and falls to REST when initialize has no mcp-session-id header", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         headers: { get: () => null }, // 无 mcp-session-id
         json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
       } as Response);
-      mockCliOk(JSON.stringify([]));
+      mockRestOk({ results: [{ docid: "#r", file: "r.md", title: "R", score: 0.6, snippet: "", line: 1, context: null }] });
 
       const results = await client.query({ searches: [{ type: "lex", query: "test" }] });
-      expect(results).toEqual([]);
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#r");
     });
   });
 });

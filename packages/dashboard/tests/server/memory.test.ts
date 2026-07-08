@@ -75,11 +75,35 @@ function makeMockDb(tableRows: Record<string, unknown[]>) {
 /** 原始 global.fetch 引用（测试后恢复） */
 const originalFetch = global.fetch;
 
-/** mock global fetch 以模拟 QMD（REST /query 优先 + MCP 降级） */
+/** mock global fetch 以模拟 QMD（MCP 优先，REST 降级） */
 function mockQmdFetch(results: Array<Record<string, unknown>>) {
   const fetchMock = vi.fn().mockImplementation((url: string, opts: { body?: string } | undefined) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
-    // REST /query 优先路径：URL 以 /query 结尾，body 无 method 字段
+    // MCP 路径：URL 含 /mcp
+    if (typeof url === 'string' && url.includes('/mcp')) {
+      if (body.method === 'initialize') {
+        // initialize 返回 mcp-session-id header
+        const headers = new Map<string, string>();
+        headers.set('mcp-session-id', 'test-session-id');
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: { get: (k: string) => headers.get(k.toLowerCase()) },
+          json: () => Promise.resolve({ result: {} }),
+        });
+      }
+      // tools/call query 返回 text 内容（JSON 字符串）
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: () =>
+          Promise.resolve({
+            result: { content: [{ type: 'text', text: JSON.stringify(results) }] },
+          }),
+      });
+    }
+    // REST /query 降级路径：URL 含 /query，body 无 method 字段
     if (typeof url === 'string' && url.includes('/query') && !body.method) {
       return Promise.resolve({
         ok: true,
@@ -88,28 +112,8 @@ function mockQmdFetch(results: Array<Record<string, unknown>>) {
         json: () => Promise.resolve({ results }),
       });
     }
-    // MCP 降级路径
-    if (body.method === 'initialize') {
-      // initialize 返回 mcp-session-id header
-      const headers = new Map<string, string>();
-      headers.set('mcp-session-id', 'test-session-id');
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        headers: { get: (k: string) => headers.get(k.toLowerCase()) },
-        json: () => Promise.resolve({ result: {} }),
-      });
-    }
-    // tools/call query 返回 text 内容（JSON 字符串）
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      headers: { get: () => null },
-      json: () =>
-        Promise.resolve({
-          result: { content: [{ type: 'text', text: JSON.stringify(results) }] },
-        }),
-    });
+    // 其他路径（如 /health）默认返回 ok
+    return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve({}) });
   });
   global.fetch = fetchMock as unknown as typeof global.fetch;
   return fetchMock;

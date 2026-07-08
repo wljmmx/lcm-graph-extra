@@ -218,42 +218,13 @@ async function qmdInitialize(): Promise<string> {
   return sid;
 }
 
-/** QMD 搜索：优先 REST /query（绕过 MCP transport 超时），降级 MCP tools/call */
+/** QMD 搜索：优先 MCP（完整 hybrid + SDK 自动展开），降级 REST /query（MCP embed 错误时 lex-only），最后 CLI 兜底 */
 async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]> {
-  // 优先 REST /query —— 直接调用 qmd store.search()，不经 MCP transport 层
-  // qmd server.ts 提供 REST /query 端点，与 MCP /mcp 共用 store，避免 enableJsonResponse 挂起
+  // 1. MCP tools/call "query" 优先 — 完整 hybrid 搜索（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
+  let mcpEmbedError = false;
   try {
-    const resp = await fetch(`${QMD_BASE_URL}/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        searches: [{ type: 'lex', query: q }, { type: 'vec', query: q }],
-        limit,
-        minScore: 0,
-        rerank: true,
-      }),
-      signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
-    });
-    if (resp.ok) {
-      const data = (await resp.json()) as { results?: Array<Record<string, unknown>> };
-      const results = Array.isArray(data?.results) ? data.results : [];
-      return results.map((r) => ({
-        source: 'qmd' as const,
-        content: typeof r.title === 'string' ? r.title : (typeof r.snippet === 'string' ? r.snippet : (typeof r.file === 'string' ? r.file : '')),
-        file: typeof r.file === 'string' ? r.file : '',
-        score: typeof r.score === 'number' ? r.score : 0,
-      }));
-    }
-    // 非 200 降级到 MCP
-  } catch (e) {
-    // REST 超时/连接失败，降级到 MCP
-  }
-
-  // 降级：MCP tools/call "query"
-  const sid = await qmdInitialize();
-  let resp: Response;
-  try {
-    resp = await fetch(`${QMD_BASE_URL}/mcp`, {
+    const sid = await qmdInitialize();
+    const resp = await fetch(`${QMD_BASE_URL}/mcp`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -279,42 +250,85 @@ async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]
       }),
       signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
     });
-  } catch (e) {
-    // D1 修复: 网络错误也可能意味着 session 失效，重置以便下次重新握手
-    qmdSessionId = null;
-    throw e;
-  }
-  if (!resp.ok) {
-    // D1 修复: 401/403 表示 session 已失效，重置 qmdSessionId 以便下次重新 initialize
-    // 原代码仅 throw，session 永不复位 → QMD 引擎永久降级为空直到进程重启
-    if (resp.status === 401 || resp.status === 403) {
-      qmdSessionId = null;
+    if (resp.ok) {
+      const data = (await resp.json()) as {
+        result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
+        error?: { message?: string };
+      };
+      // 检测 embed 维度错误（REST 降级时需避开 vec）
+      const errMsg = data?.error?.message ?? '';
+      if (/dimension|embedding|mismatch/i.test(errMsg)) {
+        mcpEmbedError = true;
+      } else {
+        const text = data?.result?.content?.[0]?.text;
+        if (text) {
+          let parsed: Array<{
+            docid?: string; file?: string; title?: string;
+            score?: number; snippet?: string; line?: number;
+          }> = [];
+          try {
+            const v = JSON.parse(text);
+            if (Array.isArray(v)) parsed = v;
+          } catch {
+            // 非 JSON 文本（如 "No results found"），视为空
+          }
+          return parsed.map((r) => ({
+            source: 'qmd' as const,
+            content: r.title || r.snippet || r.file || r.docid || '',
+            file: r.file ?? '',
+            score: typeof r.score === 'number' ? r.score : 0,
+          }));
+        }
+      }
+    } else {
+      // HTTP 错误：401/403 重置 session
+      if (resp.status === 401 || resp.status === 403) {
+        qmdSessionId = null;
+      }
     }
-    throw new Error(`QMD query HTTP ${resp.status}`);
-  }
-  const data = (await resp.json()) as {
-    result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
-  };
-  const text = data?.result?.content?.[0]?.text;
-  if (!text) return [];
-
-  let parsed: Array<{
-    docid?: string; file?: string; title?: string;
-    score?: number; snippet?: string; line?: number;
-  }> = [];
-  try {
-    const v = JSON.parse(text);
-    if (Array.isArray(v)) parsed = v;
   } catch {
-    // 非 JSON 文本（如 "No results found"），视为空
+    // MCP 网络错误/超时，降级 REST
   }
 
-  return parsed.map((r) => ({
-    source: 'qmd' as const,
-    content: r.title || r.snippet || r.file || r.docid || '',
-    file: r.file ?? '',
-    score: typeof r.score === 'number' ? r.score : 0,
-  }));
+  // 2. REST /query 备选 — MCP 失败后启用。
+  //    若 MCP 失败原因是 embed 维度错误，REST 降级为 lex-only 避免再次触发 vec embed 错误。
+  let restErr: unknown = null;
+  try {
+    const restSearches = mcpEmbedError
+      ? [{ type: 'lex', query: q }]
+      : [{ type: 'lex', query: q }, { type: 'vec', query: q }];
+    const resp = await fetch(`${QMD_BASE_URL}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        searches: restSearches,
+        limit,
+        minScore: 0,
+        rerank: !mcpEmbedError, // embed 错误时禁用 rerank
+      }),
+      signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
+    });
+    if (resp.ok) {
+      const data = (await resp.json()) as { results?: Array<Record<string, unknown>> };
+      const results = Array.isArray(data?.results) ? data.results : [];
+      return results.map((r) => ({
+        source: 'qmd' as const,
+        content: typeof r.title === 'string' ? r.title : (typeof r.snippet === 'string' ? r.snippet : (typeof r.file === 'string' ? r.file : '')),
+        file: typeof r.file === 'string' ? r.file : '',
+        score: typeof r.score === 'number' ? r.score : 0,
+      }));
+    }
+    restErr = new Error(`QMD query HTTP ${resp.status}`);
+  } catch (e) {
+    restErr = e;
+  }
+
+  // MCP + REST 都失败，抛错让 route handler 记录 error（dashboard 无 CLI 兜底）
+  if (restErr) {
+    throw restErr instanceof Error ? restErr : new Error(String(restErr));
+  }
+
+  return [];
 }
 
 // ---------------------------------------------------------------------------

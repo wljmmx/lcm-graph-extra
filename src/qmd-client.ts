@@ -1,13 +1,15 @@
 /**
- * QmdClient — unified search client for QMD (REST优先, MCP降级, CLI兜底)
+ * QmdClient — unified search client for QMD (MCP优先, REST备选, CLI兜底)
  *
- * Priority: REST /query → MCP /mcp → CLI (child_process) → throw
- * Auto-recovery: 降级后定期 ping, 恢复后自动切回
+ * Priority: MCP /mcp → REST /query → CLI (child_process) → throw
+ * Auto-recovery: 降级后定期 ping, 恢复后自动切回 MCP
  *
- * REST /query 优先的原因：
- * qmd 的 MCP StreamableHTTP transport (enableJsonResponse=true) 在长时间
- * tools/call（含 LLM rerank）时会挂起，即使 60s 也超时；而 REST /query 和
- * CLI 都直接调用 store.search()，无 MCP transport 层开销，不会挂起。
+ * 三级降级设计：
+ * - MCP 优先：完整 hybrid 搜索能力（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
+ * - REST 备选：仅在 MCP 失败（embed 维度错误、超时、连接失败）时启用。
+ *   为避免再次触发 MCP 同样的 embed 错误，REST 降级时只用 lex 子查询（纯 BM25），
+ *   避开 vec embed 路径。recall 降低但保证可用。
+ * - CLI 兜底：REST 也失败时最后兜底。
  */
 
 import { execFile } from "node:child_process";
@@ -106,6 +108,8 @@ export class QmdClient {
   private restAvailable: boolean | null = null;
   /** null = undetermined, true = MCP可用, false = MCP不可用 */
   private mcpAvailable: boolean | null = null;
+  /** 最近一次 MCP 失败是否为 embed 维度错误（用于决定 REST 降级是否避开 vec） */
+  private lastMcpErrorIsEmbed = false;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: QmdClientOptions = {}) {
@@ -120,7 +124,7 @@ export class QmdClient {
   // ===================== public API =======================================
 
   /**
-   * Hybrid search — REST /query first, MCP fallback, CLI last resort.
+   * Hybrid search — MCP first, REST fallback (lex-only), CLI last resort.
    * Results are normalised to QmdSearchResult[] regardless of source.
    */
   async query(params: SearchParams): Promise<QmdSearchResult[]> {
@@ -140,25 +144,7 @@ export class QmdClient {
         })),
       };
     }
-    // 优先 REST /query（绕过 MCP StreamableHTTP transport 的 enableJsonResponse 挂起问题）
-    if (this.restAvailable !== false) {
-      try {
-        const results = await this.queryViaRest(params);
-        this.restAvailable = true;
-        this.clearRecovery();
-        return results;
-      } catch (err) {
-        this.restAvailable = false;
-        const msg = (err as Error).message;
-        if (msg.includes("timeout") || msg.includes("aborted")) {
-          this.logger.warn("[qmd-client] REST /query timeout, falling back to MCP", { err: msg, timeout: this.mcpTimeout });
-        } else if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
-          this.logger.warn("[qmd-client] REST /query connection failed, falling back to MCP", { err: msg, baseUrl: this.mcpBaseUrl });
-        } else {
-          this.logger.warn("[qmd-client] REST /query failed, falling back to MCP", { err: msg });
-        }
-      }
-    }
+    // 1. MCP 优先 — 完整 hybrid 搜索能力（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
     if (this.mcpAvailable !== false) {
       try {
         const results = await this.queryViaMcp(params);
@@ -170,22 +156,49 @@ export class QmdClient {
         this.scheduleRecovery();
         const _mcpErr = (err as Error).message;
         const _mcpStack = (err as Error).stack;
-        if (_mcpErr.includes("circuit breaker")) {
-          this.logger.warn("[qmd-client] MCP circuit breaker OPEN, falling back to CLI");
+        // 判断是否 embed 维度错误（REST 降级时需避开 vec）
+        const isEmbedError = /dimension|embedding|mismatch/i.test(_mcpErr);
+        this.lastMcpErrorIsEmbed = isEmbedError;
+        if (isEmbedError) {
+          this.logger.warn("[qmd-client] MCP embed error (likely model dim mismatch), falling back to REST lex-only", { err: _mcpErr });
+        } else if (_mcpErr.includes("circuit breaker")) {
+          this.logger.warn("[qmd-client] MCP circuit breaker OPEN, falling back to REST");
         } else if (_mcpErr.includes("HTTP")) {
-          this.logger.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to CLI");
+          this.logger.warn("[qmd-client] MCP service error (" + _mcpErr + "), falling back to REST");
         } else if (_mcpErr.includes("empty response")) {
-          this.logger.warn("[qmd-client] MCP query returned no results, falling back to CLI");
+          this.logger.warn("[qmd-client] MCP query returned no results, falling back to REST");
         } else if (_mcpErr.includes("timeout") || _mcpErr.includes("Timeout") || _mcpErr.includes("aborted")) {
-          this.logger.warn("[qmd-client] MCP query timeout, falling back to CLI", { err: _mcpErr, timeout: this.mcpTimeout });
+          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, timeout: this.mcpTimeout });
         } else if (_mcpErr.includes("fetch failed") || _mcpErr.includes("ECONNREFUSED") || _mcpErr.includes("ECONNRESET")) {
-          this.logger.warn("[qmd-client] MCP connection failed, falling back to CLI", { err: _mcpErr, baseUrl: this.mcpBaseUrl });
+          this.logger.warn("[qmd-client] MCP connection failed, falling back to REST", { err: _mcpErr, baseUrl: this.mcpBaseUrl });
         } else {
-          this.logger.warn("[qmd-client] MCP query failed, falling back to CLI", { err: _mcpErr, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
+          this.logger.warn("[qmd-client] MCP query failed, falling back to REST", { err: _mcpErr, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
         }
       }
     }
 
+    // 2. REST /query 备选 — 仅在 MCP 失败后启用。
+    //    若 MCP 失败是 embed 维度错误，REST 降级为 lex-only 避免再次触发 vec embed 错误。
+    if (this.restAvailable !== false) {
+      try {
+        const results = await this.queryViaRest(params, this.lastMcpErrorIsEmbed);
+        this.restAvailable = true;
+        this.clearRecovery();
+        return results;
+      } catch (err) {
+        this.restAvailable = false;
+        const msg = (err as Error).message;
+        if (msg.includes("timeout") || msg.includes("aborted")) {
+          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpTimeout });
+        } else if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
+          this.logger.warn("[qmd-client] REST /query connection failed, falling back to CLI", { err: msg, baseUrl: this.mcpBaseUrl });
+        } else {
+          this.logger.warn("[qmd-client] REST /query failed, falling back to CLI", { err: msg });
+        }
+      }
+    }
+
+    // 3. CLI 兜底
     return this.queryViaCli(params);
   }
 
@@ -468,20 +481,35 @@ export class QmdClient {
 
   /**
    * REST /query 模式 —— 直接 POST /query 调用 qmd store.search()，
-   * 不经 MCP StreamableHTTP transport 层，避免 enableJsonResponse 挂起问题。
+   * 不经 MCP StreamableHTTP transport 层。
    * qmd server.ts 同时提供 REST /query（或 /search）端点，与 MCP /mcp 共用 store。
+   *
+   * @param avoidVec 为 true 时只保留 lex 子查询，避开 vec embed 路径。
+   *   用于 MCP 失败原因是 embed 维度错误时，避免 REST 再次触发同样的错误。
+   *   若过滤后无 lex 子查询，退化为使用原始所有子查询（保证不返回 0 结果的空操作）。
    */
-  private async queryViaRest(params: SearchParams): Promise<QmdSearchResult[]> {
+  private async queryViaRest(params: SearchParams, avoidVec = false): Promise<QmdSearchResult[]> {
+    // MCP embed 错误时降级为 lex-only（纯 BM25），避免再次触发 vec embed 错误
+    let searches = params.searches;
+    if (avoidVec) {
+      const lexOnly = params.searches.filter((s) => s.type === "lex");
+      if (lexOnly.length > 0) {
+        searches = lexOnly;
+      }
+      // 若无 lex 子查询，保留原样（rest 端点会尝试 vec，可能再次失败 → 降级 CLI）
+    }
+
     const body: Record<string, unknown> = {
-      searches: params.searches,
+      searches,
       limit: params.limit ?? 10,
       minScore: params.minScore ?? 0,
-      rerank: params.rerank ?? true,
+      // embed 错误场景下应禁用 rerank（rerank 可能依赖 vec 结果）
+      rerank: avoidVec ? false : (params.rerank ?? true),
     };
     if (params.collections) body.collections = params.collections;
     if (params.intent) body.intent = params.intent;
 
-    this.logger?.debug?.(`[qmd-client] queryViaRest: POST ${this.mcpBaseUrl}/query (${params.searches.length} searches)`);
+    this.logger?.debug?.(`[qmd-client] queryViaRest: POST ${this.mcpBaseUrl}/query (${searches.length} searches, avoidVec=${avoidVec})`);
     const resp = await fetch(`${this.mcpBaseUrl}/query`, {
       method: "POST",
       headers: {
@@ -653,12 +681,13 @@ export class QmdClient {
       try {
         const ok = await this.ping();
         if (ok) {
-          // /health 可达意味着 qmd 服务在线，REST /query 和 MCP /mcp 都应可达
-          this.restAvailable = true;
+          // /health 可达意味着 qmd 服务在线，MCP /mcp 应可达。
+          // REST 仅作 MCP 失败的备选，保持 undetermined (null)，下次 query 时按需探测。
           this.mcpAvailable = true;
+          this.lastMcpErrorIsEmbed = false; // 恢复 MCP 时清除 embed 错误标记
           this.mcpSessionId = null;
           this.clearRecovery();
-          this.logger.info("[qmd-client] QMD service recovered (REST + MCP), switching back");
+          this.logger.info("[qmd-client] QMD MCP service recovered, switching back to MCP");
         } else {
           this.scheduleRecovery(); // retry
         }
