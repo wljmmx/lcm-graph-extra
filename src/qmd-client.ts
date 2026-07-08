@@ -1,8 +1,13 @@
 /**
- * QmdClient — unified search client for QMD (MCP REST优先, CLI降级)
+ * QmdClient — unified search client for QMD (REST优先, MCP降级, CLI兜底)
  *
- * Priority: MCP HTTP → CLI (child_process) → throw
- * Auto-recovery: 降级后定期 ping MCP, 恢复后自动切回
+ * Priority: REST /query → MCP /mcp → CLI (child_process) → throw
+ * Auto-recovery: 降级后定期 ping, 恢复后自动切回
+ *
+ * REST /query 优先的原因：
+ * qmd 的 MCP StreamableHTTP transport (enableJsonResponse=true) 在长时间
+ * tools/call（含 LLM rerank）时会挂起，即使 60s 也超时；而 REST /query 和
+ * CLI 都直接调用 store.search()，无 MCP transport 层开销，不会挂起。
  */
 
 import { execFile } from "node:child_process";
@@ -97,6 +102,8 @@ export class QmdClient {
   /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
   private readonly logger: Logger;
 
+  /** null = undetermined, true = REST可用, false = REST不可用 */
+  private restAvailable: boolean | null = null;
   /** null = undetermined, true = MCP可用, false = MCP不可用 */
   private mcpAvailable: boolean | null = null;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -113,7 +120,7 @@ export class QmdClient {
   // ===================== public API =======================================
 
   /**
-   * Hybrid search — MCP REST first, falls back to CLI on failure.
+   * Hybrid search — REST /query first, MCP fallback, CLI last resort.
    * Results are normalised to QmdSearchResult[] regardless of source.
    */
   async query(params: SearchParams): Promise<QmdSearchResult[]> {
@@ -132,6 +139,25 @@ export class QmdClient {
             : s.query,
         })),
       };
+    }
+    // 优先 REST /query（绕过 MCP StreamableHTTP transport 的 enableJsonResponse 挂起问题）
+    if (this.restAvailable !== false) {
+      try {
+        const results = await this.queryViaRest(params);
+        this.restAvailable = true;
+        this.clearRecovery();
+        return results;
+      } catch (err) {
+        this.restAvailable = false;
+        const msg = (err as Error).message;
+        if (msg.includes("timeout") || msg.includes("aborted")) {
+          this.logger.warn("[qmd-client] REST /query timeout, falling back to MCP", { err: msg, timeout: this.mcpTimeout });
+        } else if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
+          this.logger.warn("[qmd-client] REST /query connection failed, falling back to MCP", { err: msg, baseUrl: this.mcpBaseUrl });
+        } else {
+          this.logger.warn("[qmd-client] REST /query failed, falling back to MCP", { err: msg });
+        }
+      }
     }
     if (this.mcpAvailable !== false) {
       try {
@@ -440,6 +466,51 @@ export class QmdClient {
     return sessionId;
   }
 
+  /**
+   * REST /query 模式 —— 直接 POST /query 调用 qmd store.search()，
+   * 不经 MCP StreamableHTTP transport 层，避免 enableJsonResponse 挂起问题。
+   * qmd server.ts 同时提供 REST /query（或 /search）端点，与 MCP /mcp 共用 store。
+   */
+  private async queryViaRest(params: SearchParams): Promise<QmdSearchResult[]> {
+    const body: Record<string, unknown> = {
+      searches: params.searches,
+      limit: params.limit ?? 10,
+      minScore: params.minScore ?? 0,
+      rerank: params.rerank ?? true,
+    };
+    if (params.collections) body.collections = params.collections;
+    if (params.intent) body.intent = params.intent;
+
+    this.logger?.debug?.(`[qmd-client] queryViaRest: POST ${this.mcpBaseUrl}/query (${params.searches.length} searches)`);
+    const resp = await fetch(`${this.mcpBaseUrl}/query`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.mcpTimeout),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`REST /query HTTP ${resp.status} ${resp.statusText}`);
+    }
+
+    const data = await resp.json() as { results?: Array<Record<string, unknown>> };
+    const results = Array.isArray(data?.results) ? data.results : [];
+    if (results.length === 0) return [];
+
+    return results.map((r) => ({
+      docid: typeof r.docid === "string" ? r.docid : "",
+      file: typeof r.file === "string" ? r.file : "",
+      title: typeof r.title === "string" ? r.title : "",
+      score: typeof r.score === "number" ? r.score : 0,
+      snippet: typeof r.snippet === "string" ? r.snippet : "",
+      line: typeof r.line === "number" ? r.line : 0,
+      context: typeof r.context === "string" ? r.context : null,
+    }));
+  }
+
   private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
     const args: Record<string, unknown> = {
       searches: params.searches,
@@ -582,10 +653,12 @@ export class QmdClient {
       try {
         const ok = await this.ping();
         if (ok) {
+          // /health 可达意味着 qmd 服务在线，REST /query 和 MCP /mcp 都应可达
+          this.restAvailable = true;
           this.mcpAvailable = true;
           this.mcpSessionId = null;
           this.clearRecovery();
-          this.logger.info("[qmd-client] MCP recovered, switching back");
+          this.logger.info("[qmd-client] QMD service recovered (REST + MCP), switching back");
         } else {
           this.scheduleRecovery(); // retry
         }

@@ -218,8 +218,38 @@ async function qmdInitialize(): Promise<string> {
   return sid;
 }
 
-/** QMD 搜索：MCP tools/call "query"，返回 lex+vec 混合结果 */
+/** QMD 搜索：优先 REST /query（绕过 MCP transport 超时），降级 MCP tools/call */
 async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]> {
+  // 优先 REST /query —— 直接调用 qmd store.search()，不经 MCP transport 层
+  // qmd server.ts 提供 REST /query 端点，与 MCP /mcp 共用 store，避免 enableJsonResponse 挂起
+  try {
+    const resp = await fetch(`${QMD_BASE_URL}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        searches: [{ type: 'lex', query: q }, { type: 'vec', query: q }],
+        limit,
+        minScore: 0,
+        rerank: true,
+      }),
+      signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
+    });
+    if (resp.ok) {
+      const data = (await resp.json()) as { results?: Array<Record<string, unknown>> };
+      const results = Array.isArray(data?.results) ? data.results : [];
+      return results.map((r) => ({
+        source: 'qmd' as const,
+        content: typeof r.title === 'string' ? r.title : (typeof r.snippet === 'string' ? r.snippet : (typeof r.file === 'string' ? r.file : '')),
+        file: typeof r.file === 'string' ? r.file : '',
+        score: typeof r.score === 'number' ? r.score : 0,
+      }));
+    }
+    // 非 200 降级到 MCP
+  } catch (e) {
+    // REST 超时/连接失败，降级到 MCP
+  }
+
+  // 降级：MCP tools/call "query"
   const sid = await qmdInitialize();
   let resp: Response;
   try {
