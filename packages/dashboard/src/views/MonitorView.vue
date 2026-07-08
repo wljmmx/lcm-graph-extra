@@ -155,7 +155,10 @@ const pressureOption = computed(() => ({
   ],
 }));
 
-// 时序图2：检索延迟（堆叠柱状，Y 轴 ms）
+// 时序图2：检索延迟（Assemble 折线 + L2/L3/L4 独立柱）
+// 修复重复累计 bug：原 4 项全部 stack:'latency' 堆叠，导致 Assemble(含L2/L3/L4) + L2 + L3 + L4
+// 虚高。且 L2/L3/L4 为 Promise.all 真并行，堆叠相加物理意义错误。
+// 改为：Assemble 折线（总耗时趋势）+ L2/L3/L4 独立柱（不堆叠，各层并行耗时对比）
 const latencyOption = computed(() => ({
   tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
   legend: { data: ['Assemble', 'L2', 'L3', 'L4'] },
@@ -165,26 +168,27 @@ const latencyOption = computed(() => ({
   series: [
     {
       name: 'Assemble',
-      type: 'bar',
-      stack: 'latency',
+      type: 'line',
+      smooth: true,
       data: historyAsc.value.map((s) => s.lastAssembleMs),
+      lineStyle: { width: 2 },
+      symbol: 'circle',
+      symbolSize: 6,
+      z: 10,
     },
     {
       name: 'L2',
       type: 'bar',
-      stack: 'latency',
       data: historyAsc.value.map((s) => s.lastL2Ms),
     },
     {
       name: 'L3',
       type: 'bar',
-      stack: 'latency',
       data: historyAsc.value.map((s) => s.lastL3Ms),
     },
     {
       name: 'L4',
       type: 'bar',
-      stack: 'latency',
       data: historyAsc.value.map((s) => s.lastL4Ms),
     },
   ],
@@ -462,7 +466,7 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
           <!-- 检索延迟 + tier 分布（2 列） -->
           <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
             <NGi>
-              <NCard title="检索延迟（Assemble + L2/L3/L4 堆叠）" size="small">
+              <NCard title="检索延迟（Assemble 折线 + L2/L3/L4 独立柱）" size="small">
                 <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
                 <NEmpty
                   v-else
