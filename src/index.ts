@@ -1165,7 +1165,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
 
             const expBody = personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
-            addSection('## \ud83d\udca1 经验总结', expBody, 5);
+            addSection('## 💡 经验总结（历史经验参考）', expBody, 5);
             for (const e of personalizedResults) backgroundTasks.register('exp:increment-match', expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}));
 
             // G-8: 记录本轮 assemble 返回的经验，供 afterTurn 异步验证
@@ -1185,38 +1185,46 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
           // Layer 3: Neo4j knowledge graph
           if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
             const graphBody = graphResults.slice(0, retrievalLimits.graph).map((r: any) => '- ' + (r.content ?? r.id ?? '')).join('\n');
-            addSection('## \ud83d\udd17 知识图谱', graphBody, 4);
+            addSection('## \ud83d\udd17 知识图谱（历史知识参考）', graphBody, 4);
           }
 
           // Layer 2: qmd search snippet results
-          const hasFullDocs = Array.isArray(fullDocs) && fullDocs.length > 0;
-          if (qmdResults && Array.isArray(qmdResults) && !hasFullDocs) {
-            const qmdItems = qmdResults.slice(0, retrievalLimits.qmd).map((r: any, i: number) => {
-              const citationTag = citationsMode === 'always' || citationsMode === 'auto'
-                ? ' [src:' + String(i+1) + ']'
-                : '';
-              return '- ' + (r.content ?? '') + citationTag;
-            }).join('\n');
-            addSection('## \ud83d\udcc4 记忆文件', qmdItems, 3);
+          // snippet 始终注入（不再因 fullDocs 存在而跳过），带 score 标注 + 相关性过滤
+          if (qmdResults && Array.isArray(qmdResults) && qmdResults.length > 0) {
+            const qmdItems = qmdResults
+              .slice(0, retrievalLimits.qmd)
+              .filter((r: any) => r.score == null || r.score >= 0.3)
+              .map((r: any, i: number) => {
+                const citationTag = citationsMode === 'always' || citationsMode === 'auto'
+                  ? ' [src:' + String(i+1) + ']'
+                  : '';
+                const scoreTag = typeof r.score === 'number'
+                  ? ' (相关性: ' + (r.score * 100).toFixed(0) + '%)'
+                  : '';
+                const snippet = String(r.content ?? '').slice(0, 500);
+                return '- ' + snippet + scoreTag + citationTag;
+              })
+              .join('\n');
+            if (qmdItems) {
+              addSection('## 📄 记忆文件（参考）', qmdItems, 3);
+            }
           }
 
-          // Batch-enriched full document content
+          // Batch-enriched full document content（收敛为摘要：800 字符/文档，最多 2 个文档）
           if (Array.isArray(fullDocs) && fullDocs.length > 0) {
             const docBlock = fullDocs
               .filter(Boolean)
-              .slice(0, retrievalLimits.qmd)
+              .slice(0, Math.min(retrievalLimits.qmd, 2))
               .map((doc: string) => {
-                const docLimit = resolvedCtx.maxContextChars.low;
+                const docLimit = 800;
                 if (doc.length > docLimit) {
-                  const headLen = Math.floor(docLimit * 0.6);
-                  const tailLen = docLimit - headLen;
-                  return doc.slice(0, headLen) + '\n...[中间内容已截断]...\n' + doc.slice(-tailLen);
+                  return doc.slice(0, docLimit) + '\n...[已截断，详见原文]...';
                 }
                 return doc;
               })
               .join('\n\n---\n\n');
             if (docBlock) {
-              addSection('## \ud83d\udcc4 完整文档已加载', docBlock, 3);
+              addSection('## 📄 文档摘要（参考，非当前任务）', docBlock, 3);
             }
           }
 
@@ -1251,6 +1259,10 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             let addition = '';
             if (sdkGuidance) {
               addition += '\n# Tool Guidance\n' + sdkGuidance;
+            }
+            // 引导语：明确告知 LLM 以下为知识库参考，专注当前问题，避免历史内容主导任务方向
+            if (sections.length > 0) {
+              addition += '\n# 知识库参考\n以下为知识库检索结果，仅供参考补充。请始终专注于用户当前问题，不要被历史内容主导任务方向。';
             }
             for (const sec of sections) {
               addition += '\n---\n' + sec.label + '\n' + sec.body;
