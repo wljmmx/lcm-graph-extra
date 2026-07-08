@@ -847,8 +847,9 @@ const pluginEntry: any = definePluginEntry({
                   }
                 }
 
-                qmdResults = merged;
-                graphResults = merged;  // same entity-deduped results for both
+                // 按 source 分拆，避免 L2/L3 重复注入同一数组
+                qmdResults = merged.filter((r: any) => r.source === 'qmd');
+                graphResults = merged.filter((r: any) => r.source === 'graph');
               } else {
                 qmdResults = rawQmd;
                 graphResults = rawGraph;

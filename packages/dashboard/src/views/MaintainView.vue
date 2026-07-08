@@ -25,6 +25,7 @@ import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, 
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
 import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
+import QmdTestPanel from '../components/QmdTestPanel.vue';
 import {
   invokeMaintain,
   invokeDiagnose,
@@ -557,6 +558,9 @@ function executeImport(): void {
           </OperationCard>
         </NGi>
       </NGrid>
+
+      <!-- v1.2.0: QMD MCP 性能测试面板（10x/20x 反复测试 + 平均延迟统计） -->
+      <QmdTestPanel />
 
       <!-- v1.1.0-5: 能力档次切换 -->
       <CapabilityProfileSwitch />
