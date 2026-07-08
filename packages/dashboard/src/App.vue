@@ -65,12 +65,13 @@ function renderLinkLabel(to: string, label: string): Component {
   return () => h(RouterLink, { to }, { default: () => label });
 }
 
-// 顶部导航 4 项：监控/经验/记忆/维护
+// 顶部导航 5 项：监控/经验/记忆/维护/测试工具
 const menuOptions = computed<MenuOption[]>(() => [
   { label: renderLinkLabel('/', '监控'), key: '/' },
   { label: renderLinkLabel('/experience', '经验'), key: '/experience' },
   { label: renderLinkLabel('/memory', '记忆'), key: '/memory' },
   { label: renderLinkLabel('/maintain', '维护'), key: '/maintain' },
+  { label: renderLinkLabel('/qmd-test', '测试工具'), key: '/qmd-test' },
 ]);
 </script>
 

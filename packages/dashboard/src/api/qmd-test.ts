@@ -5,7 +5,7 @@
  */
 import { apiGet, apiPost } from './client';
 
-/** 单次测试结果 */
+/** 单次测试结果摘要 */
 export interface QmdTestIterationResult {
   success: boolean;
   latencyMs: number;
@@ -15,6 +15,33 @@ export interface QmdTestIterationResult {
   queryMs?: number;
 }
 
+/** 日志条目 */
+export interface QmdTestLogEntry {
+  timestamp: number;
+  iteration: number;
+  phase: 'initialize' | 'query' | 'error' | 'info';
+  message: string;
+  durationMs?: number;
+}
+
+/** 查询结果项 */
+export interface QmdTestQueryItem {
+  docid?: string;
+  file?: string;
+  title?: string;
+  score?: number;
+  snippet?: string;
+  line?: number;
+}
+
+/** 单次迭代的查询结果 */
+export interface QmdTestQueryResult {
+  iteration: number;
+  success: boolean;
+  count: number;
+  items: QmdTestQueryItem[];
+}
+
 /** POST /api/qmd-test 响应 */
 export interface QmdTestResponse {
   ok: boolean;
@@ -22,6 +49,7 @@ export interface QmdTestResponse {
   query: string;
   iterations: number;
   limit: number;
+  timeoutMs: number;
   totalMs: number;
   successCount: number;
   successRate: number;
@@ -31,6 +59,8 @@ export interface QmdTestResponse {
   avgInitMs: number;
   avgQueryMs: number;
   results: QmdTestIterationResult[];
+  logs: QmdTestLogEntry[];
+  queryResults: QmdTestQueryResult[];
   error?: string;
 }
 
@@ -52,11 +82,13 @@ export function runQmdTest(
   query: string,
   iterations: number,
   limit: number = 5,
+  timeoutMs: number = 10000,
 ): Promise<QmdTestResponse> {
   return apiPost<QmdTestResponse>('/api/qmd-test', {
     baseUrl,
     query,
     iterations,
     limit,
+    timeoutMs,
   });
 }
