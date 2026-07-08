@@ -23,6 +23,7 @@ import { registerMemoryRoutes } from './routes/memory';
 import { registerGraphHealthRoutes } from './routes/graph-health';
 import { registerConfigRoutes } from './routes/config';
 import { registerQmdTestRoutes } from './routes/qmd-test';
+import { registerBenchmarkRoutes } from './routes/benchmark';
 import { closeNeo4j } from './lib/neo4j';
 import { requireAuth, isAuthEnabled } from './lib/auth';
 
@@ -160,6 +161,8 @@ async function main(): Promise<void> {
   await registerConfigRoutes(app);
   // v1.2.0: QMD MCP 测试路由（10x/20x 反复测试 + 平均延迟统计）
   await registerQmdTestRoutes(app);
+  // v2.2.0: Benchmark 性能压测路由（标准测试集 + 召回率/tokens/压缩率/性能分布 + 报告）
+  await registerBenchmarkRoutes(app);
 
   // 优雅关闭
   const shutdown = async (signal: string) => {

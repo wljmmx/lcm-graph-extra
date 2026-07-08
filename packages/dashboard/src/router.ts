@@ -9,6 +9,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/memory', name: 'memory', component: () => import('./views/MemoryView.vue') },
   { path: '/maintain', name: 'maintain', component: () => import('./views/MaintainView.vue') },
   { path: '/qmd-test', name: 'qmd-test', component: () => import('./views/QmdTestView.vue') },
+  { path: '/benchmark', name: 'benchmark', component: () => import('./views/BenchmarkView.vue') },
 ];
 
 export const router = createRouter({
