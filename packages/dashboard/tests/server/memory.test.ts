@@ -75,10 +75,20 @@ function makeMockDb(tableRows: Record<string, unknown[]>) {
 /** 原始 global.fetch 引用（测试后恢复） */
 const originalFetch = global.fetch;
 
-/** mock global fetch 以模拟 QMD MCP REST（initialize + query 两步） */
+/** mock global fetch 以模拟 QMD（REST /query 优先 + MCP 降级） */
 function mockQmdFetch(results: Array<Record<string, unknown>>) {
   const fetchMock = vi.fn().mockImplementation((url: string, opts: { body?: string } | undefined) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
+    // REST /query 优先路径：URL 以 /query 结尾，body 无 method 字段
+    if (typeof url === 'string' && url.includes('/query') && !body.method) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: () => Promise.resolve({ results }),
+      });
+    }
+    // MCP 降级路径
     if (body.method === 'initialize') {
       // initialize 返回 mcp-session-id header
       const headers = new Map<string, string>();
