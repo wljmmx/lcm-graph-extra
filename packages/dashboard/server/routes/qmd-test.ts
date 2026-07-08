@@ -2,15 +2,20 @@
  * QMD MCP 测试路由（v1.2.0 性能诊断）。
  *
  * - GET  /api/qmd-test/default-url —— 返回系统配置中的 QMD MCP 地址（供前端默认填充）
- * - POST /api/qmd-test            —— 执行 N 次完整 initialize + query，统计平均/最小/最大延迟
+ * - POST /api/qmd-test            —— 执行 N 次查询，统计平均/最小/最大延迟
+ *
+ * 两种测试模式：
+ * - mode='rest'（默认）：直接 POST /query，不经 MCP transport 层，更稳定快速
+ *   QMD server.ts 提供 REST 端点 POST /query（或 /search），直接调用 store.search()
+ * - mode='mcp'：完整 MCP initialize + tools/call "query"，用于测试 MCP 协议本身
+ *   注意：MCP WebStandardStreamableHTTPServerTransport 的 enableJsonResponse 模式
+ *   在长时间运行的 tools/call（含 LLM rerank）时可能挂起超时
  *
  * 设计：
  * - 默认 baseUrl 优先级：用户入参 > 系统配置 (openclaw.json: retrieval.qmd.mcpEndpoint) > env.QMD_URL > 127.0.0.1:8081
- * - 每次测试均执行完整 MCP initialize 握手 + tools/call "query"，模拟冷启动场景
  * - 单次超时可配置（timeoutMs，默认 10s），范围 1s-60s
  * - 10x/20x 串行执行（并行会让 QMD 内部排队，无法反映真实单次延迟）
- * - 完整日志输出：每次迭代的 initialize/query 请求响应均记录到 logs
- * - 查询结果输出：每次迭代的实际查询结果内容记录到 queryResults
+ * - 完整日志输出 + 查询结果输出
  */
 import type { FastifyInstance } from 'fastify';
 import { readFileSync, existsSync } from 'node:fs';
@@ -59,6 +64,8 @@ function resolveDefaultQmdUrl(): string {
 // 类型定义
 // ---------------------------------------------------------------------------
 
+type TestMode = 'rest' | 'mcp';
+
 interface McpQueryResult {
   success: boolean;
   latencyMs: number;
@@ -93,10 +100,70 @@ interface QmdTestQueryResult {
 }
 
 // ---------------------------------------------------------------------------
-// QMD MCP 客户端（独立实现，不复用 qmd-client.ts，避免缓存影响测试结果）
+// 默认值
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+// QMD MCP 测试使用的 protocolVersion（与 qmd test/mcp.test.ts 一致）
+const MCP_PROTOCOL_VERSION = '2025-03-26';
+
+// ---------------------------------------------------------------------------
+// REST 模式：直接 POST /query（不经 MCP transport 层）
+// ---------------------------------------------------------------------------
+
+/** REST /query 请求 —— 直接调用 QMD store.search()，无需 initialize 握手 */
+async function restQuery(
+  baseUrl: string,
+  query: string,
+  limit: number,
+  timeoutMs: number,
+  log: (phase: QmdTestLogEntry['phase'], message: string, durationMs?: number) => void,
+): Promise<{ count: number; items: QmdTestQueryItem[] }> {
+  const start = Date.now();
+  const body = {
+    searches: [
+      { type: 'lex', query },
+      { type: 'vec', query },
+    ],
+    limit,
+    minScore: 0,
+    rerank: true,
+  };
+  log('query', `POST ${baseUrl}/query (REST, q="${query.slice(0, 60)}")`);
+  const resp = await fetch(`${baseUrl}/query`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!resp.ok) {
+    throw new Error(`REST /query HTTP ${resp.status} ${resp.statusText}`);
+  }
+
+  const data = await resp.json() as { results?: any[] };
+  let items: QmdTestQueryItem[] = [];
+  if (data?.results && Array.isArray(data.results)) {
+    items = data.results.map((r: any) => ({
+      docid: r?.docid ?? r?.id ?? '',
+      file: r?.file ?? r?.path ?? '',
+      title: r?.title ?? '',
+      score: typeof r?.score === 'number' ? r.score : undefined,
+      snippet: typeof r?.snippet === 'string' ? r.snippet.slice(0, 500) : (typeof r?.content === 'string' ? r.content.slice(0, 500) : ''),
+      line: typeof r?.line === 'number' ? r.line : undefined,
+    }));
+  }
+
+  const elapsed = Date.now() - start;
+  log('query', `REST /query 成功，返回 ${items.length} 条结果`, elapsed);
+  return { count: items.length, items };
+}
+
+// ---------------------------------------------------------------------------
+// MCP 模式：完整 initialize + tools/call "query"
+// ---------------------------------------------------------------------------
 
 /** MCP initialize 握手 —— 每次测试都新建 session（模拟冷启动） */
 async function mcpInitialize(
@@ -110,8 +177,8 @@ async function mcpInitialize(
     id: 'init',
     method: 'initialize',
     params: {
-      protocolVersion: '2025-11-25',
-      capabilities: { tools: {}, resources: {} },
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
       clientInfo: { name: 'lcm-dashboard-qmd-test', version: '1.0' },
     },
   };
@@ -205,37 +272,56 @@ async function mcpQuery(
   }
 
   // 解析查询结果
-  const contentText = parsed?.result?.content?.[0]?.text;
+  // MCP query 工具返回 content[0].text 为格式化文本摘要，structuredContent.results 为结构化数据
   let items: QmdTestQueryItem[] = [];
-  if (contentText) {
-    try {
-      const arr = JSON.parse(contentText);
-      if (Array.isArray(arr)) {
-        items = arr.map((r: any) => ({
-          docid: r?.docid ?? r?.id ?? '',
-          file: r?.file ?? r?.path ?? '',
-          title: r?.title ?? '',
-          score: typeof r?.score === 'number' ? r.score : undefined,
-          snippet: typeof r?.snippet === 'string' ? r.snippet.slice(0, 500) : (typeof r?.content === 'string' ? r.content.slice(0, 500) : ''),
-          line: typeof r?.line === 'number' ? r.line : undefined,
-        }));
+  const structured = parsed?.result?.structuredContent?.results;
+  if (Array.isArray(structured)) {
+    items = structured.map((r: any) => ({
+      docid: r?.docid ?? r?.id ?? '',
+      file: r?.file ?? r?.path ?? '',
+      title: r?.title ?? '',
+      score: typeof r?.score === 'number' ? r.score : undefined,
+      snippet: typeof r?.snippet === 'string' ? r.snippet.slice(0, 500) : (typeof r?.content === 'string' ? r.content.slice(0, 500) : ''),
+      line: typeof r?.line === 'number' ? r.line : undefined,
+    }));
+  } else {
+    // fallback: 尝试从 content[0].text 解析
+    const contentText = parsed?.result?.content?.[0]?.text;
+    if (contentText) {
+      try {
+        const arr = JSON.parse(contentText);
+        if (Array.isArray(arr)) {
+          items = arr.map((r: any) => ({
+            docid: r?.docid ?? r?.id ?? '',
+            file: r?.file ?? r?.path ?? '',
+            title: r?.title ?? '',
+            score: typeof r?.score === 'number' ? r.score : undefined,
+            snippet: typeof r?.snippet === 'string' ? r.snippet.slice(0, 500) : (typeof r?.content === 'string' ? r.content.slice(0, 500) : ''),
+            line: typeof r?.line === 'number' ? r.line : undefined,
+          }));
+        }
+      } catch {
+        // 非 JSON 格式，items 保持空
       }
-    } catch {
-      // 非 JSON 格式，items 保持空
     }
   }
 
   const elapsed = Date.now() - start;
-  log('query', `query 成功，返回 ${items.length} 条结果`, elapsed);
+  log('query', `MCP query 成功，返回 ${items.length} 条结果`, elapsed);
   return { count: items.length, items };
 }
 
-/** 执行单次完整测试（initialize + query） */
+// ---------------------------------------------------------------------------
+// 单次测试执行
+// ---------------------------------------------------------------------------
+
+/** 执行单次完整测试 */
 async function runSingleTest(
   baseUrl: string,
   query: string,
   limit: number,
   timeoutMs: number,
+  mode: TestMode,
   iteration: number,
   logs: QmdTestLogEntry[],
 ): Promise<{ result: McpQueryResult; queryResult: QmdTestQueryResult }> {
@@ -244,8 +330,46 @@ async function runSingleTest(
     logs.push({ timestamp: Date.now(), iteration, phase, message, durationMs });
   };
 
-  logFn('info', `===== 迭代 #${iteration} 开始 =====`);
+  logFn('info', `===== 迭代 #${iteration} 开始 (mode=${mode}) =====`);
 
+  // REST 模式：直接 POST /query，不需要 initialize
+  if (mode === 'rest') {
+    let queryData: { count: number; items: QmdTestQueryItem[] };
+    try {
+      queryData = await restQuery(baseUrl, query, limit, timeoutMs, logFn);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      logFn('error', `REST /query 失败: ${errMsg}`);
+      return {
+        result: {
+          success: false,
+          latencyMs: Date.now() - totalStart,
+          resultCount: 0,
+          error: `REST /query 失败: ${errMsg}`,
+        },
+        queryResult: { iteration, success: false, count: 0, items: [] },
+      };
+    }
+
+    const totalMs = Date.now() - totalStart;
+    logFn('info', `迭代 #${iteration} 完成，总耗时 ${totalMs}ms`);
+    return {
+      result: {
+        success: true,
+        latencyMs: totalMs,
+        resultCount: queryData.count,
+        queryMs: totalMs,
+      },
+      queryResult: {
+        iteration,
+        success: true,
+        count: queryData.count,
+        items: queryData.items,
+      },
+    };
+  }
+
+  // MCP 模式：initialize + tools/call
   let sid: string;
   let initMs: number;
   try {
@@ -317,6 +441,7 @@ interface QmdTestRequest {
   iterations?: number;
   limit?: number;
   timeoutMs?: number;
+  mode?: TestMode;
 }
 
 export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void> {
@@ -340,6 +465,7 @@ export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void>
     const iterations = Number(body.iterations);
     const limit = Number(body.limit) || 5;
     const timeoutMs = Number(body.timeoutMs) || DEFAULT_TIMEOUT_MS;
+    const mode: TestMode = body.mode === 'mcp' ? 'mcp' : 'rest';
 
     // 参数校验
     if (!query) {
@@ -363,7 +489,7 @@ export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void>
     }
 
     req.log.info(
-      { baseUrl: finalBaseUrl, query, iterations, limit, timeoutMs },
+      { baseUrl: finalBaseUrl, query, iterations, limit, timeoutMs, mode },
       'QMD MCP 测试开始',
     );
 
@@ -372,7 +498,7 @@ export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void>
     const logs: QmdTestLogEntry[] = [];
     const testStart = Date.now();
 
-    logs.push({ timestamp: testStart, iteration: 0, phase: 'info', message: `测试启动: baseUrl=${finalBaseUrl}, query="${query}", iterations=${iterations}, limit=${limit}, timeout=${timeoutMs}ms` });
+    logs.push({ timestamp: testStart, iteration: 0, phase: 'info', message: `测试启动: baseUrl=${finalBaseUrl}, query="${query}", iterations=${iterations}, limit=${limit}, timeout=${timeoutMs}ms, mode=${mode}` });
 
     for (let i = 0; i < iterations; i++) {
       const { result, queryResult } = await runSingleTest(
@@ -380,6 +506,7 @@ export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void>
         query,
         limit,
         timeoutMs,
+        mode,
         i + 1,
         logs,
       );
@@ -403,7 +530,7 @@ export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void>
     const maxLatencyMs = latencies.length > 0 ? Math.max(...latencies) : 0;
     const successRate = iterations > 0 ? Math.round((successCount / iterations) * 100) : 0;
 
-    // 拆分阶段统计（仅成功的样本）
+    // 拆分阶段统计（仅成功的样本，MCP 模式才有 initMs）
     const initMsList = successResults
       .map((r) => r.initMs)
       .filter((v): v is number => typeof v === 'number');
@@ -427,6 +554,7 @@ export async function registerQmdTestRoutes(app: FastifyInstance): Promise<void>
       iterations,
       limit,
       timeoutMs,
+      mode,
       totalMs,
       successCount,
       successRate,

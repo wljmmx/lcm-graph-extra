@@ -37,6 +37,7 @@ import {
   type QmdTestResponse,
   type QmdTestLogEntry,
   type QmdTestQueryResult,
+  type TestMode,
 } from '../api/qmd-test';
 
 const message = useMessage();
@@ -48,12 +49,24 @@ const iterations = ref<number>(10);
 const limit = ref<number>(5);
 const timeoutMs = ref<number>(10000);
 const useCustomUrl = ref<boolean>(false);
+const mode = ref<TestMode>('rest');
 
 const iterationOptions = [
   { label: '10 次', value: 10 },
   { label: '20 次', value: 20 },
   { label: '5 次（快速验证）', value: 5 },
   { label: '1 次（单次连通性）', value: 1 },
+];
+
+const modeOptions = [
+  {
+    label: 'REST /query（推荐，稳定快速）',
+    value: 'rest' as TestMode,
+  },
+  {
+    label: 'MCP /mcp（完整握手 + tools/call，易超时）',
+    value: 'mcp' as TestMode,
+  },
 ];
 
 // ===== 测试状态 =====
@@ -99,6 +112,7 @@ async function executeTest(): Promise<void> {
       iterations.value,
       limit.value,
       timeoutMs.value,
+      mode.value,
     );
     result.value = resp;
     if (!resp.ok) {
@@ -106,7 +120,7 @@ async function executeTest(): Promise<void> {
       message.error(errorMsg.value);
     } else {
       message.success(
-        `测试完成：${resp.successCount}/${resp.iterations} 成功，平均 ${resp.avgLatencyMs}ms`,
+        `测试完成（${mode.value.toUpperCase()}）：${resp.successCount}/${resp.iterations} 成功，平均 ${resp.avgLatencyMs}ms`,
       );
       activeTab.value = 'stats';
     }
@@ -162,6 +176,8 @@ function phaseLabel(phase: QmdTestLogEntry['phase']): string {
 }
 
 // ===== 统计卡片数据 =====
+const isMcpMode = computed(() => result.value?.mode === 'mcp');
+
 const stats = computed(() => {
   if (!result.value || !result.value.ok) return null;
   return {
@@ -195,10 +211,31 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
     <NCard size="small" :bordered="true">
       <div class="section-header">
         <h3 style="margin: 0; font-size: var(--fs-subtitle)">QMD MCP 测试配置</h3>
-        <span class="muted">完整 initialize + query 流程，支持 10x/20x 反复测试</span>
+        <span class="muted">支持 REST /query（直连，稳定）和 MCP /mcp（完整握手）两种模式</span>
       </div>
 
       <NSpace vertical :size="12" style="margin-top: 12px">
+        <!-- 测试模式选择（独占一行，含说明） -->
+        <div class="form-row" style="align-items: flex-start;">
+          <span class="form-label">测试模式</span>
+          <div style="flex: 1">
+            <NSelect
+              v-model:value="mode"
+              :options="modeOptions"
+              size="small"
+              style="max-width: 420px"
+            />
+            <div class="mode-hint">
+              <span v-if="mode === 'rest'" class="muted">
+                REST 模式：直接 POST /query 调用 store.search()，无需 initialize 握手，绕过 MCP transport 层，适合排查 QMD 索引/embedding 性能
+              </span>
+              <span v-else class="muted">
+                MCP 模式：完整 initialize + tools/call "query" 流程，与 assemble L2_qmd 实际调用路径一致；长时间 tools/call 在 enableJsonResponse 模式下可能挂起超时
+              </span>
+            </div>
+          </div>
+        </div>
+
         <!-- 地址选择 + 超时 -->
         <NGrid :cols="'1 m:3'" :x-gap="12" :y-gap="8" responsive="screen">
           <NGi>
@@ -346,7 +383,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
                     </template>
                   </NStatistic>
                 </NGi>
-                <NGi>
+                <NGi v-if="isMcpMode">
                   <NStatistic label="平均握手" :value="latencyLabel(stats.avgInit)" />
                 </NGi>
                 <NGi>
@@ -370,7 +407,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
                     <th style="width: 50px">#</th>
                     <th style="width: 80px">状态</th>
                     <th style="width: 100px">总延迟</th>
-                    <th style="width: 100px">握手</th>
+                    <th v-if="isMcpMode" style="width: 100px">握手</th>
                     <th style="width: 100px">查询</th>
                     <th style="width: 80px">结果数</th>
                     <th>错误信息</th>
@@ -393,7 +430,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
                         {{ latencyLabel(r.latencyMs) }}
                       </NTag>
                     </td>
-                    <td>{{ r.initMs != null ? latencyLabel(r.initMs) : '-' }}</td>
+                    <td v-if="isMcpMode">{{ r.initMs != null ? latencyLabel(r.initMs) : '-' }}</td>
                     <td>{{ r.queryMs != null ? latencyLabel(r.queryMs) : '-' }}</td>
                     <td>{{ r.resultCount }}</td>
                     <td class="error-cell">{{ r.error ?? '' }}</td>
@@ -404,9 +441,13 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 
             <!-- 解读提示 -->
             <div v-if="result.ok && result.successCount > 0" class="interpretation-hint">
-              <span class="muted">
+              <span class="muted" v-if="isMcpMode">
                 解读：握手耗时高 → MCP 服务冷启动/session 创建慢；查询耗时高 → QMD 索引/embedding 慢；
                 成功率低 → MCP 不稳定，assemble 路径会降级到 CLI（额外 30s 超时）。
+              </span>
+              <span class="muted" v-else>
+                解读：REST 模式无握手开销，延迟直接反映 QMD store.search() 性能（含 embedding/rerank）；
+                若 REST 稳定但 MCP 超时，说明问题在 MCP transport 层（enableJsonResponse 长任务挂起）。
               </span>
             </div>
           </NSpace>
@@ -510,7 +551,12 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
       <NEmpty description="配置测试参数后点击「开始测试」" style="padding: 48px 0">
         <template #extra>
           <span class="muted">
-            测试将执行完整的 MCP initialize + query 流程，统计平均延迟并输出交互日志与查询结果
+            <template v-if="mode === 'rest'">
+              REST 模式：直接 POST /query，统计查询延迟并输出交互日志与查询结果
+            </template>
+            <template v-else>
+              MCP 模式：完整 initialize + query 流程，统计握手/查询延迟并输出交互日志与查询结果
+            </template>
           </span>
         </template>
       </NEmpty>
@@ -539,6 +585,10 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 .form-label-suffix {
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
+}
+.mode-hint {
+  margin-top: 4px;
+  line-height: 1.5;
 }
 .stats-grid {
   padding: 12px;

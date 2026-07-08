@@ -5,6 +5,9 @@
  */
 import { apiGet, apiPost } from './client';
 
+/** 测试模式：'rest' 直连 POST /query（默认，稳定快速），'mcp' 完整 initialize + tools/call */
+export type TestMode = 'rest' | 'mcp';
+
 /** 单次测试结果摘要 */
 export interface QmdTestIterationResult {
   success: boolean;
@@ -50,6 +53,7 @@ export interface QmdTestResponse {
   iterations: number;
   limit: number;
   timeoutMs: number;
+  mode: TestMode;
   totalMs: number;
   successCount: number;
   successRate: number;
@@ -83,6 +87,7 @@ export function runQmdTest(
   iterations: number,
   limit: number = 5,
   timeoutMs: number = 10000,
+  mode: TestMode = 'rest',
 ): Promise<QmdTestResponse> {
   return apiPost<QmdTestResponse>('/api/qmd-test', {
     baseUrl,
@@ -90,5 +95,6 @@ export function runQmdTest(
     iterations,
     limit,
     timeoutMs,
+    mode,
   });
 }
