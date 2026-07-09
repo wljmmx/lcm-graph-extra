@@ -97,6 +97,26 @@ export interface BenchmarkItemResult {
   turnRole?: string;
   /** 多轮会话：会话 ID */
   sessionId?: string;
+  /** CE 引擎诊断（engine='ce' 时）：各引擎结果数 + 错误信息 */
+  ceDiagnostics?: CeEngineDiagnostics;
+}
+
+/** CE 引擎诊断信息（区分"服务不可达"vs"无数据"） */
+export interface CeEngineDiagnostics {
+  /** lcm 引擎返回结果数 */
+  lcmCount: number;
+  /** qmd 引擎返回结果数 */
+  qmdCount: number;
+  /** neo4j 引擎返回结果数 */
+  neo4jCount: number;
+  /** 各引擎错误信息（仅失败时有值） */
+  lcmError?: string;
+  qmdError?: string;
+  neo4jError?: string;
+  /** 诊断结论 */
+  conclusion: 'ok' | 'all-empty' | 'all-failed' | 'partial-failure';
+  /** 诊断建议 */
+  hint?: string;
 }
 
 export interface BenchmarkLatencyStats {
@@ -335,13 +355,19 @@ async function restQuery(
   return { items, latencyMs: Date.now() - start };
 }
 
-/** CE 多引擎并行查询（通过 dashboard /api/memory/search） */
+/** CE 多引擎并行查询（通过 dashboard /api/memory/search）
+ *
+ * v2.3.1 改进：
+ * - 捕获 /api/memory/search 响应中的 errors 字段（各引擎独立降级时的错误信息）
+ * - 当三引擎全空时生成诊断信息（区分"服务不可达"vs"无数据"）
+ * - 诊断信息附加到 BenchmarkItemResult.ceDiagnostics
+ */
 async function ceSearch(
   dashboardBaseUrl: string,
   fixture: BenchmarkFixture,
   limit: number,
   timeoutMs: number,
-): Promise<{ items: QmdQueryItem[]; latencyMs: number }> {
+): Promise<{ items: QmdQueryItem[]; latencyMs: number; diagnostics?: CeEngineDiagnostics }> {
   const start = Date.now();
   const url = `${dashboardBaseUrl}/api/memory/search?q=${encodeURIComponent(fixture.query)}&engines=all&limit=${limit}`;
   const resp = await fetch(url, {
@@ -358,7 +384,10 @@ async function ceSearch(
       qmd?: QmdQueryItem[];
       neo4j?: QmdQueryItem[];
     };
+    total?: number;
+    errors?: { lcm?: string; qmd?: string; neo4j?: string };
   };
+
   // 合并三引擎结果
   const items: QmdQueryItem[] = [];
   const lcmResults = data?.results?.lcm ?? [];
@@ -373,7 +402,59 @@ async function ceSearch(
   for (const r of neo4jResults) {
     items.push({ ...r, source: 'neo4j' });
   }
-  return { items, latencyMs: Date.now() - start };
+
+  // 生成诊断信息
+  const diagnostics = buildCeDiagnostics(
+    lcmResults.length,
+    qmdResults.length,
+    neo4jResults.length,
+    data?.errors,
+  );
+
+  return { items, latencyMs: Date.now() - start, diagnostics };
+}
+
+/** 构建 CE 引擎诊断信息 */
+function buildCeDiagnostics(
+  lcmCount: number,
+  qmdCount: number,
+  neo4jCount: number,
+  errors?: { lcm?: string; qmd?: string; neo4j?: string },
+): CeEngineDiagnostics {
+  const lcmError = errors?.lcm;
+  const qmdError = errors?.qmd;
+  const neo4jError = errors?.neo4j;
+
+  const hasError = !!(lcmError || qmdError || neo4jError);
+  const allEmpty = lcmCount === 0 && qmdCount === 0 && neo4jCount === 0;
+  const allFailed = !!(lcmError && qmdError && neo4jError);
+
+  let conclusion: CeEngineDiagnostics['conclusion'];
+  let hint: string | undefined;
+
+  if (allFailed) {
+    conclusion = 'all-failed';
+    hint = '三引擎全部失败。请确认 dashboard 服务已启动（默认 http://127.0.0.1:7421），且 OpenClaw 宿主 / QMD / Neo4j 依赖可用。';
+  } else if (allEmpty) {
+    conclusion = 'all-empty';
+    hint = '三引擎均返回空结果。可能原因：1) lossless-claw 未摄入过相关会话数据（lcm.db 为空或无匹配）；2) QMD 未索引项目代码（运行 qmd index）；3) Neo4j 无图节点数据。';
+  } else if (hasError) {
+    conclusion = 'partial-failure';
+    hint = '部分引擎失败。查看各引擎 error 字段定位问题。';
+  } else {
+    conclusion = 'ok';
+  }
+
+  return {
+    lcmCount,
+    qmdCount,
+    neo4jCount,
+    lcmError,
+    qmdError,
+    neo4jError,
+    conclusion,
+    hint,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -422,9 +503,11 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     const batchResults = await Promise.all(
       batch.map(async (fixture) => {
         try {
-          const { items: rawItems, latencyMs } = engine === 'ce'
+          const ceOrQmd = engine === 'ce'
             ? await ceSearch(dashboardBaseUrl, fixture, limit, timeoutMs)
             : await restQuery(opts.qmdBaseUrl, fixture, limit, timeoutMs, rerank);
+          const { items: rawItems, latencyMs, diagnostics: ceDiagnostics } = ceOrQmd as
+            { items: QmdQueryItem[]; latencyMs: number; diagnostics?: CeEngineDiagnostics };
 
           const returnedDocIds = rawItems
             .map((r) => r.docid)
@@ -443,11 +526,15 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
             sessionId?: string;
           };
 
+          // CE 引擎三引擎全空时标记失败 + 附带诊断
+          const ceAllEmpty = ceDiagnostics?.conclusion === 'all-empty' || ceDiagnostics?.conclusion === 'all-failed';
+          const success = !ceAllEmpty;
+
           const result: BenchmarkItemResult = {
             fixtureId: fixture.id,
             query: fixture.query,
             category: fixture.category,
-            success: true,
+            success,
             latencyMs,
             resultCount: rawItems.length,
             returnedDocIds,
@@ -455,6 +542,9 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
             recall: hasExpected ? recall : null,
             precision: hasExpected ? precision : null,
             f1: hasExpected ? f1 : null,
+            error: ceAllEmpty
+              ? `CE 三引擎${ceDiagnostics?.conclusion === 'all-failed' ? '全部失败' : '均返回空结果'}: ${ceDiagnostics?.hint ?? ''}`
+              : undefined,
             topResults: rawItems.slice(0, limit).map((r) => ({
               docid: r.docid,
               file: r.file,
@@ -467,6 +557,7 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
             turnTotal: multiTurnMeta.turnTotal,
             turnRole: multiTurnMeta.role,
             sessionId: multiTurnMeta.sessionId,
+            ceDiagnostics,
           };
           return result;
         } catch (err) {

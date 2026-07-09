@@ -747,6 +747,8 @@ function mockCeFetch(opts: {
   lcm?: Array<Record<string, unknown>>;
   qmd?: Array<Record<string, unknown>>;
   neo4j?: Array<Record<string, unknown>>;
+  /** 各引擎错误信息（模拟服务降级） */
+  errors?: { lcm?: string; qmd?: string; neo4j?: string };
   throwError?: string;
 } = {}): void {
   const fetchMock = vi.fn().mockImplementation(async (url: string) => {
@@ -767,6 +769,7 @@ function mockCeFetch(opts: {
             neo4j: opts.neo4j ?? [],
           },
           total: (opts.lcm?.length ?? 0) + (opts.qmd?.length ?? 0) + (opts.neo4j?.length ?? 0),
+          errors: opts.errors,
         }),
       } as unknown as Response;
     }
@@ -899,6 +902,32 @@ describe('v2.3.0 测试集元数据端点', () => {
     const body = res.json();
     expect(body.ok).toBe(false);
     expect(body.error).toContain('nfcorpus');
+  });
+
+  it('GET /api/benchmark/beir/manual 返回手工下载指引', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/beir/manual?dataset=nfcorpus',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.dataset).toBe('nfcorpus');
+    expect(body.instructions).toContain('wget');
+    expect(body.instructions).toContain('corpus.jsonl');
+    expect(body.instructions).toContain('queries.jsonl');
+    expect(body.instructions).toContain('qrels.jsonl');
+    expect(body.instructions).toContain('.openclaw/.benchmark/beir/nfcorpus');
+  });
+
+  it('GET /api/benchmark/beir/manual 非法 dataset 返回 400', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/beir/manual?dataset=invalid',
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
   });
 
   it('POST /api/benchmark/run 非法 fixtureSetId 返回 400', async () => {
@@ -1087,7 +1116,7 @@ describe('v2.3.0 lib/benchmark.ts CE 引擎查询', () => {
     expect(result.items[0].error).toContain('dashboard 不可达');
   });
 
-  it('engine=ce 空结果时仍标记成功', async () => {
+  it('engine=ce 三引擎全空时标记失败 + 附带诊断信息', async () => {
     mockCeFetch({ lcm: [], qmd: [], neo4j: [] });
     const result = await runBenchmark({
       qmdBaseUrl: 'http://127.0.0.1:8081',
@@ -1097,8 +1126,66 @@ describe('v2.3.0 lib/benchmark.ts CE 引擎查询', () => {
       limit: 5,
       timeoutMs: 5000,
     });
-    expect(result.summary.successCount).toBe(1);
+    // v2.3.1: 三引擎全空标记为失败（区分"无数据"vs"服务不可达"）
+    expect(result.summary.successCount).toBe(0);
     expect(result.items[0].resultCount).toBe(0);
+    expect(result.items[0].success).toBe(false);
+    expect(result.items[0].error).toContain('CE 三引擎');
+    // 附带诊断信息
+    expect(result.items[0].ceDiagnostics).toBeDefined();
+    expect(result.items[0].ceDiagnostics!.conclusion).toBe('all-empty');
+    expect(result.items[0].ceDiagnostics!.lcmCount).toBe(0);
+    expect(result.items[0].ceDiagnostics!.qmdCount).toBe(0);
+    expect(result.items[0].ceDiagnostics!.neo4jCount).toBe(0);
+    expect(result.items[0].ceDiagnostics!.hint).toContain('lossless-claw');
+  });
+
+  it('engine=ce 三引擎全部报错时标记 all-failed', async () => {
+    mockCeFetch({
+      lcm: [],
+      qmd: [],
+      neo4j: [],
+      errors: {
+        lcm: 'lcm.db 不存在',
+        qmd: 'QMD 连接失败',
+        neo4j: 'Neo4j 不可达',
+      },
+    });
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      dashboardBaseUrl: 'http://127.0.0.1:7421',
+      engine: 'ce',
+      fixtures: [customFixtures[0]],
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    expect(result.summary.successCount).toBe(0);
+    expect(result.items[0].ceDiagnostics!.conclusion).toBe('all-failed');
+    expect(result.items[0].ceDiagnostics!.lcmError).toContain('lcm.db');
+    expect(result.items[0].ceDiagnostics!.qmdError).toContain('QMD');
+    expect(result.items[0].ceDiagnostics!.neo4jError).toContain('Neo4j');
+  });
+
+  it('engine=ce 部分引擎失败时标记 partial-failure 但仍成功', async () => {
+    mockCeFetch({
+      lcm: [{ content: 'lcm content', sessionId: 's1' }],
+      qmd: [],
+      neo4j: [],
+      errors: { qmd: 'QMD 超时', neo4j: 'Neo4j 超时' },
+    });
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      dashboardBaseUrl: 'http://127.0.0.1:7421',
+      engine: 'ce',
+      fixtures: [customFixtures[0]],
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    // 有结果（lcm 有 1 条），所以仍成功
+    expect(result.summary.successCount).toBe(1);
+    expect(result.items[0].ceDiagnostics!.conclusion).toBe('partial-failure');
+    expect(result.items[0].ceDiagnostics!.lcmCount).toBe(1);
+    expect(result.items[0].ceDiagnostics!.qmdError).toContain('QMD');
   });
 
   it('POST /api/benchmark/run engine=ce 时传递 dashboardBaseUrl', async () => {

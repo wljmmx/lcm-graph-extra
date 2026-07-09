@@ -1,16 +1,22 @@
 /**
- * Benchmark 路由 —— CE 引擎能力压测（v2.3.0）。
+ * Benchmark 路由 —— CE 引擎能力压测（v2.3.1）。
  *
  * 端点：
  * - GET  /api/benchmark/fixture-sets      —— 列出所有测试集（project-scenarios / ce-multi-turn / beir-*）
  * - GET  /api/benchmark/fixtures          —— 获取指定测试集的 fixtures（?set=<id>）
  * - GET  /api/benchmark/beir/status       —— BEIR 数据集缓存状态
- * - POST /api/benchmark/beir/download     —— 触发 BEIR 数据集下载
- * - GET  /api/benchmark/default-url       —— 系统配置中的 QMD 地址
+ * - GET  /api/benchmark/beir/manual        —— 获取 BEIR 手工下载指引（?dataset=nfcorpus|scifact）
+ * - POST /api/benchmark/beir/download      —— 触发 BEIR 数据集下载（失败时返回手工指引）
+ * - GET  /api/benchmark/default-url        —— 系统配置中的 QMD + dashboard 地址
  * - POST /api/benchmark/run               —— 执行压测，返回完整 BenchmarkResult
  * - GET  /api/benchmark/history           —— 获取历史运行列表（不含 items 详情）
  * - GET  /api/benchmark/report/:id        —— 获取完整结果（含 items）
  * - GET  /api/benchmark/report/:id/markdown —— 下载 Markdown 报告
+ *
+ * v2.3.1 改进：
+ * - BEIR 下载：多源容错（TU Darmstadt → HuggingFace → BENCHMARK_BEIR_MIRROR 环境变量）
+ * - BEIR 下载失败时返回手工下载指引（目录结构 + wget 命令）
+ * - CE 引擎查询诊断：三引擎全空时返回诊断信息（区分"无数据"vs"服务不可达"）
  *
  * v2.3.0 新增：
  * - 多测试集选择（fixtureSetId: project-scenarios / ce-multi-turn / beir-nfcorpus / beir-scifact）
@@ -34,7 +40,7 @@ import {
   type BenchmarkFixture,
   type FixtureSetId,
 } from '../lib/benchmark-fixtures.js';
-import { listBeirDatasets, isBeirCached, getBeirCacheInfo, downloadBeirDataset } from '../lib/benchmark-beir.js';
+import { listBeirDatasets, isBeirCached, getBeirCacheInfo, downloadBeirDataset, getBeirManualInstructions } from '../lib/benchmark-beir.js';
 import { runBenchmark, type BenchmarkResult } from '../lib/benchmark.js';
 import {
   exportMarkdownReport,
@@ -178,7 +184,23 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
     return { ok: true, datasets: listBeirDatasets() };
   });
 
+  // GET /api/benchmark/beir/manual —— 获取 BEIR 手工下载指引（?dataset=nfcorpus|scifact）
+  app.get('/api/benchmark/beir/manual', async (req, reply) => {
+    const dataset = ((req.query as Record<string, unknown>)?.dataset ?? '').toString().trim();
+    if (dataset !== 'nfcorpus' && dataset !== 'scifact') {
+      reply.code(400);
+      return { ok: false, error: 'dataset 必须为 nfcorpus 或 scifact' };
+    }
+    const instructions = getBeirManualInstructions(dataset);
+    if (!instructions) {
+      reply.code(404);
+      return { ok: false, error: `未知数据集: ${dataset}` };
+    }
+    return { ok: true, dataset, instructions };
+  });
+
   // POST /api/benchmark/beir/download —— 触发 BEIR 下载（预下载，避免压测时阻塞）
+  // 失败时返回 manualInstructions 字段供前端展示手工下载指引
   app.post('/api/benchmark/beir/download', async (req, reply) => {
     const body = (req.body as { dataset?: string } | undefined) ?? {};
     const dataset = (body.dataset ?? '').trim();
@@ -196,7 +218,13 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
       const msg = err instanceof Error ? err.message : String(err);
       req.log.error({ dataset, err: msg }, 'BEIR 下载失败');
       reply.code(500);
-      return { ok: false, dataset, error: msg };
+      // 返回手工下载指引，前端可直接展示
+      return {
+        ok: false,
+        dataset,
+        error: msg,
+        manualInstructions: getBeirManualInstructions(dataset),
+      };
     }
   });
 

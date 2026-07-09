@@ -58,6 +58,7 @@ import {
   type FixtureSetMeta,
   type BenchmarkHistoryItem,
   type MultiTurnSessionStats,
+  type CeEngineDiagnostics,
 } from '../api/benchmark';
 
 const message = useMessage();
@@ -129,6 +130,7 @@ const beirMessage = ref<string>('');
 
 // ===== BEIR 下载状态 =====
 const beirDownloading = ref<boolean>(false);
+const beirManualInstructions = ref<string>('');
 
 // ===== 执行状态 =====
 const loading = ref<boolean>(false);
@@ -202,6 +204,7 @@ async function downloadBeir(): Promise<void> {
   if (!isBeirSet.value) return;
   const datasetName = fixtureSetId.value.replace('beir-', '') as 'nfcorpus' | 'scifact';
   beirDownloading.value = true;
+  beirManualInstructions.value = '';
   try {
     const resp = await downloadBeirDatasetApi(datasetName);
     if (resp.ok) {
@@ -212,6 +215,10 @@ async function downloadBeir(): Promise<void> {
       await loadFixtureSetDetails(fixtureSetId.value);
     } else {
       message.error(resp.error ?? '下载失败');
+      // 下载失败时展示手工指引
+      if (resp.manualInstructions) {
+        beirManualInstructions.value = resp.manualInstructions;
+      }
     }
   } catch (e) {
     message.error(`下载失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -341,6 +348,22 @@ function coherenceTagType(score: number): 'success' | 'warning' | 'error' {
   if (score >= 0.7) return 'success';
   if (score >= 0.4) return 'warning';
   return 'error';
+}
+
+function ceDiagTagType(conclusion: CeEngineDiagnostics['conclusion']): 'success' | 'warning' | 'error' {
+  if (conclusion === 'ok') return 'success';
+  if (conclusion === 'partial-failure') return 'warning';
+  return 'error';
+}
+
+function ceDiagLabel(conclusion: CeEngineDiagnostics['conclusion']): string {
+  const map: Record<CeEngineDiagnostics['conclusion'], string> = {
+    'ok': '正常',
+    'all-empty': '三引擎全空',
+    'all-failed': '三引擎全部失败',
+    'partial-failure': '部分失败',
+  };
+  return map[conclusion] ?? conclusion;
 }
 
 function formatDateTime(iso: string): string {
@@ -756,6 +779,13 @@ const hasMultiTurnMeta = computed(() =>
             文件数: {{ currentFixtureSet.cacheInfo.fileCount }}
           </span>
         </NAlert>
+
+        <!-- BEIR 手工下载指引（自动下载失败时展示） -->
+        <NCollapse v-if="isBeirSet && beirManualInstructions" :default-expanded-names="['manual']">
+          <NCollapseItem name="manual" title="手工下载指引（自动下载失败时使用）">
+            <pre class="manual-instructions">{{ beirManualInstructions }}</pre>
+          </NCollapseItem>
+        </NCollapse>
 
         <!-- BEIR 子集大小 -->
         <NGrid v-if="isBeirSet" :cols="'1 m:3'" :x-gap="12" :y-gap="8" responsive="screen">
@@ -1209,6 +1239,7 @@ const hasMultiTurnMeta = computed(() =>
                     <th style="width: 60px">结果数</th>
                     <th style="width: 70px">召回率</th>
                     <th v-if="result.options.engine === 'ce'" style="width: 70px">来源</th>
+                    <th v-if="result.options.engine === 'ce'" style="width: 100px">CE 诊断</th>
                     <th>错误</th>
                   </tr>
                 </thead>
@@ -1253,6 +1284,16 @@ const hasMultiTurnMeta = computed(() =>
                         {{ src }}
                       </NTag>
                     </td>
+                    <td v-if="result.options.engine === 'ce'">
+                      <NTag
+                        v-if="item.ceDiagnostics"
+                        size="tiny"
+                        :type="ceDiagTagType(item.ceDiagnostics.conclusion)"
+                      >
+                        {{ ceDiagLabel(item.ceDiagnostics.conclusion) }}
+                      </NTag>
+                      <span v-else class="muted">-</span>
+                    </td>
                     <td class="error-cell">{{ item.error ?? '' }}</td>
                   </tr>
                 </tbody>
@@ -1267,6 +1308,21 @@ const hasMultiTurnMeta = computed(() =>
                   <NSpace vertical :size="4">
                     <div><strong>查询:</strong> {{ f.query }}</div>
                     <div><strong>错误:</strong> <span class="error-cell">{{ f.error }}</span></div>
+                    <!-- CE 引擎诊断 -->
+                    <div v-if="f.ceDiagnostics">
+                      <strong>CE 诊断:</strong>
+                      <NTag size="tiny" :type="ceDiagTagType(f.ceDiagnostics.conclusion)" style="margin-left: 4px">
+                        {{ ceDiagLabel(f.ceDiagnostics.conclusion) }}
+                      </NTag>
+                      <div style="margin-top: 4px; font-size: 12px">
+                        L1 lcm: {{ f.ceDiagnostics.lcmCount }} 条{{ f.ceDiagnostics.lcmError ? ` ⚠${f.ceDiagnostics.lcmError}` : '' }} ·
+                        L2 qmd: {{ f.ceDiagnostics.qmdCount }} 条{{ f.ceDiagnostics.qmdError ? ` ⚠${f.ceDiagnostics.qmdError}` : '' }} ·
+                        L3 neo4j: {{ f.ceDiagnostics.neo4jCount }} 条{{ f.ceDiagnostics.neo4jError ? ` ⚠${f.ceDiagnostics.neo4jError}` : '' }}
+                      </div>
+                      <div v-if="f.ceDiagnostics.hint" style="margin-top: 4px; font-size: 12px; color: #fa8c16">
+                        建议: {{ f.ceDiagnostics.hint }}
+                      </div>
+                    </div>
                   </NSpace>
                 </NCollapseItem>
               </NCollapse>
@@ -1346,5 +1402,19 @@ const hasMultiTurnMeta = computed(() =>
   font-size: 11px;
   word-break: break-all;
   max-width: 400px;
+}
+.manual-instructions {
+  background: var(--color-background-secondary, #f5f5f5);
+  border: 1px solid var(--color-border, #e0e0e0);
+  border-radius: 4px;
+  padding: 12px;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
 }
 </style>

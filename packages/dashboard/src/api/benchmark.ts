@@ -45,6 +45,18 @@ export interface BenchmarkTopResult {
   source?: string;
 }
 
+/** CE 引擎诊断信息（区分"服务不可达"vs"无数据"） */
+export interface CeEngineDiagnostics {
+  lcmCount: number;
+  qmdCount: number;
+  neo4jCount: number;
+  lcmError?: string;
+  qmdError?: string;
+  neo4jError?: string;
+  conclusion: 'ok' | 'all-empty' | 'all-failed' | 'partial-failure';
+  hint?: string;
+}
+
 export interface BenchmarkItemResult {
   fixtureId: string;
   query: string;
@@ -67,6 +79,8 @@ export interface BenchmarkItemResult {
   turnRole?: string;
   /** 多轮会话：会话 ID */
   sessionId?: string;
+  /** CE 引擎诊断（engine='ce' 时）：各引擎结果数 + 错误信息 */
+  ceDiagnostics?: CeEngineDiagnostics;
 }
 
 export interface BenchmarkLatencyStats {
@@ -232,7 +246,7 @@ export interface BenchmarkBeirStatusResponse {
   datasets: BeirDatasetInfo[];
 }
 
-/** POST /api/benchmark/beir/download 响应 */
+/** POST /api/benchmark/beir/download 响应（失败时包含 manualInstructions） */
 export interface BenchmarkBeirDownloadResponse {
   ok: boolean;
   dataset: string;
@@ -240,6 +254,15 @@ export interface BenchmarkBeirDownloadResponse {
   cacheInfo?: { cached: boolean; path: string; sizeBytes: number; fileCount: number };
   error?: string;
   message?: string;
+  /** 手工下载指引（下载失败时返回，供前端展示） */
+  manualInstructions?: string;
+}
+
+/** GET /api/benchmark/beir/manual 响应 */
+export interface BenchmarkBeirManualResponse {
+  ok: boolean;
+  dataset: string;
+  instructions: string;
 }
 
 /** GET /api/benchmark/history 响应（不含 items） */
@@ -296,9 +319,14 @@ export function fetchBeirStatus(): Promise<BenchmarkBeirStatusResponse> {
   return apiGet<BenchmarkBeirStatusResponse>('/api/benchmark/beir/status');
 }
 
-/** 触发 BEIR 数据集下载 */
+/** 触发 BEIR 数据集下载（失败时返回 manualInstructions 字段） */
 export function downloadBeirDatasetApi(dataset: 'nfcorpus' | 'scifact'): Promise<BenchmarkBeirDownloadResponse> {
   return apiPost<BenchmarkBeirDownloadResponse>('/api/benchmark/beir/download', { dataset });
+}
+
+/** 获取 BEIR 手工下载指引 */
+export function fetchBeirManualInstructions(dataset: 'nfcorpus' | 'scifact'): Promise<BenchmarkBeirManualResponse> {
+  return apiGet<BenchmarkBeirManualResponse>(`/api/benchmark/beir/manual?dataset=${encodeURIComponent(dataset)}`);
 }
 
 /** 获取历史列表 */

@@ -46,30 +46,92 @@ function getBeirCacheRoot(): string {
 interface BeirDatasetMeta {
   /** 数据集名称 */
   name: string;
-  /** HuggingFace 下载 URL（zip 格式） */
-  downloadUrl: string;
-  /** 期望的 SHA256 校验（可选，未校验时为空） */
-  sha256?: string;
+  /** 下载 URL 列表（按优先级排序，依次尝试） */
+  downloadUrls: string[];
   /** 默认精简子集大小（查询数） */
   defaultSubsetSize: number;
   /** 数据集描述 */
   description: string;
+  /** 手工下载指引（所有自动下载均失败时展示给用户） */
+  manualInstructions: string;
 }
 
-/** 支持的 BEIR 数据集 */
+/**
+ * 支持的 BEIR 数据集。
+ *
+ * 下载源说明（按优先级）：
+ * 1. TU Darmstadt 官方源（原始 BEIR 服务器，偶尔不稳定）
+ * 2. HuggingFace BeIR 组织镜像（更稳定，格式相同）
+ * 3. 环境变量 BENCHMARK_BEIR_MIRROR 可覆盖（指向自建镜像/内网源）
+ */
 const BEIR_DATASETS: Record<string, BeirDatasetMeta> = {
   'nfcorpus': {
     name: 'nfcorpus',
-    // HuggingFace datasets 直接下载 BEIR 格式 zip
-    downloadUrl: 'https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip',
+    downloadUrls: [
+      'https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip',
+      'https://huggingface.co/datasets/BeIR/nfcorpus/resolve/main/nfcorpus.zip',
+    ],
     defaultSubsetSize: 200,
     description: 'NFCorpus — 医学领域 dietary supplements 检索，3.2K 查询 / 3633 文档',
+    manualInstructions: [
+      '方法 1（wget/curl）:',
+      '  wget https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip',
+      '  # 或从 HuggingFace 镜像下载:',
+      '  # wget https://huggingface.co/datasets/BeIR/nfcorpus/resolve/main/nfcorpus.zip',
+      '  unzip nfcorpus.zip -d nfcorpus_tmp',
+      '  # BEIR zip 内有顶层目录 nfcorpus/，需将其内容放到缓存目录:',
+      '  mkdir -p ~/.openclaw/.benchmark/beir/nfcorpus/qrels',
+      '  cp nfcorpus_tmp/nfcorpus/corpus.jsonl ~/.openclaw/.benchmark/beir/nfcorpus/',
+      '  cp nfcorpus_tmp/nfcorpus/queries.jsonl ~/.openclaw/.benchmark/beir/nfcorpus/',
+      '  cp nfcorpus_tmp/nfcorpus/qrels/qrels.jsonl ~/.openclaw/.benchmark/beir/nfcorpus/qrels/',
+      '  rm -rf nfcorpus_tmp nfcorpus.zip',
+      '',
+      '方法 2（Python beir 库）:',
+      '  pip install beir',
+      '  python -c "from beir.datasets import BEIR; BEIR(\'nfcorpus\', \'~/.openclaw/.benchmark/beir/\')"',
+      '',
+      '方法 3（环境变量覆盖下载源）:',
+      '  export BENCHMARK_BEIR_MIRROR=https://your-mirror.example.com/beir/',
+      '  # 下载时会拼接 ${BENCHMARK_BEIR_MIRROR}nfcorpus.zip',
+      '',
+      '缓存目录结构（部署后需包含以下文件）:',
+      '  ~/.openclaw/.benchmark/beir/nfcorpus/',
+      '    ├── corpus.jsonl      # 文档库（每行 {"_id":"doc-1","title":"...","text":"..."}）',
+      '    ├── queries.jsonl     # 查询集（每行 {"_id":"query-1","text":"..."}）',
+      '    └── qrels/',
+      '        └── qrels.jsonl   # 黄金答案（每行 {"query-id":"query-1","corpus-id":"doc-1","score":1}）',
+    ].join('\n'),
   },
   'scifact': {
     name: 'scifact',
-    downloadUrl: 'https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip',
+    downloadUrls: [
+      'https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip',
+      'https://huggingface.co/datasets/BeIR/scifact/resolve/main/scifact.zip',
+    ],
     defaultSubsetSize: 200,
     description: 'SciFact — 科学论文事实核查，1.4K 查询 / 5183 文档',
+    manualInstructions: [
+      '方法 1（wget/curl）:',
+      '  wget https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip',
+      '  # 或从 HuggingFace 镜像下载:',
+      '  # wget https://huggingface.co/datasets/BeIR/scifact/resolve/main/scifact.zip',
+      '  unzip scifact.zip -d scifact_tmp',
+      '  mkdir -p ~/.openclaw/.benchmark/beir/scifact/qrels',
+      '  cp scifact_tmp/scifact/corpus.jsonl ~/.openclaw/.benchmark/beir/scifact/',
+      '  cp scifact_tmp/scifact/queries.jsonl ~/.openclaw/.benchmark/beir/scifact/',
+      '  cp scifact_tmp/scifact/qrels/qrels.jsonl ~/.openclaw/.benchmark/beir/scifact/qrels/',
+      '  rm -rf scifact_tmp scifact.zip',
+      '',
+      '方法 2（环境变量覆盖下载源）:',
+      '  export BENCHMARK_BEIR_MIRROR=https://your-mirror.example.com/beir/',
+      '',
+      '缓存目录结构（部署后需包含以下文件）:',
+      '  ~/.openclaw/.benchmark/beir/scifact/',
+      '    ├── corpus.jsonl',
+      '    ├── queries.jsonl',
+      '    └── qrels/',
+      '        └── qrels.jsonl',
+    ].join('\n'),
   },
 };
 
@@ -192,9 +254,11 @@ function parseJsonl<T>(filePath: string): T[] {
  * 下载并解压 BEIR 数据集。
  *
  * 实现说明：
+ * - 依次尝试多个下载源（TU Darmstadt → HuggingFace → 环境变量镜像）
  * - 使用 fetch 下载 zip 二进制
  * - 使用 Node.js 内置 zlib + 手动解析 zip 格式（避免引入额外依赖如 unzipper/yauzl）
  * - 解压到 ~/.openclaw/.benchmark/beir/<name>/
+ * - 所有源均失败时抛出包含手工下载指引的错误
  *
  * 注意：zip 解压只支持无密码、stored 或 deflate 压缩的标准 zip。
  */
@@ -215,37 +279,88 @@ export async function downloadBeirDataset(datasetName: string, onProgress?: (pha
   // 同时创建 qrels 子目录
   mkdirSync(resolve(cachePath, 'qrels'), { recursive: true });
 
-  onProgress?.('downloading', 0);
-
-  // 下载 zip
-  const resp = await fetch(meta.downloadUrl, {
-    signal: AbortSignal.timeout(300_000), // 5 分钟超时
-  });
-  if (!resp.ok) {
-    throw new Error(`下载 BEIR ${datasetName} 失败: HTTP ${resp.status} ${resp.statusText}`);
+  // 构建下载源列表：内置源 + 环境变量镜像
+  const urls = [...meta.downloadUrls];
+  const mirrorBase = process.env.BENCHMARK_BEIR_MIRROR;
+  if (mirrorBase) {
+    const mirrorUrl = `${mirrorBase.replace(/\/$/, '')}/${datasetName}.zip`;
+    urls.unshift(mirrorUrl); // 环境变量镜像优先级最高
   }
 
-  const totalBytes = Number(resp.headers.get('content-length') ?? 0);
-  let downloadedBytes = 0;
-  const reader = resp.body?.getReader();
-  if (!reader) {
-    throw new Error('下载响应无 body reader');
-  }
+  // 依次尝试下载源
+  const errors: string[] = [];
+  let zipBuffer: Buffer | null = null;
 
-  const chunks: Buffer[] = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      chunks.push(Buffer.from(value));
-      downloadedBytes += value.length;
-      if (totalBytes > 0) {
-        onProgress?.('downloading', Math.round((downloadedBytes / totalBytes) * 100));
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const sourceLabel = i === 0 && mirrorBase ? '镜像源（BENCHMARK_BEIR_MIRROR）'
+      : url.includes('huggingface') ? 'HuggingFace 镜像'
+      : 'TU Darmstadt 官方源';
+    try {
+      onProgress?.(`downloading(${sourceLabel})`, 0);
+      const resp = await fetch(url, {
+        signal: AbortSignal.timeout(300_000), // 5 分钟超时
+      });
+      if (!resp.ok) {
+        errors.push(`[${sourceLabel}] HTTP ${resp.status} ${resp.statusText} — ${url}`);
+        continue;
       }
+
+      const totalBytes = Number(resp.headers.get('content-length') ?? 0);
+      let downloadedBytes = 0;
+      const reader = resp.body?.getReader();
+      if (!reader) {
+        errors.push(`[${sourceLabel}] 响应无 body reader — ${url}`);
+        continue;
+      }
+
+      const chunks: Buffer[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(Buffer.from(value));
+          downloadedBytes += value.length;
+          if (totalBytes > 0) {
+            onProgress?.(`downloading(${sourceLabel})`, Math.round((downloadedBytes / totalBytes) * 100));
+          }
+        }
+      }
+      zipBuffer = Buffer.concat(chunks);
+
+      // 校验下载内容是有效 zip（至少包含 EOCD 签名）
+      if (zipBuffer.length < 22 || zipBuffer.readUInt32LE(zipBuffer.length - 22) !== 0x06054b50) {
+        // 可能 zip 末尾有注释，搜索 EOCD
+        let foundEocd = false;
+        for (let j = zipBuffer.length - 22; j >= Math.max(0, zipBuffer.length - 65557); j--) {
+          if (zipBuffer.readUInt32LE(j) === 0x06054b50) {
+            foundEocd = true;
+            break;
+          }
+        }
+        if (!foundEocd) {
+          errors.push(`[${sourceLabel}] 下载内容非有效 ZIP 文件 — ${url}`);
+          zipBuffer = null;
+          continue;
+        }
+      }
+
+      // 下载成功
+      onProgress?.('extracting', 0);
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`[${sourceLabel}] ${msg} — ${url}`);
     }
   }
-  const zipBuffer = Buffer.concat(chunks);
-  onProgress?.('extracting', 0);
+
+  if (!zipBuffer) {
+    // 所有下载源失败，抛出包含手工下载指引的错误
+    throw new Error(
+      `BEIR ${datasetName} 所有下载源均失败:\n${errors.map((e) => `  - ${e}`).join('\n')}\n\n` +
+      `=== 手工下载指引 ===\n${meta.manualInstructions}`,
+    );
+  }
 
   // 解压 zip
   await extractZipTo(zipBuffer, cachePath, datasetName, onProgress);
@@ -253,11 +368,21 @@ export async function downloadBeirDataset(datasetName: string, onProgress?: (pha
 
   // 校验解压结果
   if (!isBeirCached(datasetName)) {
-    throw new Error(`解压后数据集结构不完整，期望包含 corpus.jsonl / queries.jsonl / qrels/qrels.jsonl`);
+    throw new Error(
+      `解压后数据集结构不完整，期望包含 corpus.jsonl / queries.jsonl / qrels/qrels.jsonl\n\n` +
+      `=== 手工下载指引 ===\n${meta.manualInstructions}`,
+    );
   }
 
   onProgress?.('loading', 100);
   return loadBeirFromCache(datasetName);
+}
+
+/** 获取数据集的手工下载指引（供路由层返回给前端展示） */
+export function getBeirManualInstructions(datasetName: string): string | null {
+  const meta = BEIR_DATASETS[datasetName];
+  if (!meta) return null;
+  return meta.manualInstructions;
 }
 
 // ---------------------------------------------------------------------------

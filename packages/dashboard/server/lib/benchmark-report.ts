@@ -194,8 +194,36 @@ export function exportMarkdownReport(result: BenchmarkResult): string {
       lines.push(`### ${f.fixtureId} (${f.category})`);
       lines.push(`- **查询:** ${f.query}`);
       lines.push(`- **错误:** ${f.error ?? 'unknown'}`);
+      // CE 诊断信息
+      if (f.ceDiagnostics) {
+        const d = f.ceDiagnostics;
+        lines.push(`- **CE 诊断:** ${d.conclusion}`);
+        lines.push(`  - L1 lcm: ${d.lcmCount} 条结果${d.lcmError ? `（错误: ${d.lcmError}）` : ''}`);
+        lines.push(`  - L2 qmd: ${d.qmdCount} 条结果${d.qmdError ? `（错误: ${d.qmdError}）` : ''}`);
+        lines.push(`  - L3 neo4j: ${d.neo4jCount} 条结果${d.neo4jError ? `（错误: ${d.neo4jError}）` : ''}`);
+        if (d.hint) lines.push(`  - **建议:** ${d.hint}`);
+      }
       lines.push('');
     }
+  }
+
+  // CE 引擎诊断汇总（engine='ce' 时）
+  const ceDiagItems = result.items.filter((i) => i.ceDiagnostics);
+  if (ceDiagItems.length > 0) {
+    lines.push(`## CE 引擎诊断`);
+    lines.push('');
+    lines.push(`> 区分"服务不可达"vs"无数据"，帮助定位三引擎（L1 lcm + L2 qmd + L3 neo4j）问题。`);
+    lines.push('');
+    lines.push(`| ID | 结论 | L1 lcm | L2 qmd | L3 neo4j | 建议 |`);
+    lines.push(`|----|------|--------|--------|----------|------|`);
+    for (const item of ceDiagItems) {
+      const d = item.ceDiagnostics!;
+      const hint = d.hint ? d.hint.slice(0, 60) + (d.hint.length > 60 ? '...' : '') : '-';
+      lines.push(
+        `| ${item.fixtureId} | ${d.conclusion} | ${d.lcmCount}${d.lcmError ? ' ⚠' : ''} | ${d.qmdCount}${d.qmdError ? ' ⚠' : ''} | ${d.neo4jCount}${d.neo4jError ? ' ⚠' : ''} | ${hint} |`,
+      );
+    }
+    lines.push('');
   }
 
   return lines.join('\n');

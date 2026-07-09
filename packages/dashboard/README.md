@@ -45,6 +45,7 @@ npm start          # 启动后端，serve 静态资源
 | 性能监控 | `/` | KPI 卡片 + 压力/延迟/tier 时序图 + 熔断状态 + Cascade Beta 分布 + 用户画像 + 债务调度 + Agent 状态 |
 | 经验管理 | `/experience` | 经验列表（过滤/分页）+ 详情抽屉 + G-8 验证时间线 + RELATED_TO 关联图谱 + 遗忘/固定操作 |
 | 记忆查询 | `/memory` | 跨引擎联合搜索（lcm+qmd+neo4j 并行）+ 图谱浏览（ECharts force layout）+ 节点详情 |
+| CE 压测 | `/benchmark` | CE 引擎能力压测（BEIR 标准测试集 + 多轮会话分析 + CE 多引擎诊断） |
 | 维护操作 | `/maintain` | 9 项维护卡片 + 操作日志（最近 20 条）|
 
 ## 环境变量
@@ -61,6 +62,9 @@ npm start          # 启动后端，serve 静态资源
 | `NEO4J_USER` | neo4j | Neo4j 用户 |
 | `NEO4J_PASSWORD` | neo4j | Neo4j 密码 |
 | `QMD_URL` | http://127.0.0.1:8081 | QMD 服务地址 |
+| `DASHBOARD_URL` | http://127.0.0.1:7421 | dashboard 自身地址（benchmark CE 引擎模式默认） |
+| `BENCHMARK_CACHE_DIR` | ~/.openclaw/.benchmark | benchmark 测试集缓存根目录 |
+| `BENCHMARK_BEIR_MIRROR` | 无 | BEIR 下载镜像源（指向自建/内网镜像，拼接 `<mirror>/<name>.zip`） |
 
 ## 端口规划
 
@@ -129,11 +133,116 @@ npm start
 ## 测试
 
 ```bash
-npm test           # 63 项测试
+npm test           # 121 项测试
 npm run typecheck  # 类型检查
 ```
 
 详见 [E2E-REPORT.md](./E2E-REPORT.md)。
+
+## Benchmark CE 引擎能力压测（v2.3.1）
+
+访问 `/benchmark` 页面，测试 CE 引擎（L1 lossless-claw + L2 QMD + L3 Neo4j）的检索能力。
+
+### 测试集
+
+| 测试集 ID | 类型 | 说明 | requiresDownload |
+|----------|------|------|-------------------|
+| `project-scenarios` | 单轮 | 21 条项目场景查询（知识/经验/错误/配置/多语言/复合） | 否 |
+| `ce-multi-turn` | 多轮 | 7 条多轮会话（基于 lossless-claw 能力维度：opening/followup/clarify/recall/compress） | 否 |
+| `beir-nfcorpus` | BEIR | 业界公认信息检索标准测试集 — 医学领域 3.2K 查询 | 是 |
+| `beir-scifact` | BEIR | 业界公认信息检索标准测试集 — 科学论文 1.4K 查询 | 是 |
+
+### 查询引擎
+
+| 引擎 | 说明 | 测试目标 |
+|------|------|---------|
+| `qmd` | 直查 QMD `/query`（L2 hybrid 检索） | QMD 单引擎检索能力 |
+| `ce` | 走 dashboard `/api/memory/search`（L1 lcm + L2 qmd + L3 neo4j 三引擎并行） | CE 多引擎联合检索能力 |
+
+### CE 引擎诊断（v2.3.1）
+
+当选择 `ce` 引擎时，每条查询结果附带 CE 诊断信息，区分"服务不可达"vs"无数据"：
+
+| 诊断结论 | 含义 | 建议 |
+|----------|------|------|
+| `ok` | 三引擎正常返回 | - |
+| `all-empty` | 三引擎均返回空结果 | lossless-claw 未摄入会话数据 / QMD 未索引代码 / Neo4j 无图节点 |
+| `all-failed` | 三引擎全部报错 | dashboard 未启动 / OpenClaw 宿主 / QMD / Neo4j 依赖不可用 |
+| `partial-failure` | 部分引擎失败 | 查看各引擎 error 字段 |
+
+### BEIR 标准测试集部署
+
+BEIR 数据集（`beir-nfcorpus` / `beir-scifact`）需要下载后缓存到本地。
+
+#### 自动下载
+
+在 `/benchmark` 页面选择 BEIR 测试集后，点击"立即下载"按钮。下载源优先级：
+
+1. `BENCHMARK_BEIR_MIRROR` 环境变量指向的自建镜像（若配置）
+2. HuggingFace BeIR 组织镜像（`huggingface.co/datasets/BeIR/`）
+3. TU Darmstadt 官方源（`public.ukp.informatik.tu-darmstadt.de`，偶尔不稳定）
+
+下载失败时页面自动展示手工下载指引。
+
+#### 手工下载部署
+
+若自动下载失败，按以下步骤手工部署：
+
+**NFCorpus:**
+
+```bash
+# 1. 下载 zip（任选一个源）
+wget https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/nfcorpus.zip
+# 或从 HuggingFace 镜像下载:
+# wget https://huggingface.co/datasets/BeIR/nfcorpus/resolve/main/nfcorpus.zip
+
+# 2. 解压
+unzip nfcorpus.zip -d nfcorpus_tmp
+
+# 3. 部署到缓存目录（BEIR zip 内有顶层目录 nfcorpus/，需将其内容放到缓存目录）
+mkdir -p ~/.openclaw/.benchmark/beir/nfcorpus/qrels
+cp nfcorpus_tmp/nfcorpus/corpus.jsonl ~/.openclaw/.benchmark/beir/nfcorpus/
+cp nfcorpus_tmp/nfcorpus/queries.jsonl ~/.openclaw/.benchmark/beir/nfcorpus/
+cp nfcorpus_tmp/nfcorpus/qrels/qrels.jsonl ~/.openclaw/.benchmark/beir/nfcorpus/qrels/
+
+# 4. 清理临时文件
+rm -rf nfcorpus_tmp nfcorpus.zip
+```
+
+**SciFact:** 同上，将 `nfcorpus` 替换为 `scifact`。
+
+#### 缓存目录结构
+
+部署完成后，缓存目录需包含以下文件：
+
+```
+~/.openclaw/.benchmark/beir/
+├── nfcorpus/
+│   ├── corpus.jsonl      # 文档库（每行 {"_id":"doc-1","title":"...","text":"..."}）
+│   ├── queries.jsonl     # 查询集（每行 {"_id":"query-1","text":"..."}）
+│   └── qrels/
+│       └── qrels.jsonl   # 黄金答案（每行 {"query-id":"query-1","corpus-id":"doc-1","score":1}）
+└── scifact/
+    ├── corpus.jsonl
+    ├── queries.jsonl
+    └── qrels/
+        └── qrels.jsonl
+```
+
+#### API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/benchmark/fixture-sets` | 列出所有测试集元数据 |
+| GET | `/api/benchmark/fixtures?set=<id>` | 获取指定测试集 fixtures |
+| GET | `/api/benchmark/beir/status` | BEIR 缓存状态 |
+| GET | `/api/benchmark/beir/manual?dataset=<name>` | 获取手工下载指引 |
+| POST | `/api/benchmark/beir/download` | 触发 BEIR 下载 |
+| GET | `/api/benchmark/default-url` | 系统配置中的 QMD + dashboard 地址 |
+| POST | `/api/benchmark/run` | 执行压测 |
+| GET | `/api/benchmark/history` | 历史运行列表 |
+| GET | `/api/benchmark/report/:id` | 获取完整结果 |
+| GET | `/api/benchmark/report/:id/markdown` | 下载 Markdown 报告 |
 
 ## 许可证
 
