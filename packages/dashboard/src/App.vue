@@ -57,22 +57,26 @@ function cycleTheme(): void {
   setMode(order[(idx + 1) % order.length]);
 }
 
-// 当前激活的菜单 key（与路由路径对齐）
-const activeKey = computed(() => route.path);
+// 当前激活的菜单 key（与路由路径对齐；测试中心下的子 tab 路径也归并到 /testing）
+const activeKey = computed(() => {
+  if (route.path === '/testing' || route.path === '/benchmark' || route.path === '/qmd-test') {
+    return '/testing';
+  }
+  return route.path;
+});
 
 // 渲染带 router-link 的菜单 label
 function renderLinkLabel(to: string, label: string): Component {
   return () => h(RouterLink, { to }, { default: () => label });
 }
 
-// 顶部导航 6 项：监控/经验/记忆/维护/测试工具/压测
+// 顶部导航 5 项：监控/经验/记忆/维护/测试中心（v2.3.2 合并压测+测试工具）
 const menuOptions = computed<MenuOption[]>(() => [
   { label: renderLinkLabel('/', '监控'), key: '/' },
   { label: renderLinkLabel('/experience', '经验'), key: '/experience' },
   { label: renderLinkLabel('/memory', '记忆'), key: '/memory' },
   { label: renderLinkLabel('/maintain', '维护'), key: '/maintain' },
-  { label: renderLinkLabel('/qmd-test', '测试工具'), key: '/qmd-test' },
-  { label: renderLinkLabel('/benchmark', '压测'), key: '/benchmark' },
+  { label: renderLinkLabel('/testing', '测试中心'), key: '/testing' },
 ]);
 </script>
 

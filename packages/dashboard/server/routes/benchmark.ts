@@ -118,6 +118,105 @@ interface BenchmarkRunRequest {
   concurrency?: number;
 }
 
+/** 解析 + 校验 /run 请求参数。返回 { ok, error?, opts } —— 复用于同步与 SSE 端点 */
+function parseBenchmarkRunOptions(body: BenchmarkRunRequest): {
+  ok: boolean;
+  error?: string;
+  opts?: {
+    finalBaseUrl: string;
+    finalDashboardUrl: string;
+    limit: number;
+    timeoutMs: number;
+    rerank: boolean;
+    mode: 'rest' | 'mcp';
+    engine: 'qmd' | 'ce';
+    concurrency: number;
+    customFixtures?: BenchmarkFixture[];
+    fixtureSetId?: FixtureSetId;
+    beirSubsetSize?: number;
+  };
+} {
+  const baseUrlInput = (body.baseUrl ?? '').trim();
+  const limitRaw = body.limit;
+  const limit = (limitRaw !== undefined && limitRaw !== null && !Number.isNaN(Number(limitRaw)))
+    ? Number(limitRaw)
+    : 5;
+  const timeoutMs = Number(body.timeoutMs) || 10_000;
+  const rerank = body.rerank !== false; // 默认 true
+  const mode: 'rest' | 'mcp' = body.mode === 'mcp' ? 'mcp' : 'rest';
+  const engine: 'qmd' | 'ce' = body.engine === 'ce' ? 'ce' : 'qmd';
+  const concurrency = Math.max(1, Math.min(10, Number(body.concurrency) || 1));
+  const customFixtures = Array.isArray(body.fixtures) ? body.fixtures : undefined;
+  const fixtureSetIdRaw = body.fixtureSetId;
+  const beirSubsetSizeRaw = body.beirSubsetSize;
+  const beirSubsetSize = (beirSubsetSizeRaw !== undefined && beirSubsetSizeRaw !== null && !Number.isNaN(Number(beirSubsetSizeRaw)))
+    ? Math.max(10, Math.min(1000, Number(beirSubsetSizeRaw)))
+    : undefined;
+  const dashboardBaseUrlInput = (body.dashboardBaseUrl ?? '').trim();
+
+  // 参数校验
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
+    return { ok: false, error: 'timeoutMs 必须在 1000-60000 之间' };
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+    return { ok: false, error: 'limit 必须为 1-50 之间的整数' };
+  }
+  if (customFixtures && customFixtures.length === 0) {
+    return { ok: false, error: '自定义 fixtures 不能为空数组' };
+  }
+  if (customFixtures && customFixtures.length > 200) {
+    return { ok: false, error: '自定义 fixtures 数量不能超过 200' };
+  }
+  // fixtureSetId 校验（仅当未传 customFixtures 时校验）
+  let fixtureSetId: FixtureSetId | undefined;
+  if (!customFixtures) {
+    if (fixtureSetIdRaw !== undefined && !isValidFixtureSetId(fixtureSetIdRaw)) {
+      return { ok: false, error: `fixtureSetId 无效: ${String(fixtureSetIdRaw)}（合法值: project-scenarios / ce-multi-turn / beir-nfcorpus / beir-scifact）` };
+    }
+    fixtureSetId = isValidFixtureSetId(fixtureSetIdRaw) ? fixtureSetIdRaw : 'project-scenarios';
+  }
+
+  // baseUrl 默认值：用户输入 > 系统配置 > 兜底
+  const finalBaseUrl = baseUrlInput || resolveDefaultQmdUrl();
+  if (!/^https?:\/\/.+/.test(finalBaseUrl)) {
+    return { ok: false, error: `baseUrl 格式无效: ${finalBaseUrl}` };
+  }
+  // dashboardBaseUrl（engine='ce' 时使用）
+  const finalDashboardUrl = dashboardBaseUrlInput || resolveDefaultDashboardUrl();
+  if (engine === 'ce' && !/^https?:\/\/.+/.test(finalDashboardUrl)) {
+    return { ok: false, error: `dashboardBaseUrl 格式无效: ${finalDashboardUrl}` };
+  }
+
+  // 校验自定义 fixtures 基本结构
+  if (customFixtures) {
+    for (const f of customFixtures) {
+      if (!f.id || typeof f.id !== 'string') {
+        return { ok: false, error: 'fixture.id 必须为非空字符串' };
+      }
+      if (!f.query || typeof f.query !== 'string') {
+        return { ok: false, error: `fixture ${f.id} 的 query 必须为非空字符串` };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    opts: {
+      finalBaseUrl,
+      finalDashboardUrl,
+      limit,
+      timeoutMs,
+      rerank,
+      mode,
+      engine,
+      concurrency,
+      customFixtures,
+      fixtureSetId,
+      beirSubsetSize,
+    },
+  };
+}
+
 export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<void> {
   // GET /api/benchmark/fixture-sets —— 所有测试集元数据
   app.get('/api/benchmark/fixture-sets', async (_req, _reply) => {
@@ -267,110 +366,45 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
     return md;
   });
 
-  // POST /api/benchmark/run —— 执行压测
+  // POST /api/benchmark/run —— 执行压测（同步，返回完整结果；测试/UI fallback 使用）
   app.post('/api/benchmark/run', async (req, reply) => {
     const body = (req.body as BenchmarkRunRequest) ?? {};
-    const baseUrlInput = (body.baseUrl ?? '').trim();
-    const limitRaw = body.limit;
-    const limit = (limitRaw !== undefined && limitRaw !== null && !Number.isNaN(Number(limitRaw)))
-      ? Number(limitRaw)
-      : 5;
-    const timeoutMs = Number(body.timeoutMs) || 10_000;
-    const rerank = body.rerank !== false; // 默认 true
-    const mode: 'rest' | 'mcp' = body.mode === 'mcp' ? 'mcp' : 'rest';
-    const engine: 'qmd' | 'ce' = body.engine === 'ce' ? 'ce' : 'qmd';
-    const concurrency = Math.max(1, Math.min(10, Number(body.concurrency) || 1));
-    const customFixtures = Array.isArray(body.fixtures) ? body.fixtures : undefined;
-    const fixtureSetIdRaw = body.fixtureSetId;
-    const beirSubsetSizeRaw = body.beirSubsetSize;
-    const beirSubsetSize = (beirSubsetSizeRaw !== undefined && beirSubsetSizeRaw !== null && !Number.isNaN(Number(beirSubsetSizeRaw)))
-      ? Math.max(10, Math.min(1000, Number(beirSubsetSizeRaw)))
-      : undefined;
-    const dashboardBaseUrlInput = (body.dashboardBaseUrl ?? '').trim();
-
-    // 参数校验
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
+    const parsed = parseBenchmarkRunOptions(body);
+    if (!parsed.ok || !parsed.opts) {
       reply.code(400);
-      return { ok: false, error: 'timeoutMs 必须在 1000-60000 之间' };
+      return { ok: false, error: parsed.error };
     }
-    if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
-      reply.code(400);
-      return { ok: false, error: 'limit 必须为 1-50 之间的整数' };
-    }
-    if (customFixtures && customFixtures.length === 0) {
-      reply.code(400);
-      return { ok: false, error: '自定义 fixtures 不能为空数组' };
-    }
-    if (customFixtures && customFixtures.length > 200) {
-      reply.code(400);
-      return { ok: false, error: '自定义 fixtures 数量不能超过 200' };
-    }
-    // fixtureSetId 校验（仅当未传 customFixtures 时校验）
-    let fixtureSetId: FixtureSetId | undefined;
-    if (!customFixtures) {
-      if (fixtureSetIdRaw !== undefined && !isValidFixtureSetId(fixtureSetIdRaw)) {
-        reply.code(400);
-        return { ok: false, error: `fixtureSetId 无效: ${String(fixtureSetIdRaw)}（合法值: project-scenarios / ce-multi-turn / beir-nfcorpus / beir-scifact）` };
-      }
-      fixtureSetId = isValidFixtureSetId(fixtureSetIdRaw) ? fixtureSetIdRaw : 'project-scenarios';
-    }
-
-    // baseUrl 默认值：用户输入 > 系统配置 > 兜底
-    const finalBaseUrl = baseUrlInput || resolveDefaultQmdUrl();
-    if (!/^https?:\/\/.+/.test(finalBaseUrl)) {
-      reply.code(400);
-      return { ok: false, error: `baseUrl 格式无效: ${finalBaseUrl}` };
-    }
-    // dashboardBaseUrl（engine='ce' 时使用）
-    const finalDashboardUrl = dashboardBaseUrlInput || resolveDefaultDashboardUrl();
-    if (engine === 'ce' && !/^https?:\/\/.+/.test(finalDashboardUrl)) {
-      reply.code(400);
-      return { ok: false, error: `dashboardBaseUrl 格式无效: ${finalDashboardUrl}` };
-    }
-
-    // 校验自定义 fixtures 基本结构
-    if (customFixtures) {
-      for (const f of customFixtures) {
-        if (!f.id || typeof f.id !== 'string') {
-          reply.code(400);
-          return { ok: false, error: 'fixture.id 必须为非空字符串' };
-        }
-        if (!f.query || typeof f.query !== 'string') {
-          reply.code(400);
-          return { ok: false, error: `fixture ${f.id} 的 query 必须为非空字符串` };
-        }
-      }
-    }
+    const o = parsed.opts;
 
     req.log.info(
       {
-        baseUrl: finalBaseUrl,
-        engine,
-        fixtureSetId: fixtureSetId ?? 'custom',
-        limit,
-        timeoutMs,
-        rerank,
-        mode,
-        concurrency,
-        beirSubsetSize,
-        fixturesSource: customFixtures ? 'custom' : (fixtureSetId ?? 'project-scenarios'),
+        baseUrl: o.finalBaseUrl,
+        engine: o.engine,
+        fixtureSetId: o.fixtureSetId ?? 'custom',
+        limit: o.limit,
+        timeoutMs: o.timeoutMs,
+        rerank: o.rerank,
+        mode: o.mode,
+        concurrency: o.concurrency,
+        beirSubsetSize: o.beirSubsetSize,
+        fixturesSource: o.customFixtures ? 'custom' : (o.fixtureSetId ?? 'project-scenarios'),
       },
       'Benchmark 开始执行',
     );
 
     try {
       const result: BenchmarkResult = await runBenchmark({
-        qmdBaseUrl: finalBaseUrl,
-        fixtures: customFixtures,
-        fixtureSetId,
-        beirSubsetSize,
-        limit,
-        timeoutMs,
-        rerank,
-        mode,
-        engine,
-        dashboardBaseUrl: finalDashboardUrl,
-        concurrency,
+        qmdBaseUrl: o.finalBaseUrl,
+        fixtures: o.customFixtures,
+        fixtureSetId: o.fixtureSetId,
+        beirSubsetSize: o.beirSubsetSize,
+        limit: o.limit,
+        timeoutMs: o.timeoutMs,
+        rerank: o.rerank,
+        mode: o.mode,
+        engine: o.engine,
+        dashboardBaseUrl: o.finalDashboardUrl,
+        concurrency: o.concurrency,
       });
 
       // 持久化到内存历史
@@ -399,5 +433,103 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
       reply.code(500);
       return { ok: false, error: msg };
     }
+  });
+
+  // POST /api/benchmark/run-stream —— 执行压测（SSE 流式响应，逐条推送进度 + 完成后推送完整结果）
+  // 事件流：
+  //   event: start   data: { total }
+  //   event: progress data: { completed, total, item }
+  //   event: done    data: { result }
+  //   event: error   data: { error }
+  app.post('/api/benchmark/run-stream', async (req, reply) => {
+    const body = (req.body as BenchmarkRunRequest) ?? {};
+    const parsed = parseBenchmarkRunOptions(body);
+    if (!parsed.ok || !parsed.opts) {
+      reply.code(400);
+      return { ok: false, error: parsed.error };
+    }
+    const o = parsed.opts;
+
+    // SSE 响应头
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no', // 禁用 nginx 缓冲
+    });
+
+    // 客户端断开检测
+    let clientClosed = false;
+    req.raw.on('close', () => { clientClosed = true; });
+
+    const send = (event: string, data: unknown): void => {
+      if (clientClosed) return;
+      try {
+        reply.raw.write(`event: ${event}\n`);
+        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        clientClosed = true;
+      }
+    };
+
+    req.log.info(
+      {
+        baseUrl: o.finalBaseUrl,
+        engine: o.engine,
+        fixtureSetId: o.fixtureSetId ?? 'custom',
+        mode: 'stream',
+      },
+      'Benchmark SSE 流式执行开始',
+    );
+
+    try {
+      // 先推送 start 事件（total 在 runner 内部才知道，这里先推 0 占位，progress 事件携带真实 total）
+      send('start', { engine: o.engine, fixtureSetId: o.fixtureSetId ?? 'custom' });
+
+      const result: BenchmarkResult = await runBenchmark({
+        qmdBaseUrl: o.finalBaseUrl,
+        fixtures: o.customFixtures,
+        fixtureSetId: o.fixtureSetId,
+        beirSubsetSize: o.beirSubsetSize,
+        limit: o.limit,
+        timeoutMs: o.timeoutMs,
+        rerank: o.rerank,
+        mode: o.mode,
+        engine: o.engine,
+        dashboardBaseUrl: o.finalDashboardUrl,
+        concurrency: o.concurrency,
+        onProgress: (completed, total, _current, item) => {
+          send('progress', { completed, total, item });
+        },
+      });
+
+      // 持久化到内存历史
+      saveBenchmarkResult(result);
+
+      req.log.info(
+        {
+          runId: result.runId,
+          successCount: result.summary.successCount,
+          totalFixtures: result.summary.totalFixtures,
+          totalDurationMs: result.summary.totalDurationMs,
+        },
+        'Benchmark SSE 流式执行完成',
+      );
+
+      send('done', { ok: true, result });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, 'Benchmark SSE 流式执行失败');
+      send('error', { ok: false, error: msg });
+    } finally {
+      try {
+        reply.raw.end();
+      } catch {
+        // 忽略 end 异常（连接已断开）
+      }
+    }
+
+    // 告诉 fastify：响应已通过 reply.raw 手动写出，不要再次序列化返回值
+    return reply;
   });
 }

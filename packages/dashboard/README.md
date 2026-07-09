@@ -45,8 +45,10 @@ npm start          # 启动后端，serve 静态资源
 | 性能监控 | `/` | KPI 卡片 + 压力/延迟/tier 时序图 + 熔断状态 + Cascade Beta 分布 + 用户画像 + 债务调度 + Agent 状态 |
 | 经验管理 | `/experience` | 经验列表（过滤/分页）+ 详情抽屉 + G-8 验证时间线 + RELATED_TO 关联图谱 + 遗忘/固定操作 |
 | 记忆查询 | `/memory` | 跨引擎联合搜索（lcm+qmd+neo4j 并行）+ 图谱浏览（ECharts force layout）+ 节点详情 |
-| CE 压测 | `/benchmark` | CE 引擎能力压测（BEIR 标准测试集 + 多轮会话分析 + CE 多引擎诊断） |
+| 测试中心 | `/testing` | CE 引擎压测（BEIR 标准测试集 + 多轮会话分析 + CE 多引擎诊断 + **SSE 实时日志**）+ QMD MCP 测试工具（v2.3.2 整合） |
 | 维护操作 | `/maintain` | 9 项维护卡片 + 操作日志（最近 20 条）|
+
+> v2.3.2 起，原 `/benchmark` 和 `/qmd-test` 两个独立页面已整合为「测试中心」(`/testing`)，通过页面内 Tab 切换。旧路由仍保留并自动重定向到 `/testing?tab=<benchmark|qmd-test>`，向后兼容书签与外链。
 
 ## 环境变量
 
@@ -133,11 +135,38 @@ npm start
 ## 测试
 
 ```bash
-npm test           # 121 项测试
+npm test           # 128 项测试
 npm run typecheck  # 类型检查
 ```
 
 详见 [E2E-REPORT.md](./E2E-REPORT.md)。
+
+## 测试中心（v2.3.2 整合）
+
+访问 `/testing` 页面，包含两个子 Tab：
+
+- **CE 引擎压测**：测试 CE 引擎（L1 lossless-claw + L2 QMD + L3 Neo4j）的检索能力，支持 SSE 实时日志
+- **QMD MCP 测试**：对单条 query 反复迭代 N 次，统计 REST/MCP 协议延迟与成功率
+
+### 实时日志（SSE 流式，v2.3.2 新增）
+
+压测执行期间，**不再需要等待全部完成**才能看到结果 —— 通过 SSE 流式推送，每完成一条 fixture 即时展示：
+
+| 能力 | 说明 |
+|------|------|
+| 实时进度条 | 显示 `已完成/总数` 与百分比，运行中脉冲动画 |
+| 逐条日志面板 | 每条 fixture 完成后立即追加一行：序号 / ✓✗ / fixtureId / 查询文本 / 分类 / CE 诊断标签 / 结果数 / 延迟（带颜色）/ 错误信息 |
+| 中断按钮 | 测试运行中可随时点击「中断」终止（已完成结果保留在日志面板） |
+| 清空日志 | 测试结束后可清空日志面板 |
+
+**技术实现**：
+
+- 后端新增 `POST /api/benchmark/run-stream` 端点，返回 `text/event-stream`，事件类型：`start` / `progress`（携带单条 item 结果）/ `done`（携带完整 BenchmarkResult）/ `error`
+- runner 的 `onProgress` 回调已扩展为 4 参数（增加 `item: BenchmarkItemResult`），在 SSE 路径被接入，每条 fixture 完成时推送
+- 前端用 `fetch + ReadableStream` 消费 SSE（EventSource 不支持 POST 请求体），逐块解析 `event:`/`data:` 行
+- 原 `POST /api/benchmark/run` 同步端点保留，用于测试代码与 fallback
+
+> 客户端断开会自动检测（`req.raw.on('close')`），不再向已关闭连接写数据。
 
 ## Benchmark CE 引擎能力压测（v2.3.1）
 
@@ -239,7 +268,8 @@ rm -rf nfcorpus_tmp nfcorpus.zip
 | GET | `/api/benchmark/beir/manual?dataset=<name>` | 获取手工下载指引 |
 | POST | `/api/benchmark/beir/download` | 触发 BEIR 下载 |
 | GET | `/api/benchmark/default-url` | 系统配置中的 QMD + dashboard 地址 |
-| POST | `/api/benchmark/run` | 执行压测 |
+| POST | `/api/benchmark/run` | 执行压测（同步，返回完整结果） |
+| POST | `/api/benchmark/run-stream` | 执行压测（**SSE 流式**，逐条推送 progress + 完成推送 done；v2.3.2） |
 | GET | `/api/benchmark/history` | 历史运行列表 |
 | GET | `/api/benchmark/report/:id` | 获取完整结果 |
 | GET | `/api/benchmark/report/:id/markdown` | 下载 Markdown 报告 |

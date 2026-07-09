@@ -1266,3 +1266,160 @@ describe('v2.3.0 lib/benchmark-report.ts CE 能力维度报告', () => {
     expect(md).toContain('NeurIPS 2021');
   });
 });
+
+// ---------------------------------------------------------------------------
+// v2.3.2 SSE 流式压测端点 /api/benchmark/run-stream
+// ---------------------------------------------------------------------------
+
+describe('v2.3.2 routes/benchmark.ts SSE 流式端点', () => {
+  it('onProgress 回调现在携带 item 结果（4 参数）', async () => {
+    const progressCalls: Array<{ completed: number; total: number; hasItem: boolean }> = [];
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtures: customFixtures,
+      limit: 5,
+      timeoutMs: 5000,
+      concurrency: 1,
+      onProgress: (completed, total, _current, item) => {
+        progressCalls.push({ completed, total, hasItem: !!item && typeof item.fixtureId === 'string' });
+      },
+    });
+    expect(result.summary.totalFixtures).toBe(3);
+    expect(progressCalls).toHaveLength(3);
+    // 每次回调都携带了 item 结果（BenchmarkItemResult）
+    for (const p of progressCalls) {
+      expect(p.hasItem).toBe(true);
+      expect(p.total).toBe(3);
+    }
+    // completed 单调递增
+    expect(progressCalls[0].completed).toBe(1);
+    expect(progressCalls[2].completed).toBe(3);
+  });
+
+  it('POST /api/benchmark/run-stream 返回 text/event-stream 并逐条推送 progress', async () => {
+    // 用 customFixtures（3 条）加速
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/run-stream',
+      headers: { 'content-type': 'application/json' },
+      payload: {
+        baseUrl: 'http://127.0.0.1:8081',
+        fixtures: customFixtures,
+        limit: 5,
+        timeoutMs: 5000,
+        concurrency: 1,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+
+    const body = res.body;
+    // 应包含 start / progress / done 三类事件
+    expect(body).toContain('event: start');
+    expect(body).toContain('event: progress');
+    expect(body).toContain('event: done');
+
+    // 解析所有 SSE 事件块
+    const events = parseSseEvents(body);
+    const startEvents = events.filter((e) => e.event === 'start');
+    const progressEvents = events.filter((e) => e.event === 'progress');
+    const doneEvents = events.filter((e) => e.event === 'done');
+    const errorEvents = events.filter((e) => e.event === 'error');
+
+    expect(startEvents.length).toBe(1);
+    expect(progressEvents.length).toBe(3); // 3 条 fixture
+    expect(doneEvents.length).toBe(1);
+    expect(errorEvents.length).toBe(0);
+
+    // 校验 progress 事件 payload
+    const firstProgress = progressEvents[0];
+    expect(firstProgress.data.completed).toBe(1);
+    expect(firstProgress.data.total).toBe(3);
+    expect(firstProgress.data.item).toBeDefined();
+    expect(firstProgress.data.item.fixtureId).toBe('t-001');
+    expect(typeof firstProgress.data.item.latencyMs).toBe('number');
+
+    // 校验 done 事件 payload
+    const done = doneEvents[0];
+    expect(done.data.ok).toBe(true);
+    expect(done.data.result.summary.totalFixtures).toBe(3);
+    expect(done.data.result.items).toHaveLength(3);
+    expect(done.data.result.runId).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('POST /api/benchmark/run-stream 参数校验失败时返回 400 + JSON', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/run-stream',
+      headers: { 'content-type': 'application/json' },
+      payload: {
+        baseUrl: 'http://127.0.0.1:8081',
+        limit: 5,
+        timeoutMs: 50, // 非法：< 1000
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('timeoutMs');
+  });
+
+  it('POST /api/benchmark/run-stream fetch 失败时仍推送 progress（item 失败）+ done', async () => {
+    // 让 fetch 抛错 —— runner 内部把单条错误转成 success=false item（不向外抛），
+    // 因此 SSE 应正常推送 progress（每条失败）+ done，不推送 error 事件。
+    global.fetch = vi.fn().mockRejectedValue(new Error('QMD 连接失败')) as unknown as typeof global.fetch;
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/run-stream',
+      headers: { 'content-type': 'application/json' },
+      payload: {
+        baseUrl: 'http://127.0.0.1:8081',
+        fixtures: [customFixtures[0], customFixtures[1]],
+        limit: 5,
+        timeoutMs: 5000,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const events = parseSseEvents(res.body);
+    const progressEvents = events.filter((e) => e.event === 'progress');
+    const doneEvents = events.filter((e) => e.event === 'done');
+    const errorEvents = events.filter((e) => e.event === 'error');
+
+    // 2 条 fixture 都失败
+    expect(progressEvents.length).toBe(2);
+    for (const p of progressEvents) {
+      expect(p.data.item.success).toBe(false);
+      expect(p.data.item.error).toContain('QMD 连接失败');
+    }
+    // done 正常推送（successRate=0 但仍完成）
+    expect(doneEvents.length).toBe(1);
+    expect(doneEvents[0].data.result.summary.successCount).toBe(0);
+    expect(doneEvents[0].data.result.summary.successRate).toBe(0);
+    // 不应有 error 事件
+    expect(errorEvents.length).toBe(0);
+  });
+});
+
+/** 解析 SSE 文本流为事件数组（event + data） */
+function parseSseEvents(text: string): Array<{ event: string; data: Record<string, unknown> }> {
+  const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const chunks = text.split('\n\n');
+  for (const chunk of chunks) {
+    const lines = chunk.split('\n');
+    let event = '';
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+    }
+    if (event && dataLines.length > 0) {
+      try {
+        const data = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
+        events.push({ event, data });
+      } catch {
+        // 忽略解析失败的块
+      }
+    }
+  }
+  return events;
+}

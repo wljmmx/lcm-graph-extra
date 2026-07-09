@@ -51,8 +51,8 @@ export interface BenchmarkRunnerOptions {
   dashboardBaseUrl?: string;
   /** 并发数（默认 1，串行）。>1 时并发执行但延迟测量仍按单条计算 */
   concurrency?: number;
-  /** 进度回调 */
-  onProgress?: (completed: number, total: number, current: BenchmarkFixture) => void;
+  /** 进度回调（每完成一条 fixture 触发，携带该条结果） */
+  onProgress?: (completed: number, total: number, current: BenchmarkFixture, item: BenchmarkItemResult) => void;
 }
 
 export interface BenchmarkItemResult {
@@ -592,8 +592,8 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     items.push(...batchResults);
     completed += batch.length;
     if (opts.onProgress) {
-      for (const f of batch) {
-        opts.onProgress(completed, fixtures.length, f);
+      for (let i = 0; i < batch.length; i++) {
+        opts.onProgress(completed, fixtures.length, batch[i], batchResults[i]);
       }
     }
   }

@@ -339,9 +339,153 @@ export function fetchBenchmarkReport(runId: string): Promise<BenchmarkReportResp
   return apiGet<BenchmarkReportResponse>(`/api/benchmark/report/${encodeURIComponent(runId)}`);
 }
 
-/** 执行压测 */
+/** 执行压测（同步，返回完整结果） */
 export function runBenchmark(req: BenchmarkRunRequest): Promise<BenchmarkRunResponse> {
   return apiPost<BenchmarkRunResponse>('/api/benchmark/run', req);
+}
+
+// ---------------------------------------------------------------------------
+// SSE 流式压测（v2.3.2）
+// ---------------------------------------------------------------------------
+
+/** 流式压测事件类型 */
+export type BenchmarkStreamEvent =
+  | { type: 'start'; engine: string; fixtureSetId: string }
+  | { type: 'progress'; completed: number; total: number; item: BenchmarkItemResult }
+  | { type: 'done'; result: BenchmarkResult }
+  | { type: 'error'; error: string };
+
+/** 流式压测回调 */
+export interface BenchmarkStreamHandlers {
+  /** 每个事件触发 */
+  onEvent: (event: BenchmarkStreamEvent) => void;
+  /** 网络错误（fetch 抛出、流读取失败、HTTP 非 200） */
+  onError?: (error: Error) => void;
+}
+
+/**
+ * 执行流式压测（SSE）。
+ *
+ * 后端 POST /api/benchmark/run-stream 返回 text/event-stream，逐条推送：
+ *   event: start    data: { engine, fixtureSetId }
+ *   event: progress data: { completed, total, item }
+ *   event: done     data: { ok, result }
+ *   event: error    data: { ok, error }
+ *
+ * 用 fetch + ReadableStream 消费（EventSource 不支持 POST 请求体）。
+ * 返回一个 AbortController，调用 .abort() 可中断测试。
+ */
+export function runBenchmarkStream(
+  req: BenchmarkRunRequest,
+  handlers: BenchmarkStreamHandlers,
+): AbortController {
+  const controller = new AbortController();
+
+  void (async () => {
+    let resp: Response;
+    try {
+      resp = await fetch('/api/benchmark/run-stream', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+        body: JSON.stringify(req ?? {}),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // 用户主动 abort 会抛 AbortError，不当作错误
+      if (controller.signal.aborted) return;
+      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    if (!resp.ok || !resp.body) {
+      // HTTP 错误：尝试读取 JSON 错误信息
+      let detail = '';
+      try {
+        const text = await resp.text();
+        detail = text;
+      } catch {
+        // 忽略
+      }
+      handlers.onError?.(new Error(`SSE 请求失败: HTTP ${resp.status}${detail ? ` - ${detail}` : ''}`));
+      return;
+    }
+
+    // SSE 流解析：按 \n\n 分块（事件边界），每块内按行解析 event:/data:
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // 按 \n\n 分割事件块
+        let sepIdx: number;
+        while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + 2);
+          const event = parseSseChunk(chunk);
+          if (event) handlers.onEvent(event);
+        }
+      }
+      // flush 剩余 buffer
+      if (buffer.trim()) {
+        const event = parseSseChunk(buffer);
+        if (event) handlers.onEvent(event);
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return controller;
+}
+
+/** 解析单个 SSE 事件块（多行 event:/data:） */
+function parseSseChunk(chunk: string): BenchmarkStreamEvent | null {
+  const lines = chunk.split('\n');
+  let event = '';
+  const dataLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim());
+    }
+  }
+  if (!event || dataLines.length === 0) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(dataLines.join('\n'));
+  } catch {
+    return null;
+  }
+  const p = payload as Record<string, unknown>;
+  switch (event) {
+    case 'start':
+      return {
+        type: 'start',
+        engine: String(p.engine ?? ''),
+        fixtureSetId: String(p.fixtureSetId ?? ''),
+      };
+    case 'progress':
+      return {
+        type: 'progress',
+        completed: Number(p.completed ?? 0),
+        total: Number(p.total ?? 0),
+        item: p.item as BenchmarkItemResult,
+      };
+    case 'done':
+      return { type: 'done', result: p.result as BenchmarkResult };
+    case 'error':
+      return { type: 'error', error: String(p.error ?? '未知错误') };
+    default:
+      return null;
+  }
 }
 
 /** 下载 Markdown 报告（直接触发浏览器下载） */

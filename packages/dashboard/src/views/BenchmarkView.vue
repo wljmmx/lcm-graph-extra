@@ -48,10 +48,11 @@ import {
   fetchBenchmarkDefaultUrl,
   fetchBenchmarkHistory,
   downloadBeirDatasetApi,
-  runBenchmark,
+  runBenchmarkStream,
   downloadBenchmarkMarkdown,
   type BenchmarkFixture,
   type BenchmarkResult,
+  type BenchmarkItemResult,
   type BenchmarkMode,
   type BenchmarkEngine,
   type FixtureSetId,
@@ -137,6 +138,26 @@ const loading = ref<boolean>(false);
 const result = ref<BenchmarkResult | null>(null);
 const errorMsg = ref<string>('');
 const activeTab = ref<string>('overview');
+
+// ===== 实时日志（SSE 流式）=====
+interface LiveLogEntry {
+  index: number;          // 序号（1-based）
+  fixtureId: string;
+  query: string;
+  category: string;
+  success: boolean;
+  latencyMs: number;
+  resultCount: number;
+  returnedDocIds: string[];
+  error?: string;
+  ceConclusion?: CeEngineDiagnostics['conclusion'];
+  ts: number;             // 接收时间戳
+}
+const liveLogs = ref<LiveLogEntry[]>([]);
+const liveCompleted = ref<number>(0);
+const liveTotal = ref<number>(0);
+const liveRunning = ref<boolean>(false);
+let streamController: AbortController | null = null;
 
 // ===== 历史记录 =====
 const history = ref<BenchmarkHistoryItem[]>([]);
@@ -227,22 +248,28 @@ async function downloadBeir(): Promise<void> {
   }
 }
 
-// ===== 执行压测 =====
+// ===== 执行压测（SSE 流式，逐条推送进度 + 完成后推送完整结果）=====
 async function executeBenchmark(): Promise<void> {
-  const effectiveBaseUrl = engine.value === 'qmd' ? baseUrl.value : dashboardBaseUrl.value;
   if (engine.value === 'qmd' && !baseUrl.value.trim()) {
     message.error('QMD MCP 地址不能为空');
     return;
   }
+  // 重置状态
   loading.value = true;
+  liveRunning.value = true;
   errorMsg.value = '';
   result.value = null;
+  liveLogs.value = [];
+  liveCompleted.value = 0;
+  liveTotal.value = 0;
 
-  try {
-    const finalBaseUrl = useCustomUrl.value
-      ? (engine.value === 'qmd' ? baseUrl.value.trim() : dashboardBaseUrl.value.trim())
-      : '';
-    const resp = await runBenchmark({
+  const finalBaseUrl = useCustomUrl.value
+    ? (engine.value === 'qmd' ? baseUrl.value.trim() : dashboardBaseUrl.value.trim())
+    : '';
+
+  // 用流式端点，每条 fixture 完成时即时更新日志面板
+  streamController = runBenchmarkStream(
+    {
       baseUrl: engine.value === 'qmd' ? finalBaseUrl : undefined,
       dashboardBaseUrl: engine.value === 'ce' ? finalBaseUrl : undefined,
       fixtureSetId: fixtureSetId.value,
@@ -253,33 +280,95 @@ async function executeBenchmark(): Promise<void> {
       mode: mode.value,
       engine: engine.value,
       concurrency: concurrency.value,
-    });
-    if (!resp.ok || !resp.result) {
-      errorMsg.value = resp.error ?? '压测失败';
-      message.error(errorMsg.value);
-    } else {
-      result.value = resp.result;
-      const coherence = result.value.summary.multiTurnSessions?.length ?? 0;
-      message.success(
-        `压测完成：${resp.result.summary.successCount}/${resp.result.summary.totalFixtures} 成功，` +
-        `平均 ${resp.result.summary.latency.avg.toFixed(0)}ms，P95 ${resp.result.summary.latency.p95}ms` +
-        (coherence > 0 ? `，${coherence} 条多轮会话` : ''),
-      );
-      activeTab.value = coherence > 0 ? 'multi-turn' : 'overview';
-      // 刷新历史列表
-      try {
-        const histResp = await fetchBenchmarkHistory();
-        if (histResp.ok) history.value = histResp.history;
-      } catch {
-        // 忽略历史刷新失败
-      }
-    }
-  } catch (e) {
-    errorMsg.value = e instanceof Error ? e.message : String(e);
-    message.error(`压测请求失败: ${errorMsg.value}`);
-  } finally {
+    },
+    {
+      onEvent: (event) => {
+        if (event.type === 'start') {
+          // 后端确认开始（total 尚未知）
+          return;
+        }
+        if (event.type === 'progress') {
+          liveTotal.value = event.total;
+          liveCompleted.value = event.completed;
+          const item: BenchmarkItemResult = event.item;
+          const entry: LiveLogEntry = {
+            index: liveLogs.value.length + 1,
+            fixtureId: item.fixtureId,
+            query: item.query,
+            category: item.category,
+            success: item.success,
+            latencyMs: item.latencyMs,
+            resultCount: item.resultCount,
+            returnedDocIds: item.returnedDocIds,
+            error: item.error,
+            ceConclusion: item.ceDiagnostics?.conclusion,
+            ts: Date.now(),
+          };
+          liveLogs.value = [...liveLogs.value, entry];
+          // 实时刷新 message（每条进度）
+          const pct = event.total > 0 ? Math.round((event.completed / event.total) * 100) : 0;
+          message.info(`[${event.completed}/${event.total}] ${pct}% - ${item.fixtureId} ${item.success ? '✓' : '✗'} ${item.latencyMs}ms`, { duration: 1500 });
+          return;
+        }
+        if (event.type === 'done') {
+          result.value = event.result;
+          const coherence = event.result.summary.multiTurnSessions?.length ?? 0;
+          message.success(
+            `压测完成：${event.result.summary.successCount}/${event.result.summary.totalFixtures} 成功，` +
+            `平均 ${event.result.summary.latency.avg.toFixed(0)}ms，P95 ${event.result.summary.latency.p95}ms` +
+            (coherence > 0 ? `，${coherence} 条多轮会话` : ''),
+          );
+          activeTab.value = coherence > 0 ? 'multi-turn' : 'overview';
+          loading.value = false;
+          liveRunning.value = false;
+          streamController = null;
+          // 刷新历史列表
+          void (async () => {
+            try {
+              const histResp = await fetchBenchmarkHistory();
+              if (histResp.ok) history.value = histResp.history;
+            } catch {
+              // 忽略历史刷新失败
+            }
+          })();
+          return;
+        }
+        if (event.type === 'error') {
+          errorMsg.value = event.error;
+          message.error(`压测失败: ${event.error}`);
+          loading.value = false;
+          liveRunning.value = false;
+          streamController = null;
+          return;
+        }
+      },
+      onError: (err) => {
+        errorMsg.value = err.message;
+        message.error(`压测请求失败: ${err.message}`);
+        loading.value = false;
+        liveRunning.value = false;
+        streamController = null;
+      },
+    },
+  );
+}
+
+// ===== 中断测试 =====
+function abortBenchmark(): void {
+  if (streamController) {
+    streamController.abort();
+    streamController = null;
+    liveRunning.value = false;
     loading.value = false;
+    message.warning('已中断压测（已完成的结果仍展示在日志面板）');
   }
+}
+
+// ===== 清空实时日志 =====
+function clearLiveLogs(): void {
+  liveLogs.value = [];
+  liveCompleted.value = 0;
+  liveTotal.value = 0;
 }
 
 // ===== 加载历史报告 =====
@@ -877,6 +966,9 @@ const hasMultiTurnMeta = computed(() =>
                 <NButton type="primary" size="small" :loading="loading" :disabled="loading" @click="executeBenchmark">
                   开始压测
                 </NButton>
+                <NButton v-if="liveRunning" type="error" size="small" ghost @click="abortBenchmark">
+                  中断
+                </NButton>
                 <NButton v-if="result" size="small" :disabled="loading" @click="downloadMd">
                   下载 Markdown
                 </NButton>
@@ -947,6 +1039,61 @@ const hasMultiTurnMeta = computed(() =>
           </NList>
         </NGi>
       </NGrid>
+    </NCard>
+
+    <!-- ===== 实时日志（SSE 流式，测试期间逐条展示）===== -->
+    <NCard v-if="liveRunning || liveLogs.length > 0" size="small" :bordered="true">
+      <div class="section-header" style="margin-bottom: 12px">
+        <h3 style="margin: 0; font-size: var(--fs-subtitle)">
+          实时日志
+          <NTag v-if="liveRunning" type="info" size="small" style="margin-left: 8px">运行中</NTag>
+          <NTag v-else type="success" size="small" style="margin-left: 8px">已完成</NTag>
+        </h3>
+        <NSpace :size="12" align="center">
+          <span class="muted" style="font-size: 12px">
+            进度 {{ liveCompleted }}/{{ liveTotal || '...' }}
+            <template v-if="liveTotal > 0">
+              （{{ Math.round((liveCompleted / liveTotal) * 100) }}%）
+            </template>
+          </span>
+          <NButton v-if="!liveRunning && liveLogs.length > 0" size="tiny" quaternary @click="clearLiveLogs">
+            清空日志
+          </NButton>
+        </NSpace>
+      </div>
+
+      <!-- 进度条 -->
+      <div class="live-progress" v-if="liveTotal > 0">
+        <div
+          class="live-progress-bar"
+          :style="{ width: `${(liveCompleted / liveTotal) * 100}%` }"
+          :class="{ 'is-running': liveRunning }"
+        />
+      </div>
+
+      <!-- 逐条日志 -->
+      <div class="live-log-list">
+        <div v-for="entry in liveLogs" :key="entry.index" class="live-log-entry" :class="{ 'is-fail': !entry.success }">
+          <span class="live-log-index">#{{ entry.index }}</span>
+          <NTag :type="entry.success ? 'success' : 'error'" size="tiny" style="min-width: 28px; justify-content: center">
+            {{ entry.success ? '✓' : '✗' }}
+          </NTag>
+          <span class="live-log-fixture">{{ entry.fixtureId }}</span>
+          <span class="live-log-query" :title="entry.query">{{ entry.query }}</span>
+          <span class="live-log-cat">{{ categoryLabel(entry.category) }}</span>
+          <NTag v-if="entry.ceConclusion" :type="ceDiagTagType(entry.ceConclusion)" size="tiny">
+            {{ ceDiagLabel(entry.ceConclusion) }}
+          </NTag>
+          <span class="live-log-count">{{ entry.resultCount }} 条</span>
+          <span class="live-log-latency" :class="latencyTagType(entry.latencyMs)">
+            {{ latencyLabel(entry.latencyMs) }}
+          </span>
+          <span v-if="entry.error" class="live-log-error" :title="entry.error">{{ entry.error }}</span>
+        </div>
+        <div v-if="liveLogs.length === 0 && liveRunning" class="live-log-empty">
+          等待第一条结果...
+        </div>
+      </div>
     </NCard>
 
     <!-- ===== 结果展示区 ===== -->
@@ -1416,5 +1563,104 @@ const hasMultiTurnMeta = computed(() =>
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
+}
+
+/* ===== 实时日志面板 ===== */
+.live-progress {
+  height: 6px;
+  background: var(--color-border, #e5e6eb);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.live-progress-bar {
+  height: 100%;
+  background: var(--color-primary, #2080f0);
+  transition: width 0.3s ease;
+  border-radius: 3px;
+}
+.live-progress-bar.is-running {
+  animation: live-progress-pulse 1.5s ease-in-out infinite;
+}
+@keyframes live-progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.live-log-list {
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border, #e5e6eb);
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: var(--color-card-bg, #fff);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.live-log-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--color-divider, #f0f0f0);
+}
+.live-log-entry:last-child {
+  border-bottom: none;
+}
+.live-log-entry.is-fail {
+  background: rgba(208, 48, 80, 0.05);
+  border-radius: 2px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.live-log-index {
+  color: var(--color-text-muted, #909399);
+  min-width: 36px;
+  font-size: 11px;
+}
+.live-log-fixture {
+  color: var(--color-text-secondary, #606266);
+  min-width: 70px;
+  font-size: 11px;
+}
+.live-log-query {
+  flex: 1;
+  color: var(--color-text-primary, #303133);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.live-log-cat {
+  color: var(--color-text-muted, #909399);
+  font-size: 11px;
+  min-width: 40px;
+}
+.live-log-count {
+  color: var(--color-text-secondary, #606266);
+  min-width: 50px;
+  text-align: right;
+  font-size: 11px;
+}
+.live-log-latency {
+  min-width: 60px;
+  text-align: right;
+  font-weight: 500;
+}
+.live-log-latency.success { color: var(--color-success, #18a058); }
+.live-log-latency.warning { color: var(--color-warning, #f0a020); }
+.live-log-latency.error { color: var(--color-error, #d03050); }
+.live-log-error {
+  color: var(--color-error, #d03050);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+.live-log-empty {
+  color: var(--color-text-muted, #909399);
+  text-align: center;
+  padding: 24px 0;
+  font-size: 12px;
 }
 </style>
