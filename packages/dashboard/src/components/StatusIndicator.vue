@@ -84,7 +84,8 @@ const symbol = computed(() => {
   font-size: var(--fs-caption);
   font-weight: 700;
   line-height: 1;
-  color: #fff;
+  /* v2.3.3：符号色用染色表面（白 + 1.5% 蓝），避免纯白 */
+  color: var(--color-surface);
 }
 .shape-circle {
   border-radius: var(--radius-full);

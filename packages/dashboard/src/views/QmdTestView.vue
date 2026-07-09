@@ -592,7 +592,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 }
 .stats-grid {
   padding: 12px;
-  background: var(--color-bg-secondary, rgba(0, 0, 0, 0.02));
+  background: var(--color-bg-secondary);
   border-radius: 6px;
 }
 .detail-section {
@@ -608,13 +608,13 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
   background-color: rgba(255, 77, 79, 0.06);
 }
 .error-cell {
-  color: var(--color-danger, #ff4d4f);
+  color: var(--color-danger);
   font-size: var(--fs-caption);
   word-break: break-all;
 }
 .interpretation-hint {
   padding: 8px 12px;
-  background: var(--color-bg-secondary, rgba(0, 0, 0, 0.02));
+  background: var(--color-bg-secondary);
   border-radius: 4px;
   font-size: var(--fs-caption);
   line-height: 1.6;
@@ -628,7 +628,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 .log-container {
   max-height: 500px;
   overflow-y: auto;
-  background: var(--color-bg-secondary, rgba(0, 0, 0, 0.03));
+  background: var(--color-bg-secondary);
   border-radius: 6px;
   padding: 8px 12px;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
@@ -642,7 +642,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
   padding: 1px 0;
 }
 .log-error {
-  color: var(--color-danger, #ff4d4f);
+  color: var(--color-danger);
 }
 .log-time {
   color: var(--color-text-secondary);

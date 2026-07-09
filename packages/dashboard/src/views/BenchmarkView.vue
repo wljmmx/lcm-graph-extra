@@ -1521,7 +1521,7 @@ const hasMultiTurnMeta = computed(() =>
   flex-wrap: wrap;
   gap: 4px;
   padding: 4px 8px;
-  background: var(--color-fill-light, rgba(0, 0, 0, 0.03));
+  background: var(--color-fill-light);
   border-radius: 4px;
 }
 .detail-section {
@@ -1537,7 +1537,7 @@ const hasMultiTurnMeta = computed(() =>
   background-color: rgba(255, 77, 79, 0.06);
 }
 .error-cell {
-  color: var(--color-danger, #ff4d4f);
+  color: var(--color-danger);
   font-size: var(--fs-caption);
   word-break: break-all;
 }
@@ -1551,8 +1551,8 @@ const hasMultiTurnMeta = computed(() =>
   max-width: 400px;
 }
 .manual-instructions {
-  background: var(--color-background-secondary, #f5f5f5);
-  border: 1px solid var(--color-border, #e0e0e0);
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
   padding: 12px;
   font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
@@ -1568,14 +1568,14 @@ const hasMultiTurnMeta = computed(() =>
 /* ===== 实时日志面板 ===== */
 .live-progress {
   height: 6px;
-  background: var(--color-border, #e5e6eb);
+  background: var(--color-border);
   border-radius: 3px;
   overflow: hidden;
   margin-bottom: 12px;
 }
 .live-progress-bar {
   height: 100%;
-  background: var(--color-primary, #2080f0);
+  background: var(--color-primary);
   transition: width 0.3s ease;
   border-radius: 3px;
 }
@@ -1589,11 +1589,11 @@ const hasMultiTurnMeta = computed(() =>
 .live-log-list {
   max-height: 360px;
   overflow-y: auto;
-  border: 1px solid var(--color-border, #e5e6eb);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
   padding: 4px 8px;
-  background: var(--color-card-bg, #fff);
-  font-family: var(--font-mono, monospace);
+  background: var(--color-card-bg);
+  font-family: var(--font-family-mono);
   font-size: 12px;
 }
 .live-log-entry {
@@ -1601,7 +1601,7 @@ const hasMultiTurnMeta = computed(() =>
   align-items: center;
   gap: 8px;
   padding: 4px 0;
-  border-bottom: 1px solid var(--color-divider, #f0f0f0);
+  border-bottom: 1px solid var(--color-divider);
 }
 .live-log-entry:last-child {
   border-bottom: none;

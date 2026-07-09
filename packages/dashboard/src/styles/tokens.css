@@ -4,10 +4,16 @@
  * 所有视觉原子（色板 / 字号 / 间距 / 圆角 / 阴影 / 动效）集中定义，
  * 组件通过 var(--token) 引用，避免硬编码、便于主题切换。
  *
+ * v2.3.3 色温系统（参考"高级感 UI"方法论）：
+ * - 中性色不再使用纯白/纯灰/纯黑，全部混入品牌色温度（冷色品牌，偏蓝）
+ * - 阴影不使用 rgba(0,0,0,...)，改用品牌色染色阴影 + 0 0 0 1px 发丝边框
+ * - 文字层级保留 WCAG AA 对比度，但色相偏向品牌冷暖方向
+ * - 补齐幽灵 token（card-bg / divider / bg-secondary / fill-light）消除纯灰 fallback
+ *
  * 暗色模式预留：[data-theme="dark"] 覆盖（S3 启用）。
  */
 :root {
-  /* ===== 色板 ===== */
+  /* ===== 色板（冷色品牌：偏蓝，参考 #2080f0） ===== */
   /* 主色（与 naive-ui primary 对齐；hover 由组件直接引用，pressed/suppl 由 naive-ui 派生） */
   --color-primary: #2080f0;
   --color-primary-hover: #4098fc;
@@ -17,20 +23,34 @@
   --color-warning: #f0a020;
   --color-danger: #d03050;
 
-  /* 文本（亮色背景） */
-  --color-text-primary: #1f2329;
-  --color-text-secondary: #4e5969;
+  /* 文本（亮色背景，偏冷蓝灰；仍满足 WCAG AA 4.5:1） */
+  --color-text-primary: #0f1520;     /* 近黑，偏蓝（原 #1f2329 偏中性） */
+  --color-text-secondary: #3a4560;   /* 偏蓝灰（原 #4e5969） */
   /* #6b7280 对比度 ~4.6:1，满足 WCAG AA 4.5:1（原 #86909c 仅 3.28:1） */
-  --color-text-tertiary: #6b7280;
+  --color-text-tertiary: #7a8ba0;    /* 冷灰蓝（原 #6b7280） */
 
-  /* 背景 */
-  --color-bg-base: #ffffff;
-  --color-bg-highlight: #fff3a0; /* 命中高亮（搜索词 mark） */
-  --color-bg-hover: rgba(0, 0, 0, 0.025);
+  /* 背景（白色 + 3% 品牌蓝，不再用纯白） */
+  --color-bg-base: #f4f6fa;         /* 页面底色：白 + 3% 蓝（原 #ffffff） */
+  --color-bg-highlight: #fff3a0;    /* 命中高亮（搜索词 mark，保持暖黄以区分语义） */
+  --color-bg-hover: rgba(32, 128, 240, 0.04); /* 悬停：品牌蓝低透明度（原 rgba(0,0,0,0.025)） */
 
-  /* 边框（分隔线由 naive-ui dividerColor 提供，不暴露 token） */
-  --color-border: #e5e6eb;
-  --color-border-strong: #c9cdd4;
+  /* 表面层级（卡片/弹层，白 + 1.5% 蓝） */
+  --color-surface: #fafbfd;         /* 卡片表面（naive-ui cardColor 对齐） */
+  --color-surface-2: #edf0f7;       /* 次级表面（表头/代码块背景） */
+  --color-card-bg: #fafbfd;         /* 别名，供组件引用（消除 #fff fallback） */
+  --color-bg-secondary: #edf0f7;    /* 别名（消除 rgba(0,0,0,...) fallback） */
+  --color-fill-light: rgba(32, 128, 240, 0.06); /* 轻填充（消除 rgba(0,0,0,0.03) fallback） */
+  --color-divider: #e4e8f5;         /* 分隔线（偏蓝，消除 #f0f0f0 fallback） */
+  --color-background-secondary: #edf0f7; /* 别名（消除 #f5f5f5 fallback） */
+
+  /* 边框（灰 + 5% 品牌蓝） */
+  --color-border: #e4e8f5;          /* 偏蓝（原 #e5e6eb 偏中性） */
+  --color-border-strong: #bcc6da;   /* 偏蓝（原 #c9cdd4） */
+
+  /* ===== 阴影（带品牌色温度：蓝色 rgba，含 0 0 0 1px 发丝边框） ===== */
+  --shadow-sm: 0 1px 3px rgba(30, 50, 100, 0.08), 0 0 0 1px rgba(30, 50, 100, 0.04);
+  --shadow-md: 0 4px 16px rgba(30, 50, 100, 0.10), 0 1px 4px rgba(30, 50, 100, 0.06);
+  --shadow-lg: 0 12px 40px rgba(30, 50, 100, 0.12), 0 2px 8px rgba(30, 50, 100, 0.06);
 
   /* ===== 字号层级（4px 基准网格） ===== */
   --fs-caption: 12px; /* 辅助说明、tag */
@@ -64,16 +84,33 @@
 
 /* ===== 暗色模式预留（S3 启用） ===== */
 [data-theme="dark"] {
+  /* 文字：保持亮色透明度方案，但叠加品牌蓝温度 */
   --color-text-primary: rgba(255, 255, 255, 0.92);
   --color-text-secondary: rgba(255, 255, 255, 0.72);
   --color-text-tertiary: rgba(255, 255, 255, 0.52);
 
-  --color-bg-base: #18181c;
+  /* 背景：深色 + 品牌蓝染色（不再用纯黑 #18181c，改用偏蓝深色） */
+  --color-bg-base: #14171f;          /* 深色 + 蓝调（原 #18181c 偏中性） */
   --color-bg-hover: rgba(255, 255, 255, 0.04);
   --color-bg-highlight: rgba(240, 160, 32, 0.28);
 
+  /* 表面：偏蓝深色 */
+  --color-surface: #1a1e2a;          /* 卡片表面（原 naive-ui cardColor #1f1f24） */
+  --color-surface-2: #232838;        /* 次级表面 */
+  --color-card-bg: #1a1e2a;
+  --color-bg-secondary: #232838;
+  --color-fill-light: rgba(255, 255, 255, 0.05);
+  --color-divider: rgba(255, 255, 255, 0.10);
+  --color-background-secondary: #232838;
+
+  /* 边框：偏蓝透明 */
   --color-border: rgba(255, 255, 255, 0.12);
   --color-border-strong: rgba(255, 255, 255, 0.2);
+
+  /* 阴影：深色模式下用更深的蓝 + 发丝边框 */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
 /* ===== 全局基础样式 ===== */

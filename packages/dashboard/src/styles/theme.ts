@@ -6,6 +6,8 @@
  *
  * 在 App.vue 中通过 <NConfigProvider :theme-overrides="lightThemeOverrides"> 注入。
  * ECharts 图表可通过 echartsThemeColors 直接引用。
+ *
+ * v2.3.3 色温系统：中性色全部混入品牌色温度（冷色品牌，偏蓝），不再使用纯白/纯灰。
  */
 import type { GlobalThemeOverrides } from 'naive-ui';
 
@@ -14,6 +16,7 @@ import type { GlobalThemeOverrides } from 'naive-ui';
  *
  * 关键：primary/success/warning/error/info 与 tokens.css 完全对齐，
  * naive-ui 自带 hover/pressed/suppl 由框架派生，此处只覆盖基色。
+ * v2.3.3：表面色从纯白 #ffffff 改为染色表面（白 + 1.5% 蓝），文字/边框/分割线偏品牌蓝。
  */
 export const lightThemeOverrides: GlobalThemeOverrides = {
   common: {
@@ -42,18 +45,23 @@ export const lightThemeOverrides: GlobalThemeOverrides = {
     infoColorPressed: '#56709a',
     infoColorSuppl: 'rgba(112, 144, 192, 0.12)',
 
-    textColorBase: '#1f2329',
-    textColor1: '#1f2329',
-    textColor2: '#4e5969',
-    textColor3: '#6b7280',
+    // 文字：偏冷蓝灰（与 tokens.css --color-text-* 对齐）
+    textColorBase: '#0f1520',
+    textColor1: '#0f1520',
+    textColor2: '#3a4560',
+    textColor3: '#7a8ba0',
 
-    bodyColor: '#ffffff',
-    cardColor: '#ffffff',
-    modalColor: '#ffffff',
-    popoverColor: '#ffffff',
+    // 表面：染色（白 + 1.5% 蓝），不再用纯白
+    bodyColor: '#f4f6fa',       // 页面底色 = --color-bg-base
+    cardColor: '#fafbfd',       // 卡片 = --color-surface
+    modalColor: '#fafbfd',
+    popoverColor: '#fafbfd',
+    tableColor: '#fafbfd',
+    tableHeaderColor: '#edf0f7', // 表头 = --color-surface-2
 
-    borderColor: '#e5e6eb',
-    dividerColor: '#f2f3f5',
+    // 边框/分割线：偏品牌蓝
+    borderColor: '#e4e8f5',      // = --color-border
+    dividerColor: '#e4e8f5',    // = --color-divider（原 #f2f3f5 偏中性）
 
     borderRadius: '6px',
     borderRadiusSmall: '4px',
@@ -69,6 +77,8 @@ export const lightThemeOverrides: GlobalThemeOverrides = {
     titleFontSizeSmall: '14px',
     paddingSmall: '12px 16px',
     borderRadius: '8px',
+    // 卡片使用染色阴影（带品牌色温度 + 发丝边框）
+    color: '#fafbfd',
   },
   Button: {
     borderRadiusMedium: '6px',
@@ -80,8 +90,8 @@ export const lightThemeOverrides: GlobalThemeOverrides = {
   DataTable: {
     borderRadius: '8px',
     fontSizeSmall: '13px',
-    thColor: '#f7f8fa',
-    thTextColor: '#4e5969',
+    thColor: '#edf0f7',         // 偏蓝表头（原 #f7f8fa）
+    thTextColor: '#3a4560',      // 偏蓝灰（原 #4e5969）
   },
 };
 
@@ -91,13 +101,18 @@ export const lightThemeOverrides: GlobalThemeOverrides = {
  * 注意：useTheme 中 `{ ...lightThemeOverrides, ...darkThemeOverrides }` 是浅合并，
  * 因此 darkThemeOverrides 必须显式覆盖 light 中所有需要变更的组件级配置
  * （如 DataTable.thColor），否则亮色字面值会穿透到暗色模式。
+ *
+ * v2.3.3：暗色表面改用偏蓝深色（原 #1f1f24 偏中性），与 tokens.css 对齐。
  */
 export const darkThemeOverrides: GlobalThemeOverrides = {
   common: {
-    bodyColor: '#18181c',
-    cardColor: '#1f1f24',
-    modalColor: '#1f1f24',
-    popoverColor: '#1f1f24',
+    // 表面：偏蓝深色（原 #18181c/#1f1f24 偏中性）
+    bodyColor: '#14171f',       // = --color-bg-base dark
+    cardColor: '#1a1e2a',       // = --color-surface dark
+    modalColor: '#1a1e2a',
+    popoverColor: '#1a1e2a',
+    tableColor: '#1a1e2a',
+    tableHeaderColor: '#232838', // = --color-surface-2 dark
 
     textColorBase: 'rgba(255, 255, 255, 0.92)',
     textColor1: 'rgba(255, 255, 255, 0.92)',
@@ -105,11 +120,14 @@ export const darkThemeOverrides: GlobalThemeOverrides = {
     textColor3: 'rgba(255, 255, 255, 0.52)',
 
     borderColor: 'rgba(255, 255, 255, 0.12)',
-    dividerColor: 'rgba(255, 255, 255, 0.08)',
+    dividerColor: 'rgba(255, 255, 255, 0.10)',
+  },
+  Card: {
+    color: '#1a1e2a',
   },
   DataTable: {
     // 显式覆盖亮色 thColor，避免浅合并穿透导致暗色表头呈浅灰
-    thColor: 'rgba(255, 255, 255, 0.04)',
+    thColor: '#232838',
     thTextColor: 'rgba(255, 255, 255, 0.72)',
   },
 };
@@ -148,6 +166,7 @@ export const echartsDarkThemeColors: string[] = [
  *
  * 注：axisLabel/legend fontSize 最小 12px，对齐 tokens.css 的 --fs-caption
  * （WCAG 1.4.4 最小字号要求）。
+ * v2.3.3：坐标轴/legend 字色对齐染色 token（偏蓝灰），splitLine 偏蓝。
  */
 export const echartsBaseOption = {
   textStyle: {
@@ -155,25 +174,25 @@ export const echartsBaseOption = {
       '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   },
   tooltip: {
-    backgroundColor: 'rgba(31, 35, 41, 0.92)',
+    backgroundColor: 'rgba(15, 21, 32, 0.92)',  // 偏蓝深色（原 rgba(31,35,41,0.92)）
     borderWidth: 0,
     textStyle: { color: '#fff', fontSize: 12 },
   },
   legend: {
-    textStyle: { color: '#4e5969', fontSize: 12 },
+    textStyle: { color: '#3a4560', fontSize: 12 },  // 偏蓝灰（原 #4e5969）
     icon: 'roundRect',
     itemWidth: 12,
     itemHeight: 8,
   },
   xAxis: {
-    axisLine: { lineStyle: { color: '#e5e6eb' } },
-    axisLabel: { color: '#86909c', fontSize: 12 },
+    axisLine: { lineStyle: { color: '#e4e8f5' } },  // 偏蓝（原 #e5e6eb）
+    axisLabel: { color: '#7a8ba0', fontSize: 12 },   // 冷灰蓝（原 #86909c 弃用色）
     splitLine: { show: false },
   },
   yAxis: {
     axisLine: { show: false },
-    axisLabel: { color: '#86909c', fontSize: 12 },
-    splitLine: { lineStyle: { color: '#f2f3f5', type: 'dashed' } },
+    axisLabel: { color: '#7a8ba0', fontSize: 12 },
+    splitLine: { lineStyle: { color: '#e4e8f5', type: 'dashed' } },  // 偏蓝（原 #f2f3f5）
   },
 };
 
@@ -188,8 +207,7 @@ export const echartsBaseOption = {
  *   - 次文本 rgba(255,255,255,0.72) = --color-text-secondary
  *   - 三级 rgba(255,255,255,0.52) = --color-text-tertiary
  *   - 边框 rgba(255,255,255,0.12) = --color-border
- *   - 分隔线 rgba(255,255,255,0.08) 直接以字面量给出（tokens.css 不再暴露 --color-divider，
- *     由 naive-ui common.dividerColor 统一管控）
+ *   - 分隔线 rgba(255,255,255,0.10) = --color-divider
  */
 export const echartsDarkBaseOption = {
   textStyle: {
@@ -197,7 +215,7 @@ export const echartsDarkBaseOption = {
       '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
   },
   tooltip: {
-    backgroundColor: 'rgba(50, 50, 55, 0.92)',
+    backgroundColor: 'rgba(26, 30, 42, 0.92)',  // 偏蓝深色（原 rgba(50,50,55,0.92)）
     borderWidth: 0,
     textStyle: { color: '#fff', fontSize: 12 },
   },
@@ -215,6 +233,6 @@ export const echartsDarkBaseOption = {
   yAxis: {
     axisLine: { show: false },
     axisLabel: { color: 'rgba(255, 255, 255, 0.52)', fontSize: 12 },
-    splitLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.08)', type: 'dashed' } },
+    splitLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.10)', type: 'dashed' } },
   },
 };
