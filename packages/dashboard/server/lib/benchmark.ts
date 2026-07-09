@@ -1,21 +1,28 @@
 /**
- * Benchmark Runner —— 压测执行引擎。
+ * Benchmark Runner —— 压测执行引擎（v2.3.0 扩展）。
+ *
+ * v2.3.0 新增：
+ * - 多测试集选择：project-scenarios / ce-multi-turn / beir-nfcorpus / beir-scifact
+ * - 多轮会话测试：ce-multi-turn 展开为按轮次执行，分析上下文累积召回变化
+ * - CE 能力维度指标：多轮连贯性（recall trend）、压力分级、压缩触发检测
+ * - 查询引擎扩展：支持通过 dashboard /api/memory/search 测试 CE 多引擎并行检索（L1+L2+L3）
  *
  * 职责：
- * - 加载测试集（内置或用户自定义）
+ * - 加载测试集（内置 project-scenarios / ce-multi-turn / BEIR 在线下载）
  * - 逐条执行查询（串行，避免并发干扰延迟测量）
  * - 采集每条查询的延迟、结果数、返回的 docids
  * - 计算召回率（若 fixture 提供 expectedDocIds）
  * - 聚合统计：P50/P90/P95/P99 延迟、avg/min/max、成功率、召回率分布
+ * - 多轮会话分析：按 sessionId 分组，计算 recall 随轮次的变化趋势
  * - 输出 BenchmarkResult 供报告生成器使用
- *
- * 设计：
- * - runner 本身不持久化，持久化由路由层负责（写入 benchmark_results.db）
- * - runner 不依赖 fastify，可独立测试
- * - 支持 onProgress 回调，用于实时推送执行进度
  */
 import type { BenchmarkFixture } from './benchmark-fixtures.js';
-import { BUILTIN_FIXTURES } from './benchmark-fixtures.js';
+import {
+  PROJECT_SCENARIO_FIXTURES,
+  CE_MULTI_TURN_FIXTURES,
+  flattenMultiTurnFixtures,
+  type FixtureSetId,
+} from './benchmark-fixtures.js';
 
 // ---------------------------------------------------------------------------
 // 类型定义
@@ -24,8 +31,12 @@ import { BUILTIN_FIXTURES } from './benchmark-fixtures.js';
 export interface BenchmarkRunnerOptions {
   /** QMD 服务 base URL（如 http://127.0.0.1:8081） */
   qmdBaseUrl: string;
-  /** 自定义测试集（不传则用内置 BUILTIN_FIXTURES） */
+  /** 自定义测试集（不传则按 fixtureSetId 加载内置） */
   fixtures?: BenchmarkFixture[];
+  /** 测试集 ID（决定加载哪个内置集，默认 project-scenarios） */
+  fixtureSetId?: FixtureSetId;
+  /** BEIR 子集大小（仅 beir-* 有效，默认 200） */
+  beirSubsetSize?: number;
   /** 每条查询的 limit（默认 5） */
   limit?: number;
   /** 单次查询超时（默认 10s） */
@@ -34,6 +45,10 @@ export interface BenchmarkRunnerOptions {
   rerank?: boolean;
   /** 查询模式：'rest' 直接 REST /query，'mcp' 走 MCP /mcp */
   mode?: 'rest' | 'mcp';
+  /** 查询引擎：'qmd' 直接调 QMD /query，'ce' 调 dashboard /api/memory/search 多引擎并行 */
+  engine?: 'qmd' | 'ce';
+  /** dashboard base URL（engine='ce' 时使用，默认 http://127.0.0.1:7421） */
+  dashboardBaseUrl?: string;
   /** 并发数（默认 1，串行）。>1 时并发执行但延迟测量仍按单条计算 */
   concurrency?: number;
   /** 进度回调 */
@@ -72,7 +87,16 @@ export interface BenchmarkItemResult {
     title?: string;
     score?: number;
     snippet?: string;
+    source?: string;
   }>;
+  /** 多轮会话：轮次索引（0-based，非多轮会话为 undefined） */
+  turnIndex?: number;
+  /** 多轮会话：总轮次数 */
+  turnTotal?: number;
+  /** 多轮会话：轮次角色（opening/followup/clarify/recall/compress） */
+  turnRole?: string;
+  /** 多轮会话：会话 ID */
+  sessionId?: string;
 }
 
 export interface BenchmarkLatencyStats {
@@ -98,6 +122,28 @@ export interface BenchmarkCategoryStats {
   avgRecall: number | null;
   /** 有 expectedDocIds 的用例数 */
   recallEvaluated: number;
+}
+
+/** 多轮会话统计（CE 能力维度） */
+export interface MultiTurnSessionStats {
+  /** 会话 ID */
+  sessionId: string;
+  /** 会话分类 */
+  category: string;
+  /** 总轮次数 */
+  turnCount: number;
+  /** 成功轮次数 */
+  successCount: number;
+  /** 平均延迟 */
+  avgLatencyMs: number;
+  /** 召回率随轮次变化（按 turnIndex 排序，null 表示该轮无 expectedDocIds） */
+  recallByTurn: Array<number | null>;
+  /** 结果数随轮次变化 */
+  resultCountByTurn: number[];
+  /** 延迟随轮次变化 */
+  latencyByTurn: number[];
+  /** 上下文连贯性评分（followup 轮召回 opening 轮文档的比例，0-1，无评估时为 null） */
+  coherenceScore: number | null;
 }
 
 export interface BenchmarkSummary {
@@ -133,6 +179,8 @@ export interface BenchmarkSummary {
   } | null;
   /** 按分类统计 */
   byCategory: BenchmarkCategoryStats[];
+  /** 多轮会话统计（CE 能力维度，仅 ce-multi-turn 或含 sessionId 的用例有值） */
+  multiTurnSessions?: MultiTurnSessionStats[];
 }
 
 export interface BenchmarkResult {
@@ -146,11 +194,13 @@ export interface BenchmarkResult {
   options: {
     qmdBaseUrl: string;
     mode: string;
+    engine: string;
     limit: number;
     timeoutMs: number;
     rerank: boolean;
     concurrency: number;
-    fixturesSource: 'builtin' | 'custom' | 'mixed';
+    fixtureSetId: string;
+    fixturesSource: string;
     fixturesCount: number;
   };
   /** 汇总统计 */
@@ -212,7 +262,34 @@ function calcRecallPrecision(
 }
 
 // ---------------------------------------------------------------------------
-// REST 查询
+// 测试集加载
+// ---------------------------------------------------------------------------
+
+/** 按 fixtureSetId 加载内置测试集 */
+export async function loadFixtures(
+  fixtureSetId: FixtureSetId,
+  beirSubsetSize?: number,
+  onBeirProgress?: (phase: string, progress?: number) => void,
+): Promise<BenchmarkFixture[]> {
+  switch (fixtureSetId) {
+    case 'project-scenarios':
+      return PROJECT_SCENARIO_FIXTURES;
+    case 'ce-multi-turn':
+      // 展开多轮会话为单轮 fixture 列表
+      return flattenMultiTurnFixtures(CE_MULTI_TURN_FIXTURES);
+    case 'beir-nfcorpus':
+    case 'beir-scifact': {
+      const datasetName = fixtureSetId.replace('beir-', '');
+      const { getBeirFixtures } = await import('./benchmark-beir.js');
+      return getBeirFixtures(datasetName, beirSubsetSize, onBeirProgress);
+    }
+    default:
+      return PROJECT_SCENARIO_FIXTURES;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 查询执行
 // ---------------------------------------------------------------------------
 
 interface QmdQueryItem {
@@ -222,8 +299,10 @@ interface QmdQueryItem {
   score?: number;
   snippet?: string;
   line?: number;
+  source?: string;
 }
 
+/** QMD REST /query 查询 */
 async function restQuery(
   baseUrl: string,
   fixture: BenchmarkFixture,
@@ -256,6 +335,47 @@ async function restQuery(
   return { items, latencyMs: Date.now() - start };
 }
 
+/** CE 多引擎并行查询（通过 dashboard /api/memory/search） */
+async function ceSearch(
+  dashboardBaseUrl: string,
+  fixture: BenchmarkFixture,
+  limit: number,
+  timeoutMs: number,
+): Promise<{ items: QmdQueryItem[]; latencyMs: number }> {
+  const start = Date.now();
+  const url = `${dashboardBaseUrl}/api/memory/search?q=${encodeURIComponent(fixture.query)}&engines=all&limit=${limit}`;
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!resp.ok) {
+    throw new Error(`CE /api/memory/search HTTP ${resp.status} ${resp.statusText}`);
+  }
+  const data = (await resp.json()) as {
+    results?: {
+      lcm?: QmdQueryItem[];
+      qmd?: QmdQueryItem[];
+      neo4j?: QmdQueryItem[];
+    };
+  };
+  // 合并三引擎结果
+  const items: QmdQueryItem[] = [];
+  const lcmResults = data?.results?.lcm ?? [];
+  const qmdResults = data?.results?.qmd ?? [];
+  const neo4jResults = data?.results?.neo4j ?? [];
+  for (const r of lcmResults) {
+    items.push({ ...r, source: 'lcm' });
+  }
+  for (const r of qmdResults) {
+    items.push({ ...r, source: 'qmd' });
+  }
+  for (const r of neo4jResults) {
+    items.push({ ...r, source: 'neo4j' });
+  }
+  return { items, latencyMs: Date.now() - start };
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -265,11 +385,26 @@ async function restQuery(
  * 串行执行每条 fixture，采集延迟/结果数/docids/召回率。
  */
 export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<BenchmarkResult> {
-  const fixtures = opts.fixtures ?? BUILTIN_FIXTURES;
+  // 加载测试集
+  let fixtures: BenchmarkFixture[];
+  let fixtureSetId: string;
+  if (opts.fixtures) {
+    fixtures = opts.fixtures;
+    fixtureSetId = 'custom';
+  } else if (opts.fixtureSetId) {
+    fixtureSetId = opts.fixtureSetId;
+    fixtures = await loadFixtures(opts.fixtureSetId, opts.beirSubsetSize, opts.onProgress as ((phase: string, progress?: number) => void) | undefined);
+  } else {
+    fixtureSetId = 'project-scenarios';
+    fixtures = PROJECT_SCENARIO_FIXTURES;
+  }
+
   const limit = opts.limit ?? 5;
   const timeoutMs = opts.timeoutMs ?? 10_000;
   const rerank = opts.rerank ?? true;
   const mode = opts.mode ?? 'rest';
+  const engine = opts.engine ?? 'qmd';
+  const dashboardBaseUrl = opts.dashboardBaseUrl ?? 'http://127.0.0.1:7421';
   const concurrency = Math.max(1, opts.concurrency ?? 1);
   const startedAt = new Date();
   const startMs = Date.now();
@@ -287,9 +422,10 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     const batchResults = await Promise.all(
       batch.map(async (fixture) => {
         try {
-          const { items: rawItems, latencyMs } = await restQuery(
-            opts.qmdBaseUrl, fixture, limit, timeoutMs, rerank,
-          );
+          const { items: rawItems, latencyMs } = engine === 'ce'
+            ? await ceSearch(dashboardBaseUrl, fixture, limit, timeoutMs)
+            : await restQuery(opts.qmdBaseUrl, fixture, limit, timeoutMs, rerank);
+
           const returnedDocIds = rawItems
             .map((r) => r.docid)
             .filter((id): id is string => typeof id === 'string' && id.length > 0);
@@ -298,6 +434,14 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
           const { recall, precision, f1 } = hasExpected
             ? calcRecallPrecision(returnedDocIds, expectedDocIds)
             : { recall: 0, precision: 0, f1: 0 };
+
+          // 提取多轮会话元数据（若 fixture 来自 ce-multi-turn 展开）
+          const multiTurnMeta = fixture as BenchmarkFixture & {
+            turnIndex?: number;
+            turnTotal?: number;
+            role?: string;
+            sessionId?: string;
+          };
 
           const result: BenchmarkItemResult = {
             fixtureId: fixture.id,
@@ -317,10 +461,21 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
               title: r.title,
               score: r.score,
               snippet: r.snippet,
+              source: r.source,
             })),
+            turnIndex: multiTurnMeta.turnIndex,
+            turnTotal: multiTurnMeta.turnTotal,
+            turnRole: multiTurnMeta.role,
+            sessionId: multiTurnMeta.sessionId,
           };
           return result;
         } catch (err) {
+          const multiTurnMeta = fixture as BenchmarkFixture & {
+            turnIndex?: number;
+            turnTotal?: number;
+            role?: string;
+            sessionId?: string;
+          };
           const result: BenchmarkItemResult = {
             fixtureId: fixture.id,
             query: fixture.query,
@@ -334,6 +489,10 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
             precision: null,
             f1: null,
             error: err instanceof Error ? err.message : String(err),
+            turnIndex: multiTurnMeta.turnIndex,
+            turnTotal: multiTurnMeta.turnTotal,
+            turnRole: multiTurnMeta.role,
+            sessionId: multiTurnMeta.sessionId,
           };
           return result;
         }
@@ -412,6 +571,53 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     };
   }).sort((a, b) => b.total - a.total);
 
+  // 多轮会话统计（CE 能力维度）
+  const sessionItems = items.filter((i) => i.sessionId);
+  const sessionIds = [...new Set(sessionItems.map((i) => i.sessionId!))];
+  const multiTurnSessions: MultiTurnSessionStats[] = sessionIds.map((sid) => {
+    const sessionItemsSorted = sessionItems
+      .filter((i) => i.sessionId === sid)
+      .sort((a, b) => (a.turnIndex ?? 0) - (b.turnIndex ?? 0));
+    const turnCount = sessionItemsSorted.length;
+    const successCount = sessionItemsSorted.filter((i) => i.success).length;
+    const latencies = sessionItemsSorted.map((i) => i.latencyMs);
+    const recallByTurn = sessionItemsSorted.map((i) => i.recall);
+    const resultCountByTurn = sessionItemsSorted.map((i) => i.resultCount);
+    const latencyByTurn = latencies;
+    const avgLatencyMs = latencies.length > 0
+      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+      : 0;
+
+    // 上下文连贯性：followup 轮召回 opening 轮文档的比例
+    let coherenceScore: number | null = null;
+    const openingTurn = sessionItemsSorted.find((i) => i.turnRole === 'opening');
+    const followupTurns = sessionItemsSorted.filter((i) => i.turnRole === 'followup' || i.turnRole === 'recall');
+    if (openingTurn && openingTurn.returnedDocIds.length > 0 && followupTurns.length > 0) {
+      const openingDocs = new Set(openingTurn.returnedDocIds);
+      const coherenceScores = followupTurns
+        .filter((t) => t.returnedDocIds.length > 0)
+        .map((t) => {
+          const overlap = t.returnedDocIds.filter((d) => openingDocs.has(d)).length;
+          return overlap / openingTurn.returnedDocIds.length;
+        });
+      if (coherenceScores.length > 0) {
+        coherenceScore = coherenceScores.reduce((a, b) => a + b, 0) / coherenceScores.length;
+      }
+    }
+
+    return {
+      sessionId: sid,
+      category: sessionItemsSorted[0]?.category ?? '',
+      turnCount,
+      successCount,
+      avgLatencyMs,
+      recallByTurn,
+      resultCountByTurn,
+      latencyByTurn,
+      coherenceScore,
+    };
+  });
+
   const summary: BenchmarkSummary = {
     totalFixtures: fixtures.length,
     successCount: successItems.length,
@@ -438,6 +644,7 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     compressionRatio,
     recall: recallStats,
     byCategory,
+    multiTurnSessions: multiTurnSessions.length > 0 ? multiTurnSessions : undefined,
   };
 
   const runId = `${startedAt.toISOString().replace(/[:.]/g, '-')}-${Math.random().toString(36).slice(2, 8)}`;
@@ -449,11 +656,13 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     options: {
       qmdBaseUrl: opts.qmdBaseUrl,
       mode,
+      engine,
       limit,
       timeoutMs,
       rerank,
       concurrency,
-      fixturesSource: opts.fixtures ? 'custom' : 'builtin',
+      fixtureSetId,
+      fixturesSource: opts.fixtures ? 'custom' : fixtureSetId,
       fixturesCount: fixtures.length,
     },
     summary,

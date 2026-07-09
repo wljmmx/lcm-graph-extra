@@ -1,19 +1,21 @@
 <script setup lang="ts">
 /**
- * Benchmark 性能压测页面（v2.2.0）。
+ * Benchmark CE 引擎能力压测页面（v2.3.0）。
  *
  * 功能：
- * - 配置区：QMD 地址（系统配置/手动）+ limit + 超时 + rerank + 模式 + 并发数
- * - 测试集预览：内置 20 条 fixtures，按分类统计 + 列表展示
- * - 执行：调用 POST /api/benchmark/run，等待返回完整 BenchmarkResult
- * - 结果可视化（4 个 Tab）：
- *   1. 概览：KPI 卡片（成功率/平均延迟/P95/总耗时/tokens/压缩率/召回率）
- *   2. 性能分布：延迟分布柱状图（P50/P90/P95/P99/max）+ 按分类延迟箱线图
- *   3. Tokens & 召回率：tokens 消耗饼图 + 召回率柱状图 + 压缩率展示
- *   4. 逐条详情 + 失败用例：完整列表，可下载 Markdown 报告
+ * - 测试集选择：project-scenarios / ce-multi-turn / beir-nfcorpus / beir-scifact
+ * - 引擎选择：qmd（直查 QMD /query）/ ce（dashboard /api/memory/search 三引擎并行）
+ * - BEIR 预下载：BEIR 测试集需在线下载，提供下载状态 + 触发按钮
+ * - 配置区：地址（系统配置/手动）+ limit + 超时 + rerank + 模式 + 并发数
+ * - 结果可视化（5 个 Tab）：
+ *   1. 概览：KPI 卡片（成功率/平均延迟/P95/总耗时/tokens/压缩率/召回率/连贯性）
+ *   2. 性能分布：延迟分布柱状图 + 按分类延迟 + 逐条散点图
+ *   3. Tokens & 召回率：tokens 饼图 + 召回率柱状图 + 压缩率展示
+ *   4. CE 多轮会话分析：会话汇总表 + Recall by turn 趋势图 + Latency by turn 柱状图（仅 ce-multi-turn）
+ *   5. 逐条详情 + 失败用例：完整列表，可下载 Markdown 报告
  * - 历史记录：侧边列表，可点击查看历史报告
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import {
   NCard,
   NSpace,
@@ -36,21 +38,26 @@ import {
   NList,
   NListItem,
   NThing,
-  NDivider,
   NSpin,
   useMessage,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
 import {
+  fetchBenchmarkFixtureSets,
   fetchBenchmarkFixtures,
   fetchBenchmarkDefaultUrl,
   fetchBenchmarkHistory,
+  downloadBeirDatasetApi,
   runBenchmark,
   downloadBenchmarkMarkdown,
   type BenchmarkFixture,
   type BenchmarkResult,
   type BenchmarkMode,
+  type BenchmarkEngine,
+  type FixtureSetId,
+  type FixtureSetMeta,
   type BenchmarkHistoryItem,
+  type MultiTurnSessionStats,
 } from '../api/benchmark';
 
 const message = useMessage();
@@ -63,10 +70,22 @@ const timeoutMs = ref<number>(10000);
 const rerank = ref<boolean>(true);
 const mode = ref<BenchmarkMode>('rest');
 const concurrency = ref<number>(1);
+const engine = ref<BenchmarkEngine>('qmd');
+const dashboardBaseUrl = ref<string>('');
+
+// 测试集选择
+const fixtureSetId = ref<FixtureSetId>('project-scenarios');
+const fixtureSets = ref<FixtureSetMeta[]>([]);
+const beirSubsetSize = ref<number>(200);
 
 const modeOptions = [
   { label: 'REST /query（推荐，稳定快速）', value: 'rest' as BenchmarkMode },
   { label: 'MCP /mcp（完整握手 + tools/call，易超时）', value: 'mcp' as BenchmarkMode },
+];
+
+const engineOptions = [
+  { label: 'QMD 直查 /query（L2 hybrid 检索）', value: 'qmd' as BenchmarkEngine },
+  { label: 'CE 多引擎并行（L1 lcm + L2 qmd + L3 neo4j）', value: 'ce' as BenchmarkEngine },
 ];
 
 const concurrencyOptions = [
@@ -76,10 +95,40 @@ const concurrencyOptions = [
   { label: '8（高并发，注意 QMD 排队）', value: 8 },
 ];
 
+const fixtureSetOptions = computed(() =>
+  fixtureSets.value.map((s) => ({
+    label: `${s.name}${s.count ? `（${s.count} 条）` : ''}${s.type === 'beir' ? (s.cached ? ' ✓已缓存' : ' ⬇需下载') : ''}`,
+    value: s.id,
+  })),
+);
+
+// 当前选中的测试集元数据
+const currentFixtureSet = computed(() =>
+  fixtureSets.value.find((s) => s.id === fixtureSetId.value) ?? null,
+);
+
+// 地址输入 computed（根据引擎路由到 baseUrl / dashboardBaseUrl）
+const currentAddress = computed<string>({
+  get: () => engine.value === 'qmd' ? baseUrl.value : dashboardBaseUrl.value,
+  set: (val: string) => {
+    if (engine.value === 'qmd') baseUrl.value = val;
+    else dashboardBaseUrl.value = val;
+  },
+});
+
+// 是否为 BEIR 测试集
+const isBeirSet = computed(() =>
+  fixtureSetId.value === 'beir-nfcorpus' || fixtureSetId.value === 'beir-scifact',
+);
+
 // ===== 测试集状态 =====
 const fixtures = ref<BenchmarkFixture[]>([]);
 const categoryStats = ref<Record<string, number>>({});
 const fixturesLoading = ref<boolean>(false);
+const beirMessage = ref<string>('');
+
+// ===== BEIR 下载状态 =====
+const beirDownloading = ref<boolean>(false);
 
 // ===== 执行状态 =====
 const loading = ref<boolean>(false);
@@ -94,34 +143,87 @@ const history = ref<BenchmarkHistoryItem[]>([]);
 onMounted(async () => {
   fixturesLoading.value = true;
   try {
-    const [fixturesResp, urlResp, historyResp] = await Promise.all([
-      fetchBenchmarkFixtures(),
+    const [setsResp, urlResp, historyResp] = await Promise.all([
+      fetchBenchmarkFixtureSets(),
       fetchBenchmarkDefaultUrl(),
       fetchBenchmarkHistory(),
     ]);
-    if (fixturesResp.ok) {
-      fixtures.value = fixturesResp.fixtures;
-      categoryStats.value = fixturesResp.categoryStats;
+    if (setsResp.ok) {
+      fixtureSets.value = setsResp.fixtureSets;
     }
-    if (urlResp.ok && urlResp.defaultUrl) {
-      baseUrl.value = urlResp.defaultUrl;
+    if (urlResp.ok) {
+      baseUrl.value = urlResp.defaultQmdUrl;
+      dashboardBaseUrl.value = urlResp.defaultDashboardUrl;
     } else {
       baseUrl.value = 'http://127.0.0.1:8081';
+      dashboardBaseUrl.value = 'http://127.0.0.1:7421';
     }
     if (historyResp.ok) {
       history.value = historyResp.history;
     }
+    // 加载默认测试集 fixtures
+    await loadFixtureSetDetails(fixtureSetId.value);
   } catch (e) {
     baseUrl.value = 'http://127.0.0.1:8081';
+    dashboardBaseUrl.value = 'http://127.0.0.1:7421';
     message.warning(`初始化失败: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     fixturesLoading.value = false;
   }
 });
 
+// ===== 测试集切换时加载详情 =====
+async function loadFixtureSetDetails(setId: FixtureSetId): Promise<void> {
+  fixtures.value = [];
+  categoryStats.value = {};
+  beirMessage.value = '';
+  try {
+    const resp = await fetchBenchmarkFixtures(setId);
+    if (!resp.ok) return;
+    // 区分内置测试集和 BEIR 测试集响应
+    if ('type' in resp && resp.type === 'beir') {
+      beirMessage.value = resp.message;
+      // BEIR 测试集不预加载 fixtures（数量大），只在压测时加载
+    } else {
+      fixtures.value = resp.fixtures;
+      categoryStats.value = resp.categoryStats;
+    }
+  } catch (e) {
+    message.warning(`加载测试集失败: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+watch(fixtureSetId, (newId) => {
+  if (newId) loadFixtureSetDetails(newId);
+});
+
+// ===== BEIR 预下载 =====
+async function downloadBeir(): Promise<void> {
+  if (!isBeirSet.value) return;
+  const datasetName = fixtureSetId.value.replace('beir-', '') as 'nfcorpus' | 'scifact';
+  beirDownloading.value = true;
+  try {
+    const resp = await downloadBeirDatasetApi(datasetName);
+    if (resp.ok) {
+      message.success(resp.message ?? `${datasetName} 下载完成`);
+      // 刷新测试集列表（更新缓存状态）
+      const setsResp = await fetchBenchmarkFixtureSets();
+      if (setsResp.ok) fixtureSets.value = setsResp.fixtureSets;
+      await loadFixtureSetDetails(fixtureSetId.value);
+    } else {
+      message.error(resp.error ?? '下载失败');
+    }
+  } catch (e) {
+    message.error(`下载失败: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    beirDownloading.value = false;
+  }
+}
+
 // ===== 执行压测 =====
 async function executeBenchmark(): Promise<void> {
-  if (!baseUrl.value.trim()) {
+  const effectiveBaseUrl = engine.value === 'qmd' ? baseUrl.value : dashboardBaseUrl.value;
+  if (engine.value === 'qmd' && !baseUrl.value.trim()) {
     message.error('QMD MCP 地址不能为空');
     return;
   }
@@ -130,13 +232,19 @@ async function executeBenchmark(): Promise<void> {
   result.value = null;
 
   try {
-    const finalBaseUrl = useCustomUrl.value ? baseUrl.value.trim() : '';
+    const finalBaseUrl = useCustomUrl.value
+      ? (engine.value === 'qmd' ? baseUrl.value.trim() : dashboardBaseUrl.value.trim())
+      : '';
     const resp = await runBenchmark({
-      baseUrl: finalBaseUrl,
+      baseUrl: engine.value === 'qmd' ? finalBaseUrl : undefined,
+      dashboardBaseUrl: engine.value === 'ce' ? finalBaseUrl : undefined,
+      fixtureSetId: fixtureSetId.value,
+      beirSubsetSize: isBeirSet.value ? beirSubsetSize.value : undefined,
       limit: limit.value,
       timeoutMs: timeoutMs.value,
       rerank: rerank.value,
       mode: mode.value,
+      engine: engine.value,
       concurrency: concurrency.value,
     });
     if (!resp.ok || !resp.result) {
@@ -144,17 +252,17 @@ async function executeBenchmark(): Promise<void> {
       message.error(errorMsg.value);
     } else {
       result.value = resp.result;
+      const coherence = result.value.summary.multiTurnSessions?.length ?? 0;
       message.success(
         `压测完成：${resp.result.summary.successCount}/${resp.result.summary.totalFixtures} 成功，` +
-        `平均 ${resp.result.summary.latency.avg.toFixed(0)}ms，P95 ${resp.result.summary.latency.p95}ms`,
+        `平均 ${resp.result.summary.latency.avg.toFixed(0)}ms，P95 ${resp.result.summary.latency.p95}ms` +
+        (coherence > 0 ? `，${coherence} 条多轮会话` : ''),
       );
-      activeTab.value = 'overview';
+      activeTab.value = coherence > 0 ? 'multi-turn' : 'overview';
       // 刷新历史列表
       try {
         const histResp = await fetchBenchmarkHistory();
-        if (histResp.ok) {
-          history.value = histResp.history;
-        }
+        if (histResp.ok) history.value = histResp.history;
       } catch {
         // 忽略历史刷新失败
       }
@@ -229,6 +337,12 @@ function recallTagType(recall: number): 'success' | 'warning' | 'error' {
   return 'error';
 }
 
+function coherenceTagType(score: number): 'success' | 'warning' | 'error' {
+  if (score >= 0.7) return 'success';
+  if (score >= 0.4) return 'warning';
+  return 'error';
+}
+
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ` +
@@ -247,8 +361,31 @@ function categoryLabel(cat: string): string {
   return map[cat] ?? cat;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 // ===== 派生数据：结果摘要 =====
 const summary = computed(() => result.value?.summary ?? null);
+
+// 多轮会话列表
+const multiTurnSessions = computed<MultiTurnSessionStats[]>(() =>
+  summary.value?.multiTurnSessions ?? [],
+);
+
+// 平均连贯性评分
+const avgCoherence = computed<number | null>(() => {
+  const scores = multiTurnSessions.value
+    .map((s) => s.coherenceScore)
+    .filter((v): v is number => v !== null);
+  if (scores.length === 0) return null;
+  return scores.reduce((a, b) => a + b, 0) / scores.length;
+});
+
+// 是否显示多轮会话 Tab
+const showMultiTurnTab = computed(() => multiTurnSessions.value.length > 0);
 
 // ===== ECharts: 延迟分布柱状图（P50/P90/P95/P99/max） =====
 const latencyDistributionOption = computed(() => {
@@ -431,12 +568,125 @@ const itemsLatencyOption = computed(() => {
   };
 });
 
+// ===== ECharts: 多轮会话 Recall by turn 趋势图（折线，每条会话一条） =====
+const multiTurnRecallOption = computed(() => {
+  const sessions = multiTurnSessions.value.filter((s) => s.recallByTurn.some((r) => r !== null));
+  if (sessions.length === 0) return {};
+  const maxTurns = Math.max(...sessions.map((s) => s.recallByTurn.length));
+  const xLabels = Array.from({ length: maxTurns }, (_, i) => `T${i + 1}`);
+  return {
+    title: { text: 'Recall 随轮次变化趋势', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        let html = `轮次: ${params[0].name}<br/>`;
+        for (const p of params) {
+          const v = p.value;
+          html += `${p.seriesName}: ${v === null || v === undefined ? 'N/A' : (v * 100).toFixed(0) + '%'}<br/>`;
+        }
+        return html;
+      },
+    },
+    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 60, right: 20, top: 50, bottom: 60 },
+    xAxis: { type: 'category', data: xLabels, name: '轮次' },
+    yAxis: {
+      type: 'value',
+      name: '召回率',
+      min: 0,
+      max: 1,
+      axisLabel: { formatter: (v: number) => `${(v * 100).toFixed(0)}%` },
+    },
+    series: sessions.map((s) => ({
+      name: s.sessionId,
+      type: 'line',
+      data: s.recallByTurn.map((r) => r),
+      connectNulls: false,
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 6,
+    })),
+  };
+});
+
+// ===== ECharts: 多轮会话 Latency by turn 柱状图 =====
+const multiTurnLatencyOption = computed(() => {
+  const sessions = multiTurnSessions.value;
+  if (sessions.length === 0) return {};
+  const maxTurns = Math.max(...sessions.map((s) => s.latencyByTurn.length));
+  const xLabels = Array.from({ length: maxTurns }, (_, i) => `T${i + 1}`);
+  return {
+    title: { text: '延迟随轮次变化', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        let html = `轮次: ${params[0].name}<br/>`;
+        for (const p of params) {
+          html += `${p.seriesName}: ${latencyLabel(p.value)}<br/>`;
+        }
+        return html;
+      },
+    },
+    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 60, right: 20, top: 50, bottom: 60 },
+    xAxis: { type: 'category', data: xLabels, name: '轮次' },
+    yAxis: {
+      type: 'value',
+      name: 'ms',
+      axisLabel: { formatter: (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}`) },
+    },
+    series: sessions.map((s) => ({
+      name: s.sessionId,
+      type: 'bar',
+      data: s.latencyByTurn,
+    })),
+  };
+});
+
+// ===== ECharts: 多轮会话结果数 by turn（检测召回衰减） =====
+const multiTurnResultCountOption = computed(() => {
+  const sessions = multiTurnSessions.value;
+  if (sessions.length === 0) return {};
+  const maxTurns = Math.max(...sessions.map((s) => s.resultCountByTurn.length));
+  const xLabels = Array.from({ length: maxTurns }, (_, i) => `T${i + 1}`);
+  return {
+    title: { text: '结果数随轮次变化（召回衰减检测）', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        let html = `轮次: ${params[0].name}<br/>`;
+        for (const p of params) {
+          html += `${p.seriesName}: ${p.value} 条<br/>`;
+        }
+        return html;
+      },
+    },
+    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 60, right: 20, top: 50, bottom: 60 },
+    xAxis: { type: 'category', data: xLabels, name: '轮次' },
+    yAxis: { type: 'value', name: '结果数' },
+    series: sessions.map((s) => ({
+      name: s.sessionId,
+      type: 'line',
+      data: s.resultCountByTurn,
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 6,
+    })),
+  };
+});
+
 // ===== 失败用例列表 =====
 const failedItems = computed(() => result.value?.items.filter((i) => !i.success) ?? []);
 
 // ===== 有召回率评估的用例数 =====
 const recallEvaluatedCount = computed(() =>
   result.value?.items.filter((i) => i.recall !== null).length ?? 0,
+);
+
+// ===== 详情表是否显示多轮会话列 =====
+const hasMultiTurnMeta = computed(() =>
+  result.value?.items.some((i) => i.sessionId) ?? false,
 );
 </script>
 
@@ -445,11 +695,86 @@ const recallEvaluatedCount = computed(() =>
     <!-- ===== 配置区 ===== -->
     <NCard size="small" :bordered="true">
       <div class="section-header">
-        <h3 style="margin: 0; font-size: var(--fs-subtitle)">Benchmark 性能压测配置</h3>
-        <span class="muted">标准测试集 + 多轮会话召回率/tokens/压缩率/性能分布评估</span>
+        <h3 style="margin: 0; font-size: var(--fs-subtitle)">Benchmark CE 引擎能力压测</h3>
+        <span class="muted">标准测试集 + 多轮会话召回/连贯性/tokens/压缩率评估</span>
       </div>
 
       <NSpace vertical :size="12" style="margin-top: 12px">
+        <!-- 测试集选择 + 引擎选择 -->
+        <NGrid :cols="'1 m:3'" :x-gap="12" :y-gap="8" responsive="screen">
+          <NGi :span="2">
+            <div class="form-row">
+              <span class="form-label">测试集</span>
+              <NSelect
+                v-model:value="fixtureSetId"
+                :options="fixtureSetOptions"
+                size="small"
+                style="flex: 1"
+                placeholder="选择测试集"
+              />
+            </div>
+          </NGi>
+          <NGi>
+            <div class="form-row">
+              <span class="form-label">查询引擎</span>
+              <NSelect v-model:value="engine" :options="engineOptions" size="small" style="flex: 1" />
+            </div>
+          </NGi>
+        </NGrid>
+
+        <!-- 当前测试集说明 -->
+        <div v-if="currentFixtureSet" class="fixture-set-desc">
+          <NTag size="small" :type="currentFixtureSet.type === 'beir' ? 'success' : 'info'">
+            {{ currentFixtureSet.name }}
+          </NTag>
+          <span class="muted" style="margin-left: 8px">{{ currentFixtureSet.description }}</span>
+        </div>
+
+        <!-- BEIR 下载提示 -->
+        <NAlert
+          v-if="isBeirSet && currentFixtureSet && !currentFixtureSet.cached"
+          type="warning"
+          :show-icon="true"
+          title="BEIR 数据集未缓存"
+        >
+          <NSpace align="center" :size="8">
+            <span>首次使用需从 HuggingFace 下载（约 30s）：</span>
+            <NButton size="tiny" type="primary" :loading="beirDownloading" @click="downloadBeir">
+              立即下载
+            </NButton>
+          </NSpace>
+        </NAlert>
+        <NAlert
+          v-else-if="isBeirSet && currentFixtureSet?.cached"
+          type="success"
+          :show-icon="true"
+          title="BEIR 数据集已缓存"
+        >
+          <span v-if="currentFixtureSet.cacheInfo">
+            路径: <code style="font-size: 11px">{{ currentFixtureSet.cacheInfo.path }}</code> ·
+            大小: {{ formatBytes(currentFixtureSet.cacheInfo.sizeBytes) }} ·
+            文件数: {{ currentFixtureSet.cacheInfo.fileCount }}
+          </span>
+        </NAlert>
+
+        <!-- BEIR 子集大小 -->
+        <NGrid v-if="isBeirSet" :cols="'1 m:3'" :x-gap="12" :y-gap="8" responsive="screen">
+          <NGi>
+            <div class="form-row">
+              <span class="form-label">BEIR 子集大小</span>
+              <NInputNumber
+                v-model:value="beirSubsetSize"
+                :min="10"
+                :max="1000"
+                :step="50"
+                size="small"
+                style="width: 100%"
+              />
+              <span class="form-label-suffix">条查询</span>
+            </div>
+          </NGi>
+        </NGrid>
+
         <!-- 测试模式 + 并发 -->
         <NGrid :cols="'1 m:2'" :x-gap="12" :y-gap="8" responsive="screen">
           <NGi>
@@ -479,11 +804,11 @@ const recallEvaluatedCount = computed(() =>
           </NGi>
           <NGi>
             <div class="form-row">
-              <span class="form-label">QMD 地址</span>
+              <span class="form-label">{{ engine === 'qmd' ? 'QMD 地址' : 'Dashboard 地址' }}</span>
               <NInput
-                v-model:value="baseUrl"
+                v-model:value="currentAddress"
                 size="small"
-                placeholder="http://127.0.0.1:8081"
+                :placeholder="engine === 'qmd' ? 'http://127.0.0.1:8081' : 'http://127.0.0.1:7421'"
                 :disabled="!useCustomUrl"
                 style="flex: 1"
               />
@@ -542,19 +867,24 @@ const recallEvaluatedCount = computed(() =>
     <!-- ===== 测试集预览 + 历史记录 ===== -->
     <NCard size="small" :bordered="true">
       <div class="section-header">
-        <h3 style="margin: 0; font-size: var(--fs-subtitle)">标准测试集</h3>
+        <h3 style="margin: 0; font-size: var(--fs-subtitle)">测试集预览</h3>
         <NSpin v-if="fixturesLoading" size="small" />
-        <span v-else class="muted">共 {{ fixtures.length }} 条，覆盖 {{ Object.keys(categoryStats).length }} 个分类</span>
+        <span v-else-if="!isBeirSet" class="muted">共 {{ fixtures.length }} 条，覆盖 {{ Object.keys(categoryStats).length }} 个分类</span>
+        <span v-else-if="beirMessage" class="muted">{{ beirMessage }}</span>
       </div>
 
       <NGrid :cols="'1 m:3'" :x-gap="12" :y-gap="8" responsive="screen" style="margin-top: 12px">
-        <!-- 分类统计 -->
+        <!-- 分类统计 / BEIR 说明 -->
         <NGi>
-          <div class="detail-title">分类统计</div>
-          <NSpace :size="4" style="margin-top: 4px">
+          <div class="detail-title">{{ isBeirSet ? 'BEIR 说明' : '分类统计' }}</div>
+          <NSpace v-if="!isBeirSet" :size="4" style="margin-top: 4px">
             <NTag v-for="(count, cat) in categoryStats" :key="cat" size="small" type="info">
               {{ categoryLabel(cat) }}: {{ count }}
             </NTag>
+          </NSpace>
+          <NSpace v-else vertical :size="4" style="margin-top: 4px">
+            <span class="muted" style="font-size: 11px">业界公认信息检索基准（NeurIPS 2021）</span>
+            <span class="muted" style="font-size: 11px">子集大小: {{ beirSubsetSize }} 条查询</span>
           </NSpace>
         </NGi>
         <!-- 历史记录 -->
@@ -569,6 +899,10 @@ const recallEvaluatedCount = computed(() =>
                     <NTag :type="successRateTagType(h.summary.successRate)" size="tiny">
                       {{ (h.summary.successRate * 100).toFixed(0) }}%
                     </NTag>
+                    <NTag size="tiny" :type="h.options.engine === 'ce' ? 'success' : 'default'">
+                      {{ h.options.engine }}
+                    </NTag>
+                    <NTag size="tiny" type="info">{{ h.options.fixtureSetId }}</NTag>
                     <span style="font-size: 12px">{{ formatDateTime(h.startedAt) }}</span>
                     <span class="muted" style="font-size: 11px">
                       {{ h.summary.successCount }}/{{ h.summary.totalFixtures }} · {{ latencyLabel(h.summary.latency.avg) }} · P95 {{ latencyLabel(h.summary.latency.p95) }}
@@ -592,8 +926,8 @@ const recallEvaluatedCount = computed(() =>
         <span class="muted">
           运行 ID: {{ result.runId.slice(0, 19) }} ·
           {{ formatDateTime(result.startedAt) }} → {{ formatDateTime(result.endedAt) }} ·
-          模式 {{ result.options.mode }} · limit={{ result.options.limit }} ·
-          rerank={{ result.options.rerank }} · 并发={{ result.options.concurrency }}
+          引擎 {{ result.options.engine }} · 测试集 {{ result.options.fixtureSetId }} ·
+          模式 {{ result.options.mode }} · limit={{ result.options.limit }}
         </span>
       </div>
 
@@ -602,7 +936,7 @@ const recallEvaluatedCount = computed(() =>
         <NTabPane name="overview" tab="概览">
           <NSpace vertical :size="12">
             <!-- KPI 卡片 -->
-            <NGrid :cols="'2 s:3 m:4 l:7'" :x-gap="8" :y-gap="8" responsive="screen">
+            <NGrid :cols="'2 s:3 m:4 l:8'" :x-gap="8" :y-gap="8" responsive="screen">
               <NGi>
                 <NStatistic label="成功率">
                   <template #default>
@@ -656,15 +990,24 @@ const recallEvaluatedCount = computed(() =>
                 <NStatistic label="召回率" :value="summary.recall ? `${(summary.recall.avgRecall * 100).toFixed(1)}%` : 'N/A'">
                   <template #suffix>
                     <NTag v-if="summary.recall" :type="recallTagType(summary.recall.avgRecall)" size="small" style="margin-left: 4px">
-                      {{ summary.recall.evaluated }} 条评估
+                      {{ summary.recall.evaluated }} 条
                     </NTag>
-                    <span v-else class="muted" style="font-size: 11px; margin-left: 4px">无 expectedDocIds</span>
+                    <span v-else class="muted" style="font-size: 11px; margin-left: 4px">无标注</span>
+                  </template>
+                </NStatistic>
+              </NGi>
+              <NGi v-if="avgCoherence !== null">
+                <NStatistic label="连贯性" :value="`${(avgCoherence * 100).toFixed(1)}%`">
+                  <template #suffix>
+                    <NTag :type="coherenceTagType(avgCoherence)" size="small" style="margin-left: 4px">
+                      {{ multiTurnSessions.length }} 会话
+                    </NTag>
                   </template>
                 </NStatistic>
               </NGi>
             </NGrid>
 
-            <!-- 平均结果数 + 召回率/精确率/F1 详情 -->
+            <!-- 结果质量 + 配置摘要 -->
             <NGrid :cols="'1 m:2'" :x-gap="12" :y-gap="8" responsive="screen">
               <NGi>
                 <NCard size="small" :bordered="true">
@@ -683,7 +1026,11 @@ const recallEvaluatedCount = computed(() =>
                     <div v-if="summary.recall">
                       平均 F1: <strong>{{ (summary.recall.avgF1 * 100).toFixed(1) }}%</strong>
                     </div>
-                    <div v-else class="muted">无 expectedDocIds 标注，跳过召回率评估</div>
+                    <div v-if="avgCoherence !== null">
+                      平均上下文连贯性: <strong>{{ (avgCoherence * 100).toFixed(1) }}%</strong>
+                      <span class="muted" style="margin-left: 4px">followup 轮召回 opening 轮文档比例</span>
+                    </div>
+                    <div v-if="!summary.recall && avgCoherence === null" class="muted">无召回率/连贯性评估数据</div>
                   </NSpace>
                 </NCard>
               </NGi>
@@ -691,7 +1038,8 @@ const recallEvaluatedCount = computed(() =>
                 <NCard size="small" :bordered="true">
                   <div class="detail-title">配置摘要</div>
                   <NSpace vertical :size="4" style="margin-top: 8px">
-                    <div>测试集来源: <strong>{{ result.options.fixturesSource }}</strong>（{{ result.options.fixturesCount }} 条）</div>
+                    <div>查询引擎: <strong>{{ result.options.engine }}</strong></div>
+                    <div>测试集来源: <strong>{{ result.options.fixtureSetId }}</strong>（{{ result.options.fixturesCount }} 条）</div>
                     <div>查询模式: <strong>{{ result.options.mode }}</strong></div>
                     <div>limit: <strong>{{ result.options.limit }}</strong> · rerank: <strong>{{ result.options.rerank }}</strong></div>
                     <div>并发数: <strong>{{ result.options.concurrency }}</strong></div>
@@ -755,7 +1103,94 @@ const recallEvaluatedCount = computed(() =>
           </NSpace>
         </NTabPane>
 
-        <!-- ===== Tab 4: 逐条详情 ===== -->
+        <!-- ===== Tab 4: CE 多轮会话分析 ===== -->
+        <NTabPane v-if="showMultiTurnTab" name="multi-turn" tab="CE 多轮会话">
+          <NSpace vertical :size="16">
+            <!-- 连贯性评分概览 -->
+            <NCard size="small" :bordered="true">
+              <div class="detail-title">上下文连贯性评分</div>
+              <NSpace :size="12" align="center" style="margin-top: 8px">
+                <NStatistic v-if="avgCoherence !== null" label="平均连贯性" :value="`${(avgCoherence * 100).toFixed(1)}%`">
+                  <template #suffix>
+                    <NTag :type="coherenceTagType(avgCoherence)" size="small" style="margin-left: 4px">
+                      {{ multiTurnSessions.length }} 个会话
+                    </NTag>
+                  </template>
+                </NStatistic>
+                <span v-else class="muted">无连贯性评估数据（需 opening + followup 轮召回文档）</span>
+              </NSpace>
+              <div class="muted" style="margin-top: 8px; font-size: 11px">
+                连贯性评分 = followup/recall 轮召回 opening 轮文档的比例，衡量 CE 引擎在多轮会话中保持上下文可访问的能力（参考 lossless-claw assemble 能力维度）。
+              </div>
+            </NCard>
+
+            <!-- 会话汇总表 -->
+            <NCard size="small" :bordered="true">
+              <div class="detail-title">会话汇总</div>
+              <NTable size="small" :bordered="true" :single-line="false" style="margin-top: 6px">
+                <thead>
+                  <tr>
+                    <th>会话 ID</th>
+                    <th>分类</th>
+                    <th>轮次</th>
+                    <th>成功</th>
+                    <th>成功率</th>
+                    <th>平均延迟</th>
+                    <th>连贯性</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="s in multiTurnSessions" :key="s.sessionId">
+                    <td><code style="font-size: 11px">{{ s.sessionId }}</code></td>
+                    <td><NTag size="tiny" type="info">{{ categoryLabel(s.category) }}</NTag></td>
+                    <td>{{ s.turnCount }}</td>
+                    <td>{{ s.successCount }}</td>
+                    <td>
+                      <NTag :type="successRateTagType(s.turnCount > 0 ? s.successCount / s.turnCount : 0)" size="tiny">
+                        {{ s.turnCount > 0 ? ((s.successCount / s.turnCount) * 100).toFixed(0) : 0 }}%
+                      </NTag>
+                    </td>
+                    <td>
+                      <NTag :type="latencyTagType(s.avgLatencyMs)" size="small">
+                        {{ latencyLabel(Math.round(s.avgLatencyMs)) }}
+                      </NTag>
+                    </td>
+                    <td>
+                      <NTag v-if="s.coherenceScore !== null" :type="coherenceTagType(s.coherenceScore)" size="small">
+                        {{ (s.coherenceScore * 100).toFixed(1) }}%
+                      </NTag>
+                      <span v-else class="muted">N/A</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </NTable>
+            </NCard>
+
+            <!-- Recall by turn 趋势图 -->
+            <NCard size="small" :bordered="true">
+              <div v-if="multiTurnRecallOption && Object.keys(multiTurnRecallOption).length > 0">
+                <EChart :option="multiTurnRecallOption" height="320px" />
+              </div>
+              <NEmpty v-else description="无召回率评估的轮次" style="padding: 80px 0" />
+            </NCard>
+
+            <!-- Latency by turn 柱状图 -->
+            <NCard size="small" :bordered="true">
+              <EChart :option="multiTurnLatencyOption" height="320px" />
+            </NCard>
+
+            <!-- 结果数 by turn（召回衰减检测） -->
+            <NCard size="small" :bordered="true">
+              <div class="detail-title">召回衰减检测</div>
+              <EChart :option="multiTurnResultCountOption" height="300px" />
+              <div class="muted" style="margin-top: 8px; font-size: 11px">
+                结果数随轮次下降可能表示召回衰减（lossless-claw compact 压缩后旧轮次相关性降低）。
+              </div>
+            </NCard>
+          </NSpace>
+        </NTabPane>
+
+        <!-- ===== Tab 5: 逐条详情 ===== -->
         <NTabPane name="details" tab="逐条详情">
           <NSpace vertical :size="12">
             <div class="detail-section">
@@ -764,18 +1199,30 @@ const recallEvaluatedCount = computed(() =>
                 <thead>
                   <tr>
                     <th style="width: 80px">ID</th>
+                    <th v-if="hasMultiTurnMeta" style="width: 90px">会话</th>
+                    <th v-if="hasMultiTurnMeta" style="width: 70px">轮次</th>
+                    <th v-if="hasMultiTurnMeta" style="width: 70px">角色</th>
                     <th style="width: 70px">分类</th>
                     <th>查询</th>
                     <th style="width: 60px">状态</th>
                     <th style="width: 80px">延迟</th>
                     <th style="width: 60px">结果数</th>
                     <th style="width: 70px">召回率</th>
+                    <th v-if="result.options.engine === 'ce'" style="width: 70px">来源</th>
                     <th>错误</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="(item, idx) in result.items" :key="idx" :class="{ 'row-error': !item.success }">
                     <td><code style="font-size: 11px">{{ item.fixtureId }}</code></td>
+                    <td v-if="hasMultiTurnMeta"><code style="font-size: 10px">{{ item.sessionId ?? '-' }}</code></td>
+                    <td v-if="hasMultiTurnMeta">{{ item.turnIndex !== undefined ? `${item.turnIndex + 1}/${item.turnTotal ?? '?'}` : '-' }}</td>
+                    <td v-if="hasMultiTurnMeta">
+                      <NTag v-if="item.turnRole" size="tiny" :type="item.turnRole === 'opening' ? 'success' : 'default'">
+                        {{ item.turnRole }}
+                      </NTag>
+                      <span v-else class="muted">-</span>
+                    </td>
                     <td><NTag size="tiny" type="info">{{ categoryLabel(item.category) }}</NTag></td>
                     <td class="snippet-cell">{{ item.query.length > 80 ? item.query.slice(0, 80) + '...' : item.query }}</td>
                     <td>
@@ -794,6 +1241,17 @@ const recallEvaluatedCount = computed(() =>
                         {{ (item.recall * 100).toFixed(0) }}%
                       </NTag>
                       <span v-else class="muted">N/A</span>
+                    </td>
+                    <td v-if="result.options.engine === 'ce'">
+                      <NTag
+                        v-for="src in [...new Set((item.topResults ?? []).map((r) => r.source).filter(Boolean))]"
+                        :key="src"
+                        size="tiny"
+                        :type="src === 'qmd' ? 'success' : (src === 'neo4j' ? 'warning' : 'info')"
+                        style="margin-right: 2px"
+                      >
+                        {{ src }}
+                      </NTag>
                     </td>
                     <td class="error-cell">{{ item.error ?? '' }}</td>
                   </tr>
@@ -820,11 +1278,11 @@ const recallEvaluatedCount = computed(() =>
 
     <!-- 空状态 -->
     <NCard v-else size="small" :bordered="true">
-      <NEmpty description="配置参数后点击「开始压测」" style="padding: 48px 0">
+      <NEmpty description="选择测试集后点击「开始压测」" style="padding: 48px 0">
         <template #extra>
           <span class="muted">
-            将使用内置 {{ fixtures.length }} 条标准测试集对 QMD 检索进行多轮会话压测，
-            评估召回率、tokens 消耗、压缩率、性能分布，并输出完整报告。
+            支持业界公认 BEIR 测试集 + 基于 lossless-claw 能力维度设计的多轮会话集，
+            评估 CE 引擎的检索召回率、上下文连贯性、tokens 消耗、压缩率、性能分布。
           </span>
         </template>
       </NEmpty>
@@ -848,11 +1306,20 @@ const recallEvaluatedCount = computed(() =>
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
   white-space: nowrap;
-  min-width: 70px;
+  min-width: 90px;
 }
 .form-label-suffix {
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
+}
+.fixture-set-desc {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--color-fill-light, rgba(0, 0, 0, 0.03));
+  border-radius: 4px;
 }
 .detail-section {
   margin-top: 4px;

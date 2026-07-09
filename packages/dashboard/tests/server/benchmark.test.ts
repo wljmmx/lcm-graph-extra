@@ -19,7 +19,13 @@ import {
   getBenchmarkHistory,
   getBenchmarkResult,
 } from '../../server/lib/benchmark-report.js';
-import { BUILTIN_FIXTURES, type BenchmarkFixture } from '../../server/lib/benchmark-fixtures.js';
+import {
+  BUILTIN_FIXTURES,
+  CE_MULTI_TURN_FIXTURES,
+  flattenMultiTurnFixtures,
+  FIXTURE_SETS,
+  type BenchmarkFixture,
+} from '../../server/lib/benchmark-fixtures.js';
 import { registerBenchmarkRoutes } from '../../server/routes/benchmark.js';
 
 // ---------------------------------------------------------------------------
@@ -447,8 +453,10 @@ describe('routes/benchmark.ts', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
-    expect(typeof body.defaultUrl).toBe('string');
-    expect(body.defaultUrl).toMatch(/^https?:\/\//);
+    expect(typeof body.defaultQmdUrl).toBe('string');
+    expect(body.defaultQmdUrl).toMatch(/^https?:\/\//);
+    expect(typeof body.defaultDashboardUrl).toBe('string');
+    expect(body.defaultDashboardUrl).toMatch(/^https?:\/\//);
   });
 
   it('GET /api/benchmark/history 初始为空或包含已保存项', async () => {
@@ -504,7 +512,7 @@ describe('routes/benchmark.ts', () => {
   });
 
   it('POST /api/benchmark/run 未传 fixtures 时使用内置测试集', async () => {
-    // 为加速，仅校验来源标记为 builtin + 数量正确
+    // 为加速，仅校验来源标记为 project-scenarios + 数量正确
     const res = await app.inject({
       method: 'POST',
       url: '/api/benchmark/run',
@@ -518,7 +526,8 @@ describe('routes/benchmark.ts', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
-    expect(body.result.options.fixturesSource).toBe('builtin');
+    expect(body.result.options.fixturesSource).toBe('project-scenarios');
+    expect(body.result.options.fixtureSetId).toBe('project-scenarios');
     expect(body.result.options.fixturesCount).toBe(BUILTIN_FIXTURES.length);
     expect(body.result.summary.totalFixtures).toBe(BUILTIN_FIXTURES.length);
   });
@@ -726,5 +735,447 @@ describe('routes/benchmark.ts', () => {
       expect(item.success).toBe(false);
       expect(item.error).toContain('网络不可达');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v2.3.0 新增：测试集元数据 + BEIR 状态 + 多轮会话 + CE 引擎
+// ---------------------------------------------------------------------------
+
+/** mock dashboard /api/memory/search（CE 三引擎并行） */
+function mockCeFetch(opts: {
+  lcm?: Array<Record<string, unknown>>;
+  qmd?: Array<Record<string, unknown>>;
+  neo4j?: Array<Record<string, unknown>>;
+  throwError?: string;
+} = {}): void {
+  const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    if (opts.throwError) throw new Error(opts.throwError);
+    // CE 引擎调用 /api/memory/search?q=...&engines=all&limit=...
+    if (typeof url === 'string' && url.includes('/api/memory/search')) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: { get: () => null },
+        json: async () => ({
+          results: {
+            lcm: opts.lcm ?? [],
+            qmd: opts.qmd ?? [
+              { docid: 'doc-qmd-1', file: 'src/a.ts', title: 'QMD 文档', score: 0.9, snippet: 'qmd snippet' },
+            ],
+            neo4j: opts.neo4j ?? [],
+          },
+          total: (opts.lcm?.length ?? 0) + (opts.qmd?.length ?? 0) + (opts.neo4j?.length ?? 0),
+        }),
+      } as unknown as Response;
+    }
+    // 兜底：QMD /query
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: { get: () => null },
+      json: async () => ({ results: opts.qmd ?? [] }),
+    } as unknown as Response;
+  });
+  global.fetch = fetchMock as unknown as typeof global.fetch;
+}
+
+describe('v2.3.0 测试集元数据端点', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockQmdFetch();
+    app = await buildApp();
+  });
+  afterEach(async () => {
+    await app.close();
+    global.fetch = originalFetch;
+  });
+
+  it('GET /api/benchmark/fixture-sets 返回 4 个测试集', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/fixture-sets',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.fixtureSets).toHaveLength(4);
+    const ids = body.fixtureSets.map((s: { id: string }) => s.id);
+    expect(ids).toContain('project-scenarios');
+    expect(ids).toContain('ce-multi-turn');
+    expect(ids).toContain('beir-nfcorpus');
+    expect(ids).toContain('beir-scifact');
+    // project-scenarios 应有 count
+    const ps = body.fixtureSets.find((s: { id: string }) => s.id === 'project-scenarios');
+    expect(ps.count).toBeGreaterThan(0);
+    expect(ps.cached).toBe(true);
+    // beir 应有 requiresDownload
+    const nf = body.fixtureSets.find((s: { id: string }) => s.id === 'beir-nfcorpus');
+    expect(nf.requiresDownload).toBe(true);
+  });
+
+  it('GET /api/benchmark/fixtures?set=project-scenarios 返回 fixtures 列表', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/fixtures?set=project-scenarios',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.fixtureSetId).toBe('project-scenarios');
+    expect(Array.isArray(body.fixtures)).toBe(true);
+    expect(body.fixtures.length).toBe(BUILTIN_FIXTURES.length);
+    expect(body.categoryStats).toBeDefined();
+  });
+
+  it('GET /api/benchmark/fixtures?set=ce-multi-turn 返回展开后的多轮 fixtures', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/fixtures?set=ce-multi-turn',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.fixtureSetId).toBe('ce-multi-turn');
+    // 展开后的 fixtures 数量应大于会话数（每会话多轮）
+    const expectedCount = flattenMultiTurnFixtures(CE_MULTI_TURN_FIXTURES).length;
+    expect(body.fixtures).toHaveLength(expectedCount);
+    // 应含 sessionId 和 turnIndex
+    const withSession = body.fixtures.filter((f: { sessionId?: string }) => f.sessionId);
+    expect(withSession.length).toBeGreaterThan(0);
+  });
+
+  it('GET /api/benchmark/fixtures?set=beir-nfcorpus 返回 BEIR 元数据（不预加载 fixtures）', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/fixtures?set=beir-nfcorpus',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.fixtureSetId).toBe('beir-nfcorpus');
+    expect(body.type).toBe('beir');
+    // 应有 cached 字段和 message
+    expect(typeof body.cached).toBe('boolean');
+    expect(body.message).toBeDefined();
+    // 不应返回 fixtures 数组（BEIR 不预加载）
+    expect(body.fixtures).toBeUndefined();
+  });
+
+  it('GET /api/benchmark/fixtures 无 set 参数默认返回 project-scenarios', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/fixtures',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.fixtureSetId).toBe('project-scenarios');
+  });
+
+  it('GET /api/benchmark/beir/status 返回 BEIR 数据集状态', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/benchmark/beir/status',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(Array.isArray(body.datasets)).toBe(true);
+    expect(body.datasets.length).toBe(2);
+    const names = body.datasets.map((d: { name: string }) => d.name);
+    expect(names).toContain('nfcorpus');
+    expect(names).toContain('scifact');
+  });
+
+  it('POST /api/benchmark/beir/download 非法 dataset 返回 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/beir/download',
+      payload: { dataset: 'invalid' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('nfcorpus');
+  });
+
+  it('POST /api/benchmark/run 非法 fixtureSetId 返回 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/run',
+      payload: {
+        baseUrl: 'http://127.0.0.1:8081',
+        fixtureSetId: 'invalid-set',
+        limit: 5,
+        timeoutMs: 5000,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('fixtureSetId');
+  });
+
+  it('POST /api/benchmark/run 指定 fixtureSetId=project-scenarios 执行压测', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/run',
+      payload: {
+        baseUrl: 'http://127.0.0.1:8081',
+        fixtureSetId: 'project-scenarios',
+        limit: 3,
+        timeoutMs: 5000,
+        concurrency: 4,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.result.options.fixtureSetId).toBe('project-scenarios');
+    expect(body.result.options.engine).toBe('qmd');
+  });
+});
+
+describe('v2.3.0 lib/benchmark.ts 多轮会话分析', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockQmdFetch();
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('多轮会话 fixtures 展开后包含 sessionId/turnIndex/turnRole', async () => {
+    const flattened = flattenMultiTurnFixtures(CE_MULTI_TURN_FIXTURES);
+    expect(flattened.length).toBeGreaterThan(CE_MULTI_TURN_FIXTURES.length);
+    // 第一条应有 sessionId
+    const first = flattened[0];
+    expect(first.sessionId).toBeDefined();
+    expect(first.turnIndex).toBe(0);
+    expect(first.turnTotal).toBeGreaterThan(0);
+  });
+
+  it('使用 ce-multi-turn 测试集时 summary.multiTurnSessions 有值', async () => {
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtureSetId: 'ce-multi-turn',
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    expect(result.options.fixtureSetId).toBe('ce-multi-turn');
+    expect(result.summary.multiTurnSessions).toBeDefined();
+    expect(result.summary.multiTurnSessions!.length).toBeGreaterThan(0);
+    // 每条 item 应有 sessionId
+    const withSession = result.items.filter((i) => i.sessionId);
+    expect(withSession.length).toBe(result.items.length);
+  });
+
+  it('多轮会话统计包含 turnCount/recallByTurn/coherenceScore', async () => {
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtureSetId: 'ce-multi-turn',
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    const session = result.summary.multiTurnSessions![0];
+    expect(session.sessionId).toBeDefined();
+    expect(session.turnCount).toBeGreaterThan(0);
+    expect(session.successCount).toBeGreaterThan(0);
+    expect(Array.isArray(session.recallByTurn)).toBe(true);
+    expect(session.recallByTurn.length).toBe(session.turnCount);
+    expect(Array.isArray(session.latencyByTurn)).toBe(true);
+    expect(Array.isArray(session.resultCountByTurn)).toBe(true);
+    // coherenceScore 可为 null（无 expectedDocIds 时）或 number
+    expect(session.coherenceScore === null || typeof session.coherenceScore === 'number').toBe(true);
+  });
+
+  it('非多轮会话测试集时 multiTurnSessions 为 undefined', async () => {
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtureSetId: 'project-scenarios',
+      limit: 3,
+      timeoutMs: 5000,
+      concurrency: 4,
+    });
+    expect(result.summary.multiTurnSessions).toBeUndefined();
+  });
+
+  it('coherenceScore 计算：followup 轮召回 opening 轮文档', async () => {
+    // 构造多轮会话 fixtures：opening 返回 doc-a，followup 也返回 doc-a
+    const multiTurnFixtures: BenchmarkFixture[] = [
+      {
+        id: 'mt-test-t1',
+        query: 'opening query',
+        category: 'knowledge',
+        expectedDocIds: ['doc-1'],
+        // 模拟展开后的多轮元数据
+        ...({ turnIndex: 0, turnTotal: 2, role: 'opening', sessionId: 'mt-test' } as Record<string, unknown>),
+      } as BenchmarkFixture,
+      {
+        id: 'mt-test-t2',
+        query: 'followup query',
+        category: 'knowledge',
+        expectedDocIds: ['doc-1'],
+        ...({ turnIndex: 1, turnTotal: 2, role: 'followup', sessionId: 'mt-test' } as Record<string, unknown>),
+      } as BenchmarkFixture,
+    ];
+    // mock fetch 返回 doc-1（与 opening 召回的文档相同）
+    mockQmdFetch({
+      results: [{ docid: 'doc-1', file: 'src/a.ts', title: 'A', score: 0.9, snippet: 'content' }],
+    });
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtures: multiTurnFixtures,
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    expect(result.summary.multiTurnSessions).toBeDefined();
+    expect(result.summary.multiTurnSessions).toHaveLength(1);
+    const session = result.summary.multiTurnSessions![0];
+    // coherenceScore 应为 1（followup 召回了 opening 的所有文档）
+    expect(session.coherenceScore).toBe(1);
+  });
+});
+
+describe('v2.3.0 lib/benchmark.ts CE 引擎查询', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('engine=ce 时通过 dashboard /api/memory/search 查询三引擎并行', async () => {
+    mockCeFetch({
+      lcm: [{ content: 'lcm content', sessionId: 's1' }],
+      qmd: [{ docid: 'doc-qmd-1', file: 'a.ts', title: 'QMD', score: 0.9, snippet: 'qmd' }],
+      neo4j: [{ content: 'neo4j node', type: 'TASK', pagerank: 1.5 }],
+    });
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      dashboardBaseUrl: 'http://127.0.0.1:7421',
+      engine: 'ce',
+      fixtures: [customFixtures[0]],
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    expect(result.options.engine).toBe('ce');
+    expect(result.summary.successCount).toBe(1);
+    // 结果应合并三引擎
+    const item = result.items[0];
+    expect(item.resultCount).toBe(3); // lcm + qmd + neo4j
+    // topResults 应有 source 标记
+    const sources = (item.topResults ?? []).map((r) => r.source).filter(Boolean);
+    expect(sources).toContain('lcm');
+    expect(sources).toContain('qmd');
+    expect(sources).toContain('neo4j');
+  });
+
+  it('engine=ce 时 CE 查询失败标记为失败', async () => {
+    mockCeFetch({ throwError: 'dashboard 不可达' });
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      dashboardBaseUrl: 'http://127.0.0.1:7421',
+      engine: 'ce',
+      fixtures: [customFixtures[0]],
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    expect(result.summary.successCount).toBe(0);
+    expect(result.items[0].error).toContain('dashboard 不可达');
+  });
+
+  it('engine=ce 空结果时仍标记成功', async () => {
+    mockCeFetch({ lcm: [], qmd: [], neo4j: [] });
+    const result = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      dashboardBaseUrl: 'http://127.0.0.1:7421',
+      engine: 'ce',
+      fixtures: [customFixtures[0]],
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    expect(result.summary.successCount).toBe(1);
+    expect(result.items[0].resultCount).toBe(0);
+  });
+
+  it('POST /api/benchmark/run engine=ce 时传递 dashboardBaseUrl', async () => {
+    mockCeFetch({
+      qmd: [{ docid: 'doc-1', file: 'a.ts', title: 'A', score: 0.9, snippet: 's' }],
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/benchmark/run',
+      payload: {
+        engine: 'ce',
+        dashboardBaseUrl: 'http://127.0.0.1:7421',
+        fixtures: [customFixtures[0]],
+        limit: 5,
+        timeoutMs: 5000,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.result.options.engine).toBe('ce');
+    expect(body.result.summary.successCount).toBe(1);
+  });
+});
+
+describe('v2.3.0 lib/benchmark-report.ts CE 能力维度报告', () => {
+  let multiTurnResult: BenchmarkResult;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockQmdFetch({
+      results: [{ docid: 'doc-1', file: 'src/a.ts', title: 'A', score: 0.9, snippet: 'content' }],
+    });
+    multiTurnResult = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtureSetId: 'ce-multi-turn',
+      limit: 5,
+      timeoutMs: 5000,
+    });
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('多轮会话报告包含 CE 能力维度章节', () => {
+    const md = exportMarkdownReport(multiTurnResult);
+    expect(md).toContain('## CE 能力维度');
+    expect(md).toContain('## CE 多轮会话分析');
+    expect(md).toContain('lossless-claw');
+  });
+
+  it('多轮会话报告包含会话汇总表', () => {
+    const md = exportMarkdownReport(multiTurnResult);
+    expect(md).toContain('### 会话汇总');
+    expect(md).toContain('连贯性评分');
+    expect(md).toContain('Recall 随轮次变化趋势');
+  });
+
+  it('多轮会话报告逐条详情包含会话/轮次列', () => {
+    const md = exportMarkdownReport(multiTurnResult);
+    expect(md).toContain('会话');
+    expect(md).toContain('轮次');
+    expect(md).toContain('角色');
+  });
+
+  it('BEIR 测试集报告包含 BEIR 说明', async () => {
+    // 用 project-scenarios 模拟，但手动设置 fixtureSetId
+    const beirResult = await runBenchmark({
+      qmdBaseUrl: 'http://127.0.0.1:8081',
+      fixtures: [customFixtures[0]],
+      limit: 5,
+      timeoutMs: 5000,
+    });
+    // 手动覆盖 options.fixtureSetId 模拟 BEIR 报告
+    (beirResult.options as { fixtureSetId: string }).fixtureSetId = 'beir-nfcorpus';
+    const md = exportMarkdownReport(beirResult);
+    expect(md).toContain('BEIR nfcorpus');
+    expect(md).toContain('NeurIPS 2021');
   });
 });
