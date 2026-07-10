@@ -2,8 +2,8 @@
 
 > 审计日期：2026-07-04｜重新评估日期：2026-07-10
 > 审计范围：`/workspace/src` 全量代码（生命周期/检索/存储/适配器/工具/熔断/债务/快照）
-> 基线版本：v2.1.10（commit 8f8b114，main 分支）+ 第一批修复（未提交）
-> 测试基线：619 项通过（30 个文件）｜tsc 类型检查：通过
+> 基线版本：v2.1.10（commit 8f8b114，main 分支）+ 第一批 + 第二批修复
+> 测试基线：630 项通过（31 个文件）｜tsc 类型检查：通过
 > 审计方法：逐文件源码追溯 + 配置值核对 + 调用链验证 + 2026-07-10 三路并行复审
 
 ---
@@ -12,7 +12,7 @@
 
 **合并状态**：`main` 是 GitHub 上唯一远程分支（commit 8f8b114），无待合并分支；前序会话已清理所有 `trae/*` 分支。
 
-**第一批修复进展**（5/25 项，未提交，已通过 tsc + 619 项测试验证）：
+**修复进展**（11/25 项，已通过 tsc + 630 项测试验证）：
 
 | 编号 | 问题 | 状态 | 验证 |
 |------|------|------|------|
@@ -21,10 +21,15 @@
 | P1-2 | decayHalfLifeDays 不一致 | ✅ 已修复 | 统一为 DEFAULTS.ttl.halfLifeDays |
 | P1-3 | afterTurn 同步 I/O | ✅ 已修复 | 缓存函数 + 调用点替换 |
 | P1-7 | Tier2 LLM 缺 keep_alive | ✅ 已修复 | withKeepAliveIfOllama 注入 |
+| P0-2 | 优先级裁剪体系冲突 | ✅ 已修复 | applyTotalControl 经验优先级 2→4，10 个测试通过 |
+| P0-3 | compact 无超时透传 | ✅ 已修复 | Promise.race + 300s 超时，1 个测试通过 |
+| P0-4 | experience tags 类型不匹配 | ✅ 已修复 | split(coalesce(...)) 无需数据迁移 |
+| P0-1 | 双检索管线 minScore 不一致 | ✅ 已修复 | 统一为 DEFAULTS.retrieval.expMinScore |
+| P1-4 | MCP 工具不复用 QmdClient 单例 | ✅ 已修复 | acquireQmdClient() + owned 标记 |
 
-**待修复（20 项）**：经 2026-07-10 三路并行子代理逐项核查，4 个 P0 + 6 个 P1 + 10 个 P2 **全部确认仍存在**，行号已同步至当前代码。
+**待修复（14 项）**：5 个 P1（P1-5/6/8/9/10）+ 10 个 P2。第三批 I/O 优化（6 项）与第四批一致性（6 项）待推进。
 
-**优先级建议**：下一批应聚焦剩余 4 个 P0（P0-1 双管线 / P0-2 优先级冲突 / P0-3 compact 超时 / P0-4 tags 类型），它们影响核心功能与稳定性。
+**下一批建议**：第三批聚焦 I/O 与批量优化（P1-5 lcmg_backup 流式化 / P1-6 lcmg_sync 批量化 / P1-10 upsertEntities 批量化 / P2-7 debt-manager 异步化 / P2-2/3 distillation 并发化 / P1-9 searchWithCache 定位）。
 
 ---
 
@@ -69,10 +74,10 @@
 
 | 编号 | 问题 | 位置 | 影响 |
 |------|------|------|------|
-| **P0-1** | `assemble` 完全绕过 `RetrievalGateway`，两套检索管线并存 | [index.ts](file:///workspace/src/index.ts#L694-L791) vs [retrieval-gateway.ts](file:///workspace/src/retrieval-gateway.ts#L132-L195) | gateway 的超时保护/统计/上下文推断在主路径失效；minScore 不一致（0.5 vs 0.6）；维护成本翻倍 |
-| **P0-2** | `applyTotalControl` 与 `priority-trim` 优先级冲突 | [token-control.ts](file:///workspace/src/plugin/token-control.ts#L81-L104) vs [index.ts](file:///workspace/src/index.ts#L1298-L1316) | priority-trim 保护经验(L4)→applyTotalControl 又先裁经验，实际裁剪顺序与设计意图相悖 |
-| **P0-3** | lossless-claw adapter `compact()` 无超时透传 | [lossless-claw-adapter.ts](file:///workspace/src/middleware/lossless-claw-adapter.ts#L486) | compact 是唯一 `throw` 的调用，若 lossless-claw 内部挂起，调用方无限等待 |
-| **P0-4** | experience tags 类型不匹配（存逗号字符串、查询按数组迭代） | [storage.ts](file:///workspace/src/experience/storage.ts#L229-L234) 写入 vs [L142-L145](file:///workspace/src/experience/storage.ts#L142-L145) 查询 | `ANY(s IN COALESCE(e.tags_scenario, []))` 对字符串逐字符迭代，标签过滤可能完全失效 |
+| **P0-1** ✅ 已修复（第二批） | `assemble` 完全绕过 `RetrievalGateway`，两套检索管线并存 | [index.ts](file:///workspace/src/index.ts#L694-L791) minScore 改为 `DEFAULTS.retrieval.expMinScore`，与 [retrieval-gateway.ts](file:///workspace/src/retrieval-gateway.ts#L132-L195) 统一；保留双管线并文档化（assemble 含 gateway 缺失的 circuitBreaker/degraded/scenario/重排逻辑） | minScore 统一为 0.5；新增 `DEFAULTS.retrieval.expMinScore` 单一来源 |
+| **P0-2** ✅ 已修复（第二批） | `applyTotalControl` 与 `priority-trim` 优先级冲突 | [token-control.ts](file:///workspace/src/plugin/token-control.ts#L81-L104) 经验优先级 2→4（最高保护），与 [index.ts](file:///workspace/src/index.ts#L1298-L1316) priority-trim 的 layer 语义一致 | 裁剪顺序符合设计意图：经验最后被裁；10 个测试覆盖 |
+| **P0-3** ✅ 已修复（第二批） | lossless-claw adapter `compact()` 无超时透传 | [lossless-claw-adapter.ts](file:///workspace/src/middleware/lossless-claw-adapter.ts#L486) `Promise.race` + 300s 超时（`LCMG_COMPACT_TIMEOUT_MS` 可覆盖），超时进 catch 返回 `ok:false` | compact 不再无限挂起；1 个超时测试通过 |
+| **P0-4** ✅ 已修复（第二批） | experience tags 类型不匹配（存逗号字符串、查询按数组迭代） | [storage.ts](file:///workspace/src/experience/storage.ts#L149-L152) 查询改用 `split(coalesce(...), ',')`，与写入 `.join(',')` + 读取路径 `buildTagsFromRow` 一致 | 标签过滤生效；无需数据迁移，现有逗号字符串直接被 split 还原 |
 | **P0-5** ✅ 已修复（第一批） | embed keep_alive 完全失效：默认 baseURL 带 `/v1` 导致走 OpenAI 兼容端点，Ollama 忽略 keep_alive | [embed-fn.ts](file:///workspace/src/adapters/embed-fn.ts#L82-L90) 改用 `isOllamaEndpoint` 判断并剥离 `/v1` 后缀走原生 `/api/embed`；[neo4j-helper.ts](file:///workspace/src/config/neo4j-helper.ts#L131) 默认改为 `http://127.0.0.1:11434` | 修复后 keep_alive=1h 生效，模型常驻内存；配套 5 个测试已更新验证新行为 |
 
 ### P1（中等 — 性能损耗或配置失效）
@@ -82,7 +87,7 @@
 | **P1-1** ✅ 已修复（第一批） | `fuzzyMatchThreshold` 死配置 | [entity-extractor.ts](file:///workspace/src/entity-extractor.ts#L33) 已接受 `fuzzyMatchThreshold` 参数；[merger.ts](file:///workspace/src/merger.ts#L66) 传递 `this.config.fuzzyMatchThreshold` | 配置现生效（0.85），用户可调 |
 | **P1-2** ✅ 已修复（第一批） | `decayHalfLifeDays` 双常量不一致 | [index.ts](file:///workspace/src/index.ts#L220) 改为 `DEFAULTS.ttl.halfLifeDays` | 统一为 45，与 defaults.ts 一致 |
 | **P1-3** ✅ 已修复（第一批） | `afterTurn` 热路径每次 `readFileSync` 读 openclaw.json | [index.ts](file:///workspace/src/index.ts#L82-L96) 缓存函数 + [L1649](file:///workspace/src/index.ts#L1649) 调用点替换 | 进程生命周期内仅读一次，与 neo4j-helper 模式一致 |
-| **P1-4** | 4 个 MCP 工具每次 `new QmdClient()` 不复用单例 | [tools.ts](file:///workspace/src/tools.ts#L1200) lcmg_search、L1712 lcmg_qmd_status、L1753 lcmg_get_document、L1786 lcmg_batch_get（另 L1030 第 5 处） | 与 retrieval-gateway 行为不一致，重复建连开销 |
+| **P1-4** ✅ 已修复（第二批） | 4 个 MCP 工具每次 `new QmdClient()` 不复用单例 | [tools.ts](file:///workspace/src/tools.ts) 新增 `_sharedQmdClient` + `acquireQmdClient()`（owned 标记区分注入单例/自建实例）；5 处调用点（lcmg_search/qmd_status/get_document/batch_get/diagnose）统一复用；index.ts 通过 dashboardContext 注入单例 | 复用注入单例，重复建连开销消除 |
 | **P1-5** | `lcmg_backup` 全表扫描无 LIMIT + 同步文件读写 | [tools.ts](file:///workspace/src/tools.ts#L671) `MATCH (n) RETURN n` + [L678](file:///workspace/src/tools.ts#L678) `MATCH ()-[r]->() RETURN r`；同步 I/O L713/L717/L725 | 全表扫描无 LIMIT + 同步 readFileSync/writeFileSync |
 | **P1-6** | `lcmg_sync` Phase 1 嵌套 SQLite N 次往返 | [tools.ts](file:///workspace/src/tools.ts#L1512) 逐行 `SELECT COUNT(*)`（另 L1568-1570、L1603-105 同类） | Neo4j session 内逐行 SQLite 往返 |
 | **P1-7** ✅ 已修复（第一批） | Tier2 LLM 判断未注入 keep_alive | [index.ts](file:///workspace/src/index.ts#L1050-L1056) body 改用 `withKeepAliveIfOllama` | 与其他 LLM 调用一致，避免模型卸载 |
@@ -390,13 +395,13 @@
 
 ```
 第一批（热路径与稳定性，P0 + 关键 P1）
-  ├─ 3.1.1 统一检索管线（P0-1）        ← 待执行（最高优先，消除双管线）
-  ├─ 3.1.2 对齐优先级裁剪（P0-2）      ← 待执行
-  ├─ 3.1.3 compact 超时保护（P0-3）    ← 待执行
-  ├─ 3.1.4 修复 tags 类型（P0-4）      ← 待执行（需数据迁移）
+  ├─ 3.1.1 统一检索管线（P0-1）        ← ✅ 已完成（minScore 统一 + 文档化双管线）
+  ├─ 3.1.2 对齐优先级裁剪（P0-2）      ← ✅ 已完成（经验优先级 2→4）
+  ├─ 3.1.3 compact 超时保护（P0-3）    ← ✅ 已完成（Promise.race + 300s）
+  ├─ 3.1.4 修复 tags 类型（P0-4）      ← ✅ 已完成（split(coalesce)，无需迁移）
   ├─ 3.1.5 修复死配置（P1-1, P1-2）    ← ✅ 已完成
   ├─ 3.1.6 afterTurn 去同步 I/O（P1-3）← ✅ 已完成
-  ├─ 3.1.7 工具复用 QmdClient（P1-4）  ← 待执行
+  ├─ 3.1.7 工具复用 QmdClient（P1-4）  ← ✅ 已完成（acquireQmdClient + owned）
   ├─ 3.1.8 Tier2 keep_alive（P1-7）    ← ✅ 已完成
   └─ P0-5 embed keep_alive             ← ✅ 已完成（新增项）
 
@@ -452,11 +457,13 @@
 
 ## 七、附录：审计基线
 
-- **代码版本**：v2.1.10（commit 8f8b114，main 分支）+ 第一批修复（未提交）
-- **测试基线**：619 项通过（30 个文件）
+- **代码版本**：v2.1.10（commit 8f8b114，main 分支）+ 第一批 + 第二批修复
+- **测试基线**：630 项通过（31 个文件）
 - **tsc 类型检查**：通过
 - **审计文件数**：32 个 src/ 文件 + 4 个配置文件
 - **发现总数**：5 个 P0 + 10 个 P1 + 10 个 P2 = 25 项
 - **第一批已修复**：P0-5、P1-1、P1-2、P1-3、P1-7（5 项）
-- **待修复**：4 个 P0 + 6 个 P1 + 10 个 P2 = 20 项（全部经 2026-07-10 三路并行复审确认仍存在）
-- **重新评估日期**：2026-07-10（基于 main 8f8b114 + 第一批修复，逐项核查确认）
+- **第二批已修复**：P0-1、P0-2、P0-3、P0-4、P1-4（5 项，另 P1-3 缓存补完）
+- **累计已修复**：11 项（5 P0 + 6 P1）
+- **待修复**：5 个 P1（P1-5/6/8/9/10）+ 10 个 P2 = 14 项
+- **重新评估日期**：2026-07-10（基于 main 8f8b114 + 第一/二批修复，逐项核查确认）

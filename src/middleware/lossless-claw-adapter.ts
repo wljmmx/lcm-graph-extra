@@ -483,7 +483,28 @@ export class LosslessClawAdapter {
 
     try {
       // Call lossless-claw's compact engine
-      const lcResult = await this.engine.compact(params);
+      // BUGFIX(P0-3): compact 是唯一 throw 的调用，若 lossless-claw 内部挂起
+      // （如 LLM 摘要请求无响应、replay 死锁），调用方将无限等待。
+      // 用 Promise.race 加超时兜底：默认 300s，可通过 LCMG_COMPACT_TIMEOUT_MS 覆盖。
+      // 超时后返回 { ok:false, reason:'timeout' } 而非 throw，与 catch 分支行为一致。
+      const compactTimeoutMs = (() => {
+        const raw = process.env.LCMG_COMPACT_TIMEOUT_MS;
+        if (raw) { const n = Number(raw); if (Number.isFinite(n) && n > 0) return n; }
+        return 300_000; // 5min 默认上限
+      })();
+      let compactTimer: ReturnType<typeof setTimeout> | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        compactTimer = setTimeout(
+          () => reject(new Error(`compact timeout after ${compactTimeoutMs}ms`)),
+          compactTimeoutMs,
+        );
+      });
+      let lcResult: any;
+      try {
+        lcResult = await Promise.race([this.engine.compact(params), timeoutPromise]);
+      } finally {
+        if (compactTimer) clearTimeout(compactTimer);
+      }
 
       // Map CompactResult (openclaw-bridge) to lcm-graph-extra expected format:
       // engine returns: { ok, compacted, reason, result: { tokensBefore, tokensAfter, details }, exhausted }

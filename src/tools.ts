@@ -23,8 +23,26 @@ let _pluginNeo4jConfig: Record<string, unknown> | undefined;
 // Module-level QMD URL helper
 let _pluginQmdUrl = "http://127.0.0.1:8081";
 
+// BUGFIX(P1-4): 由 index.ts 注入的共享 QmdClient 单例。
+// 5 个 MCP 工具（lcmg_search/qmd_status/get_document/batch_get/diagnose）复用此实例，
+// 避免每次调用 new QmdClient 重建 MCP 连接 + recoveryTimer。未注入时回退到 new QmdClient。
+let _sharedQmdClient: any = null;
+
 function getQmdBaseUrl() {
   return _pluginQmdUrl;
+}
+
+/**
+ * 获取 QmdClient：优先复用 index.ts 注入的单例，否则按需 new 一个。
+ * 调用方需在 finally 中判断是否需要 dispose：只有自建的实例才需 dispose，
+ * 注入的单例由 index.ts 统一管理生命周期（register 闭包 dispose 时释放）。
+ */
+async function acquireQmdClient(): Promise<{ client: any; owned: boolean }> {
+  if (_sharedQmdClient && typeof _sharedQmdClient.query === 'function') {
+    return { client: _sharedQmdClient, owned: false };
+  }
+  const { QmdClient } = await import("./qmd-client.js");
+  return { client: new QmdClient({ mcpBaseUrl: getQmdBaseUrl() }), owned: true };
 }
 
 function getPluginNeo4jConfig(): Record<string, unknown> | undefined {
@@ -311,12 +329,18 @@ export function registerOperationalTools(api: any): void {
  * Dashboard 工具上下文 —— 由 index.ts 注入，供 lcmg_distill / lcmg_compact / lcmg_reset_breaker
  * 访问 register() 闭包内的单例（expStore / runDistillation / triggerCompact / resetBreaker）。
  * 可选参数：未注入时三个工具返回 "dashboard context not available"（向后兼容旧调用方）。
+ *
+ * BUGFIX(P1-4): 新增 qmdClient 字段，让 lcmg_search / lcmg_qmd_status /
+ * lcmg_get_document / lcmg_batch_get / lcmg_diagnose 复用 register() 闭包内
+ * 已配置好 mcpTimeout / cliTimeout 的 QmdClient 单例，而非每次 new QmdClient。
  */
 export interface DashboardToolContext {
   expStore?: any;
   runDistillation?: (limit: number) => Promise<any>;
   triggerCompact?: (conversationId?: number) => Promise<boolean>;
   resetBreaker?: (name: string) => boolean;
+  /** 共享的 QmdClient 单例（由 index.ts 注入）；未注入时工具回退到 new QmdClient */
+  qmdClient?: any;
 }
 
 /**
@@ -329,6 +353,8 @@ export function registerOperationalToolsWithDashboard(api: any, dashboardContext
 }
 
 function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardToolContext | undefined): void {
+  // BUGFIX(P1-4): 缓存注入的 qmdClient 单例供所有 MCP 工具复用
+  _sharedQmdClient = dashboardContext?.qmdClient ?? null;
   // v1.0.1-5: 包装 api.registerTool —— 为每个 lcmg_* 工具注入操作审计日志
   const originalRegisterTool = api.registerTool.bind(api);
   api.registerTool = (toolDef: any) => {
@@ -1024,10 +1050,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         ok("MCP 8081", "HTTP " + r.status); pass++;
       } catch { warn("MCP 8081", "unreachable"); warns++; }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      // BUGFIX(P1-4): 复用注入的单例（owned=false 时不 dispose）
       let qmd: any = null;
+      let qmdOwned = false;
       try {
-        const { QmdClient } = await import("./qmd-client.js");
-        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        const acquired = await acquireQmdClient();
+        qmd = acquired.client; qmdOwned = acquired.owned;
         if (await qmd.ping()) { ok("QmdClient", "MCP available (CLI fallback ready)"); pass++; }
         else { warn("QmdClient", "MCP down, running in CLI fallback mode"); warns++; }
         const stat = await qmd.status();
@@ -1036,7 +1064,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const r2 = await qmd.query({ searches: [{ type: "lex", query: "test" }], limit: 1 });
         ok("Search test", r2.length > 0 ? r2.length + " results" : "0 results (empty index)"); pass++;
       } catch (e: any) { warn("qmd", "unavailable: " + e.message); warns++; }
-      finally { if (qmd) { try { qmd.dispose(); } catch {} } }
+      finally { if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} } }
 
       // 3. Neo4j
       sep();
@@ -1195,9 +1223,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         let qmd: any = null;
+        let qmdOwned = false;
         try {
-          const { QmdClient } = await import("./qmd-client.js");
-          qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+          // BUGFIX(P1-4): 复用注入的 QmdClient 单例
+          const acquired = await acquireQmdClient();
+          qmd = acquired.client; qmdOwned = acquired.owned;
           if (signal?.aborted) {
             return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
@@ -1223,7 +1253,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } catch (e: any) {
           results.push(`❌ qmd search: ${e?.message ?? String(e)}\n`);
         } finally {
-          if (qmd) { try { qmd.dispose(); } catch {} }
+          if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
         }
       }
 
@@ -1706,10 +1736,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      // BUGFIX(P1-4): 复用注入的单例
       let qmd: any = null;
+      let qmdOwned = false;
       try {
-        const { QmdClient } = await import("./qmd-client.js");
-        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        const acquired = await acquireQmdClient();
+        qmd = acquired.client; qmdOwned = acquired.owned;
         const [pingOk, statusText] = await Promise.all([
           qmd.ping().catch(() => false),
           qmd.status().catch(() => null),
@@ -1726,7 +1758,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], details: { ok: false, error: `❌ Error: ${e.message}` }, isError: true };
       } finally {
-        if (qmd) { try { qmd.dispose(); } catch {} }
+        if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -1747,10 +1779,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      // BUGFIX(P1-4): 复用注入的单例
       let qmd: any = null;
+      let qmdOwned = false;
       try {
-        const { QmdClient } = await import("./qmd-client.js");
-        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        const acquired = await acquireQmdClient();
+        qmd = acquired.client; qmdOwned = acquired.owned;
         const content = await qmd.get(params.file);
         if (content) {
           return { content: [{ type: "text" as const, text: content }], details: { ok: true } };
@@ -1759,7 +1793,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], details: { ok: false, error: `❌ Error: ${e.message}` }, isError: true };
       } finally {
-        if (qmd) { try { qmd.dispose(); } catch {} }
+        if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
   });
@@ -1780,10 +1814,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // SEC-2 H-8: QmdClient 使用 try/finally 确保 dispose 释放 recoveryTimer
+      // BUGFIX(P1-4): 复用注入的单例
       let qmd: any = null;
+      let qmdOwned = false;
       try {
-        const { QmdClient } = await import("./qmd-client.js");
-        qmd = new QmdClient({ mcpBaseUrl: getQmdBaseUrl() });
+        const acquired = await acquireQmdClient();
+        qmd = acquired.client; qmdOwned = acquired.owned;
         const results = await qmd.multiGet(params.pattern);
         if (results.length === 0) {
           return { content: [{ type: "text" as const, text: `No documents found for: ${params.pattern}` }], details: { ok: true } };
@@ -1793,7 +1829,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `❌ Error: ${e.message}` }], details: { ok: false, error: `❌ Error: ${e.message}` }, isError: true };
       } finally {
-        if (qmd) { try { qmd.dispose(); } catch {} }
+        if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
   });

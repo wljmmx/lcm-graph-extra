@@ -34,6 +34,11 @@ export const DEFAULTS = {
   retrieval: {
     slowSearchThresholdMs: 1000, // 单路检索超过此阈值记为慢查询
     globalTimeoutMs: 15_000,     // 单路检索全局超时
+    // BUGFIX(P0-1): 统一 L4 经验召回的 minScore。
+    // 此前 RetrievalGateway.searchWithExperience 用 0.5，assemble 用 0.6，
+    // 导致两条检索路径对相同 query 召回的经验集合不同。
+    // 0.5 更宽松、召回率更高，与 RetrievalGateway 设计意图一致，作为单一来源。
+    expMinScore: 0.5,
   },
 
   /** 图谱适配器（graph-adapter.ts） */

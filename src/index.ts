@@ -689,6 +689,13 @@ const pluginEntry: any = definePluginEntry({
           lastRetrievalQuery = qmdQuery;
 
           // ---- Parallel Phase 1: L2 + L3 + L4 all fire together (with per-layer timing) ----
+          //
+          // P0-1 说明：assemble 与 RetrievalGateway.searchWithExperience 是两条并存的检索路径。
+          // 完全合并风险高（assemble 含 circuitBreaker / markDegraded / scenario-adjust /
+          // hasSelfCategory 门控 / LLM 重排等 gateway 缺失的生产逻辑），
+          // 当前先统一最关键的 minScore 不一致（已对齐到 DEFAULTS.retrieval.expMinScore），
+          // 消除两路径对相同 query 召回经验集合不同的根因。
+          // 后续演进可在 RetrievalGateway 补齐 degraded 标记 + scenario 调整后再迁移。
           const parallelStart = Date.now();
           qmdResults = [];
           graphResults = [];
@@ -794,7 +801,9 @@ const pluginEntry: any = definePluginEntry({
                     expStore.searchByQuery({
                       query: qmdQuery,
                       projects: expProjects,
-                      minScore: 0.6,
+                      // BUGFIX(P0-1): 统一使用 DEFAULTS.retrieval.expMinScore，
+                      // 与 RetrievalGateway.searchWithExperience 一致（原硬编码 0.6 与 gateway 0.5 不一致）
+                      minScore: DEFAULTS.retrieval.expMinScore,
                       limit: retrievalLimits.exp,
                     }),
                   );
@@ -2222,6 +2231,8 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
     // -------------------------------------------------------------------
     const dashboardContext: DashboardToolContext = {
       expStore: undefined, // expStore 在闭包内延迟访问，由 runDistillation 回调内部读取
+      // BUGFIX(P1-4): 注入 qmdClient 单例，供 5 个 MCP 工具复用（避免每次 new QmdClient）
+      qmdClient: qmdClient ?? undefined,
       runDistillation: async (limit: number) => {
         // 包装内部 runDistillation(expStoreRef, apiRef, log, limit?)，延迟读取 expStore 当前值
         const storeRef = expStore;

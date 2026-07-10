@@ -161,7 +161,8 @@ export class RetrievalGateway {
           freeTags: filters.freeTags,
           scenarioTags: filters.scenarioTags,
           techStackTags: filters.techStackTags,
-          minScore: 0.5,
+          // BUGFIX(P0-1): 统一使用 DEFAULTS.retrieval.expMinScore，与 assemble 一致
+          minScore: DEFAULTS.retrieval.expMinScore,
           limit: 3,
         });
         return this.toExpRetrievalResult(expResults);

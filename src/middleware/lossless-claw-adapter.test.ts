@@ -262,4 +262,18 @@ describe('LosslessClawAdapter', () => {
       sessionId: '12345',
     }));
   });
+
+  it('P0-3: compact 超时返回 { ok:false } 而非无限挂起', async () => {
+    // 设置极短超时 + 永不 resolve 的 mock，验证 Promise.race 超时兜底
+    process.env.LCMG_COMPACT_TIMEOUT_MS = '50';
+    mockEngine.compact.mockReturnValue(new Promise(() => {})); // 永不 resolve/reject
+
+    const result = await adapter.compact({ sessionId: 'test', sessionFile: '/test/session' });
+
+    expect(result.ok).toBe(false);
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toContain('timeout');
+    expect(mockLogger.error).toHaveBeenCalled();
+    delete process.env.LCMG_COMPACT_TIMEOUT_MS;
+  });
 });

@@ -138,10 +138,17 @@ const SEARCH_QUERY_TAIL = `
         LIMIT $limit
 `;
 
-/** P3-6: 可选的标签过滤条件（hasFilters 时拼接到 WHERE 子句） */
+/** P3-6: 可选的标签过滤条件（hasFilters 时拼接到 WHERE 子句）
+ *
+ * BUGFIX(P0-4): tags_scenario / tags_techStack 存储为逗号分隔字符串（见 upsertDistilled
+ * 的 .join(',')），此前用 ANY(s IN COALESCE(e.tags_scenario, [])) 把字符串当数组迭代，
+ * Cypher 会逐字符拆分，导致 s IN $scenarioTags 几乎永不匹配，标签过滤完全失效。
+ * 改为 split(coalesce(...), ',')（与 tags_free 查询 L126 + 读取路径 buildTagsFromRow 一致）。
+ * 无需数据迁移：现有逗号字符串数据直接被 split 正确还原为数组。
+ */
 const SEARCH_QUERY_TAG_FILTER = `AND (
-             ANY(s IN COALESCE(e.tags_scenario, []) WHERE s IN $scenarioTags)
-             OR ANY(t IN COALESCE(e.tags_techStack, []) WHERE t IN $techStackTags)
+             ANY(s IN split(coalesce(e.tags_scenario, ''), ',') WHERE s <> '' AND s IN $scenarioTags)
+             OR ANY(t IN split(coalesce(e.tags_techStack, ''), ',') WHERE t <> '' AND t IN $techStackTags)
            )`;
 
 const FETCH_PENDING = `
