@@ -22,7 +22,7 @@
  */
 
 import type { EmbeddingConfig } from '../types.js';
-import { cleanBaseURL } from '../utils/url.js';
+import { cleanBaseURL, isOllamaEndpoint } from '../utils/url.js';
 
 // ---------------------------------------------------------------------------
 // LRU 缓存：相同 query 文本的 embedding 结果缓存，避免重复请求 Ollama
@@ -71,14 +71,23 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
     options,
   } = ecfg;
 
-  // 判断 API 格式：baseURL 以 /v1 结尾走 OpenAI 兼容，否则走 Ollama 原生
-  // 使用 cleanBaseURL 清洗可能的反引号/引号/首尾空格污染（用户从 markdown 复制时常见）
+  // 判断 API 格式：
+  //   - Ollama 端点（127.0.0.1:11434 / localhost:11434 等）→ 优先原生 /api/embed（支持 keep_alive）
+  //   - 非 Ollama 且 baseURL 以 /v1 结尾 → OpenAI 兼容 /v1/embeddings
+  //   - 其他 → 默认按原生 Ollama 处理（/api/embed）
+  // BUGFIX(P0-5): 对于 Ollama 端点，即使 baseURL 以 /v1 结尾，也优先使用原生 /api/embed。
+  // 因为 Ollama 的 OpenAI 兼容 /v1/embeddings 端点不识别 keep_alive 参数，
+  // 会导致模型 5 分钟后自动卸载，keep_alive=1h 完全失效。
+  // 同时剥离 /v1 后缀，避免拼接出 /v1/api/embed 这样的非法路径。
   const baseClean = cleanBaseURL(baseURL);
-  const isOpenAiCompatible = /\/v1\/?$/.test(baseClean);
+  const isOllama = isOllamaEndpoint(baseClean);
+  const isOpenAiCompatible = !isOllama && /\/v1\/?$/.test(baseClean);
   // Ollama 原生端点（/api/embed 和 /api/embeddings）要求运行时参数嵌套在 options 子对象内，
   // 不能平铺到 body 顶层（顶层会被 Ollama 静默忽略，导致 num_ctx/seed/temperature 等失效）。
   // OpenAI 兼容端点的扩展字段（dimensions/encoding_format）本就在顶层，保持平铺。
   const isOllamaNative = !isOpenAiCompatible;
+  // Ollama 端点剥离 /v1 后缀（避免 /v1/api/embed 非法路径）
+  const baseForOllama = isOllama ? baseClean.replace(/\/v1\/?$/, '') : baseClean;
 
   // 预构建请求头
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -109,11 +118,11 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
         body = { model, input: [text], keep_alive: keepAlive };
       } else if (useLegacyOllama) {
         // 旧版 Ollama: /api/embeddings + prompt
-        ep = baseClean + '/api/embeddings';
+        ep = baseForOllama + '/api/embeddings';
         body = { model, prompt: text, keep_alive: keepAlive };
       } else {
         // 新版 Ollama: /api/embed + input (数组格式)
-        ep = baseClean + '/api/embed';
+        ep = baseForOllama + '/api/embed';
         body = { model, input: [text], keep_alive: keepAlive };
       }
       // 透传额外 options：
@@ -202,7 +211,9 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
 export async function probeEmbeddingHealth(cfg: EmbeddingConfig): Promise<boolean> {
   if (!cfg?.baseURL) return false;
   const baseClean = cleanBaseURL(cfg.baseURL);
-  const isOpenAiCompatible = /\/v1\/?$/.test(baseClean);
+  // BUGFIX(P0-5): 使用 isOllamaEndpoint 判断，与 createLocalEmbedFn 保持一致
+  const isOllama = isOllamaEndpoint(baseClean);
+  const isOpenAiCompatible = !isOllama && /\/v1\/?$/.test(baseClean);
   const timeoutMs = 5000;
 
   const probePaths: string[] = isOpenAiCompatible

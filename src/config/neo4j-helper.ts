@@ -128,7 +128,9 @@ export function resolveEmbeddingConfig(
 
   const model = (embeddingSection.model as string) || process.env.GM_EMBED_MODEL || "Qwen3.5-Embedding-0.6B-GGUF";
   // 清洗 baseURL：用户从 markdown 复制时可能混入反引号/引号/首尾空格
-  const rawBaseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434/v1";
+  // BUGFIX(P0-5): 默认改为 Ollama 原生端点（不带 /v1），走 /api/embed 而非 /v1/embeddings。
+  // 原因：Ollama 的 OpenAI 兼容层 (/v1/*) 不识别 keep_alive 参数，导致模型反复卸载加载。
+  const rawBaseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434";
   const baseURL = cleanBaseURL(rawBaseURL);
   const dimensions = (embeddingSection.dimensions as number) ?? 1024;
   const keepAlive = (embeddingSection.keepAlive as string) || "1h";

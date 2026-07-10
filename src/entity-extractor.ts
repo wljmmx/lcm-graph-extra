@@ -30,7 +30,7 @@ export interface EntityGroup {
  * Groups results by normalized entity name, then merges
  * qmd + graph sources for the same entity.
  */
-export function groupByEntity(results: RetrievalResult[]): EntityGroup[] {
+export function groupByEntity(results: RetrievalResult[], fuzzyMatchThreshold?: number): EntityGroup[] {
   if (!results.length) return [];
 
   const groups = new Map<string, EntityGroup>();
@@ -60,7 +60,7 @@ export function groupByEntity(results: RetrievalResult[]): EntityGroup[] {
   }
 
   // Fuzzy merge similar entity names
-  return fuzzyMergeGroups(Array.from(groups.values()));
+  return fuzzyMergeGroups(Array.from(groups.values()), fuzzyMatchThreshold);
 }
 
 /**
@@ -167,8 +167,10 @@ export function entityNameSimilarity(a: string, b: string): number {
  * Fuzzy merge groups with similar entity names.
  * Threshold > 0.75 triggers merge.
  */
-function fuzzyMergeGroups(groups: EntityGroup[]): EntityGroup[] {
+function fuzzyMergeGroups(groups: EntityGroup[], fuzzyMatchThreshold?: number): EntityGroup[] {
   if (groups.length <= 1) return groups;
+  // BUGFIX(P1-1): 读取配置的 fuzzyMatchThreshold，而非硬编码 0.75
+  const threshold = fuzzyMatchThreshold ?? 0.75;
 
   const merged: EntityGroup[] = [];
   const used = new Set<number>();
@@ -183,7 +185,7 @@ function fuzzyMergeGroups(groups: EntityGroup[]): EntityGroup[] {
       if (used.has(j)) continue;
 
       const sim = entityNameSimilarity(current.name, groups[j].name);
-      if (sim >= 0.75) {
+      if (sim >= threshold) {
         // Merge: keep higher displayName and combine results
         current = mergeTwoGroups(current, groups[j]);
         used.add(j);

@@ -62,8 +62,8 @@ export class Merger {
     // Step 1: Exact dedup by result ID (prevent exact duplicates)
     const deduped = this.idDedup(all);
 
-    // Step 2: Group by entity
-    const groups = groupByEntity(deduped);
+    // Step 2: Group by entity (BUGFIX P1-1: 传递 fuzzyMatchThreshold 配置)
+    const groups = groupByEntity(deduped, this.config.fuzzyMatchThreshold);
 
     // Step 3: Flatten groups into ranked results
     const ranked = this.flattenGroups(groups);
@@ -234,8 +234,8 @@ export class Merger {
     const topK = Math.min(results.length, 10);
     const candidates = results.slice(0, topK);
 
-    // Group candidates by entity for context
-    const groups = groupByEntity(candidates);
+    // Group candidates by entity for context (BUGFIX P1-1: 传递 fuzzyMatchThreshold)
+    const groups = groupByEntity(candidates, this.config.fuzzyMatchThreshold);
 
     const candidateText = groups
       .map((g, i) => {

@@ -79,6 +79,22 @@ import { healthMetrics } from './health-metrics.js';
 const lastAssembleExpIdsBySession = new Map<string, Array<{ id: string; summary: string; query: string }>>();
 const LAST_EXP_MAP_MAX = 200; // 防止无界增长，LRU 上限
 
+// BUGFIX(P1-3): afterTurn 热路径不再每次 readFileSync 读 openclaw.json
+// 改为进程生命周期内读取一次（与 neo4j-helper.ts 的 _entriesCache 模式一致）。
+// graph-memory-pro 的 llm 配置由外部插件写入，进程重启即可拿到最新值。
+let _cachedGmpLlmConfig: unknown | undefined | null = null; // null=已尝试读取但不存在/失败
+function getCachedGmpLlmConfig(): unknown | undefined {
+  if (_cachedGmpLlmConfig !== null) return _cachedGmpLlmConfig;
+  // 首次读取
+  try {
+    const p = homedir() + '/.openclaw/openclaw.json';
+    if (!existsSync(p)) { _cachedGmpLlmConfig = null; return undefined; }
+    const d = JSON.parse(readFileSync(p, 'utf8'));
+    _cachedGmpLlmConfig = d?.plugins?.entries?.['graph-memory-pro']?.config?.llm;
+    return _cachedGmpLlmConfig;
+  } catch { _cachedGmpLlmConfig = null; return undefined; }
+}
+
 // R-2: 成本感知级联管理器 —— 全局单例
 import { cascadeManager, CascadeManager } from './cascade-manager.js';
 
@@ -199,7 +215,8 @@ const pluginEntry: any = definePluginEntry({
             ? (api.pluginConfig.retrieval.limits.qmd + (api.pluginConfig.retrieval.limits.graph ?? 5))
             : 10,
           fuzzyMatchThreshold: 0.85,
-          decayHalfLifeDays: 30,
+          // BUGFIX(P1-2): 统一使用 DEFAULTS.ttl.halfLifeDays，消除 30 vs 45 不一致
+          decayHalfLifeDays: DEFAULTS.ttl.halfLifeDays,
         });
 
         // 创建全局 RetrievalGateway 单例，供 dashboard snapshot 读取检索性能
@@ -1028,9 +1045,15 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     const llmFn = async (prompt: string): Promise<string> => {
                       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                       if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
+                      // BUGFIX(P1-7): 注入 keep_alive，与其他 LLM 调用保持一致，避免模型卸载
+                      const body = withKeepAliveIfOllama(
+                        llm.baseURL,
+                        { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 },
+                        llm.keepAlive,
+                      );
                       const resp = await fetch(llm.baseURL + '/chat/completions', {
                         method: 'POST', headers,
-                        body: JSON.stringify({ model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 }),
+                        body: JSON.stringify(body),
                         signal: AbortSignal.timeout(8000),
                       });
                       if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
@@ -1621,14 +1644,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                 baseURL: distillLlm.baseURL,
                 keepAlive: distillLlm.keepAlive,
               }
-            : api.pluginConfig?.llm || (() => {
-          try {
-            const p = homedir() + '/.openclaw/openclaw.json';
-            if (!existsSync(p)) return undefined;
-            const d = JSON.parse(readFileSync(p, 'utf8'));
-            return d?.plugins?.entries?.['graph-memory-pro']?.config?.llm;
-          } catch { return undefined }
-        })() || {
+            : api.pluginConfig?.llm || getCachedGmpLlmConfig() || {
                 apiKey: process.env.OPENAI_API_KEY || '',
                 baseURL: cleanBaseURL(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
