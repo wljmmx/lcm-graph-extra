@@ -341,69 +341,126 @@ export function getRetrievalLimitsForTier(tier: PressureTier, limits: {
 export interface ScenarioAdjustResult {
   scenario: string | null;
   limits: RetrievalLimits;
+  /** C-3: 分类置信度 [0, 1]，加权关键词原始分数 */
+  confidence: number;
 }
 
 /**
- * R-5': 从 query 中快速检测场景，并按场景调整 retrievalLimits 比例。
+ * C-3: 场景感知检索 — 加权关键词匹配 + 置信度门控 + 平局打破。
+ *
+ * 核心改进（v2.2.0）：
+ *   1. 关键词加权：不同关键词有不同权重（如 "crash" 1.0 > "error" 0.3）
+ *   2. 置信度门控：原始加权分数 < CONFIDENCE_THRESHOLD(0.5) → 不调整
+ *   3. 平局打破：score 相同时按场景优先级排序（bug-fix > config-debug > ...）
+ *   4. security-audit 独立分类（与 code-review 有不同的检索偏好）
  *
  * 设计原则：零延迟（纯规则匹配，不用 LLM），只在 tier 基础上微调比例。
  * 总 token 量不变（避免突破压力预算），只改各层分配比例。
- *
- * 场景 → 权重调整：
- *   - bug-fix / config-debug / performance-opt: QMD ↑  Graph →  Exp ↓
- *     （代码/配置优先，经验层只做辅助）
- *   - feature-dev / refactor: QMD →  Graph ↑  Exp →
- *     （结构优先，图谱关联更重要）
- *   - code-review / security-audit: QMD ↓  Graph →  Exp ↑
- *     （经验优先，历史经验更有参考价值）
- *   - deployment / devops: QMD ↑  Graph ↓  Exp →
- *     （配置/文档优先）
  */
 export function detectScenarioAndAdjustLimits(
   query: string,
   baseLimits: RetrievalLimits,
 ): ScenarioAdjustResult {
   if (!query || !query.trim()) {
-    return { scenario: null, limits: baseLimits };
+    return { scenario: null, limits: baseLimits, confidence: 0 };
   }
 
   const q = query.toLowerCase();
 
-  // 场景关键词匹配（优先级从高到低）
-  let detected: string | null = null;
-
-  const bugPatterns = ['bug', 'error', 'fail', 'crash', 'exception', '修复', '错误', '报错', '崩溃', '异常'];
-  const configPatterns = ['config', 'setting', '配置', '设置', 'deploy', '部署', 'env', '环境变量'];
-  const perfPatterns = ['perf', 'slow', 'latency', 'optim', '性能', '慢', '优化', '提速'];
-  const featurePatterns = ['feature', 'implement', 'add', 'create', 'build', '新功能', '实现', '添加', '开发'];
-  const refactorPatterns = ['refactor', 'rework', 'restructure', '重构', '改造', '整理'];
-  const reviewPatterns = ['review', 'audit', 'check', '审查', '评审', '检查', '安全'];
-  const deployPatterns = ['deploy', 'release', 'ci', 'cd', 'pipeline', '发布', '上线', '流水线'];
-
-  const matchCount = (patterns: string[]): number =>
-    patterns.filter((p) => q.includes(p)).length;
-
-  const scores: Record<string, number> = {
-    'bug-fix': matchCount(bugPatterns),
-    'config-debug': matchCount(configPatterns),
-    'performance-opt': matchCount(perfPatterns),
-    'feature-dev': matchCount(featurePatterns),
-    'refactor': matchCount(refactorPatterns),
-    'code-review': matchCount(reviewPatterns),
-    'deployment': matchCount(deployPatterns),
+  // ---- C-3: 加权关键词（权重越高越能指示场景） ----
+  // 1.0 = 强信号词，单一命中即可确认场景
+  // 0.6 = 正常信号词
+  // 0.3 = 弱信号词，需组合命中
+  const patterns: Record<string, { keywords: Array<[string, number]>; priority: number }> = {
+    'bug-fix': {
+      keywords: [
+        ['crash', 1.0], ['segfault', 1.0], ['panic', 1.0], ['fatal', 1.0],
+        ['exception', 0.6], ['修复', 0.6], ['报错', 0.6], ['崩溃', 0.6],
+        ['bug', 0.6], ['error', 0.3], ['fail', 0.3], ['错误', 0.3], ['异常', 0.3],
+      ],
+      priority: 1, // 最高优先级（最紧急）
+    },
+    'config-debug': {
+      keywords: [
+        ['配置', 0.6], ['config', 0.6], ['setting', 0.6], ['设置', 0.6],
+        ['deploy', 0.6], ['部署', 0.6], ['env', 0.6], ['环境变量', 0.6],
+        ['环境', 0.3],
+      ],
+      priority: 2,
+    },
+    'performance-opt': {
+      keywords: [
+        ['perf', 0.6], ['性能', 0.6], ['优化', 0.6], ['optim', 0.6],
+        ['slow', 0.6], ['慢', 0.6], ['latency', 0.6],
+        ['提速', 0.3],
+      ],
+      priority: 3,
+    },
+    'security-audit': {
+      keywords: [
+        ['安全', 0.6], ['security', 0.6], ['vuln', 0.6], ['漏洞', 0.6],
+        ['attack', 0.6], ['攻击', 0.6], ['inject', 0.6], ['注入', 0.6],
+        ['auth', 0.6], ['认证', 0.6], ['permission', 0.6], ['权限', 0.6],
+      ],
+      priority: 4, // C-3: 独立分类，不同于 code-review
+    },
+    'code-review': {
+      keywords: [
+        ['review', 0.6], ['审查', 0.6], ['评审', 0.6],
+        ['检查', 0.3], ['check', 0.3], ['audit', 0.3],
+      ],
+      priority: 5,
+    },
+    'deployment': {
+      keywords: [
+        ['deploy', 0.6], ['release', 0.6], ['发布', 0.6], ['上线', 0.6],
+        ['ci', 0.6], ['pipeline', 0.6], ['流水线', 0.6],
+        ['cd', 0.3],
+      ],
+      priority: 6,
+    },
+    'feature-dev': {
+      keywords: [
+        ['feature', 0.6], ['新功能', 0.6], ['implement', 0.6],
+        ['add', 0.3], ['create', 0.3], ['build', 0.3], ['实现', 0.3], ['添加', 0.3], ['开发', 0.3],
+      ],
+      priority: 7,
+    },
+    'refactor': {
+      keywords: [
+        ['refactor', 0.6], ['重构', 0.6], ['rework', 0.6],
+        ['改造', 0.3], ['整理', 0.3], ['restructure', 0.3],
+      ],
+      priority: 8, // 最低优先级（最宽泛）
+    },
   };
 
-  let maxScore = 0;
-  for (const [scenario, score] of Object.entries(scores)) {
-    if (score > maxScore) {
-      maxScore = score;
-      detected = scenario;
+  // 计算加权原始分数
+  const scores: Array<{ scenario: string; score: number; priority: number }> = [];
+  for (const [scenario, { keywords, priority }] of Object.entries(patterns)) {
+    let weightedScore = 0;
+    for (const [kw, weight] of keywords) {
+      if (q.includes(kw)) {
+        weightedScore += weight;
+      }
     }
+    scores.push({ scenario, score: weightedScore, priority });
   }
 
-  // 至少命中 1 个关键词才算检测到场景
-  if (maxScore < 1 || !detected) {
-    return { scenario: null, limits: baseLimits };
+  // 按 score 降序 → priority 升序（score 相同时，优先级高（数字小）的胜出）
+  scores.sort((a, b) => b.score - a.score || a.priority - b.priority);
+
+  const best = scores[0];
+
+  // C-3: 置信度门控 — 加权分数低于阈值 → 不使用场景分类
+  const CONFIDENCE_THRESHOLD = 0.5;
+  if (!best || best.score < CONFIDENCE_THRESHOLD) {
+    return { scenario: null, limits: baseLimits, confidence: best?.score ?? 0 };
+  }
+
+  // 高压力模式下（high tier）不做调整（已经是最低限度）
+  if (baseLimits.qmd <= 1 && baseLimits.graph <= 1) {
+    return { scenario: best.scenario, limits: baseLimits, confidence: best.score };
   }
 
   // 按场景调整比例 —— 保持总量接近，只重新分配
@@ -412,25 +469,24 @@ export function detectScenarioAndAdjustLimits(
   let graphRatio = 0.35;
   let expRatio = 0.20;
 
-  switch (detected) {
+  switch (best.scenario) {
     case 'bug-fix':
     case 'config-debug':
     case 'performance-opt':
-      // QMD 优先，Experience 降低
       qmdRatio = 0.55; graphRatio = 0.30; expRatio = 0.15;
       break;
     case 'feature-dev':
     case 'refactor':
-      // Graph 稍高，结构关联更重要
       qmdRatio = 0.40; graphRatio = 0.45; expRatio = 0.15;
       break;
     case 'code-review':
-    case 'security-audit':
-      // Experience 优先，历史经验参考价值高
       qmdRatio = 0.30; graphRatio = 0.30; expRatio = 0.40;
       break;
+    case 'security-audit':
+      // C-3: 安全审计独立分类 — QMD 优先（漏洞模式/安全配置），Experience 次之
+      qmdRatio = 0.50; graphRatio = 0.20; expRatio = 0.30;
+      break;
     case 'deployment':
-      // QMD 优先（配置/文档），Graph 降低
       qmdRatio = 0.55; graphRatio = 0.20; expRatio = 0.25;
       break;
   }
@@ -441,12 +497,7 @@ export function detectScenarioAndAdjustLimits(
     exp: Math.max(0, Math.round(totalBase * expRatio)),
   };
 
-  // 高压力模式下（high tier）不做调整（已经是最低限度）
-  if (baseLimits.qmd <= 1 && baseLimits.graph <= 1) {
-    return { scenario: detected, limits: baseLimits };
-  }
-
-  return { scenario: detected, limits: adjusted };
+  return { scenario: best.scenario, limits: adjusted, confidence: best.score };
 }
 
 /**

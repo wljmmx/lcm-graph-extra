@@ -97,8 +97,115 @@ function getCachedGmpLlmConfig(): unknown | undefined {
   } catch { _cachedGmpLlmConfig = null; return undefined; }
 }
 
+/**
+ * H-2: 根据压力等级动态生成知识库参考引导语。
+ * low tier → 详细引导（分层使用说明 + 冲突处理策略）
+ * medium tier → 精简引导（优先级提示）
+ * high tier → 极简引导（仅核心提示）
+ */
+function buildKnowledgeGuidance(tier: string, hasSections: boolean): string {
+  if (!hasSections) return '';
+  const header = '\n# 知识库参考\n';
+  switch (tier) {
+    case 'low':
+      return header + [
+        '以下为知识库检索结果，按可靠程度分为三层：',
+        '1. 经验总结（最高优先级）：历史对话中验证过的经验，可直接参考',
+        '2. 知识图谱（中优先级）：代码实体关系，用于理解项目结构',
+        '3. 记忆文件（参考优先级）：代码片段和文档，用于补充细节',
+        '',
+        '使用原则：',
+        '- 经验表明"不推荐"的做法，即使图谱中有相关代码，也应优先采纳经验',
+        '- 当不同层的信息冲突时，以经验总结为准',
+        '- 请始终专注于用户当前问题，不要被历史内容主导任务方向',
+        '- 如果知识库内容与当前问题无关，请忽略并基于你的知识回答',
+      ].join('\n');
+    case 'medium':
+      return header + [
+        '以下为知识库检索结果，按优先级排列：经验总结 > 知识图谱 > 记忆文件。',
+        '请专注于用户当前问题，冲突时以经验总结为准。',
+      ].join('\n');
+    case 'high':
+      return header + '请专注于用户当前问题。';
+    default:
+      return header + '以下为知识库检索结果，仅供参考。请始终专注于用户当前问题。';
+  }
+}
+
+/**
+ * H-5: 模型输出质量自动评估结果。
+ */
+interface OutputQualityMetrics {
+  outputLength: number;
+  outputLengthOk: boolean;
+  isRepetitive: boolean;
+  referencesUsed: number;
+  referencesAvailable: number;
+  userFeedbackSignal: 'positive' | 'negative' | 'neutral';
+  overallScore: number; // [0, 1]
+}
+
+/**
+ * H-5: 模型输出质量自动评估（afterTurn 中执行）。
+ * 纯规则检查，零 LLM 调用，不影响延迟。
+ */
+function evaluateOutputQuality(
+  output: string,
+  previousOutput: string | null,
+  systemPromptAddition: string,
+): OutputQualityMetrics {
+  const metrics: OutputQualityMetrics = {
+    outputLength: output.length,
+    outputLengthOk: output.length >= 10 && output.length <= 8000,
+    isRepetitive: false,
+    referencesUsed: 0,
+    referencesAvailable: 0,
+    userFeedbackSignal: 'neutral',
+    overallScore: 0,
+  };
+
+  // 1. 引用使用率：检查模型输出中是否引用了知识库中的实体
+  if (systemPromptAddition) {
+    const kbEntities = systemPromptAddition.match(/`(\w{3,})`/g) ?? [];
+    metrics.referencesAvailable = kbEntities.length;
+    if (kbEntities.length > 0) {
+      let used = 0;
+      for (const entity of kbEntities) {
+        if (output.includes(entity.replace(/`/g, ''))) used++;
+      }
+      metrics.referencesUsed = used;
+    }
+  }
+
+  // 2. 重复输出检测
+  if (previousOutput && output.length > 50) {
+    const overlap = output.slice(0, 200).toLowerCase();
+    const prev = previousOutput.slice(0, 200).toLowerCase();
+    if (overlap === prev) {
+      metrics.isRepetitive = true;
+    }
+  }
+
+  // 综合评分
+  let score = 0;
+  if (metrics.outputLengthOk) score += 0.3;
+  if (metrics.referencesAvailable > 0) {
+    score += (metrics.referencesUsed / metrics.referencesAvailable) * 0.3;
+  } else {
+    score += 0.3; // 无引用内容时不扣分
+  }
+  if (!metrics.isRepetitive) score += 0.4;
+  metrics.overallScore = Math.round(score * 100) / 100;
+  return metrics;
+}
+
 // R-2: 成本感知级联管理器 —— 全局单例
 import { cascadeManager, CascadeManager } from './cascade-manager.js';
+
+// H-6: 会话级预热缓存 — bootstrap 时预加载高频经验，assemble 第一轮注入
+const sessionWarmupCache = new Map<string, any[]>();
+const WARMUP_CACHE_MAX = 100;
+const WARMUP_CACHE_TTL_MS = 30 * 60 * 1000; // 30min TTL
 
 // applyTotalControl 已抽出到 src/plugin/token-control.ts
 import { applyTotalControl } from "./plugin/token-control.js";
@@ -333,6 +440,23 @@ const pluginEntry: any = definePluginEntry({
           };
         } catch (err: any) {
           return { bootstrapped: false, reason: 'bootstrap_error: ' + (err?.message ?? String(err)) };
+        } finally {
+          // H-6: 会话启动时预加载高频经验（非阻塞，失败静默）
+          try {
+            const sid = typeof params.sessionId === 'string' ? params.sessionId : String(params.sessionId);
+            const sk = params.sessionKey ?? sid;
+            if (sessionWarmupCache.size >= WARMUP_CACHE_MAX) {
+              const firstKey = sessionWarmupCache.keys().next().value;
+              if (firstKey) sessionWarmupCache.delete(firstKey);
+            }
+            if (expStore) {
+              const topExp = await expStore.getTopExperiences(3);
+              if (topExp && topExp.length > 0) {
+                sessionWarmupCache.set(sk, topExp);
+                logger?.debug?.("[bootstrap] H-6 warmup: preloaded top experiences", { count: topExp.length, sessionKey: sk });
+              }
+            }
+          } catch { /* non-fatal */ }
         }
       },
 
@@ -713,7 +837,11 @@ const pluginEntry: any = definePluginEntry({
           const scenarioAdjust = detectScenarioAndAdjustLimits(qmdQuery, retrievalLimits);
           retrievalLimits = scenarioAdjust.limits;
           if (scenarioAdjust.scenario) {
-            logger?.debug?.("R-5 scenario-adjusted retrieval limits", { scenario: scenarioAdjust.scenario, limits: retrievalLimits });
+            logger?.debug?.("R-5 scenario-adjusted retrieval limits", {
+              scenario: scenarioAdjust.scenario,
+              confidence: Number(scenarioAdjust.confidence?.toFixed(3) ?? 0),
+              limits: retrievalLimits,
+            });
           }
 
           try {
@@ -829,6 +957,18 @@ const pluginEntry: any = definePluginEntry({
             const rawQmd = Array.isArray(l2?.results) ? l2.results : [];
             const rawGraph = Array.isArray(l3?.results) ? l3.results : [];
             expResults = Array.isArray(l4?.results) ? l4.results : [];
+
+            // H-6: 上下文预热 — 低压力 tier 且无 query 检索结果时注入预热经验
+            if (tier === 'low' && expResults.length === 0) {
+              const sk = typeof params.sessionKey === 'string' ? params.sessionKey : (typeof params.session_id === 'string' ? params.session_id : '');
+              const warmup = sessionWarmupCache.get(sk);
+              if (warmup && warmup.length > 0) {
+                expResults = warmup;
+                logger?.debug?.("[assemble] H-6: injected warmup experiences", { count: expResults.length });
+                // 使用后清除，避免后续轮次重复注入
+                sessionWarmupCache.delete(sk);
+              }
+            }
 
             // S1-1: Use Merger for entity-level cross-engine dedup (replaces hand-written ID dedup)
             try {
@@ -1287,6 +1427,22 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             }
           }
 
+          // H-4: 上下文冲突检测 — 检测经验层与图谱/记忆层之间的信息冲突
+          try {
+            const { detectConflicts } = await import('./merger.js');
+            const expForConflict = expResults.map((e: any) => ({ content: e.experience?.summary ?? e.experience?.detail ?? '', source: 'experience' as const, type: 'raw' as const, id: e.experience?.id ?? '', score: e.score ?? 0 }));
+            const graphForConflict = (Array.isArray(graphResults) ? graphResults : []).map((r: any) => ({ ...r, source: 'graph' as const }));
+            const qmdForConflict = (Array.isArray(qmdResults) ? qmdResults : []).map((r: any) => ({ ...r, source: 'qmd' as const }));
+            const conflicts = detectConflicts(expForConflict, graphForConflict, qmdForConflict);
+            if (conflicts.length > 0) {
+              const conflictText = conflicts.map((c: any, i: number) =>
+                `⚠️ 冲突 ${i + 1} [${c.severity === 'high' ? '严重' : '中等'}]: ${c.description}`
+              ).join('\n');
+              addSection('## ⚠️ 内容冲突提示', conflictText, 6);
+              logger?.debug?.("[assemble] H-4: detected content conflicts", { count: conflicts.length });
+            }
+          } catch { /* non-fatal */ }
+
           // ==================================================================
           // 3. Build systemPromptAddition: Tool Guidance + injected sections
           // ==================================================================
@@ -1299,9 +1455,9 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (sdkGuidance) {
               addition += '\n# Tool Guidance\n' + sdkGuidance;
             }
-            // 引导语：明确告知 LLM 以下为知识库参考，专注当前问题，避免历史内容主导任务方向
+            // H-2: 根据压力等级动态生成知识库参考引导语
             if (sections.length > 0) {
-              addition += '\n# 知识库参考\n以下为知识库检索结果，仅供参考补充。请始终专注于用户当前问题，不要被历史内容主导任务方向。';
+              addition += buildKnowledgeGuidance(tier, true);
             }
             for (const sec of sections) {
               addition += '\n---\n' + sec.label + '\n' + sec.body;
@@ -1628,6 +1784,25 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             logger?.debug?.(`[afterTurn] skipped (assistant content too short, ${qualityFilterMs}ms total)`);
             return;
           }
+
+          // H-5: 模型输出质量自动评估（零 LLM 调用，不影响延迟）
+          try {
+            const qualityMetrics = evaluateOutputQuality(
+              assistantContent,
+              null, // previousOutput — 后续可通过会话级缓存传入
+              '', // systemPromptAddition — afterTurn 无法直接访问 assemble 的注入内容
+            );
+            logger?.debug?.("[afterTurn] H-5 output quality", {
+              overallScore: qualityMetrics.overallScore,
+              outputLengthOk: qualityMetrics.outputLengthOk,
+              isRepetitive: qualityMetrics.isRepetitive,
+              referencesUsed: qualityMetrics.referencesUsed,
+              referencesAvailable: qualityMetrics.referencesAvailable,
+            });
+            if (qualityMetrics.isRepetitive) {
+              logger?.warn?.("[afterTurn] H-5 repetitive output detected");
+            }
+          } catch { /* non-fatal */ }
 
           // S-7': 用户画像轻量版 —— 从用户消息中提取偏好信号
           // 用于后续经验搜索的个性化加权（零延迟，纯规则）

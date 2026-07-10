@@ -41,13 +41,20 @@ const UPSERT_DISTILLED = `
     e.status = 'DISTILLED'
 `;
 
-/** Legacy: 按 relevanceScore 排序（不查 query，用于通用经验兜底） */
+/** Legacy: 按 relevanceScore 排序（不查 query，用于通用经验兜底）
+ *  C-1: matchCount 引入时间衰减排序，防止正反馈循环。
+ */
 const SEARCH_RELEVANT = `
   MATCH (e:${LABEL})
   WHERE e.status = 'DISTILLED'
     AND (e.state IS NULL OR e.state <> 'superseded')
     AND e.relevanceScore >= $minScore
     AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
+  WITH e,
+    CASE WHEN e.lastRecalledAt IS NOT NULL
+      THEN coalesce(e.matchCount, 0) * (0.5 ^ ((timestamp() - e.lastRecalledAt) / (1000.0 * 60 * 60 * 24 * $halfLifeDays)))
+      ELSE coalesce(e.matchCount, 0) * 0.5
+    END AS decayedMatchCount
   RETURN e.id AS id,
          e.title AS title,
          e.summary AS summary,
@@ -62,7 +69,7 @@ const SEARCH_RELEVANT = `
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity,
          e.tags_free AS tags_free
-  ORDER BY e.relevanceScore DESC, e.matchCount DESC
+  ORDER BY e.relevanceScore DESC, decayedMatchCount DESC
   LIMIT $limit
 `;
 
@@ -95,7 +102,8 @@ const SEARCH_BY_CONTEXT = `
 
 const INCREMENT_MATCH_COUNT = `
   MATCH (e:${LABEL} {id: $id})
-  SET e.matchCount = coalesce(e.matchCount, 0) + 1
+  SET e.matchCount = coalesce(e.matchCount, 0) + 1,
+      e.lastRecalledAt = timestamp()
 `;
 
 // G-8: LLM 异步验证回路 —— 更新 qualityScore + 调整 relevanceScore + 记录历史
@@ -127,6 +135,11 @@ const SEARCH_QUERY_TAIL = `
                WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
             THEN 0.3
             ELSE 0.0 END) AS queryMatch
+        WITH e, queryMatch,
+          CASE WHEN e.lastRecalledAt IS NOT NULL
+            THEN coalesce(e.matchCount, 0) * (0.5 ^ ((timestamp() - e.lastRecalledAt) / (1000.0 * 60 * 60 * 24 * $halfLifeDays)))
+            ELSE coalesce(e.matchCount, 0) * 0.5
+          END AS decayedMatchCount
         RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
                e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
                e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
@@ -134,7 +147,7 @@ const SEARCH_QUERY_TAIL = `
                e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
                e.tags_free AS tags_free,
                queryMatch AS queryMatch
-        ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) DESC, e.matchCount DESC
+        ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) + (decayedMatchCount * 0.1) DESC
         LIMIT $limit
 `;
 
@@ -256,11 +269,12 @@ export class ExperienceStorage {
       projects = [],
       minScore = 0.6,
       limit = 5,
+      halfLifeDays = 30,
     } = options;
 
     // 如果没有 query 且没有标签过滤，回退到按 relevanceScore 排序
     if (!query && scenarioTags.length === 0 && techStackTags.length === 0) {
-      return this.searchRelevant(minScore, limit);
+      return this.searchRelevant(minScore, limit, halfLifeDays);
     }
 
     const hasFilters = scenarioTags.length > 0 || techStackTags.length > 0 || projects.length > 0;
@@ -274,6 +288,7 @@ export class ExperienceStorage {
       queryFreeTags: queryFreeTags.length > 0 ? queryFreeTags : [],
       projects: projects.length > 0 ? projects : [],
       limit: Math.trunc(limit),
+      halfLifeDays,
     };
 
     // S-6': 项目名过滤 —— 软过滤（命中任一项目名即可，无项目名的经验也保留）
@@ -305,15 +320,17 @@ export class ExperienceStorage {
   }
 
   /**
-   * 搜索精炼经验（按 relevanceScore + matchCount 排序，legacy）
+   * 搜索精炼经验（按 relevanceScore + decayedMatchCount 排序，legacy）
+   * C-1: matchCount 引入时间衰减，防止正反馈循环。
    */
   async searchRelevant(
     minScore: number = 0.6,
     limit: number = 5,
+    halfLifeDays: number = 30,
   ): Promise<ExperienceSearchResult[]> {
     const rows = await this.adapter.query<ExperienceSearchRow>(
       SEARCH_RELEVANT,
-      { minScore, limit: Math.trunc(limit) },
+      { minScore, limit: Math.trunc(limit), halfLifeDays },
     );
     return (rows || []).map((r: any) => ({
       experience: rowToDistilled(r),
@@ -498,6 +515,60 @@ export class ExperienceStorage {
     const rows = await this.adapter.query(CLEANUP_EXPIRED, { batchSize: Math.trunc(batchSize) });
     const row = rows?.[0] as { deleted?: number } | undefined;
     return typeof row?.deleted === 'number' ? row.deleted : 0;
+  }
+
+  /**
+   * H-6: 获取全局高频经验（用于会话启动预热）。
+   * 按 matchCount 降序，不依赖 query 关键词。
+   */
+  async getTopExperiences(limit: number = 3): Promise<ExperienceSearchResult[]> {
+    const rows = await this.adapter.query<ExperienceSearchRow>(`
+      MATCH (e:${LABEL})
+      WHERE e.status = 'DISTILLED'
+        AND (e.state IS NULL OR e.state <> 'superseded')
+        AND e.relevanceScore >= 0.6
+        AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
+      RETURN e.id AS id, e.title AS title, e.summary AS summary,
+             e.detail AS detail, e.context AS context,
+             e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
+             e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
+             e.tags_scenario AS tags_scenario, e.tags_techStack AS tags_techStack,
+             e.tags_severity AS tags_severity, e.tags_free AS tags_free
+      ORDER BY e.matchCount DESC, e.relevanceScore DESC
+      LIMIT ${Math.trunc(limit)}
+    `);
+    return (rows || []).map((r: any) => ({
+      experience: rowToDistilled(r),
+      score: r.relevanceScore,
+    }));
+  }
+
+  /**
+   * C-1: 批量衰减长期未被召回的 matchCount。
+   * 对 lastRecalledAt 超过 staleThresholdDays 的经验，matchCount 衰减 50%。
+   * 由 dreaming/cron 定期调用，避免 matchCount 无限累积。
+   *
+   * @param staleThresholdDays 超过此天数未召回，触发衰减
+   * @param batchSize 每批处理数量
+   * @returns 本批次衰减的节点数
+   */
+  async decayMatchCount(
+    staleThresholdDays: number = 14,
+    batchSize: number = 100,
+  ): Promise<number> {
+    const staleMs = staleThresholdDays * 24 * 60 * 60 * 1000;
+    const result = await this.adapter.query(`
+      MATCH (e:${LABEL})
+      WHERE e.status = 'DISTILLED'
+        AND e.lastRecalledAt IS NOT NULL
+        AND e.lastRecalledAt < timestamp() - ${staleMs}
+        AND e.matchCount > 0
+      WITH e LIMIT ${Math.trunc(batchSize)}
+      SET e.matchCount = round(e.matchCount * 0.5)
+      RETURN count(e) AS decayed
+    `);
+    const row = result?.[0] as { decayed?: number } | undefined;
+    return typeof row?.decayed === 'number' ? row.decayed : 0;
   }
 }
 

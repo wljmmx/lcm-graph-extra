@@ -72,6 +72,88 @@ function resolveBackupDir(instance: PluginInstance): string {
 }
 
 // ---------------------------------------------------------------------------
+// C-2: Compaction quality validation
+// ---------------------------------------------------------------------------
+
+/** C-2: 压缩摘要质量检查结果。 */
+interface CompactionQualityMetrics {
+  qualityScore: number;       // [0, 1] 综合质量分数
+  lengthRatio: number;        // 摘要 token 数 / 原始 token 数
+  entityRetention: number;    // [0, 1] 实体保留率
+  keywordRetention: number;   // [0, 1] 关键词保留率
+  isEmpty: boolean;           // 摘要是否为空
+  warnings: string[];         // 质量警告信息
+}
+
+/**
+ * C-2: 对压缩摘要进行质量检查。
+ *
+ * 检查维度：
+ *   1. 空内容检测
+ *   2. 长度合理性（过度压缩/压缩不足）
+ *   3. 实体保留率（代码中的函数名、类名、文件路径等）
+ *   4. 关键词保留率（高频词/TF top 词）
+ *
+ * 纯规则/统计方法，零 LLM 调用，不阻塞主流程。
+ */
+function validateCompactionQuality(
+  summary: string,
+  tokensBefore: number,
+  tokensAfter: number,
+): CompactionQualityMetrics {
+  const warnings: string[] = [];
+
+  // 1. 空内容检测
+  const trimmed = (summary ?? '').trim();
+  const isEmpty = trimmed.length === 0 || /^[\s\p{P}]+$/u.test(trimmed);
+  if (isEmpty) {
+    return {
+      qualityScore: 0, lengthRatio: 0, entityRetention: 0, keywordRetention: 0,
+      isEmpty: true, warnings: ['摘要为空或仅含标点符号'],
+    };
+  }
+
+  // 2. 长度合理性
+  const lengthRatio = tokensBefore > 0 ? tokensAfter / tokensBefore : 0;
+  if (lengthRatio < 0.05) {
+    warnings.push(`摘要过度压缩: 压缩比 ${(lengthRatio * 100).toFixed(1)}%（低于 5%），可能丢失关键信息`);
+  }
+  if (lengthRatio > 0.50) {
+    warnings.push(`压缩不足: 压缩比 ${(lengthRatio * 100).toFixed(1)}%（高于 50%），摘要可能过于冗长`);
+  }
+
+  // 3. 实体保留率：提取代码实体（函数名、类名、文件路径）
+  const entityPattern = /`([a-zA-Z_]\w{2,})`|([./][\w./-]+)|([A-Z][a-z]+(?:[A-Z][a-z]+)+)/g;
+  const origEntities = new Set(Array.from(trimmed.matchAll(entityPattern), m => m[0]));
+  // 由于没有原始消息文本，实体保留率基于摘要自身实体数量评估
+  // 摘要中包含至少 1 个代码实体 → 保留率视为合格
+  const entityRetention = origEntities.size > 0 ? 1.0 : 0.5;
+
+  // 4. 关键词保留率：基于摘要自身的词频分布
+  const stopWords = new Set([
+    'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for',
+    'of', 'that', 'this', 'was', 'are', 'be', 'been', 'has', 'had', 'have', 'it', 'its',
+    '的', '是', '在', '了', '和', '与', '或', '不', '有', '我', '你', '他', '她', '它', '们',
+  ]);
+  const extractWords = (text: string): string[] => {
+    return text.toLowerCase().split(/[\s,.;:!?()\[\]{}"'\n\r\t]+/)
+      .filter(w => w.length > 2 && !stopWords.has(w));
+  };
+  const summaryWords = extractWords(trimmed);
+  // 摘要中包含足够多的有意义词 → 关键词保留率视为合格
+  const keywordRetention = summaryWords.length >= 5 ? 1.0 : summaryWords.length >= 2 ? 0.6 : 0.3;
+
+  // 综合评分
+  const lengthScore = lengthRatio >= 0.05 && lengthRatio <= 0.50 ? 1.0
+    : lengthRatio < 0.05 ? 0.3 : 0.7;
+  const qualityScore = Math.round(
+    (lengthScore * 0.3 + entityRetention * 0.4 + keywordRetention * 0.3) * 100
+  ) / 100;
+
+  return { qualityScore, lengthRatio, entityRetention, keywordRetention, isEmpty, warnings };
+}
+
+// ---------------------------------------------------------------------------
 // Public hook
 // ---------------------------------------------------------------------------
 
@@ -177,6 +259,53 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
           summaryId: compactResult.summaryId,
           exhausted: compactResult.exhausted,
         });
+
+        // C-2: 压缩摘要质量验证
+        try {
+          const summary = compactResult?.summary ?? resultData?.summary ?? '';
+          const tokensBefore = resultData?.tokensBefore ?? 0;
+          const tokensAfter = resultData?.tokensAfter ?? 0;
+
+          if (summary && tokensBefore > 0) {
+            const metrics = validateCompactionQuality(summary, tokensBefore, tokensAfter);
+
+            logger?.info?.("compaction: quality check", {
+              qualityScore: metrics.qualityScore,
+              lengthRatio: Number(metrics.lengthRatio.toFixed(3)),
+              entityRetention: Number(metrics.entityRetention.toFixed(3)),
+              keywordRetention: Number(metrics.keywordRetention.toFixed(3)),
+              warnings: metrics.warnings,
+            });
+
+            // 低质量摘要 → 告警 + 降级标记
+            if (metrics.qualityScore < 0.40) {
+              logger?.warn?.("compaction: LOW QUALITY summary detected", {
+                qualityScore: metrics.qualityScore,
+                warnings: metrics.warnings,
+                summaryId: compactResult.summaryId,
+              });
+              // 写入质量事件到 memory 目录，供 Dashboard 和后续流程参考
+              try {
+                const qualityPath = path.join(memoryDir, '.compaction-quality.json');
+                const previousMetrics: unknown[] = await (async () => {
+                  try {
+                    const raw = await fs.readFile(qualityPath, 'utf-8');
+                    return JSON.parse(raw) as unknown[];
+                  } catch { return []; }
+                })();
+                previousMetrics.push({
+                  timestamp: new Date().toISOString(),
+                  summaryId: compactResult.summaryId,
+                  ...metrics,
+                });
+                // 只保留最近 20 条
+                await fs.writeFile(qualityPath, JSON.stringify(previousMetrics.slice(-20), null, 2));
+              } catch { /* non-fatal */ }
+            }
+          }
+        } catch (qualityErr) {
+          logger?.debug?.("compaction: quality check failed (non-fatal)", { err: String(qualityErr) });
+        }
       } else {
         logger?.info?.("compaction: lossless-claw — no action needed", {
           reason: compactResult.reason,
@@ -226,4 +355,5 @@ export const __test__ = {
   listBackupsForFile,
   enforceRetention,
   resolveBackupDir,
+  validateCompactionQuality,
 };

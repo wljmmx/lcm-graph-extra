@@ -39,6 +39,7 @@ export const DEFAULTS = {
     // 导致两条检索路径对相同 query 召回的经验集合不同。
     // 0.5 更宽松、召回率更高，与 RetrievalGateway 设计意图一致，作为单一来源。
     expMinScore: 0.5,
+    expHalfLifeDays: 30,          // C-1: matchCount 时间衰减半衰期（天）
   },
 
   // BUGFIX(P2-9): LLM 调用超时集中化（原散落 6 处硬编码 1.5s~30s，跨 20 倍不一致）。
