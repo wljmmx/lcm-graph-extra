@@ -1,8 +1,8 @@
-# lcm-graph-extra v2.1.10 性能审计与优化改造方案
+# lcm-graph-extra v2.1.11 性能审计与优化改造方案
 
-> 审计日期：2026-07-04｜重新评估日期：2026-07-10
+> 审计日期：2026-07-04｜重新评估日期：2026-07-10｜完成日期：2026-07-10
 > 审计范围：`/workspace/src` 全量代码（生命周期/检索/存储/适配器/工具/熔断/债务/快照）
-> 基线版本：v2.1.10（commit 8f8b114，main 分支）+ 第一批 + 第二批修复
+> 基线版本：v2.1.10（commit 8f8b114，main 分支）+ 第一/二/三/四批修复 → v2.1.11
 > 测试基线：630 项通过（31 个文件）｜tsc 类型检查：通过
 > 审计方法：逐文件源码追溯 + 配置值核对 + 调用链验证 + 2026-07-10 三路并行复审
 
@@ -12,24 +12,36 @@
 
 **合并状态**：`main` 是 GitHub 上唯一远程分支（commit 8f8b114），无待合并分支；前序会话已清理所有 `trae/*` 分支。
 
-**修复进展**（11/25 项，已通过 tsc + 630 项测试验证）：
+**修复进展**（25/25 项全部完成，已通过 tsc + 630 项测试验证）：
 
-| 编号 | 问题 | 状态 | 验证 |
+| 批次 | 编号 | 问题 | 状态 |
 |------|------|------|------|
-| P0-5 | embed keep_alive 失效 | ✅ 已修复 | 5 个 embed-fn 测试更新通过 |
-| P1-1 | fuzzyMatchThreshold 死配置 | ✅ 已修复 | entity-extractor + merger 测试通过 |
-| P1-2 | decayHalfLifeDays 不一致 | ✅ 已修复 | 统一为 DEFAULTS.ttl.halfLifeDays |
-| P1-3 | afterTurn 同步 I/O | ✅ 已修复 | 缓存函数 + 调用点替换 |
-| P1-7 | Tier2 LLM 缺 keep_alive | ✅ 已修复 | withKeepAliveIfOllama 注入 |
-| P0-2 | 优先级裁剪体系冲突 | ✅ 已修复 | applyTotalControl 经验优先级 2→4，10 个测试通过 |
-| P0-3 | compact 无超时透传 | ✅ 已修复 | Promise.race + 300s 超时，1 个测试通过 |
-| P0-4 | experience tags 类型不匹配 | ✅ 已修复 | split(coalesce(...)) 无需数据迁移 |
-| P0-1 | 双检索管线 minScore 不一致 | ✅ 已修复 | 统一为 DEFAULTS.retrieval.expMinScore |
-| P1-4 | MCP 工具不复用 QmdClient 单例 | ✅ 已修复 | acquireQmdClient() + owned 标记 |
+| 第一批 | P0-1 | 双检索管线 minScore 不一致 | ✅ 已修复 |
+| 第一批 | P0-2 | 优先级裁剪体系冲突 | ✅ 已修复 |
+| 第一批 | P0-3 | compact 无超时透传 | ✅ 已修复 |
+| 第一批 | P0-4 | experience tags 类型不匹配 | ✅ 已修复 |
+| 第一批 | P0-5 | embed keep_alive 失效 | ✅ 已修复 |
+| 第一批 | P1-1 | fuzzyMatchThreshold 死配置 | ✅ 已修复 |
+| 第一批 | P1-2 | decayHalfLifeDays 不一致 | ✅ 已修复 |
+| 第一批 | P1-3 | afterTurn 同步 I/O | ✅ 已修复 |
+| 第一批 | P1-7 | Tier2 LLM 缺 keep_alive | ✅ 已修复 |
+| 第二批 | P1-4 | MCP 工具不复用 QmdClient 单例 | ✅ 已修复 |
+| 第三批 | P1-5 | lcmg_backup 全表扫描 + 同步 I/O | ✅ 已修复 |
+| 第三批 | P1-6 | lcmg_sync N 次 SQLite 往返 | ✅ 已修复 |
+| 第三批 | P1-9 | searchWithCache @deprecated 误标 | ✅ 已修复 |
+| 第三批 | P1-10 | upsertEntities 死代码 | ✅ 已修复 |
+| 第三批 | P2-2/3 | runDistillation 串行 LLM | ✅ 已修复 |
+| 第三批 | P2-7 | debt-manager 同步 I/O | ✅ 已修复 |
+| 第四批 | P1-8 | lcm 熔断器死注册 | ✅ 已修复（文档化保留） |
+| 第四批 | P2-1 | lastAssembleExpIdsBySession 无 TTL | ✅ 已修复 |
+| 第四批 | P2-4 | lcmg_search 冗余 toLower 扫描 | ✅ 已修复 |
+| 第四批 | P2-5 | linkRelated 无 LIMIT 中间结果 | ✅ 已修复 |
+| 第四批 | P2-6 | health-metrics 无 WAL PRAGMA | ✅ 已修复 |
+| 第四批 | P2-8 | 错误路径 O(N²) token 估算 | ✅ 已修复 |
+| 第四批 | P2-9 | LLM 超时不一致 | ✅ 已修复 |
+| 第四批 | P2-10 | tagRegistry.load 静默吞错 | ✅ 已修复 |
 
-**待修复（8 项）**：1 个 P1（P1-8）+ 7 个 P2。第四批一致性（6 项）+ P1-8 熔断器待推进。
-
-**下一批建议**：第四批聚焦一致性与健壮性（P2-9 统一 LLM 超时 / P2-5 linkRelated LIMIT / P2-1 expIds TTL / P2-8 token 估算增量 / P2-10 tagRegistry 重试 / P1-8 lcm 熔断器）。
+**待修复**：0 项。25 项性能审计问题全部完成（5 P0 + 10 P1 + 10 P2）。
 
 ---
 
@@ -91,7 +103,7 @@
 | **P1-5** ✅ 已修复（第三批） | `lcmg_backup` 全表扫描无 LIMIT + 同步文件读写 | [tools.ts](file:///workspace/src/tools.ts#L699) `MATCH (n) RETURN n LIMIT 50000` + [L706](file:///workspace/src/tools.ts#L706) `MATCH ()-[r]->() RETURN r LIMIT 100000`；同步 I/O 全改 `fsp.*` 异步 | LIMIT 防止 OOM；readFileSync/writeFileSync/readdirSync/statSync → fsp 异步 |
 | **P1-6** ✅ 已修复（第三批） | `lcmg_sync` Phase 1 嵌套 SQLite N 次往返 | [tools.ts](file:///workspace/src/tools.ts#L1537) 批量 `IN (...)` 替代逐行 COUNT；[L1607](file:///workspace/src/tools.ts#L1607) 批量 `GROUP BY` 替代逐行 SELECT；[L1649](file:///workspace/src/tools.ts#L1649) UNWIND 批量 MERGE | N 次往返 → O(N/500) 批；repair 复用 check 结果无需重复查 SQLite |
 | **P1-7** ✅ 已修复（第一批） | Tier2 LLM 判断未注入 keep_alive | [index.ts](file:///workspace/src/index.ts#L1050-L1056) body 改用 `withKeepAliveIfOllama` | 与其他 LLM 调用一致，避免模型卸载 |
-| **P1-8** | lcm 熔断器空转（无生产调用点） | [circuit-breaker.ts](file:///workspace/src/circuit-breaker.ts#L10) 定义 `lcm`；仅 [circuit-breaker.test.ts L73](file:///workspace/src/circuit-breaker.test.ts#L73) 测试调用 | 生产无 `withCircuitBreaker("lcm", ...)` 调用点 |
+| **P1-8** ✅ 已修复（第四批） | lcm 熔断器空转（无生产调用点） | [circuit-breaker.ts](file:///workspace/src/circuit-breaker.ts#L10) 文档化为死注册（保留类型兼容 DB schema `cb_lcm_ok/cb_lcm_fails` 与 dashboard reset_breaker） | 死配置已文档化，保留兼容性 |
 | **P1-9** ✅ 已修复（第三批） | `searchWithCache` 标记 @deprecated 仍活跃使用 | [graph-adapter.ts](file:///workspace/src/adapters/graph-adapter.ts#L395) 去 @deprecated 注释，改为正常说明（L3 正式入口，唯一调用点 index.ts:763，承载 LRU 缓存 + community enrichment） | 消除误标，方法仍被活跃维护 |
 | **P1-10** ✅ 已修复（第三批） | `graph-adapter.upsertEntities()` per-entity N+1 死代码 | [graph-adapter.ts](file:///workspace/src/adapters/graph-adapter.ts#L707) 已删除 upsertEntities 方法（零调用方）；生产路径走 batchUpsert（L579，由 extractAndUpsertFromTurn L927 调用） | 删除 78 行死代码，消除 N+1 隐患 |
 
@@ -99,16 +111,16 @@
 
 | 编号 | 问题 | 位置 | 影响 |
 |------|------|------|------|
-| **P2-1** | `lastAssembleExpIdsBySession` 无 TTL | [index.ts L79-80](file:///workspace/src/index.ts#L79) 声明 + [L1203-1205](file:///workspace/src/index.ts#L1203) 仅 size 淘汰 | 仅 LRU 上限 200，长生命周期进程 200 条 session 元数据常驻 |
+| **P2-1** ✅ 已修复（第四批） | `lastAssembleExpIdsBySession` 无 TTL | [index.ts L79-82](file:///workspace/src/index.ts#L79) Map value 改为 `{ ids, ts }` + 30min TTL（`LAST_EXP_MAP_TTL_MS`）；set 写时间戳，get 检查过期 | 过期 session 元数据自动清理 |
 | **P2-2** ✅ 已修复（第三批） | `runDistillation` 串行 LLM 调用 | [distillation.ts L136](file:///workspace/src/plugin/distillation.ts#L136) 串行 for-await → 分批并发（`LCMG_DISTILL_CONCURRENCY` 默认 3） | batch=5 并发 3，最坏 2 轮 15s |
 | **P2-3** ✅ 已修复（第三批） | G-8 验证回路串行 LLM（每经验一次，最多 3 条） | 随 P2-2 一并优化（distillation 主循环已并发化，G-8 验证回路 ≤3 条影响小） | 3 次串行 5s → 随 distillation 并发化覆盖 |
-| **P2-4** | `lcmg_search` Neo4j 分支无索引全属性 CONTAINS 扫描 | [tools.ts L1241-1247](file:///workspace/src/tools.ts#L1241)（另 L1350-1355 同类） | `n.name CONTAINS $k OR n.content CONTAINS $k` 无索引提示 |
-| **P2-5** | `linkRelated`/`findRelatedByConcepts` 无 LIMIT 中间结果 | [storage.ts L369-405](file:///workspace/src/experience/storage.ts#L369) + [L415-444](file:///workspace/src/experience/storage.ts#L415) | `MATCH (other:EXPERIENCE) WHERE other.status='DISTILLED'` 大图中间结果集巨大 |
-| **P2-6** | health-metrics 与 lcm-bridge 共用 lcm.db 但驱动不同 + 无 WAL | [health-metrics.ts L278-302](file:///workspace/src/health-metrics.ts#L278) 无 PRAGMA；[lcm-bridge.ts L73-77](file:///workspace/src/lcm-bridge.ts#L73) 设 WAL | node:sqlite 无 PRAGMA，与 lcm-bridge WAL 连接共存行为依赖 SQLite 版本 |
+| **P2-4** ✅ 已修复（第四批） | `lcmg_search` Neo4j 分支冗余 `toLower` 全属性 CONTAINS 扫描 | [tools.ts L1278](file:///workspace/src/tools.ts#L1278) 去掉冗余 `toLower(n.name) CONTAINS toLower($k)`（与 `n.name CONTAINS $k` 重复），加 full-text index 建议 | 减少一次全属性 CONTAINS 扫描 |
+| **P2-5** ✅ 已修复（第四批） | `linkRelated`/`findRelatedByConcepts` 无 LIMIT 中间结果 | [storage.ts](file:///workspace/src/experience/storage.ts) linkRelated + findRelatedByConcepts 加 `LIMIT $candidateLimit`（`max(maxLinks*5, 15)`）中间结果裁剪 | 大图中间结果集不再爆炸 |
+| **P2-6** ✅ 已修复（第四批） | health-metrics 与 lcm-bridge 共用 lcm.db 但驱动不同 + 无 WAL | [health-metrics.ts L279-286](file:///workspace/src/health-metrics.ts#L279) 加 WAL PRAGMA（`journal_mode=WAL` / `synchronous=NORMAL` / `cache_size=-65536` / `temp_store=MEMORY`），与 lcm-bridge 一致 | 双驱动 PRAGMA 对齐 |
 | **P2-7** ✅ 已修复（第三批） | debt-manager `processSingleDebt` 同步 `readdirSync` + `JSON.parse` | [debt-manager.ts L362](file:///workspace/src/core/debt-manager.ts#L362) readdirSync → `fs.promises.readdir`；[L365](file:///workspace/src/core/debt-manager.ts#L365) readFileSync → `fs.promises.readFile`；existsSync 保留作守卫 | 不再阻塞事件循环 |
-| **P2-8** | 错误路径 O(N²) token 估算 | [index.ts L1504-1520](file:///workspace/src/index.ts#L1504) while [L1508-1516](file:///workspace/src/index.ts#L1508) | catch 分支 while 循环内反复全量 `estimateTokensFromMessages` |
-| **P2-9** | LLM 超时不一致（1500ms ~ 30000ms 跨 20 倍） | index.ts L853(1500)/L1762(5000)/L1057(8000)；tools.ts L194(15000)；embed-fn.ts L146(30000)；graph-adapter.ts L966(30000) | 6 处 LLM fetch 无统一策略 |
-| **P2-10** | `tagRegistry.load()` fire-and-forget 静默吞错 | [retrieval-gateway.ts L65](file:///workspace/src/retrieval-gateway.ts#L65) `.catch(() => {})` | 首次启动加载失败，整个会话周期上下文推断用空 tag |
+| **P2-8** ✅ 已修复（第四批） | 错误路径 O(N²) token 估算 | [index.ts](file:///workspace/src/index.ts) catch 分支 while 循环改增量（splice 前算被删消息 token 数，splice 后从总数扣减） | 消除 O(N²) 全量重算 |
+| **P2-9** ✅ 已修复（第四批） | LLM 超时不一致（1500ms ~ 30000ms 跨 20 倍） | [defaults.ts](file:///workspace/src/config/defaults.ts) 新增 `DEFAULTS.llm`（`rerankTimeoutMs=3000` / `judgeTimeoutMs=10000` / `validateTimeoutMs=8000` / `summarizeTimeoutMs=20000` / `embedTimeoutMs=30000` / `graphLlmTimeoutMs=30000`）；6 处调用点统一引用 | LLM 超时集中化可调 |
+| **P2-10** ✅ 已修复（第四批） | `tagRegistry.load()` fire-and-forget 静默吞错 | [retrieval-gateway.ts L64-85](file:///workspace/src/retrieval-gateway.ts#L64) `.catch(() => {})` → `loadTagRegistryWithRetry()` 带 10s/30s/60s 三次退避重试 | 首次加载失败可恢复 |
 
 ---
 
@@ -316,9 +328,9 @@
 
 ---
 
-### 3.3 第三批：一致性与健壮性（P2 剩余）
+### 3.3 第三批：一致性与健壮性（P2 剩余）— ✅ 全部完成
 
-#### 3.3.1 统一 LLM 超时策略（P2-9）
+#### 3.3.1 统一 LLM 超时策略（P2-9）✅ 已完成
 
 **目标**：建立 LLM 调用超时分级。
 
@@ -330,7 +342,7 @@
 
 ---
 
-#### 3.3.2 linkRelated 加 LIMIT 中间结果（P2-5）
+#### 3.3.2 linkRelated 加 LIMIT 中间结果（P2-5）✅ 已完成
 
 **目标**：防止大图中间结果集爆炸。
 
@@ -341,7 +353,7 @@
 
 ---
 
-#### 3.3.3 lastAssembleExpIdsBySession 加 TTL（P2-1）
+#### 3.3.3 lastAssembleExpIdsBySession 加 TTL（P2-1）✅ 已完成
 
 **目标**：过期 session 元数据自动清理。
 
@@ -354,7 +366,7 @@
 
 ---
 
-#### 3.3.4 错误路径 token 估算增量优化（P2-8）
+#### 3.3.4 错误路径 token 估算增量优化（P2-8）✅ 已完成
 
 **目标**：catch 分支复用增量扣减逻辑。
 
@@ -366,7 +378,7 @@
 
 ---
 
-#### 3.3.5 tagRegistry.load 失败重试（P2-10）
+#### 3.3.5 tagRegistry.load 失败重试（P2-10）✅ 已完成
 
 **目标**：首次加载失败不静默放弃。
 
@@ -378,16 +390,29 @@
 
 ---
 
-#### 3.3.6 lcm 熔断器接入或移除（P1-8）
+#### 3.3.6 lcm 熔断器接入或移除（P1-8）✅ 已完成（文档化保留）
 
 **目标**：消除死配置。
 
-**改造**：
-- 评估：lcm 子系统是否有需要熔断的调用点（lcm-bridge SQLite 查询）
-- 若有：lcm-bridge 查询包裹 `withCircuitBreaker("lcm", ...)`
-- 若无：移除 lcm 熔断器定义，减少认知负担
+**决策**：评估确认 lcm 子系统无生产调用点（lcm-bridge SQLite 查询未包裹熔断器，且为本地低延迟操作）。选择文档化为死注册而非移除，保留类型定义以兼容 DB schema（`cb_lcm_ok/cb_lcm_fails`）与 dashboard `reset_breaker` 工具。
 
-**接入点**：[circuit-breaker.ts](file:///workspace/src/circuit-breaker.ts#L10)、[lcm-bridge.ts](file:///workspace/src/lcm-bridge.ts)
+**改造**：[circuit-breaker.ts L10-13](file:///workspace/src/circuit-breaker.ts#L10) 加注释文档化死注册状态。
+
+---
+
+#### 3.3.7 lcmg_search 去冗余 toLower 扫描（P2-4）✅ 已完成
+
+**目标**：消除 `lcmg_search` Neo4j 分支冗余 `toLower` 全属性 CONTAINS 扫描。
+
+**改造**：[tools.ts L1278](file:///workspace/src/tools.ts#L1278) 去掉与 `n.name CONTAINS $k` 重复的 `toLower(n.name) CONTAINS toLower($k)`，加 full-text index 建议注释。
+
+---
+
+#### 3.3.8 health-metrics WAL PRAGMA（P2-6）✅ 已完成
+
+**目标**：health-metrics 与 lcm-bridge 共用 lcm.db 的 PRAGMA 对齐。
+
+**改造**：[health-metrics.ts L279-286](file:///workspace/src/health-metrics.ts#L279) 加 WAL PRAGMA（`journal_mode=WAL` / `synchronous=NORMAL` / `cache_size=-65536` / `temp_store=MEMORY`），与 lcm-bridge 一致。
 
 ---
 
@@ -414,12 +439,14 @@
   └─ 3.2.6 searchWithCache 定位（P1-9）    ← ✅ 已完成（去 @deprecated）
 
 第三批（一致性与健壮性，P2 剩余）
-  ├─ 3.3.1 统一 LLM 超时（P2-9）
-  ├─ 3.3.2 linkRelated LIMIT（P2-5）
-  ├─ 3.3.3 expIds TTL（P2-1）
-  ├─ 3.3.4 token 估算增量（P2-8）
-  ├─ 3.3.5 tagRegistry 重试（P2-10）
-  └─ 3.3.6 lcm 熔断器（P1-8）
+  ├─ 3.3.1 统一 LLM 超时（P2-9）          ← ✅ 已完成（DEFAULTS.llm 集中化）
+  ├─ 3.3.2 linkRelated LIMIT（P2-5）       ← ✅ 已完成（candidateLimit 裁剪）
+  ├─ 3.3.3 expIds TTL（P2-1）              ← ✅ 已完成（30min TTL）
+  ├─ 3.3.4 token 估算增量（P2-8）          ← ✅ 已完成（增量扣减）
+  ├─ 3.3.5 tagRegistry 重试（P2-10）       ← ✅ 已完成（10s/30s/60s 退避）
+  ├─ 3.3.6 lcm 熔断器（P1-8）              ← ✅ 已完成（文档化保留）
+  ├─ 3.3.7 去冗余 toLower（P2-4）          ← ✅ 已完成
+  └─ 3.3.8 health-metrics WAL（P2-6）      ← ✅ 已完成（PRAGMA 对齐）
 ```
 
 **依赖关系**：
@@ -457,7 +484,7 @@
 
 ## 七、附录：审计基线
 
-- **代码版本**：v2.1.10（commit 8f8b114，main 分支）+ 第一/二/三批修复
+- **代码版本**：v2.1.11（commit 8f8b114，main 分支）+ 第一/二/三/四批修复
 - **测试基线**：630 项通过（31 个文件）
 - **tsc 类型检查**：通过
 - **审计文件数**：32 个 src/ 文件 + 4 个配置文件
@@ -465,6 +492,7 @@
 - **第一批已修复**：P0-5、P1-1、P1-2、P1-3、P1-7（5 项）
 - **第二批已修复**：P0-1、P0-2、P0-3、P0-4、P1-4（5 项，另 P1-3 缓存补完）
 - **第三批已修复**：P1-5、P1-6、P1-9、P1-10、P2-2、P2-3、P2-7（6 项）
-- **累计已修复**：17 项（5 P0 + 9 P1 + 3 P2）
-- **待修复**：1 个 P1（P1-8）+ 7 个 P2（P2-1/4/5/6/8/9/10）= 8 项
-- **重新评估日期**：2026-07-10（基于 main 8f8b114 + 第一/二/三批修复，逐项核查确认）
+- **第四批已修复**：P1-8、P2-1、P2-4、P2-5、P2-6、P2-8、P2-9、P2-10（8 项）
+- **累计已修复**：25 项（5 P0 + 10 P1 + 10 P2）— ✅ 全部完成
+- **待修复**：0 项
+- **完成日期**：2026-07-10（基于 main 8f8b114 + 四批修复，逐项核查确认）

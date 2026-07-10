@@ -41,6 +41,17 @@ export const DEFAULTS = {
     expMinScore: 0.5,
   },
 
+  // BUGFIX(P2-9): LLM 调用超时集中化（原散落 6 处硬编码 1.5s~30s，跨 20 倍不一致）。
+  /** LLM 调用超时（P2-9: 集中化，原散落 6 处硬编码 1.5s~30s） */
+  llm: {
+    rerankTimeoutMs: 3_000,       // merger LLM rerank（原 1500 过短，慢模型易误超时）
+    judgeTimeoutMs: 10_000,       // R-2 Tier 2 LLM judgment（原 8000）
+    validateTimeoutMs: 8_000,     // G-8 afterTurn 相关性验证（原 5000）
+    summarizeTimeoutMs: 20_000,   // 经验回顾摘要（原 15000）
+    embedTimeoutMs: 30_000,       // embedding 调用（原 30000，保持不变）
+    graphLlmTimeoutMs: 30_000,    // graph-adapter LLM（原 30000，保持不变）
+  },
+
   /** 图谱适配器（graph-adapter.ts） */
   graph: {
     maxRetries: 3,                 // 连接重试次数

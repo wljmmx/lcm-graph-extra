@@ -61,9 +61,27 @@ export class RetrievalGateway {
     // Initialize ExperienceStorage for Layer 4 distilled experience recall
     this.experienceStorage = new ExperienceStorage(graphAdapter as any, 5);
     this.tagRegistry = new TagRegistry(graphAdapter as any);
-    // Load tag registry (async, non-blocking — uses cached defaults if load fails)
-    this.tagRegistry.load().catch(() => {});
+    // BUGFIX(P2-10): tagRegistry.load 失败时带退避重试，而非静默吞错
+    // 首次启动若 Neo4j 短暂不可用，后续恢复后会重新加载，避免整个会话周期用空 tag
+    this.loadTagRegistryWithRetry();
     // globalTimeoutMs default is 15000 (class property)
+  }
+
+  /**
+   * BUGFIX(P2-10): tagRegistry.load 带退避重试。
+   * 最多重试 3 次，间隔 10s / 30s / 60s。全部失败后用 cached defaults（原行为）。
+   */
+  private loadTagRegistryWithRetry(attempt: number = 0): void {
+    const delays = [10_000, 30_000, 60_000]; // 10s / 30s / 60s
+    this.tagRegistry.load()
+      .then(() => { /* 加载成功 */ })
+      .catch((err) => {
+        this.logger.warn(`[lcm-graph-extra] tagRegistry.load failed (attempt ${attempt + 1})`, { err: String(err) });
+        if (attempt < delays.length) {
+          setTimeout(() => this.loadTagRegistryWithRetry(attempt + 1), delays[attempt]);
+        }
+        // 超过重试次数则放弃，使用 cached defaults（与原 .catch(()=>{}) 行为一致）
+      });
   }
 
   /**

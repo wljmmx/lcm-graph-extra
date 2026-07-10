@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.11] - 2026-07-10
+
+### Fixed
+
+- **P0-1**: 统一检索管线 minScore 到 `DEFAULTS.retrieval.expMinScore`（0.5），消除 assemble(0.6) 与 RetrievalGateway(0.5) 不一致
+- **P0-2**: 对齐 `applyTotalControl` 与 `priority-trim` 优先级体系，经验优先级 2→4（最高保护），与 layer 语义一致
+- **P0-3**: `compact()` 超时保护（Promise.race + 300s，`LCMG_COMPACT_TIMEOUT_MS` 可覆盖），超时返回 `ok:false` 而非无限挂起
+- **P0-4**: experience tags 类型修复，查询改用 `split(coalesce(...), ',')`，与写入 `.join(',')` 一致，无需数据迁移
+- **P0-5**: embed keep_alive 修复，`isOllamaEndpoint` 判断 + 剥离 `/v1` 走原生 `/api/embed`，keep_alive=1h 生效
+- **P1-1**: `fuzzyMatchThreshold` 死配置修复，entity-extractor 读取配置现生效（0.85）
+- **P1-2**: `decayHalfLifeDays` 统一为 `DEFAULTS.ttl.halfLifeDays`（45）
+- **P1-3**: `afterTurn` 热路径去除 `readFileSync`，改为进程级缓存
+- **P1-4**: MCP 工具复用 QmdClient 单例（`acquireQmdClient()` + owned 标记），5 处调用统一
+- **P1-7**: Tier2 LLM 注入 keep_alive（`withKeepAliveIfOllama`）
+- **P2-1**: `lastAssembleExpIdsBySession` 增加 30min TTL（写入时间戳 + 读取时过期清理），长生命周期进程不再常驻 200 条 session 元数据
+- **P2-6**: health-metrics 与 lcm-bridge 对齐 WAL PRAGMA（`journal_mode=WAL` / `synchronous=NORMAL` / `cache_size` / `temp_store=MEMORY`），消除双驱动共存行为依赖
+- **P2-10**: `tagRegistry.load()` 失败带退避重试（10s/30s/60s 共 3 次），替代原 `.catch(() => {})` 静默吞错，避免整个会话周期用空 tag
+
+### Performance
+
+- **P1-5**: `lcmg_backup` 异步 I/O（`fsp.*` 替代同步 fs）+ Neo4j 全表扫描加 `LIMIT 50000/100000` 防 OOM
+- **P1-6**: `lcmg_sync` 批量化，逐行 `COUNT(*)` → 批量 `IN(...)`；逐行 `SELECT` → `GROUP BY`；逐条 MERGE → `UNWIND` 批量 MERGE
+- **P1-9**: `searchWithCache` 去 `@deprecated` 误标（L3 正式入口，唯一调用点 index.ts:763）
+- **P1-10**: 删除 `upsertEntities` 死代码（零调用方，生产走 `batchUpsert`）
+- **P2-2/3**: `runDistillation` 并发化，串行 for-await → 分批并发（默认 3，`LCMG_DISTILL_CONCURRENCY` 可覆盖）
+- **P2-7**: `debt-manager` 异步化，`readdirSync`/`readFileSync` → `fs.promises`
+- **P2-4**: `lcmg_search` 去除冗余 `toLower(n.name) CONTAINS toLower($k)`（与 `n.name CONTAINS $k` 重复扫描），减少一次全属性 CONTAINS
+- **P2-5**: `linkRelated`/`findRelatedByConcepts` 加 `LIMIT $candidateLimit` 中间结果裁剪（`max(maxLinks*5, 15)`），防止大图中间结果集爆炸
+- **P2-8**: 错误路径 token 估算改增量（splice 前算被删消息 token 数，splice 后从总数扣减），消除 catch 分支 O(N²) 全量重算
+
+### Changed
+
+- 版本号统一升级至 2.1.11（package.json / openclaw.plugin.json / dashboard / src/index.ts / package-lock.json）
+- **P2-9**: LLM 超时集中化到 `DEFAULTS.llm`（`rerankTimeoutMs=3000` / `judgeTimeoutMs=10000` / `validateTimeoutMs=8000` / `summarizeTimeoutMs=20000` / `embedTimeoutMs=30000` / `graphLlmTimeoutMs=30000`），原 6 处散落硬编码（1.5s~30s 跨 20 倍）统一引用
+- **P1-8**: `lcm` 熔断器文档化为死注册（生产无 `withCircuitBreaker("lcm", ...)` 调用点），保留类型定义以兼容 DB schema（`cb_lcm_ok/cb_lcm_fails`）与 dashboard `reset_breaker` 工具
+
 ## [2.1.10] - 2026-07-05
 
 ### Added
@@ -194,5 +230,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **SEC-5 M-11/M-12**: backup/restore 路径校验，防止路径穿越到 `~/.openclaw` 之外
 - **SEC-L**: FTS5 MATCH 查询字符串转义，防止语法错误和意外匹配
 
+[2.1.11]: https://github.com/wljmmx/lcm-graph-extra/releases/tag/v2.1.11
 [2.1.10]: https://github.com/wljmmx/lcm-graph-extra/releases/tag/v2.1.10
 [2.1.9]: https://github.com/wljmmx/lcm-graph-extra/releases/tag/v2.1.9

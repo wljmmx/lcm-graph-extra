@@ -888,7 +888,7 @@ export class GraphAdapter {
         { model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 },
         keepAlive,
       );
-      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(DEFAULTS.llm.graphLlmTimeoutMs) });
       if (!res.ok) throw new Error('LLM ' + res.status);
       const data = await res.json();
       return (data as any)?.choices?.[0]?.message?.content ?? '';

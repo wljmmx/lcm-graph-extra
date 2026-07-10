@@ -23,6 +23,8 @@
 
 import type { EmbeddingConfig } from '../types.js';
 import { cleanBaseURL, isOllamaEndpoint } from '../utils/url.js';
+// P2-9: 接入集中化 LLM 超时常量
+import { DEFAULTS } from '../config/defaults.js';
 
 // ---------------------------------------------------------------------------
 // LRU 缓存：相同 query 文本的 embedding 结果缓存，避免重复请求 Ollama
@@ -143,7 +145,7 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(DEFAULTS.llm.embedTimeoutMs),
       });
 
       // 新版端点不存在（旧版 Ollama）→ 切换旧版并重试

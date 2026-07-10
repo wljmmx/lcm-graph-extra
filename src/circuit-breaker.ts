@@ -7,6 +7,9 @@
 
 import { DEFAULTS } from './config/defaults.js';
 
+// P1-8: "lcm" 子系统为死注册 —— 生产代码无 withCircuitBreaker("lcm", ...) 调用点，
+// 仅 circuit-breaker.test.ts 和 health_metrics 表 schema（cb_lcm_ok/cb_lcm_fails）引用。
+// 保留类型定义以兼容 DB schema 与 dashboard reset_breaker 工具，实际熔断保护未生效。
 type Subsystem = "lcm" | "qmd" | "neo4j";
 
 interface CircuitState {

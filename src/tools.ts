@@ -17,6 +17,8 @@ import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { getGlobalLogger } from './utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from './utils/url.js';
 import { exportMarkdownToPdf, exportMarkdownToFile } from './utils/pdf-export.js';
+// P2-9: 接入集中化 LLM 超时常量
+import { DEFAULTS } from './config/defaults.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -210,7 +212,7 @@ async function generateExperienceSummary(records: any[], usedExperienceNodes: bo
       const resp = await fetch(baseURL + '/chat/completions', {
         method: 'POST', headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(DEFAULTS.llm.summarizeTimeoutMs),
       });
       if (resp.ok) {
         const data: any = await resp.json();
@@ -1271,9 +1273,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             if (signal?.aborted) {
               return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
+            // BUGFIX(P2-4): 去掉冗余 toLower 扫描（与 n.name CONTAINS $k 重复），
+            // CONTAINS 无法走 B-tree 索引，未来可考虑创建 full-text index 优化：
+            //   CREATE INDEX node_search_fts IF NOT EXISTS FOR (n:Entity) ON (n.name, n.content)
             const rows = await session.run(
               `MATCH (n)
-               WHERE (n.name CONTAINS $k OR n.content CONTAINS $k OR toLower(n.name) CONTAINS toLower($k))
+               WHERE (n.name CONTAINS $k OR n.content CONTAINS $k)
                AND (n.state IS NULL OR n.state <> 'superseded')
                RETURN n.name, labels(n)[0] AS type, n.content, n.pagerank
                ORDER BY n.pagerank DESC LIMIT $limit`,

@@ -1,9 +1,9 @@
 # lcm-graph-extra 性能优化演进路线图
 
-> 版本：v2.1.10 → v2.2.0
-> 基线：commit 8f8b114（main）+ 第一/二/三批修复，630 项测试通过，tsc 通过
+> 版本：v2.1.11
+> 基线：commit 8f8b114（main）+ 第一/二/三/四批修复，630 项测试通过，tsc 通过
 > 审计报告：[2026-07-04-performance-audit-and-optimization.md](docs/superpowers/specs/2026-07-04-performance-audit-and-optimization.md)
-> 发现总数：5 个 P0 + 10 个 P1 + 10 个 P2 = 25 项｜已修复 17 项｜待修复 8 项
+> 发现总数：5 个 P0 + 10 个 P1 + 10 个 P2 = 25 项｜已修复 25 项｜待修复 0 项 ✅
 
 ---
 
@@ -53,12 +53,14 @@
 
 | 序号 | 编号 | 任务 | 风险 | 接入点 | 状态 |
 |------|------|------|------|--------|------|
-| 17 | P2-9 | 统一 LLM 超时策略 | 低 | 8 处 fetch | ⏳ 待执行 |
-| 18 | P2-5 | linkRelated 加 LIMIT 中间结果 | 低 | storage.ts | ⏳ 待执行 |
-| 19 | P2-1 | lastAssembleExpIdsBySession 加 TTL | 低 | index.ts L79 | ⏳ 待执行 |
-| 20 | P2-8 | 错误路径 token 估算增量优化 | 低 | index.ts L1481 | ⏳ 待执行 |
-| 21 | P2-10 | tagRegistry.load 失败重试 | 低 | retrieval-gateway.ts L65 | ⏳ 待执行 |
-| 22 | P1-8 | lcm 熔断器接入或移除 | 低 | circuit-breaker.ts | ⏳ 待执行 |
+| 17 | P2-9 | 统一 LLM 超时策略 | 低 | 6 处 fetch → DEFAULTS.llm | ✅ 已完成 |
+| 18 | P2-5 | linkRelated 加 LIMIT 中间结果 | 低 | storage.ts | ✅ 已完成 |
+| 19 | P2-1 | lastAssembleExpIdsBySession 加 TTL | 低 | index.ts L79 | ✅ 已完成 |
+| 20 | P2-8 | 错误路径 token 估算增量优化 | 低 | index.ts L1506 | ✅ 已完成 |
+| 21 | P2-10 | tagRegistry.load 失败重试 | 低 | retrieval-gateway.ts L64 | ✅ 已完成 |
+| 22 | P1-8 | lcm 熔断器文档化（死注册） | 低 | circuit-breaker.ts L10 | ✅ 已完成 |
+| 23 | P2-6 | health-metrics 加 WAL PRAGMA | 低 | health-metrics.ts L279 | ✅ 已完成 |
+| 24 | P2-4 | lcmg_search 去冗余 toLower 扫描 | 低 | tools.ts L1278 | ✅ 已完成 |
 
 ---
 

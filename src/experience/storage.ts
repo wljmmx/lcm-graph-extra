@@ -381,6 +381,9 @@ export class ExperienceStorage {
     if (!experienceId || !Array.isArray(concepts) || concepts.length === 0) return 0;
 
     const lowerConcepts = concepts.map((c) => c.toLowerCase());
+    // BUGFIX(P2-5): 先 LIMIT 取 top 候选再做 MERGE，避免大图中间结果集巨大
+    // 候选池放大到 maxLinks*5，保证 ORDER BY 后仍有足够重叠项
+    const candidateLimit = Math.max(maxLinks * 5, 15);
     const result = await this.adapter.query(
       `
         MATCH (e:${LABEL} { id: $id })
@@ -394,6 +397,9 @@ export class ExperienceStorage {
         WHERE size(overlap) >= 1
         WITH e, other, size(overlap) AS overlapScore
         ORDER BY overlapScore DESC, other.relevanceScore DESC
+        LIMIT $candidateLimit
+        WITH e, other, overlapScore
+        ORDER BY overlapScore DESC, other.relevanceScore DESC
         LIMIT $maxLinks
         MERGE (e)-[r:RELATED_TO]->(other)
         SET r.overlap = overlapScore,
@@ -404,6 +410,7 @@ export class ExperienceStorage {
         id: experienceId,
         concepts: lowerConcepts,
         maxLinks: Math.trunc(maxLinks),
+        candidateLimit: Math.trunc(candidateLimit),
       },
     );
 
@@ -426,6 +433,8 @@ export class ExperienceStorage {
   ): Promise<string[]> {
     if (!experienceId || !Array.isArray(concepts) || concepts.length === 0) return [];
     const lowerConcepts = concepts.map((c) => c.toLowerCase());
+    // BUGFIX(P2-5): 先 LIMIT 候选池再 ORDER BY+LIMIT 最终结果，避免大图中间结果集巨大
+    const candidateLimit = Math.max(maxResults * 5, 15);
     const result = await this.adapter.query<{ id: string }>(
       `
         MATCH (other:${LABEL})
@@ -438,6 +447,9 @@ export class ExperienceStorage {
         WHERE size(overlap) >= 1
         WITH other, size(overlap) AS overlapScore
         ORDER BY overlapScore DESC, other.relevanceScore DESC
+        LIMIT $candidateLimit
+        WITH other, overlapScore
+        ORDER BY overlapScore DESC, other.relevanceScore DESC
         LIMIT $maxResults
         RETURN other.id AS id
       `,
@@ -445,6 +457,7 @@ export class ExperienceStorage {
         id: experienceId,
         concepts: lowerConcepts,
         maxResults: Math.trunc(maxResults),
+        candidateLimit: Math.trunc(candidateLimit),
       },
     );
     return (result || []).map((r: any) => r.id).filter(Boolean);

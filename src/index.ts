@@ -76,8 +76,10 @@ import { healthMetrics } from './health-metrics.js';
 // B-1 修复: 原为模块级 let 变量，多 session 并发时 G-8 验证回路会串数据
 // （session A 的 assemble 写入，session B 的 afterTurn 读取）。
 // 改为 per-sessionKey Map，每个 session 独立追踪。
-const lastAssembleExpIdsBySession = new Map<string, Array<{ id: string; summary: string; query: string }>>();
+// BUGFIX(P2-1): 增加 TTL，写入 30 分钟后过期清理，避免长生命周期进程 200 条 session 元数据常驻。
+const lastAssembleExpIdsBySession = new Map<string, { ids: Array<{ id: string; summary: string; query: string }>; ts: number }>();
 const LAST_EXP_MAP_MAX = 200; // 防止无界增长，LRU 上限
+const LAST_EXP_MAP_TTL_MS = 30 * 60 * 1000; // 30min TTL
 
 // BUGFIX(P1-3): afterTurn 热路径不再每次 readFileSync 读 openclaw.json
 // 改为进程生命周期内读取一次（与 neo4j-helper.ts 的 _entriesCache 模式一致）。
@@ -280,7 +282,7 @@ const pluginEntry: any = definePluginEntry({
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.1.10",
+        version: "2.1.11",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         // SDK ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn"
@@ -859,7 +861,7 @@ const pluginEntry: any = definePluginEntry({
                         const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
                           method: 'POST', headers,
                           body: JSON.stringify(body),
-                          signal: AbortSignal.timeout(1500),
+                          signal: AbortSignal.timeout(DEFAULTS.llm.rerankTimeoutMs),
                         });
                         if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
                         const data: any = await resp.json();
@@ -1063,7 +1065,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                       const resp = await fetch(llm.baseURL + '/chat/completions', {
                         method: 'POST', headers,
                         body: JSON.stringify(body),
-                        signal: AbortSignal.timeout(8000),
+                        signal: AbortSignal.timeout(DEFAULTS.llm.judgeTimeoutMs),
                       });
                       if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
                       const data: any = await resp.json();
@@ -1203,11 +1205,15 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
 
             // G-8: 记录本轮 assemble 返回的经验，供 afterTurn 异步验证
             // B-1 修复: 使用 sessionKey-scoped Map，避免多 session 竞态
-            lastAssembleExpIdsBySession.set(sessionKey, personalizedResults.map((e: any) => ({
-              id: e.experience.id,
-              summary: e.experience.summary ?? '',
-              query: qmdQuery,
-            })));
+            // BUGFIX(P2-1): 记录写入时间戳，配合 TTL 清理
+            lastAssembleExpIdsBySession.set(sessionKey, {
+              ids: personalizedResults.map((e: any) => ({
+                id: e.experience.id,
+                summary: e.experience.summary ?? '',
+                query: qmdQuery,
+              })),
+              ts: Date.now(),
+            });
             // LRU 淘汰：超过上限时删除最早插入的 session 条目
             if (lastAssembleExpIdsBySession.size > LAST_EXP_MAP_MAX) {
               const oldest = lastAssembleExpIdsBySession.keys().next().value;
@@ -1514,11 +1520,17 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
             if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
               const buffer: any[] = [...finalMessages];
               const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+              // BUGFIX(P2-8): 增量维护 token 计数，避免 while 循环内每次 splice 后全量重算导致 O(N²)
+              let currentEst = totalEst; // 以首次全量估算结果作为基线
               while (buffer.length > systemCount + 1) {
                 const idx = buffer.findIndex((m: any) => m.role !== 'system');
                 if (idx < 0) break;
+                // splice 前先取出被删消息，单独计算其 token 数，splice 后从总数减去
+                const removedMsg = buffer[idx];
+                const removedTokens = estimateTokensFromMessages([removedMsg]);
                 buffer.splice(idx, 1);
-                if (estimateTokensFromMessages(buffer) <= contextWindow * 0.85) {
+                currentEst -= removedTokens; // 增量更新，避免全量重算
+                if (currentEst <= contextWindow * 0.85) {
                   finalMessages = buffer;
                   break;
                 }
@@ -1740,7 +1752,12 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
               : typeof params.session_id === 'string'
                 ? params.session_id
                 : 'default';
-            const lastAssembleExpIds = lastAssembleExpIdsBySession.get(g8SessionKey) ?? [];
+            // BUGFIX(P2-1): 读取时检查 TTL，过期则视为无数据并清理
+            const cached = lastAssembleExpIdsBySession.get(g8SessionKey);
+            const lastAssembleExpIds = (cached && (Date.now() - cached.ts < LAST_EXP_MAP_TTL_MS)) ? cached.ids : [];
+            if (cached && lastAssembleExpIds.length === 0) {
+              lastAssembleExpIdsBySession.delete(g8SessionKey); // 已过期，清理
+            }
             if (lastAssembleExpIds.length > 0) {
               const expIdsToValidate = [...lastAssembleExpIds];
               lastAssembleExpIdsBySession.delete(g8SessionKey); // 清空，避免重复验证
@@ -1768,7 +1785,7 @@ logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | 
                     const resp = await fetch(llm.baseURL + '/chat/completions', {
                       method: 'POST', headers,
                       body: JSON.stringify(body),
-                      signal: AbortSignal.timeout(5000),
+                      signal: AbortSignal.timeout(DEFAULTS.llm.validateTimeoutMs),
                     });
                     if (!resp.ok) continue;
                     const data: any = await resp.json();
@@ -2758,4 +2775,4 @@ export type {
 } from './experience/types.js';
 
 
-export const VERSION = '2.1.10';
+export const VERSION = '2.1.11';

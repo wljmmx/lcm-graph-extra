@@ -277,6 +277,13 @@ export class HealthMetricsCollector {
           const { homedir } = await import('node:os');
           const dbPath = resolve(homedir(), '.openclaw', 'lcm.db');
           this.db = new DatabaseSync(dbPath);
+          // BUGFIX(P2-6): 与 lcm-bridge 一致的 PRAGMA 设置，避免混用 journal_mode 导致锁竞争
+          try {
+            this.db.exec('PRAGMA journal_mode = WAL');
+            this.db.exec('PRAGMA synchronous = NORMAL');
+            this.db.exec('PRAGMA cache_size = -65536');
+            this.db.exec('PRAGMA temp_store = MEMORY');
+          } catch { /* PRAGMA 失败不阻塞（可能是只读场景） */ }
           this.db.exec(`
             CREATE TABLE IF NOT EXISTS health_metrics (
               ts INTEGER PRIMARY KEY,

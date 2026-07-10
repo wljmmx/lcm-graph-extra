@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/lcm-graph-extra",
-  "version": "2.1.10",
+  "version": "2.1.11",
   "description": "OpenClaw ContextEngine plugin: coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
   "type": "module",
   "workspaces": [
