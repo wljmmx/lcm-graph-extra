@@ -358,11 +358,13 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
       const wsDir = _apiContext.config?.workspace || process.env.OPENCLAW_WORKSPACE;
       if (wsDir) {
         const losslessSessionDir = path.join(wsDir, ".lossless", "sessions");
+        // BUGFIX(P2-7): 将同步 fs 调用改为异步，避免在 debt 处理热路径阻塞事件循环。
+        // existsSync 保留作为守卫检查（开销小），readdir/readFile 改用 fs.promises 异步版本。
         if (fs.existsSync(losslessSessionDir)) {
-          const files = fs.readdirSync(losslessSessionDir).filter((f: string) => f.endsWith(".json"));
+          const files = (await fs.promises.readdir(losslessSessionDir)).filter((f: string) => f.endsWith(".json"));
           for (const fname of files) {
             try {
-              const data = JSON.parse(fs.readFileSync(path.join(losslessSessionDir, fname), "utf8"));
+              const data = JSON.parse(await fs.promises.readFile(path.join(losslessSessionDir, fname), "utf8"));
               // BUG-AUDIT: 用反查到的真实 sessionId/sessionKey 匹配，而非 String(conversationId)
               if (data.sessionId === realSessionId || data.sessionKey === sessionKey) {
                 sessionFile = path.join(wsDir, ".lossless", "sessions", fname);

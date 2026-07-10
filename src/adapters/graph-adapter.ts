@@ -392,7 +392,8 @@ export class GraphAdapter {
     } catch (err) { this.logger?.error?.(`[lcm-graph-extra] search error: ${err}`); return []; }
   }
 
-  /* @deprecated - cache-aware search wrapper */
+  // P1-9: searchWithCache 是 L3 图检索的正式入口（index.ts 唯一调用点），
+  // 承载 LRU 缓存 + community enrichment 双重职责，去除误标的 @deprecated。
   async searchWithCache(query: string, limit?: number): Promise<RetrievalResult[]> {
     // SEC-L: 修复前 key 仅截断前 200 字符，超长查询（>200）会碰撞。
     // 加 full-hash 后缀区分，前缀保留便于调试。
@@ -703,84 +704,8 @@ export class GraphAdapter {
     return { upserted: uc, conflicts: cc };
   }
 
-  async upsertEntities(
-    entities: Array<{ name: string; type: string; description: string; content: string }>,
-    relations: Array<{ from: string; to: string; type: string; instruction?: string }>,
-  ): Promise<{ upserted: number; conflicts: number }> {
-    const m3 = this.mod ?? await this.connect().then(() => this.mod);
-    if (!m3) return { upserted: 0, conflicts: 0 };
-    let cc = 0, uc = 0;
-    const now = Date.now();
-    try {
-      for (const e of entities) {
-        if (!e.name?.trim()) continue;
-        const t = mapEntityType(e.type), nid = makeNodeId(e.name, t);
-        const existing = await m3.findById(this.driver, nid);
-        if (existing) {
-          const ec = existing.properties?.content ?? '';
-          if (ec.trim() !== (e.content ?? '').trim()) {
-            const decision = this.conflictLogger.resolve(e.name.trim(), t,
-              { updatedAt: existing.properties?.updatedAt ?? 0, validatedCount: existing.properties?.validatedCount ?? 0, content: ec },
-              { updatedAt: now, validatedCount: 1, content: e.content ?? '' });
-            cc++;
-
-            // Execute decision-based upsert strategy
-            if (decision === 'keep_existing') {
-              // Skip upsert - keep existing content intact
-              uc++;
-              continue;
-            } else if (decision === 'replace_with_new') {
-              // Full replacement with new content
-              await m3.upsertNode(this.driver, {
-                id: nid, type: t, name: e.name.trim(),
-                description: (e.description ?? '').slice(0, 500),
-                content: (e.content ?? '').slice(0, 2000),
-                status: 'active', pagerank: 0.5,
-                validatedCount: 1,
-                createdAt: existing.properties?.createdAt ?? now, updatedAt: now,
-              });
-              uc++;
-              continue;
-            } else if (decision === 'merge_both') {
-              // Merge existing + new content
-              const mergedContent = (ec.trim() || '') + '\n---\n' + ((e.content ?? '').trim() || '');
-              await m3.upsertNode(this.driver, {
-                id: nid, type: t, name: e.name.trim(),
-                description: (e.description ?? '').slice(0, 500),
-                content: mergedContent.slice(0, 2000),
-                status: 'active', pagerank: 0.5,
-                validatedCount: (existing.properties?.validatedCount ?? 0) + 1,
-                createdAt: existing.properties?.createdAt ?? now, updatedAt: now,
-              });
-              uc++;
-              continue;
-            }
-          }
-        }
-        // No conflict or no decision path matched - standard upsert
-        await m3.upsertNode(this.driver, {
-          id: nid, type: t, name: e.name.trim(),
-          description: (e.description ?? '').slice(0, 500),
-          content: (e.content ?? '').slice(0, 2000),
-          status: 'active', pagerank: 0.5,
-          validatedCount: existing ? (existing.properties?.validatedCount ?? 0) + 1 : 1,
-          createdAt: existing ? (existing.properties?.createdAt ?? now) : now, updatedAt: now,
-        });
-        uc++;
-      }
-      for (const rel of relations) {
-        if (!rel.from?.trim() || !rel.to?.trim()) continue;
-        const mt = mapEdgeType(rel.type);
-        await m3.upsertEdge(this.driver, {
-          id: makeNodeId(rel.from + '-' + rel.to, mt), type: mt,
-          fromId: makeNodeId(rel.from, 'TASK'), toId: makeNodeId(rel.to, 'TASK'),
-          instruction: (rel.instruction ?? '').slice(0, 500),
-          condition: '', weight: 1.0, createdAt: now, updatedAt: now,
-        });
-      }
-    } catch (err) { this.logger?.error?.(`[lcm-graph-extra] upsert error: ${err}`); }
-    return { upserted: uc, conflicts: cc };
-  }
+  // P1-10: upsertEntities 已移除 —— per-entity N+1 死代码（零调用方），
+  // 生产路径走 batchUpsert（由 extractAndUpsertFromTurn 调用）。
 
   // P3-9 GMR-4: processFeedback 已移除 —— 空实现（恒返回 0）且无任何生产代码调用，属死代码。
   

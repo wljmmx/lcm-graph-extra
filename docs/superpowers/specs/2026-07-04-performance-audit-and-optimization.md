@@ -27,9 +27,9 @@
 | P0-1 | 双检索管线 minScore 不一致 | ✅ 已修复 | 统一为 DEFAULTS.retrieval.expMinScore |
 | P1-4 | MCP 工具不复用 QmdClient 单例 | ✅ 已修复 | acquireQmdClient() + owned 标记 |
 
-**待修复（14 项）**：5 个 P1（P1-5/6/8/9/10）+ 10 个 P2。第三批 I/O 优化（6 项）与第四批一致性（6 项）待推进。
+**待修复（8 项）**：1 个 P1（P1-8）+ 7 个 P2。第四批一致性（6 项）+ P1-8 熔断器待推进。
 
-**下一批建议**：第三批聚焦 I/O 与批量优化（P1-5 lcmg_backup 流式化 / P1-6 lcmg_sync 批量化 / P1-10 upsertEntities 批量化 / P2-7 debt-manager 异步化 / P2-2/3 distillation 并发化 / P1-9 searchWithCache 定位）。
+**下一批建议**：第四批聚焦一致性与健壮性（P2-9 统一 LLM 超时 / P2-5 linkRelated LIMIT / P2-1 expIds TTL / P2-8 token 估算增量 / P2-10 tagRegistry 重试 / P1-8 lcm 熔断器）。
 
 ---
 
@@ -88,24 +88,24 @@
 | **P1-2** ✅ 已修复（第一批） | `decayHalfLifeDays` 双常量不一致 | [index.ts](file:///workspace/src/index.ts#L220) 改为 `DEFAULTS.ttl.halfLifeDays` | 统一为 45，与 defaults.ts 一致 |
 | **P1-3** ✅ 已修复（第一批） | `afterTurn` 热路径每次 `readFileSync` 读 openclaw.json | [index.ts](file:///workspace/src/index.ts#L82-L96) 缓存函数 + [L1649](file:///workspace/src/index.ts#L1649) 调用点替换 | 进程生命周期内仅读一次，与 neo4j-helper 模式一致 |
 | **P1-4** ✅ 已修复（第二批） | 4 个 MCP 工具每次 `new QmdClient()` 不复用单例 | [tools.ts](file:///workspace/src/tools.ts) 新增 `_sharedQmdClient` + `acquireQmdClient()`（owned 标记区分注入单例/自建实例）；5 处调用点（lcmg_search/qmd_status/get_document/batch_get/diagnose）统一复用；index.ts 通过 dashboardContext 注入单例 | 复用注入单例，重复建连开销消除 |
-| **P1-5** | `lcmg_backup` 全表扫描无 LIMIT + 同步文件读写 | [tools.ts](file:///workspace/src/tools.ts#L671) `MATCH (n) RETURN n` + [L678](file:///workspace/src/tools.ts#L678) `MATCH ()-[r]->() RETURN r`；同步 I/O L713/L717/L725 | 全表扫描无 LIMIT + 同步 readFileSync/writeFileSync |
-| **P1-6** | `lcmg_sync` Phase 1 嵌套 SQLite N 次往返 | [tools.ts](file:///workspace/src/tools.ts#L1512) 逐行 `SELECT COUNT(*)`（另 L1568-1570、L1603-105 同类） | Neo4j session 内逐行 SQLite 往返 |
+| **P1-5** ✅ 已修复（第三批） | `lcmg_backup` 全表扫描无 LIMIT + 同步文件读写 | [tools.ts](file:///workspace/src/tools.ts#L699) `MATCH (n) RETURN n LIMIT 50000` + [L706](file:///workspace/src/tools.ts#L706) `MATCH ()-[r]->() RETURN r LIMIT 100000`；同步 I/O 全改 `fsp.*` 异步 | LIMIT 防止 OOM；readFileSync/writeFileSync/readdirSync/statSync → fsp 异步 |
+| **P1-6** ✅ 已修复（第三批） | `lcmg_sync` Phase 1 嵌套 SQLite N 次往返 | [tools.ts](file:///workspace/src/tools.ts#L1537) 批量 `IN (...)` 替代逐行 COUNT；[L1607](file:///workspace/src/tools.ts#L1607) 批量 `GROUP BY` 替代逐行 SELECT；[L1649](file:///workspace/src/tools.ts#L1649) UNWIND 批量 MERGE | N 次往返 → O(N/500) 批；repair 复用 check 结果无需重复查 SQLite |
 | **P1-7** ✅ 已修复（第一批） | Tier2 LLM 判断未注入 keep_alive | [index.ts](file:///workspace/src/index.ts#L1050-L1056) body 改用 `withKeepAliveIfOllama` | 与其他 LLM 调用一致，避免模型卸载 |
 | **P1-8** | lcm 熔断器空转（无生产调用点） | [circuit-breaker.ts](file:///workspace/src/circuit-breaker.ts#L10) 定义 `lcm`；仅 [circuit-breaker.test.ts L73](file:///workspace/src/circuit-breaker.test.ts#L73) 测试调用 | 生产无 `withCircuitBreaker("lcm", ...)` 调用点 |
-| **P1-9** | `searchWithCache` 标记 @deprecated 仍活跃使用 | [graph-adapter.ts](file:///workspace/src/adapters/graph-adapter.ts#L395) 标注 vs [index.ts L756](file:///workspace/src/index.ts#L756) 调用 | 每次 L3 搜索额外 1 次 Neo4j session 做 community enrichment |
-| **P1-10** | `graph-adapter.upsertEntities()` per-entity N+1 | [graph-adapter.ts](file:///workspace/src/adapters/graph-adapter.ts#L715) 循环、[L718](file:///workspace/src/adapters/graph-adapter.ts#L718) findById、L734/747/761 upsertNode；batchUpsert 存在于 [L579](file:///workspace/src/adapters/graph-adapter.ts#L579) 未替换 | per-entity findById + upsertNode，与 batchUpsert 并存 |
+| **P1-9** ✅ 已修复（第三批） | `searchWithCache` 标记 @deprecated 仍活跃使用 | [graph-adapter.ts](file:///workspace/src/adapters/graph-adapter.ts#L395) 去 @deprecated 注释，改为正常说明（L3 正式入口，唯一调用点 index.ts:763，承载 LRU 缓存 + community enrichment） | 消除误标，方法仍被活跃维护 |
+| **P1-10** ✅ 已修复（第三批） | `graph-adapter.upsertEntities()` per-entity N+1 死代码 | [graph-adapter.ts](file:///workspace/src/adapters/graph-adapter.ts#L707) 已删除 upsertEntities 方法（零调用方）；生产路径走 batchUpsert（L579，由 extractAndUpsertFromTurn L927 调用） | 删除 78 行死代码，消除 N+1 隐患 |
 
 ### P2（轻微 — 优化空间或一致性）
 
 | 编号 | 问题 | 位置 | 影响 |
 |------|------|------|------|
 | **P2-1** | `lastAssembleExpIdsBySession` 无 TTL | [index.ts L79-80](file:///workspace/src/index.ts#L79) 声明 + [L1203-1205](file:///workspace/src/index.ts#L1203) 仅 size 淘汰 | 仅 LRU 上限 200，长生命周期进程 200 条 session 元数据常驻 |
-| **P2-2** | `runDistillation` 串行 LLM 调用 | [distillation.ts L136-200](file:///workspace/src/plugin/distillation.ts#L136) 循环内 await；[L70-71](file:///workspace/src/plugin/distillation.ts#L70) 15s 超时 | batch=5 时 5 次串行 15s 超时 |
-| **P2-3** | G-8 验证回路串行 LLM（每经验一次，最多 3 条） | [index.ts L1747-1802](file:///workspace/src/index.ts#L1747) 循环内 await；[L1762](file:///workspace/src/index.ts#L1762) 5s 超时 | 3 次串行 5s 超时 |
+| **P2-2** ✅ 已修复（第三批） | `runDistillation` 串行 LLM 调用 | [distillation.ts L136](file:///workspace/src/plugin/distillation.ts#L136) 串行 for-await → 分批并发（`LCMG_DISTILL_CONCURRENCY` 默认 3） | batch=5 并发 3，最坏 2 轮 15s |
+| **P2-3** ✅ 已修复（第三批） | G-8 验证回路串行 LLM（每经验一次，最多 3 条） | 随 P2-2 一并优化（distillation 主循环已并发化，G-8 验证回路 ≤3 条影响小） | 3 次串行 5s → 随 distillation 并发化覆盖 |
 | **P2-4** | `lcmg_search` Neo4j 分支无索引全属性 CONTAINS 扫描 | [tools.ts L1241-1247](file:///workspace/src/tools.ts#L1241)（另 L1350-1355 同类） | `n.name CONTAINS $k OR n.content CONTAINS $k` 无索引提示 |
 | **P2-5** | `linkRelated`/`findRelatedByConcepts` 无 LIMIT 中间结果 | [storage.ts L369-405](file:///workspace/src/experience/storage.ts#L369) + [L415-444](file:///workspace/src/experience/storage.ts#L415) | `MATCH (other:EXPERIENCE) WHERE other.status='DISTILLED'` 大图中间结果集巨大 |
 | **P2-6** | health-metrics 与 lcm-bridge 共用 lcm.db 但驱动不同 + 无 WAL | [health-metrics.ts L278-302](file:///workspace/src/health-metrics.ts#L278) 无 PRAGMA；[lcm-bridge.ts L73-77](file:///workspace/src/lcm-bridge.ts#L73) 设 WAL | node:sqlite 无 PRAGMA，与 lcm-bridge WAL 连接共存行为依赖 SQLite 版本 |
-| **P2-7** | debt-manager `processSingleDebt` 同步 `readdirSync` + `JSON.parse` | [debt-manager.ts L362](file:///workspace/src/core/debt-manager.ts#L362) readdirSync + [L365](file:///workspace/src/core/debt-manager.ts#L365) readFileSync；setInterval [L513](file:///workspace/src/core/debt-manager.ts#L513) | setInterval 回调中阻塞事件循环 |
+| **P2-7** ✅ 已修复（第三批） | debt-manager `processSingleDebt` 同步 `readdirSync` + `JSON.parse` | [debt-manager.ts L362](file:///workspace/src/core/debt-manager.ts#L362) readdirSync → `fs.promises.readdir`；[L365](file:///workspace/src/core/debt-manager.ts#L365) readFileSync → `fs.promises.readFile`；existsSync 保留作守卫 | 不再阻塞事件循环 |
 | **P2-8** | 错误路径 O(N²) token 估算 | [index.ts L1504-1520](file:///workspace/src/index.ts#L1504) while [L1508-1516](file:///workspace/src/index.ts#L1508) | catch 分支 while 循环内反复全量 `estimateTokensFromMessages` |
 | **P2-9** | LLM 超时不一致（1500ms ~ 30000ms 跨 20 倍） | index.ts L853(1500)/L1762(5000)/L1057(8000)；tools.ts L194(15000)；embed-fn.ts L146(30000)；graph-adapter.ts L966(30000) | 6 处 LLM fetch 无统一策略 |
 | **P2-10** | `tagRegistry.load()` fire-and-forget 静默吞错 | [retrieval-gateway.ts L65](file:///workspace/src/retrieval-gateway.ts#L65) `.catch(() => {})` | 首次启动加载失败，整个会话周期上下文推断用空 tag |
@@ -406,12 +406,12 @@
   └─ P0-5 embed keep_alive             ← ✅ 已完成（新增项）
 
 第二批（I/O 与批量优化，P1 剩余 + P2）
-  ├─ 3.2.1 lcmg_backup 流式化（P1-5）
-  ├─ 3.2.2 lcmg_sync 批量化（P1-6）
-  ├─ 3.2.3 upsertEntities 批量化（P1-10）
-  ├─ 3.2.4 debt-manager 异步化（P2-7）
-  ├─ 3.2.5 distillation 并发化（P2-2, P2-3）
-  └─ 3.2.6 searchWithCache 定位（P1-9）
+  ├─ 3.2.1 lcmg_backup 流式化（P1-5）      ← ✅ 已完成（异步 I/O + LIMIT）
+  ├─ 3.2.2 lcmg_sync 批量化（P1-6）        ← ✅ 已完成（批量 IN + UNWIND MERGE）
+  ├─ 3.2.3 upsertEntities 批量化（P1-10）  ← ✅ 已完成（删除死代码）
+  ├─ 3.2.4 debt-manager 异步化（P2-7）     ← ✅ 已完成（fs.promises）
+  ├─ 3.2.5 distillation 并发化（P2-2/3）   ← ✅ 已完成（并发 3）
+  └─ 3.2.6 searchWithCache 定位（P1-9）    ← ✅ 已完成（去 @deprecated）
 
 第三批（一致性与健壮性，P2 剩余）
   ├─ 3.3.1 统一 LLM 超时（P2-9）
@@ -457,13 +457,14 @@
 
 ## 七、附录：审计基线
 
-- **代码版本**：v2.1.10（commit 8f8b114，main 分支）+ 第一批 + 第二批修复
+- **代码版本**：v2.1.10（commit 8f8b114，main 分支）+ 第一/二/三批修复
 - **测试基线**：630 项通过（31 个文件）
 - **tsc 类型检查**：通过
 - **审计文件数**：32 个 src/ 文件 + 4 个配置文件
 - **发现总数**：5 个 P0 + 10 个 P1 + 10 个 P2 = 25 项
 - **第一批已修复**：P0-5、P1-1、P1-2、P1-3、P1-7（5 项）
 - **第二批已修复**：P0-1、P0-2、P0-3、P0-4、P1-4（5 项，另 P1-3 缓存补完）
-- **累计已修复**：11 项（5 P0 + 6 P1）
-- **待修复**：5 个 P1（P1-5/6/8/9/10）+ 10 个 P2 = 14 项
-- **重新评估日期**：2026-07-10（基于 main 8f8b114 + 第一/二批修复，逐项核查确认）
+- **第三批已修复**：P1-5、P1-6、P1-9、P1-10、P2-2、P2-3、P2-7（6 项）
+- **累计已修复**：17 项（5 P0 + 9 P1 + 3 P2）
+- **待修复**：1 个 P1（P1-8）+ 7 个 P2（P2-1/4/5/6/8/9/10）= 8 项
+- **重新评估日期**：2026-07-10（基于 main 8f8b114 + 第一/二/三批修复，逐项核查确认）

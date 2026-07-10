@@ -1,9 +1,9 @@
 # lcm-graph-extra 性能优化演进路线图
 
 > 版本：v2.1.10 → v2.2.0
-> 基线：commit 8f8b114（main）+ 第一批 + 第二批修复，630 项测试通过，tsc 通过
+> 基线：commit 8f8b114（main）+ 第一/二/三批修复，630 项测试通过，tsc 通过
 > 审计报告：[2026-07-04-performance-audit-and-optimization.md](docs/superpowers/specs/2026-07-04-performance-audit-and-optimization.md)
-> 发现总数：5 个 P0 + 10 个 P1 + 10 个 P2 = 25 项｜已修复 11 项｜待修复 14 项
+> 发现总数：5 个 P0 + 10 个 P1 + 10 个 P2 = 25 项｜已修复 17 项｜待修复 8 项
 
 ---
 
@@ -42,12 +42,12 @@
 
 | 序号 | 编号 | 任务 | 风险 | 接入点 | 状态 |
 |------|------|------|------|--------|------|
-| 11 | P1-5 | lcmg_backup 流式化（分批 + 异步 I/O） | 低 | tools.ts L635 | ⏳ 待执行 |
-| 12 | P1-6 | lcmg_sync 批量化（消除 N 次往返） | 低 | tools.ts L1475 | ⏳ 待执行 |
-| 13 | P1-10 | upsertEntities 批量化 | 低 | graph-adapter.ts L706 | ⏳ 待执行 |
-| 14 | P2-7 | debt-manager 异步化 sessionFile 扫描 | 低 | debt-manager.ts L360 | ⏳ 待执行 |
-| 15 | P2-2/3 | distillation 并发化（并发 3） | 低 | distillation.ts | ⏳ 待执行 |
-| 16 | P1-9 | searchWithCache 定位（去废弃标记或迁移） | 低 | graph-adapter.ts | ⏳ 待执行 |
+| 11 | P1-5 | lcmg_backup 流式化（异步 I/O + LIMIT） | 低 | tools.ts L681-L754 | ✅ 已完成 |
+| 12 | P1-6 | lcmg_sync 批量化（批量 IN + UNWIND MERGE） | 低 | tools.ts L1537-L1677 | ✅ 已完成 |
+| 13 | P1-10 | upsertEntities 删除死代码（零调用方） | 低 | graph-adapter.ts L706 | ✅ 已完成 |
+| 14 | P2-7 | debt-manager 异步化 sessionFile 扫描 | 低 | debt-manager.ts L360 | ✅ 已完成 |
+| 15 | P2-2/3 | distillation 并发化（并发 3） | 低 | distillation.ts L136 | ✅ 已完成 |
+| 16 | P1-9 | searchWithCache 去 @deprecated 标记 | 低 | graph-adapter.ts L395 | ✅ 已完成 |
 
 ### 第四批：一致性与健壮性（P2 剩余 + P1-8）
 

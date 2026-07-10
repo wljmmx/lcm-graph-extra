@@ -10,6 +10,7 @@ import * as neo4jDriver from 'neo4j-driver';
 import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import * as fsp from "node:fs/promises";
 import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from './config/neo4j-helper';
@@ -677,7 +678,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       } catch (e: any) {
         return { content: [{ type: "text" as const, text: `Error: ${e.message}` }], details: { ok: false, error: `Error: ${e.message}` }, isError: true };
       }
-      mkdirSync(safeOutDir, { recursive: true });
+      // BUGFIX(P1-5): 异步 I/O 替代同步 fs 调用，避免阻塞事件循环
+      await fsp.mkdir(safeOutDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const backupPath = join(safeOutDir, `memory-full-backup-${stamp}.json`);
 
@@ -687,21 +689,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lcm: { conversations: [] }, files: [],
       };
 
-      // Neo4j
+      // Neo4j — BUGFIX(P1-5): 全表扫描加 LIMIT 防止超大图库 OOM
       try {
         const { driver, session } = await neo4jSession();
         try {
           if (signal?.aborted) {
             return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
-          const nodes = await session.run("MATCH (n) RETURN n");
+          const nodes = await session.run("MATCH (n) RETURN n LIMIT 50000");
           (backup.neo4j as any).entities = nodes.records.map((r: any) => {
             const p = r.get("n").properties; return { id: p.id, name: p.name, labels: r.get("n").labels };
           });
           if (signal?.aborted) {
             return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
-          const rels = await session.run("MATCH ()-[r]->() RETURN r");
+          const rels = await session.run("MATCH ()-[r]->() RETURN r LIMIT 100000");
           (backup.neo4j as any).relationships = rels.records.map((r: any) => {
             const p = r.get("r").properties;
             return { fromId: p.fromId ?? "", toId: p.toId ?? "", type: r.get("r").type };
@@ -728,19 +730,19 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
       finally { if (db) { try { db.close(); } catch {} } }
 
-      // Memory files
+      // Memory files — BUGFIX(P1-5): readFileSync/readdirSync/statSync → fsp 异步
       try {
         const memDir = join(homedir(), ".openclaw", "workspace", "main");
         const candidates = [
           join(memDir, "MEMORY.md"), join(memDir, "memory"),
         ];
         for (const c of candidates) {
-          if (existsSync(c) && statSync(c).isFile()) {
-            (backup.files as any[]).push({ path: basename(c), content: readFileSync(c, "utf-8").slice(0, 100000) });
+          if (existsSync(c) && (await fsp.stat(c)).isFile()) {
+            (backup.files as any[]).push({ path: basename(c), content: (await fsp.readFile(c, "utf-8")).slice(0, 100000) });
           } else if (existsSync(c)) {
-            const entries = readdirSync(c).filter((f) => f.endsWith(".md"));
+            const entries = (await fsp.readdir(c)).filter((f) => f.endsWith(".md"));
             for (const entry of entries) {
-              (backup.files as any[]).push({ path: `memory/${entry}`, content: readFileSync(join(c, entry), "utf-8").slice(0, 50000) });
+              (backup.files as any[]).push({ path: `memory/${entry}`, content: (await fsp.readFile(join(c, entry), "utf-8")).slice(0, 50000) });
             }
           }
         }
@@ -748,7 +750,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         getGlobalLogger()?.debug?.("backup: memory files read unavailable (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
       }
 
-      writeFileSync(backupPath, JSON.stringify(backup, null, 2), "utf-8");
+      // BUGFIX(P1-5): writeFileSync → fsp.writeFile（大 JSON 同步写会长时间阻塞事件循环）
+      await fsp.writeFile(backupPath, JSON.stringify(backup, null, 2), "utf-8");
       const msgCount = (backup.lcm as any).conversations.reduce((a: number, c: any) => a + (c.messages?.length ?? 0), 0);
       return {
         content: [{
@@ -1531,19 +1534,30 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           neo4jMsgNodes = allMsgNodes.records.length;
           push(`  Neo4j: ${neo4jMsgNodes} ConversationMessage nodes\n`);
 
-          // Check each for orphan (no matching session in lcm.db)
+          // BUGFIX(P1-6): 批量 IN 查询替代逐行 COUNT，消除 N 次 SQLite 往返
           // SEC-3 H-6: db2 嵌套在 neo4j session 内，需独立 finally 清理
           let db2: any = null;
           try {
             db2 = openDb();
+            const allSids = allMsgNodes.records
+              .map((r: any) => r.get("sid"))
+              .filter((s: any) => s && String(s).trim())
+              .map((s: any) => String(s));
+            const existingSids = new Set<string>();
+            const BATCH = 500; // SQLite IN 参数分批，避免超 999 限制
+            for (let i = 0; i < allSids.length; i += BATCH) {
+              const batch = allSids.slice(i, i + BATCH);
+              const placeholders = batch.map(() => '?').join(',');
+              const rows = db2.prepare(
+                `SELECT session_id FROM conversations WHERE session_id IN (${placeholders})`
+              ).all(...batch) as any[];
+              for (const row of rows) existingSids.add(String(row.session_id));
+            }
             for (const rec of allMsgNodes.records) {
               const sid = rec.get("sid") ?? "";
-              if (sid) {
-                const exists = db2.prepare("SELECT COUNT(*) AS c FROM conversations WHERE session_id = ?").get(sid) as any;
-                if (exists.c === 0) {
-                  orphanNodes++;
-                  orphanedIds.push(rec.get("id") ?? sid);
-                }
+              if (sid && !existingSids.has(String(sid))) {
+                orphanNodes++;
+                orphanedIds.push(rec.get("id") ?? sid);
               }
             }
           } finally { if (db2) { try { db2.close(); } catch {} } }
@@ -1590,28 +1604,41 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             content: r.get("content") ?? '',
           }));
 
-          // 与 lcm.db 对比（取最新一条消息的 created_at 作为权威 updatedAt）
+          // BUGFIX(P1-6): 批量 GROUP BY 查询替代逐行 SELECT，消除 N 次 SQLite 往返
+          // 一次性查出每个 conversation_id 的最新 created_at，内存中对比检测 drift
+          const sidToLatestTs = new Map<string, number>();
           try {
             lcmDb2 = openDb();
-            for (const row of neo4jRows) {
-              if (!row.sid) continue;
-              const lcmRow = lcmDb2.prepare(
-                "SELECT created_at AS ca, content AS c FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1"
-              ).get(row.sid) as any;
-              if (!lcmRow || !lcmRow.ca) continue;
-
-              // lcm.db created_at 是 'YYYY-MM-DD HH:MM:SS' 格式，转毫秒时间戳
-              const lcmTs = new Date(lcmRow.ca.replace(' ', 'T') + 'Z').getTime() || 0;
-              if (lcmTs === 0) continue;
-
-              // 时间戳差异超过 60s 视为 drift（容忍写延迟）
-              const diffMs = Math.abs(lcmTs - row.updatedAt);
-              if (diffMs > 60_000) {
-                driftCount++;
-                if (driftIds.length < 10) driftIds.push(row.id);
+            const allSids = neo4jRows.filter((r: any) => r.sid).map((r: any) => String(r.sid));
+            const BATCH = 500; // SQLite IN 参数分批，避免超 999 限制
+            for (let i = 0; i < allSids.length; i += BATCH) {
+              const batch = allSids.slice(i, i + BATCH);
+              const placeholders = batch.map(() => '?').join(',');
+              const rows = lcmDb2.prepare(
+                `SELECT conversation_id, MAX(created_at) AS ca FROM messages WHERE conversation_id IN (${placeholders}) GROUP BY conversation_id`
+              ).all(...batch) as any[];
+              for (const row of rows) {
+                if (!row.ca) continue;
+                // lcm.db created_at 是 'YYYY-MM-DD HH:MM:SS' 格式，转毫秒时间戳
+                const ts = new Date(String(row.ca).replace(' ', 'T') + 'Z').getTime() || 0;
+                if (ts > 0) sidToLatestTs.set(String(row.conversation_id), ts);
               }
             }
           } finally { if (lcmDb2) { try { lcmDb2.close(); } catch {} } }
+
+          // 内存中检测 drift（时间戳差异超过 60s 视为 drift，容忍写延迟）
+          const driftRows: Array<{ id: string; ts: number }> = [];
+          for (const row of neo4jRows) {
+            if (!row.sid) continue;
+            const lcmTs = sidToLatestTs.get(String(row.sid));
+            if (!lcmTs) continue;
+            const diffMs = Math.abs(lcmTs - row.updatedAt);
+            if (diffMs > 60_000) {
+              driftCount++;
+              if (driftIds.length < 10) driftIds.push(row.id);
+              driftRows.push({ id: row.id, ts: lcmTs });
+            }
+          }
 
           push(`  Neo4j ConversationMessage with updatedAt: ${neo4jRows.length}\n`);
           push(`  Timestamp drift > 60s: ${driftCount}\n`);
@@ -1620,6 +1647,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           }
 
           // N-1 Phase 1.5 repair: 增量 MERGE updatedAt（以 lcm.db 为权威源）
+          // BUGFIX(P1-6): UNWIND 批量 MERGE 替代逐条 session.run，复用 check 阶段的 driftRows 无需再查 SQLite
           if (mode === "repair" && !isDryRun && driftCount > 0) {
             if (signal?.aborted) {
               return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
@@ -1627,28 +1655,20 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             push(`\n  Repairing ${driftCount} drifted nodes via MERGE...\n`);
             let merged = 0;
             try {
-              lcmDb2 = openDb();
-              for (const row of neo4jRows) {
-                if (!row.sid) continue;
-                const lcmRow = lcmDb2.prepare(
-                  "SELECT created_at AS ca FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1"
-                ).get(row.sid) as any;
-                if (!lcmRow || !lcmRow.ca) continue;
-                const lcmTs = new Date(lcmRow.ca.replace(' ', 'T') + 'Z').getTime() || 0;
-                if (lcmTs === 0) continue;
-                const diffMs = Math.abs(lcmTs - row.updatedAt);
-                if (diffMs <= 60_000) continue;
-                // 增量 MERGE：以 lcm.db 为权威，更新 Neo4j updatedAt
-                await session.run(
-                  `MATCH (n:ConversationMessage {id: $id})
-                   SET n.updatedAt = $ts,
-                       n.syncSource = 'lcm-db-merge',
-                       n.syncedAt = timestamp()`,
-                  { id: row.id, ts: neo4jDriver.int(lcmTs) as any }
+              const updates = driftRows.map(d => ({ id: d.id, ts: neo4jDriver.int(d.ts) as any }));
+              const BATCH = 500;
+              for (let i = 0; i < updates.length; i += BATCH) {
+                const batch = updates.slice(i, i + BATCH);
+                const result = await session.run(
+                  `UNWIND $updates AS u
+                   MATCH (n:ConversationMessage {id: u.id})
+                   SET n.updatedAt = u.ts, n.syncSource = 'lcm-db-merge', n.syncedAt = timestamp()
+                   RETURN count(*) AS c`,
+                  { updates: batch }
                 );
-                merged++;
+                merged += result.records[0]?.get("c")?.toNumber?.() ?? batch.length;
               }
-            } finally { if (lcmDb2) { try { lcmDb2.close(); } catch {} } }
+            } catch (e: any) { push(`  ⚠️ MERGE error: ${e.message}\n`); }
             push(`  ✅ MERGE'd ${merged} nodes with corrected updatedAt\n`);
           } else if (mode === "repair" && isDryRun && driftCount > 0) {
             push(`  (Dry run) Would MERGE ${driftCount} nodes with corrected updatedAt\n`);

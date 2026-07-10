@@ -133,70 +133,82 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     if (!pending.length) return;
     log?.info?.('distillation: processing ' + String(pending.length) + ' pending');
     const llm = resolveDistillationLlm(apiRef);
-    for (const raw of pending) {
-      try {
-        const distilled = await distillOne(raw, llm);
-        if (distilled) {
-          await expStoreRef.saveDistilled(distilled);
-          await expStoreRef.deleteById(raw.id);
-          // v1.2.0-3: 记录蒸馏成功
-          businessMetrics.recordDistill(true);
-          // v1.2.0-3: 记录经验质量分（基于 relevanceScore）
-          businessMetrics.recordExperienceQuality(distilled.relevanceScore);
+    // BUGFIX(P2-2/3): 原为串行 for-await，每条 distillOne 是一次 LLM 调用（含 15s 超时），
+    // 5 条串行最坏 75s。改为分批并发处理，每批 concurrency 条用 Promise.allSettled 并发执行。
+    // 每条蒸馏按 raw.id 隔离、无跨条数据依赖，并发安全；单条失败不影响其他条。
+    // 默认并发上限 3，可通过环境变量 LCMG_DISTILL_CONCURRENCY 覆盖（上限 10，防止瞬时压力过大）。
+    const concurrency = (() => {
+      const raw = process.env.LCMG_DISTILL_CONCURRENCY;
+      if (raw) { const n = Number(raw); if (Number.isFinite(n) && n > 0) return Math.min(n, 10); }
+      return 3;
+    })();
+    for (let i = 0; i < pending.length; i += concurrency) {
+      const batch = pending.slice(i, i + concurrency);
+      await Promise.allSettled(batch.map((raw: any) => (async () => {
+        try {
+          const distilled = await distillOne(raw, llm);
+          if (distilled) {
+            await expStoreRef.saveDistilled(distilled);
+            await expStoreRef.deleteById(raw.id);
+            // v1.2.0-3: 记录蒸馏成功
+            businessMetrics.recordDistill(true);
+            // v1.2.0-3: 记录经验质量分（基于 relevanceScore）
+            businessMetrics.recordExperienceQuality(distilled.relevanceScore);
 
-          // S-11': Zettelkasten evolve — 建立 RELATED_TO 关联
-          // 优先调用 gm-pro linkNodes API 创建语义链接，失败降级到 Cypher MERGE。
-          // 用 LLM 提取的 relatedConcepts 搜索已有经验并建立关联，
-          // 让经验网络自组织生长（类似卡片盒笔记法）。
-          const concepts: string[] | undefined = distilled.relatedConcepts;
-          if (concepts?.length && typeof expStoreRef.linkRelated === 'function') {
-            try {
-              // 优先尝试 gm-pro linkNodes API（与 S-11 对接）
-              let gmProLinked = 0;
+            // S-11': Zettelkasten evolve — 建立 RELATED_TO 关联
+            // 优先调用 gm-pro linkNodes API 创建语义链接，失败降级到 Cypher MERGE。
+            // 用 LLM 提取的 relatedConcepts 搜索已有经验并建立关联，
+            // 让经验网络自组织生长（类似卡片盒笔记法）。
+            const concepts: string[] | undefined = distilled.relatedConcepts;
+            if (concepts?.length && typeof expStoreRef.linkRelated === 'function') {
               try {
-                const { withGmProFallback } = await import("../adapters/gm-pro-fallback.js");
-                // 先用 Cypher 查找概念重叠的节点（linkRelated 的搜索逻辑），再用 linkNodes 建边
-                const relatedNodes = await expStoreRef.findRelatedByConcepts?.(distilled.id, concepts, 3);
-                if (Array.isArray(relatedNodes) && relatedNodes.length > 0) {
-                  for (const targetId of relatedNodes) {
-                    const result = await withGmProFallback<{ created: boolean } | null>(
-                      'linkNodes',
-                      async (mod) => {
-                        const r = await mod.linkNodes(distilled.id, targetId, 'RELATED_TO');
-                        return r as { created: boolean } | null;
-                      },
-                      async () => null, // fallback 到后续 Cypher linkRelated
-                      { label: 'S-11 linkNodes' },
-                    );
-                    if (result?.created) gmProLinked++;
+                // 优先尝试 gm-pro linkNodes API（与 S-11 对接）
+                let gmProLinked = 0;
+                try {
+                  const { withGmProFallback } = await import("../adapters/gm-pro-fallback.js");
+                  // 先用 Cypher 查找概念重叠的节点（linkRelated 的搜索逻辑），再用 linkNodes 建边
+                  const relatedNodes = await expStoreRef.findRelatedByConcepts?.(distilled.id, concepts, 3);
+                  if (Array.isArray(relatedNodes) && relatedNodes.length > 0) {
+                    for (const targetId of relatedNodes) {
+                      const result = await withGmProFallback<{ created: boolean } | null>(
+                        'linkNodes',
+                        async (mod) => {
+                          const r = await mod.linkNodes(distilled.id, targetId, 'RELATED_TO');
+                          return r as { created: boolean } | null;
+                        },
+                        async () => null, // fallback 到后续 Cypher linkRelated
+                        { label: 'S-11 linkNodes' },
+                      );
+                      if (result?.created) gmProLinked++;
+                    }
                   }
+                } catch (gmProErr) {
+                  log?.debug?.("distillation: gm-pro linkNodes skipped", { err: String(gmProErr) });
                 }
-              } catch (gmProErr) {
-                log?.debug?.("distillation: gm-pro linkNodes skipped", { err: String(gmProErr) });
-              }
 
-              // Fallback: 如果 gm-pro 未处理任何关联，用 Cypher MERGE 兜底
-              if (gmProLinked === 0) {
-                const linked = await expStoreRef.linkRelated(distilled.id, concepts, 3);
-                if (linked > 0) {
-                  log?.debug?.("distillation: zettelkasten evolve linked (cypher fallback)", { id: distilled.id, linked, concepts: concepts.slice(0, 3) });
+                // Fallback: 如果 gm-pro 未处理任何关联，用 Cypher MERGE 兜底
+                if (gmProLinked === 0) {
+                  const linked = await expStoreRef.linkRelated(distilled.id, concepts, 3);
+                  if (linked > 0) {
+                    log?.debug?.("distillation: zettelkasten evolve linked (cypher fallback)", { id: distilled.id, linked, concepts: concepts.slice(0, 3) });
+                  }
+                } else {
+                  log?.debug?.("distillation: zettelkasten evolve linked (gm-pro)", { id: distilled.id, linked: gmProLinked, concepts: concepts.slice(0, 3) });
                 }
-              } else {
-                log?.debug?.("distillation: zettelkasten evolve linked (gm-pro)", { id: distilled.id, linked: gmProLinked, concepts: concepts.slice(0, 3) });
+              } catch (linkErr) {
+                log?.debug?.("distillation: zettelkasten evolve skipped", { err: String(linkErr) });
               }
-            } catch (linkErr) {
-              log?.debug?.("distillation: zettelkasten evolve skipped", { err: String(linkErr) });
             }
+          } else {
+            // v1.2.0-3: distillOne 返回 null（LLM 解析失败或超时）→ 记录蒸馏失败
+            businessMetrics.recordDistill(false);
           }
-        } else {
-          // v1.2.0-3: distillOne 返回 null（LLM 解析失败或超时）→ 记录蒸馏失败
+        } catch (e) {
+          log?.warn?.("distillation item failed", { err: String(e) });
+          // v1.2.0-3: 记录蒸馏失败
           businessMetrics.recordDistill(false);
         }
-      } catch (e) {
-        log?.warn?.("distillation item failed", { err: String(e) });
-        // v1.2.0-3: 记录蒸馏失败
-        businessMetrics.recordDistill(false);
-      }
+      })()));
     }
   } catch (e) { log?.warn?.("distillation batch failed", { err: String(e) }); }
 }
