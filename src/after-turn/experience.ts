@@ -89,7 +89,10 @@ export function extractExperiences(
         const trigger = detectExperienceTrigger(msg, priorMessages);
         if (!trigger) continue;
         const raw = extractRawExperience(trigger, msg, sessionId);
-        backgroundTasks.register('exp:save-raw', ctx.expStore.saveRaw(raw).then(() => {}, (saveErr: any) => {
+        backgroundTasks.register('exp:save-raw', ctx.expStore.saveRaw(raw).then(() => {
+          // P2-1: 经验写入后失效 L4 检索缓存（新经验可能改变检索结果）
+          ctx.l4QueryCache?.clear();
+        }, (saveErr: any) => {
           ctx.logger?.warn?.('[afterTurn] experience saveRaw failed', { err: String(saveErr) });
         }));
         ctx.logger?.debug?.(`[afterTurn] experience extracted: source=${trigger}, id=${raw.id}`);

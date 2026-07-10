@@ -279,6 +279,9 @@ export class ExperienceStorage {
   /**
    * Query-aware 混合搜索（主召回路径）
    * 静态 relevanceScore (60%) + 动态 query 关键词匹配 (40%) + 标签过滤
+   *
+   * P1-3: 优先使用 Neo4j 全文索引查询（db.index.fulltext.queryNodes），
+   * 若失败则降级到原 CONTAINS 全扫描路径。
    */
   async searchByQuery(options: ExperienceQueryOptions): Promise<ExperienceSearchResult[]> {
     const {
@@ -296,6 +299,111 @@ export class ExperienceStorage {
     if (!query && scenarioTags.length === 0 && techStackTags.length === 0) {
       return this.searchRelevant(minScore, limit, halfLifeDays);
     }
+
+    // P1-3: 有 query 关键词时，优先尝试全文索引查询路径
+    if (query && query.trim().length > 0) {
+      try {
+        const ftResults = await this._searchByFulltextIndex(options, halfLifeDays);
+        if (ftResults !== null) return ftResults;
+      } catch {
+        // 全文索引不可用（Neo4j 版本不支持或索引未创建），降级到 CONTAINS
+      }
+    }
+
+    return this._searchByContains(options, halfLifeDays);
+  }
+
+  /**
+   * P1-3: 使用 Neo4j 全文索引查询的搜索路径（O(log n)）。
+   * 失败时返回 null，由调用方降级到 CONTAINS。
+   */
+  private async _searchByFulltextIndex(
+    options: ExperienceQueryOptions,
+    halfLifeDays: number,
+  ): Promise<ExperienceSearchResult[] | null> {
+    const {
+      freeTags: queryFreeTags = [],
+      query,
+      scenarioTags = [],
+      techStackTags = [],
+      projects = [],
+      minScore = 0.6,
+      limit = 5,
+    } = options;
+
+    if (!query) return null;
+
+    const hasFilters = scenarioTags.length > 0 || techStackTags.length > 0 || projects.length > 0;
+    const projectFilter = projects.length > 0
+      ? `\n           AND (size($projects) = 0 OR (e.projectName IS NOT NULL AND toLower(e.projectName) IN [p IN $projects | toLower(p)]))`
+      : '';
+    const filterClause = hasFilters ? `\n           ${SEARCH_QUERY_TAG_FILTER}` : '';
+
+    // 使用全文索引查询节点，再应用过滤和排序
+    const cypher = `CALL db.index.fulltext.queryNodes('experience_summary_idx', $queryKeyword) YIELD node AS e, score AS ftScore
+         WHERE e:${LABEL}
+           AND e.status = 'DISTILLED'
+           AND (e.state IS NULL OR e.state <> 'superseded')
+           AND e.relevanceScore >= $minScore
+           AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())${projectFilter}${filterClause}
+         WITH e, ftScore,
+           (CASE WHEN size($queryFreeTags) > 0
+             AND coalesce(e.tags_free, '') <> ''
+             AND ANY(f IN split(coalesce(e.tags_free, ''), ',')
+                WHERE toLower(f) IN [x IN $queryFreeTags | toLower(x)])
+             THEN 0.3
+             ELSE 0.0 END) AS tagMatch
+         WITH e, ftScore, tagMatch,
+           CASE WHEN e.lastRecalledAt IS NOT NULL
+             THEN coalesce(e.matchCount, 0) * (0.5 ^ ((timestamp() - e.lastRecalledAt) / (1000.0 * 60 * 60 * 24 * $halfLifeDays)))
+             ELSE coalesce(e.matchCount, 0) * 0.5
+           END AS decayedMatchCount
+         RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
+                e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
+                e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
+                e.tags_scenario AS tags_scenario,
+                e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
+                e.tags_free AS tags_free,
+                (ftScore + tagMatch) AS queryMatch
+         ORDER BY (e.relevanceScore * 0.6) + ((ftScore + tagMatch) * 0.4) + (decayedMatchCount * 0.1) DESC
+         LIMIT $limit`;
+
+    const params: Record<string, unknown> = {
+      minScore,
+      queryKeyword: query,
+      scenarioTags: scenarioTags.length > 0 ? scenarioTags : [],
+      techStackTags: techStackTags.length > 0 ? techStackTags : [],
+      queryFreeTags: queryFreeTags.length > 0 ? queryFreeTags : [],
+      projects: projects.length > 0 ? projects : [],
+      limit: Math.trunc(limit),
+      halfLifeDays,
+    };
+
+    const rows = await this.adapter.query<ExperienceSearchRow>(cypher, params);
+    return (rows || []).map((r: any) => ({
+      experience: rowToDistilled(r),
+      score: r.relevanceScore !== undefined
+        ? Number(r.relevanceScore) * 0.6 + (Number(r.queryMatch) || 0) * 0.4
+        : Number(r.relevanceScore),
+    }));
+  }
+
+  /**
+   * P1-3: 原 CONTAINS 全扫描搜索路径（降级方案）。
+   */
+  private async _searchByContains(
+    options: ExperienceQueryOptions,
+    halfLifeDays: number,
+  ): Promise<ExperienceSearchResult[]> {
+    const {
+      freeTags: queryFreeTags = [],
+      query,
+      scenarioTags = [],
+      techStackTags = [],
+      projects = [],
+      minScore = 0.6,
+      limit = 5,
+    } = options;
 
     const hasFilters = scenarioTags.length > 0 || techStackTags.length > 0 || projects.length > 0;
 

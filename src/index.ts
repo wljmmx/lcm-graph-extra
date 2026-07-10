@@ -80,6 +80,23 @@ const WARMUP_CACHE_TTL_MS = 30 * 60 * 1000; // 30min TTL
 const sessionQualityScores = new Map<string, number>();
 const QUALITY_SCORE_TTL_MS = 60 * 60 * 1000; // 1h TTL
 
+// P0-1: 会话级 LLM Rerank 异步缓存 — fire-and-forget 结果供下一轮 assemble 使用
+const llmRerankCache = new Map<string, { query: string; results: any[]; ts: number }>();
+const LLM_RERANK_CACHE_MAX = 50;
+const LLM_RERANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
+
+// P2-1: L2/L4 检索结果 LRU 缓存（同 query 短期复用，TTL 5min）
+const l2QueryCache = new Map<string, { results: any[]; ts: number }>();
+const l4QueryCache = new Map<string, { results: any[]; ts: number }>();
+const QUERY_CACHE_MAX = 50;
+const QUERY_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
+
+// P2-2: heartbeat 文件 mtimeMs 缓存 —— 仅读取修改时间变化的文件
+// session 文件缓存完整解析结果（供 pendingMessages + debt 写入复用）
+const sessionFileCache = new Map<string, { mtimeMs: number; data: any; msgCount: number }>();
+// debt 文件缓存解析后的 tokenRatio
+const debtFileCache = new Map<string, { mtimeMs: number; ratio: number }>();
+
 // applyTotalControl 已抽出到 src/plugin/token-control.ts
 import { applyTotalControl } from "./plugin/token-control.js";
 
@@ -396,6 +413,9 @@ const pluginEntry: any = definePluginEntry({
           sessionWarmupCache,
           lastAssembleExpIdsBySession,
           sessionQualityScores,
+          llmRerankCache,
+          l2QueryCache,
+          l4QueryCache,
           userProfile,
           setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
         };
@@ -419,6 +439,7 @@ const pluginEntry: any = definePluginEntry({
           resolveDistillationLlm,
           lastAssembleExpIdsBySession,
           sessionQualityScores,
+          l4QueryCache,
         };
         await afterTurnCore(ctx, params);
       },
@@ -902,12 +923,51 @@ const pluginEntry: any = definePluginEntry({
             const sessionDataCache: { file: string; data: any }[] = [];
             if (await dirExists(sessionDir)) {
               const files = (await readdir(sessionDir)).filter((f) => f.endsWith(".json"));
-              for (const sf of files) {
-                try {
-                  const data = JSON.parse(await readFile(join(sessionDir, sf), "utf8"));
-                  pendingMessages += Array.isArray(data.messages) ? data.messages.length : 0;
-                  sessionDataCache.push({ file: sf, data });
-                } catch { /* skip */ }
+              // P2-2: 清理已删除文件的缓存条目（防止缓存泄漏）
+              const currentSessionPaths = new Set(files.map((sf) => join(sessionDir, sf)));
+              for (const cachedPath of sessionFileCache.keys()) {
+                if (!currentSessionPaths.has(cachedPath)) {
+                  sessionFileCache.delete(cachedPath);
+                }
+              }
+              // P2-2: 先并行 stat 获取 mtimeMs，仅读取修改时间变化的文件
+              const fileInfos = await Promise.all(
+                files.map(async (sf) => {
+                  const filePath = join(sessionDir, sf);
+                  try {
+                    const st = await stat(filePath);
+                    return { file: sf, filePath, mtimeMs: st.mtimeMs };
+                  } catch {
+                    // 文件可能已删除，清除缓存
+                    sessionFileCache.delete(filePath);
+                    return null;
+                  }
+                }),
+              );
+              // 并行读取 mtimeMs 变化的文件（未变更的走缓存）
+              const readResults = await Promise.all(
+                fileInfos.filter(Boolean).map(async (fi) => {
+                  const cached = sessionFileCache.get(fi!.filePath);
+                  if (cached && cached.mtimeMs === fi!.mtimeMs) {
+                    // P2-2: mtimeMs 未变，复用缓存（跳过 readFile + JSON.parse）
+                    return { file: fi!.file, data: cached.data, msgCount: cached.msgCount };
+                  }
+                  try {
+                    const data = JSON.parse(await readFile(fi!.filePath, "utf8"));
+                    const msgCount = Array.isArray(data.messages) ? data.messages.length : 0;
+                    sessionFileCache.set(fi!.filePath, { mtimeMs: fi!.mtimeMs, data, msgCount });
+                    return { file: fi!.file, data, msgCount };
+                  } catch {
+                    sessionFileCache.delete(fi!.filePath);
+                    return null;
+                  }
+                }),
+              );
+              for (const r of readResults) {
+                if (r) {
+                  pendingMessages += r.msgCount;
+                  sessionDataCache.push({ file: r.file, data: r.data });
+                }
               }
             }
 
@@ -923,15 +983,47 @@ const pluginEntry: any = definePluginEntry({
             const debtDir = join(losslessDir, "debt");
             if (await dirExists(debtDir)) {
               const debtFiles = (await readdir(debtDir)).filter((f) => f.endsWith(".json"));
-              for (const df of debtFiles) {
-                try {
-                  const debt = JSON.parse(await readFile(join(debtDir, df), "utf8"));
-                  if (debt.currentTokenCount) {
-                    maxTokenRatio = Math.max(maxTokenRatio, debt.currentTokenCount / 262144);
-                  }
-                } catch (e) { /* skip */
-                  logger?.debug?.("heartbeat: debt file parse failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+              // P2-2: 清理已删除文件的缓存条目
+              const currentDebtPaths = new Set(debtFiles.map((df) => join(debtDir, df)));
+              for (const cachedPath of debtFileCache.keys()) {
+                if (!currentDebtPaths.has(cachedPath)) {
+                  debtFileCache.delete(cachedPath);
                 }
+              }
+              // P2-2: 先并行 stat 获取 mtimeMs，仅读取修改时间变化的 debt 文件
+              const debtFileInfos = await Promise.all(
+                debtFiles.map(async (df) => {
+                  const filePath = join(debtDir, df);
+                  try {
+                    const st = await stat(filePath);
+                    return { file: df, filePath, mtimeMs: st.mtimeMs };
+                  } catch {
+                    debtFileCache.delete(filePath);
+                    return null;
+                  }
+                }),
+              );
+              const debtResults = await Promise.all(
+                debtFileInfos.filter(Boolean).map(async (fi) => {
+                  const cached = debtFileCache.get(fi!.filePath);
+                  if (cached && cached.mtimeMs === fi!.mtimeMs) {
+                    // P2-2: mtimeMs 未变，复用缓存的 ratio
+                    return cached.ratio;
+                  }
+                  try {
+                    const debt = JSON.parse(await readFile(fi!.filePath, "utf8"));
+                    const ratio = debt.currentTokenCount ? debt.currentTokenCount / 262144 : 0;
+                    debtFileCache.set(fi!.filePath, { mtimeMs: fi!.mtimeMs, ratio });
+                    return ratio;
+                  } catch (e) {
+                    logger?.debug?.("heartbeat: debt file parse failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                    debtFileCache.delete(fi!.filePath);
+                    return 0;
+                  }
+                }),
+              );
+              for (const ratio of debtResults) {
+                if (ratio > maxTokenRatio) maxTokenRatio = ratio;
               }
             }
 
@@ -1069,7 +1161,10 @@ const pluginEntry: any = definePluginEntry({
           if (elapsed >= distillIntervalMs) {
             lastDistillationRun = Date.now();
             // 注册到 backgroundTasks 以便 dispose 时等待
-            backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger).catch((e: any) => {
+            backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger).then(() => {
+              // P2-1: 蒸馏后新经验变为 DISTILLED 可被检索，失效 L4 缓存
+              l4QueryCache.clear();
+            }).catch((e: any) => {
               logger?.warn?.("distillation batch failed", { err: String(e) });
             }));
           }
@@ -1237,6 +1332,41 @@ const pluginEntry: any = definePluginEntry({
           }
           if (cleanedExpIds > 0 || cleanedWarmup > 0) {
             logger?.debug?.("heartbeat: session metadata cleanup", { cleanedExpIds, cleanedWarmup });
+          }
+          // P0-1: 清理过期 LLM Rerank 缓存
+          let cleanedRerank = 0;
+          for (const [key, val] of llmRerankCache) {
+            if (now - val.ts > LLM_RERANK_CACHE_TTL_MS) {
+              llmRerankCache.delete(key);
+              cleanedRerank++;
+            }
+          }
+          if (llmRerankCache.size > LLM_RERANK_CACHE_MAX) {
+            const entries = [...llmRerankCache.entries()].sort((a, b) => a[1].ts - b[1].ts);
+            for (const [key] of entries.slice(0, entries.length - LLM_RERANK_CACHE_MAX)) {
+              llmRerankCache.delete(key);
+              cleanedRerank++;
+            }
+          }
+          if (cleanedRerank > 0) {
+            logger?.debug?.("heartbeat: LLM rerank cache cleanup", { cleanedRerank });
+          }
+          // P2-1: 清理过期 L2/L4 检索缓存
+          let cleanedQueryCache = 0;
+          for (const [key, val] of l2QueryCache) {
+            if (now - val.ts > QUERY_CACHE_TTL_MS) {
+              l2QueryCache.delete(key);
+              cleanedQueryCache++;
+            }
+          }
+          for (const [key, val] of l4QueryCache) {
+            if (now - val.ts > QUERY_CACHE_TTL_MS) {
+              l4QueryCache.delete(key);
+              cleanedQueryCache++;
+            }
+          }
+          if (cleanedQueryCache > 0) {
+            logger?.debug?.("heartbeat: L2/L4 query cache cleanup", { cleanedQueryCache });
           }
           hbSessionCleanupCounter = 0;
         }

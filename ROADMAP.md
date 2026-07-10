@@ -95,10 +95,126 @@
 | R-8 全文索引 | P3 性能 | EXPERIENCE 节点的 summary/context/title 无索引，CONTAINS 查询全扫描 | 在 Neo4j 中为 EXPERIENCE 节点创建 TEXT INDEX | 0.5天 |
 
 > R-1~R-8 共 8 项，预计总成本 6-7 天，纳入 v2.1.12 版本。
+> 上述 R-1~R-8 已于 v2.1.12 全部落地。
+
+### 2026-07-10 业务流程时序分析与性能优化（v2.1.13）
+
+> 基于完整业务流程时序分析，定位 6 个性能瓶颈，按收益/风险分三批优化。
+> 预计总收益：assemble 热路径延迟降低 40-60%，heartbeat 延迟降低 80%。
+
+| 编号 | 优先级 | 瓶颈 | 优化方案 | 预期收益 | 成本 |
+|---|---|---|---|---|---|
+| P0-1 | P0 | LLM Rerank 阻塞热路径（3s 超时） | 改为异步 fire-and-forget，当前轮用 Merger 默认排序 | tier=low 延迟 -90% | 0.5h |
+| P0-2 | P0 | G-8 验证串行 LLM（最坏 24s） | 改为 Promise.all 并行验证 3 条经验 | 验证耗时 -67% | 0.5h |
+| P0-3 | P0 | heartbeat 串行 readFile | 改为 Promise.all 并行读取 session 文件 | 扫描耗时 -80% | 0.5h |
+| P1-1 | P1 | injection 动态 import() | 提升为模块顶层静态导入 | 每次 -2~5ms | 0.5h |
+| P1-2 | P1 | idDedup slice key 碰撞 | 改用 md5 hash 生成 fallback key | 去重准确率提升 | 0.5h |
+| P1-3 | P1 | L4 CONTAINS 全扫描 | 使用 Neo4j 全文索引查询 db.index.fulltext.queryNodes | L4 延迟 -90% | 2h |
+| P2-1 | P2 | L2/L4 无缓存 | 添加 LRU 缓存（同 L3 searchWithCache） | 重复查询 -95% | 2h |
+| P2-2 | P2 | heartbeat 全量扫描 | mtimeMs 缓存，仅读变更文件 | 无变更时 -95% | 1h |
+| P2-3 | P2 | Cascade 评估串行 | judgeRecall 异步不阻塞，thompsonRerank 条件执行 | R-2 路径 -80% | 0.5h |
+
+> P0-1~P2-3 共 9 项，预计总成本 8h，纳入 v2.1.13 版本。
 
 ---
 
-## 三-bis、v2.1.12 详细任务（8 项，按依赖关系分三批）
+## 三-ter、v2.1.13 性能优化详细任务（9 项，按收益/风险分三批）
+
+### 第一批：高收益低风险（3 项，1.5h，预计热路径 -40~60%）
+
+#### P0-1 LLM Rerank 异步化
+
+**当前**：[src/assemble/retrieval.ts](src/assemble/retrieval.ts) 中 `tier=low && tokenRatio<0.25 && merged.length>=3` 时 `await merger.llmRerank` 同步阻塞，3s 超时。
+**优化**：改为 fire-and-forget，当前轮使用 Merger 默认排序结果，LLM Rerank 结果写入 session 级缓存供下一轮使用。
+**预期收益**：tier=low 场景 assemble 延迟 ~3s → ~300ms（-90%）。
+**风险**：低 — 仅影响低压力场景排序质量，下一轮生效。
+
+#### P0-2 G-8 验证并行化
+
+**当前**：[src/after-turn/index.ts](src/after-turn/index.ts) 中 `for (const exp of expIdsToValidate)` 串行 LLM 调用，最坏 3 × 8s = 24s。
+**优化**：改为 `Promise.all(expIdsToValidate.slice(0, 3).map(...))` 并行验证。
+**预期收益**：G-8 验证最坏 ~24s → ~8s（-67%）。
+**风险**：低 — 3 个并行 LLM 调用对服务端压力可控。
+
+#### P0-3 heartbeat 文件扫描并行化
+
+**当前**：[src/index.ts](src/index.ts) heartbeat 中 `for (const sf of files)` 串行读取 session 文件。
+**优化**：改为 `Promise.all(files.map(sf => readFile(...).then(...)))` 并行读取。
+**预期收益**：100 sessions 从 ~500ms → ~100ms（-80%）。
+**风险**：低 — 纯 I/O 并行，无副作用。
+
+---
+
+### 第二批：中等收益（3 项，3h，预计热路径 -10~20%）
+
+#### P1-1 injection 动态导入静态化
+
+**当前**：[src/assemble/injection.ts](src/assemble/injection.ts) 中 `await import('../async/task-registry.js')` 和 `await import('../merger.js')` 在 injectContext 中。
+**优化**：提升到模块顶层静态导入。
+**预期收益**：每次 assemble 节省 ~2-5ms。
+**风险**：低 — 模块缓存保证无副作用。
+
+#### P1-2 Merger idDedup hash 优化
+
+**当前**：[src/merger.ts](src/merger.ts) `idDedup` 使用 `r.content.slice(0, 80)` 作为 fallback key，可能碰撞。
+**优化**：改用 `createHash('md5').update(content).digest('hex')` 生成唯一 fallback key。
+**预期收益**：减少去重碰撞，提升去重准确率。
+**风险**：低 — 仅增加 ~0.5ms hash 计算。
+
+#### P1-3 L4 Cypher 全文索引查询
+
+**当前**：[src/experience/storage.ts](src/experience/storage.ts) `SEARCH_QUERY_TAIL` 使用 4 个 `CONTAINS` 全扫描。
+**优化**：使用 Neo4j 全文索引查询 `CALL db.index.fulltext.queryNodes('experience_summary_idx', $queryKeyword)`，保留 `CONTAINS` 作为降级路径。
+**预期收益**：L4 搜索 O(n) → O(log n)，500 条经验时 ~200ms → ~20ms（-90%）。
+**风险**：中 — 需要 Neo4j 4.0+ 支持全文索引，需要降级路径。
+
+---
+
+### 第三批：深度优化（3 项，3.5h，预计整体吞吐 -5~10%）
+
+#### P2-1 L2/L4 检索结果预热缓存
+
+**当前**：L3 有 `searchWithCache`（5min TTL），但 L2 和 L4 无缓存。
+**优化**：为 L2 和 L4 添加类似 LRU 缓存，相同 query 返回缓存结果。
+**预期收益**：连续相同 query 时 L2/L4 从 ~200ms → ~5ms（-95%）。
+**风险**：中 — 需要处理缓存失效策略（经验更新时清除）。
+
+#### P2-2 heartbeat 文件变更检测
+
+**当前**：每次 heartbeat 读取所有 session 文件。
+**优化**：使用 `fs.stat` 的 `mtimeMs` 缓存，仅读取修改时间变化的文件。
+**预期收益**：无变更时 heartbeat 文件扫描 ~200ms → ~5ms（-95%）。
+**风险**：低 — 需要处理文件删除场景。
+
+#### P2-3 Cascade 评估条件简化
+
+**当前**：`evaluateTier1` + `judgeRecall` + `thompsonRerank` 串行执行。
+**优化**：`judgeRecall` 异步不阻塞，`thompsonRerank` 仅在 `needsTier2` 时执行。
+**预期收益**：R-2 路径从 ~30ms → ~5ms（gm-pro 不可用时 -80%）。
+**风险**：低 — 仅调整执行顺序。
+
+---
+
+### v2.1.13 实施顺序
+
+```
+第一批（高收益低风险，1.5h）:
+  P0-1 (LLM Rerank 异步化) + P0-2 (G-8 并行化) + P0-3 (heartbeat 并行化)
+
+第二批（中等收益，3h）:
+  P1-1 (静态导入) + P1-2 (idDedup hash) + P1-3 (L4 全文索引)
+
+第三批（深度优化，3.5h）:
+  P2-1 (L2/L4 缓存) + P2-2 (文件变更检测) + P2-3 (Cascade 简化)
+```
+
+**产出**：assemble 热路径延迟降低 40-60%，heartbeat 延迟降低 80%，整体吞吐提升 5-10%。
+
+> 预计总工期 8h，产出 v2.1.13 版本。
+
+---
+
+## 四、v1.0.0 演进方案（13 项，按依赖关系分三批）
 
 ### 第一批：类型安全 + 韧性修复（无依赖，2 项，0.5-1 天）
 

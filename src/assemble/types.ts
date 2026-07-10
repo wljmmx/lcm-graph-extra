@@ -24,6 +24,12 @@ export interface AssembleContext {
   setLastRetrievalQuery: (q: string) => void;
   /** R-5: 会话级输出质量评分，afterTurn 评估后写入，assemble 中读取调整检索门槛 */
   sessionQualityScores: Map<string, number>;
+  /** P0-1: 会话级 LLM Rerank 异步缓存，fire-and-forget 结果供下一轮使用 */
+  llmRerankCache: Map<string, { query: string; results: any[]; ts: number }>;
+  /** P2-1: L2 qmd 检索结果 LRU 缓存（同 query 短期复用，TTL 由 heartbeat 清理） */
+  l2QueryCache: Map<string, { results: any[]; ts: number }>;
+  /** P2-1: L4 experience 检索结果 LRU 缓存（经验写入时整体失效） */
+  l4QueryCache: Map<string, { results: any[]; ts: number }>;
 }
 
 /**

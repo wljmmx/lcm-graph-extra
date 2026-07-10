@@ -16,6 +16,9 @@ import { quickHash } from '../plugin/keywords.js';
 import { applyTotalControl } from '../plugin/token-control.js';
 import { estimateTokensFromMessages } from '../lcm-bridge.js';
 import { buildKnowledgeGuidance } from './guidance.js';
+// P1-1: 动态 import 提升为静态导入，避免每次 injectContext 的 await import 开销
+import { backgroundTasks } from '../async/task-registry.js';
+import { detectConflicts } from '../merger.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
 export async function injectContext(
@@ -99,7 +102,7 @@ export async function injectContext(
     const expBody = personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
     addSection('## 💡 经验总结（历史经验参考）', expBody, 5);
     for (const e of personalizedResults) {
-      const { backgroundTasks } = await import('../async/task-registry.js');
+      // P1-1: 已改为静态导入，直接使用 backgroundTasks
       backgroundTasks.register('exp:increment-match', ctx.expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}));
     }
 
@@ -188,7 +191,7 @@ export async function injectContext(
 
   // H-4: 上下文冲突检测
   try {
-    const { detectConflicts } = await import('../merger.js');
+    // P1-1: 已改为静态导入，直接使用 detectConflicts
     const expForConflict = finalExpResults.map((e: any) => ({ content: e.experience?.summary ?? e.experience?.detail ?? '', source: 'experience' as const, type: 'raw' as const, id: e.experience?.id ?? '', score: e.score ?? 0 }));
     const graphForConflict = (Array.isArray(graphResults) ? graphResults : []).map((r: any) => ({ ...r, source: 'graph' as const }));
     const qmdForConflict = (Array.isArray(qmdResults) ? qmdResults : []).map((r: any) => ({ ...r, source: 'qmd' as const }));

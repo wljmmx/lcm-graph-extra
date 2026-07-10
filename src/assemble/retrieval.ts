@@ -19,6 +19,20 @@ import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import type { AssembleContext, RetrievalOutput } from './types.js';
 
+/** P2-1: L2/L4 检索结果缓存 TTL（与 L3 searchWithCache 5min 一致） */
+const QUERY_CACHE_TTL_MS = 300 * 1000;
+/** P2-1: L2/L4 缓存 LRU 容量上限 */
+const QUERY_CACHE_MAX = 50;
+
+/** P2-1: 简单字符串 hash（djb2 变体），用于缓存 key */
+function hashKey(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
 export async function performRetrieval(
   ctx: AssembleContext,
   params: any,
@@ -82,6 +96,12 @@ export async function performRetrieval(
         const t0 = Date.now();
         try {
           if (!qmdQuery) return { results: [], ms: 0 };
+          // P2-1: L2 检索结果缓存 —— 同 query+limit 短期复用
+          const l2CacheKey = `l2:${hashKey(qmdQuery.toLowerCase().trim())}:${retrievalLimits.qmd}`;
+          const l2Cached = ctx.l2QueryCache.get(l2CacheKey);
+          if (l2Cached && Date.now() - l2Cached.ts < QUERY_CACHE_TTL_MS) {
+            return { results: l2Cached.results, ms: Date.now() - t0 };
+          }
           const res = await withCircuitBreaker("qmd", "L2 qmdClient.query", () => ctx.qmdClient.query({
             searches: [
               { type: "lex", query: qmdQuery },
@@ -90,6 +110,12 @@ export async function performRetrieval(
             limit: retrievalLimits.qmd,
             rerank: true
           }));
+          // P2-1: 写入缓存（LRU 上限保护）
+          if (ctx.l2QueryCache.size >= QUERY_CACHE_MAX) {
+            const oldest = ctx.l2QueryCache.keys().next().value;
+            if (oldest !== undefined) ctx.l2QueryCache.delete(oldest);
+          }
+          ctx.l2QueryCache.set(l2CacheKey, { results: res as any[], ts: Date.now() });
           return { results: res, ms: Date.now() - t0 };
         } catch (e) {
           const _l2e = e as Error; const _l2m = _l2e.message;
@@ -155,30 +181,36 @@ export async function performRetrieval(
               return [...found].map(s => s.toLowerCase()).filter(s => !stops.has(s) && s.length >= 2).slice(0, 5);
             } catch { return []; }
           })();
-          const res = await withCircuitBreaker("neo4j", "L4 expStore.search", () => {
-            // R-5: 根据上一轮输出质量动态调整 expMinScore
-            let adjustedMinScore = DEFAULTS.retrieval.expMinScore;
-            const sk = typeof params.sessionKey === 'string'
-              ? params.sessionKey
-              : typeof params.session_id === 'string'
-                ? params.session_id
-                : '';
-            if (sk && ctx.sessionQualityScores) {
-              const lastScore = ctx.sessionQualityScores.get(sk);
-              if (lastScore != null) {
-                if (lastScore < 0.3) {
-                  adjustedMinScore += 0.2; // 严重低质量 → 大幅提高门槛
-                } else if (lastScore < 0.5) {
-                  adjustedMinScore += 0.1; // 低质量 → 提高门槛
-                }
-                // lastScore >= 0.5 → 保持默认
-                ctx.logger?.debug?.("[assemble] R-5 quality-adjusted expMinScore", {
-                  original: DEFAULTS.retrieval.expMinScore,
-                  adjusted: adjustedMinScore,
-                  lastQualityScore: lastScore,
-                });
+          // R-5: 根据上一轮输出质量动态调整 expMinScore（提取到 withCircuitBreaker 外，供 P2-1 缓存 key 使用）
+          let adjustedMinScore = DEFAULTS.retrieval.expMinScore;
+          const sk = typeof params.sessionKey === 'string'
+            ? params.sessionKey
+            : typeof params.session_id === 'string'
+              ? params.session_id
+              : '';
+          if (sk && ctx.sessionQualityScores) {
+            const lastScore = ctx.sessionQualityScores.get(sk);
+            if (lastScore != null) {
+              if (lastScore < 0.3) {
+                adjustedMinScore += 0.2; // 严重低质量 → 大幅提高门槛
+              } else if (lastScore < 0.5) {
+                adjustedMinScore += 0.1; // 低质量 → 提高门槛
               }
+              // lastScore >= 0.5 → 保持默认
+              ctx.logger?.debug?.("[assemble] R-5 quality-adjusted expMinScore", {
+                original: DEFAULTS.retrieval.expMinScore,
+                adjusted: adjustedMinScore,
+                lastQualityScore: lastScore,
+              });
             }
+          }
+          // P2-1: L4 检索结果缓存 —— 同 query+projects+minScore+limit 短期复用
+          const l4CacheKey = `l4:${hashKey(qmdQuery.toLowerCase().trim())}:${hashKey(expProjects.join(','))}:${adjustedMinScore.toFixed(3)}:${retrievalLimits.exp}`;
+          const l4Cached = ctx.l4QueryCache.get(l4CacheKey);
+          if (l4Cached && Date.now() - l4Cached.ts < QUERY_CACHE_TTL_MS) {
+            return { results: l4Cached.results, ms: Date.now() - t0 };
+          }
+          const res = await withCircuitBreaker("neo4j", "L4 expStore.search", () => {
             return ctx.expStore.searchByQuery({
               query: qmdQuery,
               projects: expProjects,
@@ -186,6 +218,12 @@ export async function performRetrieval(
               limit: retrievalLimits.exp,
             });
           });
+          // P2-1: 写入缓存（LRU 上限保护）
+          if (ctx.l4QueryCache.size >= QUERY_CACHE_MAX) {
+            const oldest = ctx.l4QueryCache.keys().next().value;
+            if (oldest !== undefined) ctx.l4QueryCache.delete(oldest);
+          }
+          ctx.l4QueryCache.set(l4CacheKey, { results: res as any[], ts: Date.now() });
           return { results: res, ms: Date.now() - t0 };
         } catch (e) {
           ctx.logger?.warn?.("L4 experience search failed", { err: (e as Error).message });
@@ -222,32 +260,55 @@ export async function performRetrieval(
       if (ctx.merger && Array.isArray(rawQmd) && Array.isArray(rawGraph)) {
         let merged = ctx.merger.merge(rawQmd, rawGraph);
 
+        // P0-1: LLM Rerank 异步化 — 当前轮使用 Merger 默认排序，LLM 结果写入 session 缓存供下一轮使用
+        // 原 await ctx.merger.llmRerank 同步阻塞 3s 超时，改为 fire-and-forget
         if (tier === 'low' && tokenRatio < 0.25 && merged.length >= 3 && typeof ctx.merger.llmRerank === 'function') {
-          try {
-            const llmCfg = ctx.resolveDistillationLlm(ctx.api);
-            if (llmCfg?.model) {
-              const llmFn = async (prompt: string): Promise<string> => {
-                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-                if (llmCfg!.apiKey) headers['Authorization'] = 'Bearer ' + llmCfg!.apiKey;
-                const body = withKeepAliveIfOllama(
-                  llmCfg!.baseURL,
-                  { model: llmCfg!.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 },
-                  llmCfg!.keepAlive,
-                );
-                const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
-                  method: 'POST', headers,
-                  body: JSON.stringify(body),
-                  signal: AbortSignal.timeout(DEFAULTS.llm.rerankTimeoutMs),
-                });
-                if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
-                const data: any = await resp.json();
-                return data?.choices?.[0]?.message?.content || '';
-              };
-              const reranked = await ctx.merger.llmRerank(merged, qmdQuery, llmFn);
-              if (reranked.length > 0) merged = reranked;
+          const sessionKey = typeof params.sessionKey === 'string'
+            ? params.sessionKey
+            : typeof params.session_id === 'string'
+              ? params.session_id
+              : '';
+          // 检查上一轮异步 Rerank 的结果
+          if (sessionKey && ctx.llmRerankCache) {
+            const cached = ctx.llmRerankCache.get(sessionKey);
+            if (cached && cached.query === qmdQuery && cached.results.length > 0) {
+              merged = cached.results;
+              ctx.llmRerankCache.delete(sessionKey);
+              ctx.logger?.debug?.("[P0-1] applied cached LLM rerank results", { sessionKey, count: merged.length });
             }
-          } catch (rerankErr) {
-            ctx.logger?.debug?.("Merger LLM rerank skipped/failed, using entity sort", { err: String(rerankErr) });
+          }
+
+          // 启动异步 Rerank（fire-and-forget），结果存入 session 缓存供下一轮使用
+          if (sessionKey && ctx.llmRerankCache) {
+            (async () => {
+              try {
+                const llmCfg = ctx.resolveDistillationLlm(ctx.api);
+                if (!llmCfg?.model) return;
+                const llmFn = async (prompt: string): Promise<string> => {
+                  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                  if (llmCfg!.apiKey) headers['Authorization'] = 'Bearer ' + llmCfg!.apiKey;
+                  const body = withKeepAliveIfOllama(
+                    llmCfg!.baseURL,
+                    { model: llmCfg!.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 256 },
+                    llmCfg!.keepAlive,
+                  );
+                  const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
+                    method: 'POST', headers,
+                    body: JSON.stringify(body),
+                    signal: AbortSignal.timeout(DEFAULTS.llm.rerankTimeoutMs),
+                  });
+                  if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
+                  const data: any = await resp.json();
+                  return data?.choices?.[0]?.message?.content || '';
+                };
+                const reranked = await ctx.merger.llmRerank(merged, qmdQuery, llmFn);
+                if (reranked.length > 0) {
+                  ctx.llmRerankCache.set(sessionKey, { query: qmdQuery, results: reranked, ts: Date.now() });
+                }
+              } catch (rerankErr) {
+                ctx.logger?.debug?.("[P0-1] async LLM rerank failed (non-fatal)", { err: String(rerankErr) });
+              }
+            })().catch(() => { /* swallow unhandled */ });
           }
         }
 
@@ -317,36 +378,53 @@ export async function performRetrieval(
         })),
       );
 
-      let r2JudgeSource: 'gm-pro' | 'local' = 'local';
-      try {
-        const { withGmProFallback } = await import('../adapters/gm-pro-fallback.js');
-        const judgeResult = await withGmProFallback(
-          'judgeRecall',
-          async (mod) => {
-            return await mod.judgeRecall({
-              query: qmdQuery,
-              recalledNodeIds: allResults.map((r: any) => r?.id ?? r?.experience?.id).filter(Boolean),
-              scenario: scenarioAdjust?.scenario,
-            });
-          },
-          async () => null,
-          { logger: ctx.logger, label: 'R-2 judgeRecall' },
-        );
-        if (judgeResult && typeof judgeResult.tier1Confidence === 'number') {
-          confidence.tier1Score = judgeResult.tier1Confidence;
-          confidence.needsTier2 = judgeResult.tier1Confidence < 0.7;
-          r2JudgeSource = 'gm-pro';
-        }
-      } catch (r2JudgeErr) {
-        ctx.logger?.debug?.("R-2 judgeRecall fallback to local evaluateTier1", { err: String(r2JudgeErr) });
-      }
-
+      // P2-3: judgeRecall 改为 fire-and-forget 异步，不阻塞主路径。
+      // 主路径直接使用 evaluateTier1 的本地 confidence；judgeRecall 结果异步反馈
+      // 到 healthMetrics + cascade arms，影响下一轮 thompsonRerank。
       try {
         const { healthMetrics } = await import('../health-metrics.js');
-        healthMetrics.recordCascadeConfidence(confidence.tier1Score ?? 0, r2JudgeSource);
+        healthMetrics.recordCascadeConfidence(confidence.tier1Score ?? 0, 'local');
       } catch (e) { /* non-fatal */
         ctx.logger?.debug?.("recordCascadeConfidence failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
       }
+
+      const r2JudgeQuery = qmdQuery;
+      const r2JudgeNodeIds = allResults.map((r: any) => r?.id ?? r?.experience?.id).filter(Boolean);
+      const r2JudgeScenario = scenarioAdjust?.scenario;
+      backgroundTasks.register('r2:judgeRecall', (async () => {
+        try {
+          const { withGmProFallback } = await import('../adapters/gm-pro-fallback.js');
+          const judgeResult = await withGmProFallback(
+            'judgeRecall',
+            async (mod) => {
+              return await mod.judgeRecall({
+                query: r2JudgeQuery,
+                recalledNodeIds: r2JudgeNodeIds,
+                scenario: r2JudgeScenario,
+              });
+            },
+            async () => null,
+            { logger: ctx.logger, label: 'R-2 judgeRecall (async)' },
+          );
+          if (judgeResult && typeof judgeResult.tier1Confidence === 'number') {
+            try {
+              const { healthMetrics } = await import('../health-metrics.js');
+              healthMetrics.recordCascadeConfidence(judgeResult.tier1Confidence, 'gm-pro');
+            } catch { /* non-fatal */ }
+            // 反馈到 cascade arms（gm-pro 高置信 → 正反馈，影响下一轮采样）
+            if (judgeResult.tier1Confidence >= 0.7) {
+              for (const nid of r2JudgeNodeIds) {
+                ctx.cascadeManager.recordFeedback(
+                  CascadeManager.makeArmKey(r2JudgeScenario ?? 'default', nid),
+                  true,
+                );
+              }
+            }
+          }
+        } catch (r2JudgeErr) {
+          ctx.logger?.debug?.("R-2 judgeRecall async failed (non-fatal)", { err: String(r2JudgeErr) });
+        }
+      })().then(() => {}, () => {}));
 
       if (confidence.needsTier2 && tier === 'low') {
         const scenarioTag = scenarioAdjust?.scenario ?? 'default';

@@ -151,7 +151,8 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
             const llm = ctx.resolveDistillationLlm(ctx.api);
             if (!llm?.model) return;
 
-            for (const exp of expIdsToValidate.slice(0, 3)) {
+            // P0-2: 改为 Promise.all 并行验证，避免串行 LLM 调用（最坏 3 × 8s = 24s → ~8s）
+            const validateOne = async (exp: { id: string; query: string; summary: string }) => {
               try {
                 const prompt = `Rate the relevance of this experience to the user's query on a scale of 0 to 1.\nQuery: "${exp.query.slice(0, 500)}"\nExperience: "${exp.summary.slice(0, 300)}"\nReturn ONLY a number between 0 and 1 (e.g., 0.8). 1 means highly relevant, 0 means completely irrelevant.`;
                 const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -166,11 +167,11 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                   body: JSON.stringify(body),
                   signal: AbortSignal.timeout(DEFAULTS.llm.validateTimeoutMs),
                 });
-                if (!resp.ok) continue;
+                if (!resp.ok) return;
                 const data: any = await resp.json();
                 const text = data?.choices?.[0]?.message?.content?.trim() || '';
                 const score = parseFloat(text);
-                if (isNaN(score) || score < 0 || score > 1) continue;
+                if (isNaN(score) || score < 0 || score > 1) return;
 
                 const delta = score >= 0.5 ? 0.05 : -0.05;
                 try {
@@ -199,7 +200,9 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
               } catch (e) { /* skip individual validation */
                 ctx.logger?.debug?.("G-8 quality validation skipped (non-fatal)", { id: exp.id, err: e instanceof Error ? e.message : String(e) });
               }
-            }
+            };
+            // 并行验证最多 3 条经验
+            await Promise.all(expIdsToValidate.slice(0, 3).map(validateOne));
           } catch (g8Err) {
             ctx.logger?.debug?.("[afterTurn] G-8 validation loop skipped", { err: String(g8Err) });
           }
