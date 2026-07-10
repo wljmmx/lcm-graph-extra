@@ -67,6 +67,16 @@
 | N-3 TTL-经验层集成 | findExpiredNodes 针对图节点；EXPERIENCE.expiresAt 字段未调度清理 | heartbeat 扩展 cleanupExpiredExperienceNodes |
 | N-4 健康指标导出 | heartbeat 已收集 pressure signals，仅日志输出 | 暴露 Prometheus 指标 / 写入 lcm.db 供 lcmg_diagnose 查询 |
 
+### 2026-07-10 上下文污染审计新增项（P1 级修复）
+
+| 新编号 | 短板 | 实现思路 | 成本 |
+|---|---|---|---|
+| C-1 经验召回时间衰减 | matchCount 只增不减形成正反馈循环，新经验难以突破 | Cypher 排序引入 `lastRecalledAt` 时间衰减 + `decayMatchCount` 批量清理 | 2h |
+| C-2 压缩摘要质量验证 | compact 后无质量检查，低质量摘要污染后续推理 | 纯统计检查（长度比/实体保留率/关键词覆盖）+ 低质量告警 + `.compaction-quality.json` 记录 | 3h |
+| C-3 场景分类置信度门控 | 简单关键词匹配无置信度阈值，误分类导致检索偏向 | 加权关键词匹配 + 置信度门控（0.30）+ 平局打破 + security-audit 独立分类 | 2h |
+
+> 详细修复方案见 [audit/context-pollution-fix-plan-2026-07-10.md](audit/context-pollution-fix-plan-2026-07-10.md)
+
 ---
 
 ## 四、v1.0.0 演进方案（13 项，按依赖关系分三批）
@@ -329,6 +339,14 @@
 ---
 
 ## 六、实施顺序
+
+### 第零批：上下文污染修复（无新 API 依赖，3 项）
+
+```
+C-3 (场景分类置信度门控) → C-1 (经验召回时间衰减) → C-2 (压缩摘要质量验证)
+```
+
+**产出**: 上下文污染防御增强（场景分类准确度 + 经验召回公平性 + 摘要质量保障）
 
 ### 第一批：补强现有能力（无新 API 依赖，8 项）
 
