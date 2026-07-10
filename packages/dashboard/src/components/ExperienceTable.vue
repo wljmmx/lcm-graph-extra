@@ -16,6 +16,7 @@ import {
   type DataTableColumns,
   type PaginationProps,
 } from 'naive-ui';
+import { useBreakpoints } from '../composables/useBreakpoints';
 import type { ExperienceItem } from '../api/experience';
 import { formatDateTime } from '../utils/format';
 
@@ -29,6 +30,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'row-click', id: string): void;
 }>();
+
+// L7 修复：窄屏隐藏次要列（matchCount / qualityScore），降低 scroll-x 避免横向滚动
+const breakpoints = useBreakpoints({ xs: 0, s: 640, m: 768, l: 1024, xl: 1280 });
+const isNarrowScreen = breakpoints.smaller('m');
 
 // type → NTag 颜色
 function typeColor(t: string): 'info' | 'error' | 'warning' | 'success' | 'default' {
@@ -51,7 +56,8 @@ function statusColor(s: string): 'warning' | 'success' | 'default' {
   }
 }
 
-const columns = computed<DataTableColumns<ExperienceItem>>(() => [
+const columns = computed<DataTableColumns<ExperienceItem>>(() => {
+  const cols: DataTableColumns<ExperienceItem> = [
   {
     title: '标题',
     key: 'title',
@@ -109,7 +115,15 @@ const columns = computed<DataTableColumns<ExperienceItem>>(() => [
     width: 150,
     render: (row) => formatDateTime(row.createdAt ?? 0),
   },
-]);
+  ];
+  // L7: 窄屏隐藏次要列（matchCount / qualityScore）
+  return isNarrowScreen.value
+    ? cols.filter((c) => 'key' in c && c.key !== 'matchCount' && c.key !== 'qualityScore')
+    : cols;
+});
+
+// L7: 窄屏降低 scroll-x 阈值
+const scrollX = computed(() => isNarrowScreen.value ? 580 : 900);
 
 // 客户端分页：默认 10/页，可由 pageSize prop 覆盖
 const pagination = computed<PaginationProps>(() => ({
@@ -152,7 +166,7 @@ function rowClassName(row: ExperienceItem): string {
     :bordered="false"
     :striped="true"
     :pagination="pagination"
-    :scroll-x="900"
+    :scroll-x="scrollX"
     size="small"
   />
 </template>

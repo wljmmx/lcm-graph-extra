@@ -334,6 +334,15 @@ const chartCols = '1 s:1 m:2';
 // 状态面板：小屏 1 列，中屏 2 列，宽屏（l≥1280）3 列
 const panelCols = '1 s:1 m:2 l:3';
 
+// H2 修复：聚合错误摘要（供状态面板 Tab 顶部错误条使用）
+const failedPanelSummary = computed(() => {
+  const failed: string[] = [];
+  if (latestIsError.value) failed.push('健康指标 / 熔断 / memory');
+  if (graphHealthIsError.value) failed.push('图谱健康');
+  if (agentIsError.value) failed.push('Agent 状态');
+  return failed.length ? failed.join('、') + ' 加载失败' : '';
+});
+
 // S4-2: Tab 分组（KPI / 时序 / 状态面板），降低单屏信息密度
 // 默认激活 KPI tab；display-directive="show" 保持所有面板在 DOM（测试可访问文本）
 const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
@@ -452,13 +461,26 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         tab="时序图"
         display-directive="show"
       >
+        <!-- 错误态穿透（H2 修复）：接口报错时在该 Tab 顶部提示，而非混入"无历史数据" -->
+        <NAlert
+          v-if="historyIsError"
+          type="error"
+          :show-icon="true"
+          title="时序图历史加载失败"
+          style="margin-bottom: 12px"
+        >
+          后端 /api/health/history 不可达。服务恢复后将自动重试（每 60 秒轮询）。
+        </NAlert>
         <NSpace vertical :size="12">
           <!-- 压力信号（全宽） -->
           <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
             <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
+            <div v-else-if="historyLoading" class="chart-loading">
+              <NSpin size="small" />
+            </div>
             <NEmpty
               v-else
-              :description="historyLoading ? '加载中…' : '无历史数据'"
+              :description="historyIsError ? '加载失败，见上方错误提示' : '无历史数据'"
               style="padding: 24px 0"
             />
           </NCard>
@@ -468,9 +490,12 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
             <NGi>
               <NCard title="检索延迟（Assemble 折线 + L2/L3/L4 独立柱）" size="small">
                 <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+                <div v-else-if="historyLoading" class="chart-loading">
+                  <NSpin size="small" />
+                </div>
                 <NEmpty
                   v-else
-                  :description="historyLoading ? '加载中…' : '无历史数据'"
+                  :description="historyIsError ? '加载失败，见上方错误提示' : '无历史数据'"
                   style="padding: 24px 0"
                 />
               </NCard>
@@ -478,9 +503,12 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
             <NGi>
               <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
                 <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
+                <div v-else-if="historyLoading" class="chart-loading">
+                  <NSpin size="small" />
+                </div>
                 <NEmpty
                   v-else
-                  :description="historyLoading ? '加载中…' : '无历史数据'"
+                  :description="historyIsError ? '加载失败，见上方错误提示' : '无历史数据'"
                   style="padding: 24px 0"
                 />
               </NCard>
@@ -495,6 +523,16 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         tab="状态面板"
         display-directive="show"
       >
+        <!-- 错误态穿透（H2 修复）：聚合错误条，替代把错误误显示为"插件未响应" -->
+        <NAlert
+          v-if="latestIsError || graphHealthIsError || agentIsError"
+          type="error"
+          :show-icon="true"
+          title="部分状态面板加载失败"
+          style="margin-bottom: 12px"
+        >
+          {{ failedPanelSummary }}。服务恢复后将自动重试。
+        </NAlert>
         <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 熔断状态 -->
         <NGi>
@@ -723,9 +761,9 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         <!-- G-5: 图谱健康卡片（gm-pro getGraphHealth，降级到本地 graphAdapter） -->
         <NGi>
           <NCard title="图谱健康" size="small">
-            <NSpin v-if="graphHealthLoading && !graphHealth" size="small" style="padding: 12px 0">
-              <template #default>加载中…</template>
-            </NSpin>
+            <div v-if="graphHealthLoading && !graphHealth" class="card-loading">
+              <NSpin size="small" />
+            </div>
             <template v-else-if="graphHealth">
               <div class="profile-section">
                 <NTag :type="graphHealthTagType" size="small">
@@ -765,9 +803,9 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         <!-- Agent 状态 -->
         <NGi>
           <NCard title="Agent 状态" size="small">
-            <NSpin v-if="agentLoading && !agent" size="small" style="padding: 12px 0">
-              <template #default>加载中…</template>
-            </NSpin>
+            <div v-if="agentLoading && !agent" class="card-loading">
+              <NSpin size="small" />
+            </div>
             <template v-else-if="agent">
               <div class="profile-section">
                 <NTag :type="agent.online ? 'success' : 'error'" size="small">
@@ -831,7 +869,8 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
 /* .muted / .mono 已在 tokens.css 全局定义，此处不重复 */
 .layer-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* L5 修复：窄屏自适应列数（auto-fill + minmax），避免 5 列在窄屏被挤压 */
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
   gap: var(--space-sm);
   /* 重置 ul 默认样式 */
   list-style: none;
@@ -872,5 +911,13 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
 .layer-label {
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
+}
+/* M10 修复：统一加载态样式（图表/卡片内居中 spinner） */
+.chart-loading,
+.card-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 0;
 }
 </style>

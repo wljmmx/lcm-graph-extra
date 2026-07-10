@@ -128,7 +128,7 @@ function handleInvoke(tool: string, params: Record<string, unknown>): void {
       <span class="muted">共 {{ total }} 条</span>
     </div>
 
-    <NLayout has-sider style="height: calc(100vh - 160px); margin-top: 12px;">
+    <NLayout has-sider style="flex: 1; min-height: 0; margin-top: 12px;">
       <!-- 左侧过滤侧栏 -->
       <NLayoutSider
         bordered
@@ -183,6 +183,9 @@ function handleInvoke(tool: string, params: Record<string, unknown>): void {
 <style scoped>
 .experience-view {
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 104px); /* App header 56px + content padding 48px */
 }
 .experience-header {
   display: flex;

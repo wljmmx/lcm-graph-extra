@@ -13,8 +13,8 @@
  * 图谱 Tab 仍展示 top 节点（后端空 q 走 pagerank DESC top 路径）。
  */
 import { ref, computed } from 'vue';
-import { useQuery } from '@tanstack/vue-query';
-import { NTabs, NTabPane, NEmpty, NSpin } from 'naive-ui';
+import { useQuery, useQueryClient } from '@tanstack/vue-query';
+import { NTabs, NTabPane, NEmpty, NSpin, NAlert, NButton, NSpace } from 'naive-ui';
 import MemorySearchBar, { type MemorySearchParams } from '../components/MemorySearchBar.vue';
 import MemoryResultList from '../components/MemoryResultList.vue';
 import MemoryGraphView from '../components/MemoryGraphView.vue';
@@ -53,7 +53,8 @@ function handleNodeClick(id: string): void {
 }
 
 // ===== 跨引擎搜索查询（仅 q 非空时启用） =====
-const { data: searchData, isLoading: searchLoading } = useQuery({
+// M7 修复：placeholderData 保留旧结果（搜索中不闪烁清空列表）
+const { data: searchData, isLoading: searchLoading, isError: searchIsError } = useQuery({
   queryKey: computed(() => ['memory-search', committedSearch.value]),
   queryFn: () =>
     fetchMemorySearch(
@@ -62,17 +63,31 @@ const { data: searchData, isLoading: searchLoading } = useQuery({
       committedSearch.value.limit,
     ),
   enabled: () => !!committedSearch.value.q,
+  placeholderData: (prev: unknown) => prev,
 });
 
 // ===== 图谱查询（q 变化时刷新；空 q 仍展示 top 节点） =====
-const { data: graphData, isLoading: graphLoading } = useQuery({
+const { data: graphData, isLoading: graphLoading, isError: graphIsError } = useQuery({
   queryKey: computed(() => [
     'memory-graph',
     committedSearch.value.q,
     committedSearch.value.limit,
   ]),
   queryFn: () => fetchMemoryGraph(committedSearch.value.q, committedSearch.value.limit),
+  placeholderData: (prev: unknown) => prev,
 });
+
+const queryClient = useQueryClient();
+
+// 重试搜索查询
+function retrySearch(): void {
+  void queryClient.invalidateQueries({ queryKey: ['memory-search'] });
+}
+
+// 重试图谱查询
+function retryGraph(): void {
+  void queryClient.invalidateQueries({ queryKey: ['memory-graph'] });
+}
 
 // 当前选中节点对象（从 graphData 中查找）
 const selectedNode = computed(() => {
@@ -104,7 +119,18 @@ const showEmptyPrompt = computed(
     <NTabs v-model:value="activeTab" type="line" style="margin-top: 12px">
       <!-- Tab 1: 列表 -->
       <NTabPane name="list" tab="列表">
-        <NSpin v-if="searchLoading" size="small">
+        <NAlert
+          v-if="searchIsError"
+          type="error"
+          title="搜索请求失败"
+          style="margin-bottom: 12px"
+        >
+          <NSpace vertical :size="8">
+            <span>无法获取搜索结果，请检查后端服务是否正常，然后重试。</span>
+            <NButton size="small" type="error" @click="retrySearch">重试</NButton>
+          </NSpace>
+        </NAlert>
+        <NSpin v-else-if="searchLoading" size="small">
           <template #default>搜索中…</template>
         </NSpin>
         <NEmpty
@@ -121,7 +147,18 @@ const showEmptyPrompt = computed(
 
       <!-- Tab 2: 图谱 -->
       <NTabPane name="graph" tab="图谱">
-        <NSpin v-if="graphLoading" size="small">
+        <NAlert
+          v-if="graphIsError"
+          type="error"
+          title="图谱加载失败"
+          style="margin-bottom: 12px"
+        >
+          <NSpace vertical :size="8">
+            <span>无法获取图谱数据，请检查后端服务是否正常，然后重试。</span>
+            <NButton size="small" type="error" @click="retryGraph">重试</NButton>
+          </NSpace>
+        </NAlert>
+        <NSpin v-else-if="graphLoading" size="small">
           <template #default>加载图谱中…</template>
         </NSpin>
         <MemoryGraphView

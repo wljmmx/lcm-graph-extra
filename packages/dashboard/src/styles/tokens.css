@@ -57,12 +57,16 @@
   --fs-label: 13px; /* 表头、按钮 */
   --fs-body: 14px; /* 正文 */
   --fs-subtitle: 16px; /* 副标题 */
+  --fs-h2: 20px; /* 区块标题（页面内 h2） */
+  --fs-h1: 24px; /* 页面标题（h1） */
   --fs-display: 26px; /* KPI 主数值 */
 
   /* ===== 间距（4px 基准网格） ===== */
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
 
   /* ===== 圆角 ===== */
   --radius-sm: 4px;

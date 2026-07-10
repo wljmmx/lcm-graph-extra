@@ -9,8 +9,8 @@
  * - 通过 size prop 控制尺寸（默认 16px）
  * - 不可见时对屏幕阅读器隐藏（aria-hidden="true"）
  *
- * 图标清单（24 个，覆盖 dashboard 所有场景）：
- *   导航：Activity（监控）/BookOpen（经验）/Database（记忆）/Settings（维护）
+ * 图标清单（25 个，覆盖 dashboard 所有场景）：
+ *   导航：Menu（hamburger）/Activity（监控）/BookOpen（经验）/Database（记忆）/Settings（维护）
  *   操作：Refresh / Trash / Save / Upload / Power / Tools / Flask / Beaker /
  *         Download / Compress / Wrench / Reset
  *   状态：Warning / Danger / Check / X
@@ -33,6 +33,7 @@ const props = withDefaults(
 // SVG 路径数据：每个图标一组 <path> 或其他 SVG 元素
 const PATHS: Record<string, string> = {
   // ===== 导航 =====
+  menu: '<line x1="3" y1="6" x2="21" y2="6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="3" y1="18" x2="21" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   activity: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   bookOpen: '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 5v6c0 1.66 4 3 9 3s9-1.34 9-3V5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 11v6c0 1.66 4 3 9 3s9-1.34 9-3v-6" fill="none" stroke="currentColor" stroke-width="2"/>',

@@ -13,9 +13,8 @@
  *   POST /api/capability-profile { id } → 切换
  */
 import { ref, onMounted } from 'vue';
-import { NCard, NSpace, NTag, NButton, NModal, useMessage } from 'naive-ui';
+import { NCard, NSpace, NTag, NButton, NModal, NAlert, useMessage } from 'naive-ui';
 import { fetchCapabilityProfile, switchCapabilityProfile, type CapabilityProfile } from '../api/config';
-import Icon from './Icon.vue';
 
 const message = useMessage();
 
@@ -86,9 +85,19 @@ onMounted(loadProfile);
       <NButton size="tiny" quaternary :loading="loading" @click="loadProfile">刷新</NButton>
     </template>
 
-    <div v-if="errorMsg" class="cap-error">
-      <Icon name="warning" :size="14" /> {{ errorMsg }}
-    </div>
+    <!-- M8 修复：错误改 NAlert + 重试按钮（替代一闪而过的文本） -->
+    <NAlert
+      v-if="errorMsg"
+      type="error"
+      :show-icon="true"
+      title="能力档次加载失败"
+      style="margin-bottom: var(--space-sm)"
+    >
+      {{ errorMsg }}
+      <template #action>
+        <NButton size="small" @click="loadProfile">重试</NButton>
+      </template>
+    </NAlert>
 
     <div v-if="current" class="cap-current">
       <span class="cap-label">当前档次：</span>
@@ -143,11 +152,6 @@ onMounted(loadProfile);
 </template>
 
 <style scoped>
-.cap-error {
-  color: var(--color-danger);
-  padding: var(--space-sm) 0;
-  font-size: var(--fs-label);
-}
 .cap-current {
   display: flex;
   align-items: center;

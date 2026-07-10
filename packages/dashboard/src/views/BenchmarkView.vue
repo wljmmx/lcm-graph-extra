@@ -42,6 +42,7 @@ import {
   useMessage,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
+import { echartsThemeColors } from '../styles/theme';
 import {
   fetchBenchmarkFixtureSets,
   fetchBenchmarkFixtures,
@@ -99,7 +100,7 @@ const concurrencyOptions = [
 
 const fixtureSetOptions = computed(() =>
   fixtureSets.value.map((s) => ({
-    label: `${s.name}${s.count ? `（${s.count} 条）` : ''}${s.type === 'beir' ? (s.cached ? ' ✓已缓存' : ' ⬇需下载') : ''}`,
+    label: `${s.name}${s.count ? `（${s.count} 条）` : ''}${s.type === 'beir' ? (s.cached ? '（已缓存）' : '（需下载）') : ''}`,
     value: s.id,
   })),
 );
@@ -582,14 +583,14 @@ const latencyDistributionOption = computed(() => {
       data: values.map((v, i) => ({
         value: v,
         itemStyle: {
-          color: i >= 3 && i <= 4 ? '#faad14' : (i >= 5 ? '#ff4d4f' : '#52c41a'),
+          color: i >= 3 && i <= 4 ? echartsThemeColors[2] : (i >= 5 ? echartsThemeColors[3] : echartsThemeColors[1]),
         },
       })),
       label: {
         show: true,
         position: 'top',
         formatter: (p: any) => latencyLabel(p.value),
-        fontSize: 10,
+        fontSize: 12,
       },
     }],
   };
@@ -631,7 +632,7 @@ const categoryLatencyOption = computed(() => {
         show: true,
         position: 'top',
         formatter: (p: any) => latencyLabel(p.value),
-        fontSize: 10,
+        fontSize: 12,
       },
     }],
   };
@@ -647,12 +648,12 @@ const tokensOption = computed(() => {
       trigger: 'item',
       formatter: '{b}: {c} ({d}%)',
     },
-    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    legend: { bottom: 0, textStyle: { fontSize: 12 } },
     series: [{
       type: 'pie',
       radius: ['40%', '70%'],
       center: ['50%', '50%'],
-      label: { formatter: '{b}\n{c}', fontSize: 11 },
+      label: { formatter: '{b}\n{c}', fontSize: 12 },
       data: [
         { name: '输入 tokens', value: t.input },
         { name: '输出 tokens', value: t.output },
@@ -690,12 +691,12 @@ const recallOption = computed(() => {
     series: [{
       type: 'bar',
       data: cats.map((c) => c.avgRecall),
-      itemStyle: { color: '#52c41a' },
+      itemStyle: { color: echartsThemeColors[1] },
       label: {
         show: true,
         position: 'top',
         formatter: (p: any) => `${(p.value * 100).toFixed(0)}%`,
-        fontSize: 10,
+        fontSize: 12,
       },
     }],
   };
@@ -719,7 +720,7 @@ const itemsLatencyOption = computed(() => {
       },
     },
     grid: { left: 60, right: 20, top: 50, bottom: 50 },
-    xAxis: { type: 'category', data: result.value.items.map((i) => i.fixtureId), axisLabel: { rotate: 45, fontSize: 10 } },
+    xAxis: { type: 'category', data: result.value.items.map((i) => i.fixtureId), axisLabel: { rotate: 45, fontSize: 12 } },
     yAxis: {
       type: 'value',
       name: 'ms',
@@ -729,7 +730,7 @@ const itemsLatencyOption = computed(() => {
       type: 'scatter',
       data: result.value.items.map((i, idx) => ({
         value: [idx, i.latencyMs],
-        itemStyle: { color: i.success ? '#52c41a' : '#ff4d4f' },
+        itemStyle: { color: i.success ? echartsThemeColors[1] : echartsThemeColors[3] },
       })),
       symbolSize: 10,
     }],
@@ -755,7 +756,7 @@ const multiTurnRecallOption = computed(() => {
         return html;
       },
     },
-    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    legend: { bottom: 0, textStyle: { fontSize: 12 } },
     grid: { left: 60, right: 20, top: 50, bottom: 60 },
     xAxis: { type: 'category', data: xLabels, name: '轮次' },
     yAxis: {
@@ -795,7 +796,7 @@ const multiTurnLatencyOption = computed(() => {
         return html;
       },
     },
-    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    legend: { bottom: 0, textStyle: { fontSize: 12 } },
     grid: { left: 60, right: 20, top: 50, bottom: 60 },
     xAxis: { type: 'category', data: xLabels, name: '轮次' },
     yAxis: {
@@ -829,7 +830,7 @@ const multiTurnResultCountOption = computed(() => {
         return html;
       },
     },
-    legend: { bottom: 0, textStyle: { fontSize: 11 } },
+    legend: { bottom: 0, textStyle: { fontSize: 12 } },
     grid: { left: 60, right: 20, top: 50, bottom: 60 },
     xAxis: { type: 'category', data: xLabels, name: '轮次' },
     yAxis: { type: 'value', name: '结果数' },
@@ -954,7 +955,7 @@ const hasMultiTurnMeta = computed(() =>
           title="BEIR 数据集已缓存"
         >
           <span v-if="currentFixtureSet.cacheInfo">
-            路径: <code style="font-size: 11px">{{ currentFixtureSet.cacheInfo.path }}</code> ·
+            路径: <code style="font-size: var(--fs-caption)">{{ currentFixtureSet.cacheInfo.path }}</code> ·
             大小: {{ formatBytes(currentFixtureSet.cacheInfo.sizeBytes) }} ·
             文件数: {{ currentFixtureSet.cacheInfo.fileCount }}
           </span>
@@ -1096,8 +1097,8 @@ const hasMultiTurnMeta = computed(() =>
             </NTag>
           </NSpace>
           <NSpace v-else vertical :size="4" style="margin-top: 4px">
-            <span class="muted" style="font-size: 11px">业界公认信息检索基准（NeurIPS 2021）</span>
-            <span class="muted" style="font-size: 11px">子集大小: {{ beirSubsetSize }} 条查询</span>
+            <span class="muted" style="font-size: var(--fs-caption)">业界公认信息检索基准（NeurIPS 2021）</span>
+            <span class="muted" style="font-size: var(--fs-caption)">子集大小: {{ beirSubsetSize }} 条查询</span>
           </NSpace>
         </NGi>
         <!-- 历史记录 -->
@@ -1117,7 +1118,7 @@ const hasMultiTurnMeta = computed(() =>
                     </NTag>
                     <NTag size="tiny" type="info">{{ h.options.fixtureSetId }}</NTag>
                     <span style="font-size: 12px">{{ formatDateTime(h.startedAt) }}</span>
-                    <span class="muted" style="font-size: 11px">
+                    <span class="muted" style="font-size: var(--fs-caption)">
                       {{ h.summary.successCount }}/{{ h.summary.totalFixtures }} · {{ latencyLabel(h.summary.latency.avg) }} · P95 {{ latencyLabel(h.summary.latency.p95) }}
                     </span>
                   </NSpace>
@@ -1241,7 +1242,7 @@ const hasMultiTurnMeta = computed(() =>
               <NGi>
                 <NStatistic label="总 tokens" :value="summary.estimatedTokens.total">
                   <template #suffix>
-                    <span class="muted" style="font-size: 11px; margin-left: 4px">
+                    <span class="muted" style="font-size: var(--fs-caption); margin-left: 4px">
                       in={{ summary.estimatedTokens.input }} out={{ summary.estimatedTokens.output }}
                     </span>
                   </template>
@@ -1250,7 +1251,7 @@ const hasMultiTurnMeta = computed(() =>
               <NGi>
                 <NStatistic label="压缩率" :value="`${(summary.compressionRatio * 100).toFixed(1)}%`">
                   <template #suffix>
-                    <span class="muted" style="font-size: 11px; margin-left: 4px">越低越省</span>
+                    <span class="muted" style="font-size: var(--fs-caption); margin-left: 4px">越低越省</span>
                   </template>
                 </NStatistic>
               </NGi>
@@ -1260,7 +1261,7 @@ const hasMultiTurnMeta = computed(() =>
                     <NTag v-if="summary.recall" :type="recallTagType(summary.recall.avgRecall)" size="small" style="margin-left: 4px">
                       {{ summary.recall.evaluated }} 条
                     </NTag>
-                    <span v-else class="muted" style="font-size: 11px; margin-left: 4px">无标注</span>
+                    <span v-else class="muted" style="font-size: var(--fs-caption); margin-left: 4px">无标注</span>
                   </template>
                 </NStatistic>
               </NGi>
@@ -1387,7 +1388,7 @@ const hasMultiTurnMeta = computed(() =>
                 </NStatistic>
                 <span v-else class="muted">无连贯性评估数据（需 opening + followup 轮召回文档）</span>
               </NSpace>
-              <div class="muted" style="margin-top: 8px; font-size: 11px">
+              <div class="muted" style="margin-top: 8px; font-size: var(--fs-caption)">
                 连贯性评分 = followup/recall 轮召回 opening 轮文档的比例，衡量 CE 引擎在多轮会话中保持上下文可访问的能力（参考 lossless-claw assemble 能力维度）。
               </div>
             </NCard>
@@ -1409,7 +1410,7 @@ const hasMultiTurnMeta = computed(() =>
                 </thead>
                 <tbody>
                   <tr v-for="s in multiTurnSessions" :key="s.sessionId">
-                    <td><code style="font-size: 11px">{{ s.sessionId }}</code></td>
+                    <td><code style="font-size: var(--fs-caption)">{{ s.sessionId }}</code></td>
                     <td><NTag size="tiny" type="info">{{ categoryLabel(s.category) }}</NTag></td>
                     <td>{{ s.turnCount }}</td>
                     <td>{{ s.successCount }}</td>
@@ -1451,7 +1452,7 @@ const hasMultiTurnMeta = computed(() =>
             <NCard size="small" :bordered="true">
               <div class="detail-title">召回衰减检测</div>
               <EChart :option="multiTurnResultCountOption" height="300px" />
-              <div class="muted" style="margin-top: 8px; font-size: 11px">
+              <div class="muted" style="margin-top: 8px; font-size: var(--fs-caption)">
                 结果数随轮次下降可能表示召回衰减（lossless-claw compact 压缩后旧轮次相关性降低）。
               </div>
             </NCard>
@@ -1483,8 +1484,8 @@ const hasMultiTurnMeta = computed(() =>
                 </thead>
                 <tbody>
                   <tr v-for="(item, idx) in result.items" :key="idx" :class="{ 'row-error': !item.success }">
-                    <td><code style="font-size: 11px">{{ item.fixtureId }}</code></td>
-                    <td v-if="hasMultiTurnMeta"><code style="font-size: 10px">{{ item.sessionId ?? '-' }}</code></td>
+                    <td><code style="font-size: var(--fs-caption)">{{ item.fixtureId }}</code></td>
+                    <td v-if="hasMultiTurnMeta"><code style="font-size: var(--fs-caption)">{{ item.sessionId ?? '-' }}</code></td>
                     <td v-if="hasMultiTurnMeta">{{ item.turnIndex !== undefined ? `${item.turnIndex + 1}/${item.turnTotal ?? '?'}` : '-' }}</td>
                     <td v-if="hasMultiTurnMeta">
                       <NTag v-if="item.turnRole" size="tiny" :type="item.turnRole === 'opening' ? 'success' : 'default'">
@@ -1557,7 +1558,7 @@ const hasMultiTurnMeta = computed(() =>
                         L2 qmd: {{ f.ceDiagnostics.qmdCount }} 条{{ f.ceDiagnostics.qmdError ? ` ⚠${f.ceDiagnostics.qmdError}` : '' }} ·
                         L3 neo4j: {{ f.ceDiagnostics.neo4jCount }} 条{{ f.ceDiagnostics.neo4jError ? ` ⚠${f.ceDiagnostics.neo4jError}` : '' }}
                       </div>
-                      <div v-if="f.ceDiagnostics.hint" style="margin-top: 4px; font-size: 12px; color: #fa8c16">
+                      <div v-if="f.ceDiagnostics.hint" style="margin-top: 4px; font-size: var(--fs-caption); color: var(--color-warning)">
                         建议: {{ f.ceDiagnostics.hint }}
                       </div>
                     </div>
@@ -1625,7 +1626,7 @@ const hasMultiTurnMeta = computed(() =>
   font-weight: 600;
 }
 .row-error {
-  background-color: rgba(255, 77, 79, 0.06);
+  background-color: var(--color-danger-suppl, rgba(208, 48, 80, 0.06));
 }
 .error-cell {
   color: var(--color-danger);
@@ -1637,7 +1638,7 @@ const hasMultiTurnMeta = computed(() =>
   font-size: var(--fs-caption);
 }
 .snippet-cell {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   word-break: break-all;
   max-width: 400px;
 }
@@ -1646,8 +1647,8 @@ const hasMultiTurnMeta = computed(() =>
   border: 1px solid var(--color-border);
   border-radius: 4px;
   padding: 12px;
-  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
-  font-size: 12px;
+  font-family: var(--font-family-mono);
+  font-size: var(--fs-caption);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1704,54 +1705,54 @@ const hasMultiTurnMeta = computed(() =>
   padding-right: 4px;
 }
 .live-log-index {
-  color: var(--color-text-muted, #909399);
+  color: var(--color-text-tertiary);
   min-width: 36px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
 }
 .live-log-fixture {
-  color: var(--color-text-secondary, #606266);
+  color: var(--color-text-secondary);
   min-width: 70px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
 }
 .live-log-query {
   flex: 1;
-  color: var(--color-text-primary, #303133);
+  color: var(--color-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
 .live-log-cat {
-  color: var(--color-text-muted, #909399);
-  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-size: var(--fs-caption);
   min-width: 40px;
 }
 .live-log-count {
-  color: var(--color-text-secondary, #606266);
+  color: var(--color-text-secondary);
   min-width: 50px;
   text-align: right;
-  font-size: 11px;
+  font-size: var(--fs-caption);
 }
 .live-log-latency {
   min-width: 60px;
   text-align: right;
   font-weight: 500;
 }
-.live-log-latency.success { color: var(--color-success, #18a058); }
-.live-log-latency.warning { color: var(--color-warning, #f0a020); }
-.live-log-latency.error { color: var(--color-error, #d03050); }
+.live-log-latency.success { color: var(--color-success); }
+.live-log-latency.warning { color: var(--color-warning); }
+.live-log-latency.error { color: var(--color-danger); }
 .live-log-error {
-  color: var(--color-error, #d03050);
-  font-size: 11px;
+  color: var(--color-danger);
+  font-size: var(--fs-caption);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 200px;
 }
 .live-log-empty {
-  color: var(--color-text-muted, #909399);
+  color: var(--color-text-tertiary);
   text-align: center;
   padding: 24px 0;
-  font-size: 12px;
+  font-size: var(--fs-caption);
 }
 </style>

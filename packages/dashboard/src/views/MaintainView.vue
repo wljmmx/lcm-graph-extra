@@ -19,7 +19,7 @@
  *   - reset_breaker / sync repair / compact / maintain / ttl_cleanup / import 二次确认
  *   - 危险操作（restore / reset_breaker / sync repair）按钮 type=error
  */
-import { computed, reactive, ref } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import { useMutation } from '@tanstack/vue-query';
 import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, useMessage } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
@@ -76,6 +76,10 @@ const restoreTargetsOptions = [
   { label: '仅 LCM (lcm_only)', value: 'lcm_only' },
   { label: '仅文件 (files_only)', value: 'files_only' },
 ];
+
+// H6 修复：路径常驻校验状态（替代一闪而过的 toast）
+const backupPathError = computed(() => validateOpenclawPath(backupOutputPath.value));
+const restorePathError = computed(() => validateOpenclawPath(restoreBackupPath.value));
 
 // 卡片 8：同步修复
 const syncMode = ref<'check' | 'repair'>('check');
@@ -194,6 +198,13 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
     loadingMap[vars.cardKey] = false;
   },
 });
+
+// M14 修复：顶部错误条可关闭，且新错误出现时自动恢复显示
+const topErrorDismissed = ref(false);
+watch(
+  () => mutation.error.value,
+  () => { topErrorDismissed.value = false; },
+);
 
 /**
  * 统一执行入口（P1 竞态修复）。
@@ -450,7 +461,12 @@ function executeImport(): void {
             @execute="executeBackup"
           >
             <template #form>
-              <NFormItem label="输出路径（目录）" size="small" :show-feedback="false">
+              <NFormItem
+                label="输出路径（目录）"
+                size="small"
+                :validation-status="backupPathError ? 'error' : undefined"
+                :feedback="backupPathError ?? undefined"
+              >
                 <NInput
                   v-model:value="backupOutputPath"
                   size="small"
@@ -473,7 +489,12 @@ function executeImport(): void {
             @execute="executeRestore"
           >
             <template #form>
-              <NFormItem label="备份文件路径" size="small" :show-feedback="false">
+              <NFormItem
+                label="备份文件路径"
+                size="small"
+                :validation-status="restorePathError ? 'error' : undefined"
+                :feedback="restorePathError ?? undefined"
+              >
                 <NInput
                   v-model:value="restoreBackupPath"
                   size="small"
@@ -493,6 +514,14 @@ function executeImport(): void {
                   默认开启，关闭后将实际写入数据
                 </span>
               </NFormItem>
+              <NAlert
+                v-if="!restoreDryRun"
+                type="warning"
+                :show-icon="true"
+                style="margin-top: 8px"
+              >
+                dryRun 已关闭：执行后将实际向 Neo4j / LCM 写入数据，请再次确认备份文件路径正确。
+              </NAlert>
             </template>
           </OperationCard>
         </NGi>
@@ -522,6 +551,14 @@ function executeImport(): void {
                   默认开启，repair 模式下关闭才会实际删除
                 </span>
               </NFormItem>
+              <NAlert
+                v-if="syncMode === 'repair' && !syncDryRun"
+                type="warning"
+                :show-icon="true"
+                style="margin-top: 8px"
+              >
+                repair 模式且 dryRun 已关闭：执行后将实际删除孤儿节点，操作不可逆。
+              </NAlert>
             </template>
           </OperationCard>
         </NGi>
@@ -561,18 +598,23 @@ function executeImport(): void {
       <!-- v1.1.0-5: 能力档次切换 -->
       <CapabilityProfileSwitch />
 
-      <!-- 错误兜底提示（mutation 抛错时由日志区展示，此处保留全页提示） -->
+      <!-- M14 修复：顶部错误兜底提示（友好文案 + 可关闭） -->
       <NAlert
-        v-if="mutation.isError.value"
+        v-if="mutation.isError.value && !topErrorDismissed"
         type="error"
         :show-icon="true"
-        title="最近一次操作异常"
+        title="操作执行失败"
+        closable
+        @close="topErrorDismissed = true"
       >
-        {{ mutation.error.value?.message ?? '未知错误' }}
+        <NSpace vertical :size="4">
+          <span>{{ mutation.error.value?.message ?? '未知错误' }}</span>
+          <span class="muted">请检查后端 MCP 服务是否正常，或查看下方操作日志了解详情。可稍后重试该操作。</span>
+        </NSpace>
       </NAlert>
 
       <!-- 操作日志区（底部固定） -->
-      <OperationLog :logs="logs" />
+      <OperationLog :logs="logs" @clear="logs = []" />
     </NSpace>
   </div>
 </template>

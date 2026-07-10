@@ -14,7 +14,7 @@
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NTabs, NTabPane } from 'naive-ui';
+import { NTabs, NTabPane, NBreadcrumb, NBreadcrumbItem } from 'naive-ui';
 import BenchmarkView from './BenchmarkView.vue';
 import QmdTestView from './QmdTestView.vue';
 
@@ -59,10 +59,10 @@ const tabLabel = computed(() =>
 <template>
   <div class="testing-center">
     <div class="testing-center-header">
-      <h2 style="margin: 0; font-size: var(--fs-title, 18px); font-weight: 600">测试中心</h2>
-      <span class="muted" style="font-size: 12px; margin-left: 8px">
-        当前：{{ tabLabel }}
-      </span>
+      <NBreadcrumb>
+        <NBreadcrumbItem>测试中心</NBreadcrumbItem>
+        <NBreadcrumbItem>{{ tabLabel }}</NBreadcrumbItem>
+      </NBreadcrumb>
     </div>
 
     <NTabs

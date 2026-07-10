@@ -24,6 +24,7 @@ import {
   TitleComponent,
   DataZoomComponent,
 } from 'echarts/components';
+import { NEmpty } from 'naive-ui';
 import {
   echartsThemeColors,
   echartsDarkThemeColors,
@@ -82,6 +83,18 @@ const mergedOption = computed<Record<string, unknown>>(() => {
 // vue-echarts 实例引用（shallowRef 避免对组件实例做深响应式代理）
 const chartRef = shallowRef<InstanceType<typeof VChart> | null>(null);
 
+// L12 修复：内置空态检测（series.data 全空时显示 NEmpty，替代空白画布）
+const hasData = computed(() => {
+  const opt = props.option;
+  const series = opt.series as Array<Record<string, unknown>> | undefined;
+  if (!series || !Array.isArray(series)) return true;
+  return series.some((s) => {
+    const data = s.data;
+    if (Array.isArray(data)) return data.length > 0;
+    return true; // 非数组 data（如 graph 节点）默认有数据
+  });
+});
+
 onBeforeUnmount(() => {
   // 卸载时释放 echarts 实例，避免内存泄漏
   chartRef.value?.dispose();
@@ -89,7 +102,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <!-- L12 修复：无数据时显示空态，替代空白画布 -->
+  <NEmpty
+    v-if="!hasData"
+    description="无数据"
+    :style="{ height, display: 'flex', alignItems: 'center', justifyContent: 'center' }"
+  />
   <VChart
+    v-else
     ref="chartRef"
     :option="mergedOption"
     autoresize

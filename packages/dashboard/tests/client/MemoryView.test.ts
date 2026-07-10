@@ -41,7 +41,10 @@ vi.mock('@tanstack/vue-query', async () => {
     isLoading: ref(false),
     isError: ref(false),
   }));
-  return { useQuery, VueQueryPlugin: { install: () => {} } };
+  const useQueryClient = vi.fn(() => ({
+    invalidateQueries: vi.fn(() => Promise.resolve()),
+  }));
+  return { useQuery, useQueryClient, VueQueryPlugin: { install: () => {} } };
 });
 
 import { useQuery } from '@tanstack/vue-query';

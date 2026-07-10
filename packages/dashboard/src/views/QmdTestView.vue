@@ -593,7 +593,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 .stats-grid {
   padding: 12px;
   background: var(--color-bg-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .detail-section {
   margin-top: 4px;
@@ -615,7 +615,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 .interpretation-hint {
   padding: 8px 12px;
   background: var(--color-bg-secondary);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: var(--fs-caption);
   line-height: 1.6;
 }
@@ -629,9 +629,9 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
   max-height: 500px;
   overflow-y: auto;
   background: var(--color-bg-secondary);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-family: var(--font-family-mono);
   font-size: 12px;
   line-height: 1.8;
 }
@@ -666,12 +666,12 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
 
 /* 查询结果表格 */
 .mono-cell {
-  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-  font-size: 11px;
+  font-family: var(--font-family-mono);
+  font-size: var(--fs-caption);
   word-break: break-all;
 }
 .snippet-cell {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   word-break: break-all;
   max-width: 400px;
 }

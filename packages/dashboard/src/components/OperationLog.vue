@@ -20,6 +20,7 @@ import {
   NCollapse,
   NCollapseItem,
   NText,
+  NButton,
 } from 'naive-ui';
 import { formatTimeWithSeconds, formatDuration } from '../utils/format';
 
@@ -36,6 +37,10 @@ export interface OperationLogEntry {
 
 const props = defineProps<{
   logs: OperationLogEntry[];
+}>();
+
+const emit = defineEmits<{
+  (e: 'clear'): void;
 }>();
 
 // 反向副本用于"旧的在下"的视觉顺序展示（父组件传入已倒序，这里直接展示）
@@ -66,13 +71,25 @@ function prettyJson(v: unknown): string {
 
 <template>
   <NCard title="操作日志（最近 20 条）" size="small">
+    <template #header-extra>
+      <NButton
+        v-if="displayLogs.length > 0"
+        size="tiny"
+        quaternary
+        type="error"
+        @click="emit('clear')"
+      >
+        清空
+      </NButton>
+    </template>
     <NEmpty
       v-if="displayLogs.length === 0"
       size="small"
       description="暂无操作记录"
       style="padding: 12px 0"
     />
-    <NList v-else bordered clickable>
+    <!-- M9 修复：去除 clickable（列表项无点击交互，避免误导用户） -->
+    <NList v-else bordered>
       <NListItem v-for="log in displayLogs" :key="log.id">
         <NSpace align="center" :size="8" wrap>
           <NText depth="3" class="log-time">{{ formatTimeWithSeconds(log.ts) }}</NText>
@@ -115,11 +132,11 @@ function prettyJson(v: unknown): string {
 
 <style scoped>
 .log-time {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-family-mono);
   font-size: var(--fs-caption);
 }
 .log-tool {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-family-mono);
   font-size: var(--fs-label);
   font-weight: 600;
 }
@@ -138,7 +155,7 @@ function prettyJson(v: unknown): string {
 .log-pre {
   margin: 2px 0 0 0;
   padding: var(--space-xs) var(--space-sm);
-  background: var(--color-bg-hover);
+  background: var(--color-surface-2);
   border-radius: var(--radius-sm);
   font-family: var(--font-family-mono);
   font-size: var(--fs-caption);

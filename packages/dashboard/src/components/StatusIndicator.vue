@@ -87,6 +87,10 @@ const symbol = computed(() => {
   /* v2.3.3：符号色用染色表面（白 + 1.5% 蓝），避免纯白 */
   color: var(--color-surface);
 }
+/* L4 修复：warning 态（橙底）白字对比度不足 WCAG AA，改深色字 */
+.dot.dot-warning {
+  color: var(--color-text-primary);
+}
 .shape-circle {
   border-radius: var(--radius-full);
 }

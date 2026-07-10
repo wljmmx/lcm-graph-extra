@@ -15,7 +15,7 @@
  * danger / confirmLevel 均为响应式：父组件可动态切换（如 sync 卡片
  * 在 mode=repair 时升级为 danger + 二次确认）。
  */
-import { computed, ref } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import { NCard, NButton, NPopconfirm, NTag, NSpace } from 'naive-ui';
 import Icon from './Icon.vue';
 
@@ -90,6 +90,33 @@ const executeAriaLabel = computed(() => {
   if (props.confirmLevel === 2) parts.push('需三次确认');
   return parts.join('，');
 });
+
+// H7 修复：长操作进度反馈 —— 加载中显示已耗时（无后端进度上报时的诚实反馈）
+const elapsedSec = ref(0);
+let timer: ReturnType<typeof setInterval> | null = null;
+
+watch(
+  () => props.loading,
+  (loading) => {
+    if (loading) {
+      elapsedSec.value = 0;
+      timer = setInterval(() => { elapsedSec.value += 1; }, 1000);
+    } else if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  },
+);
+
+onUnmounted(() => {
+  if (timer) clearInterval(timer);
+});
+
+const elapsedLabel = computed(() => {
+  const s = elapsedSec.value;
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+});
 </script>
 
 <template>
@@ -102,6 +129,8 @@ const executeAriaLabel = computed(() => {
     <div class="card-header">
       <NSpace align="center" :size="6">
         <Icon v-if="icon" :name="icon" :size="16" />
+        <!-- L1 修复：danger 态无自定义图标时，用 warning 图标补位 -->
+        <Icon v-else-if="danger" name="warning" :size="16" />
         <span class="card-title" :style="{ color: titleColor }">{{ title }}</span>
         <NTag v-if="danger" size="small" type="error">危险</NTag>
         <NTag v-if="confirmLevel === 2" size="small" type="warning">三次确认</NTag>
@@ -110,6 +139,12 @@ const executeAriaLabel = computed(() => {
     </div>
 
     <div class="card-desc">{{ description }}</div>
+
+    <!-- H7 修复：长操作运行时显示已耗时 + 不确定进度条 -->
+    <div v-if="loading" class="card-progress" role="status" aria-live="polite">
+      <div class="progress-bar-indeterminate"><div class="progress-bar-fill" /></div>
+      <span class="progress-elapsed">执行中… 已耗时 {{ elapsedLabel }}</span>
+    </div>
 
     <!-- 参数表单 slot -->
     <div class="card-form">
@@ -221,6 +256,36 @@ const executeAriaLabel = computed(() => {
 }
 .card-form {
   margin-bottom: var(--space-sm);
+}
+/* H7：长操作进度反馈 */
+.card-progress {
+  margin-bottom: var(--space-sm);
+}
+.progress-bar-indeterminate {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--color-fill-light);
+  overflow: hidden;
+}
+.progress-bar-fill {
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: var(--radius-full);
+  background: var(--color-primary);
+  animation: op-progress-slide 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes op-progress-slide {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+.progress-elapsed {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
 }
 .card-footer {
   display: flex;

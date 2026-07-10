@@ -9,7 +9,7 @@
  * 应用按钮触发 update:modelValue，由父组件发起列表查询；
  * 重置按钮恢复默认空过滤。
  */
-import { reactive, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import {
   NForm,
   NFormItem,
@@ -19,6 +19,7 @@ import {
   NInputNumber,
   NButton,
   NSpace,
+  NBadge,
 } from 'naive-ui';
 import type { ExperienceListParams } from '../api/experience';
 
@@ -58,11 +59,23 @@ watch(
   { deep: true },
 );
 
-// 时间范围：[from, to] 毫秒数组；表单内只暂存，应用时拆分写入 form.from / form.to
-const dateRange = reactive<[number | null, number | null]>([
-  props.modelValue.from ?? null,
-  props.modelValue.to ?? null,
-]);
+// L8 修复：dateRange 改 ref，支持 v-model 直绑 NDatePicker
+const dateRange = ref<[number, number] | null>(
+  props.modelValue.from && props.modelValue.to
+    ? [props.modelValue.from, props.modelValue.to]
+    : null,
+);
+
+// M13 修复：激活条件数 badge（非默认值视为激活）
+const activeFilterCount = computed(() => {
+  let count = 0;
+  if (form.status && form.status !== 'all') count++;
+  if (form.type) count++;
+  if (dateRange.value) count++;
+  if (form.tag) count++;
+  if (form.projectName) count++;
+  return count;
+});
 
 const statusOptions = [
   { label: '全部', value: 'all' },
@@ -79,23 +92,13 @@ const typeOptions = [
   { label: 'best_practice', value: 'best_practice' },
 ];
 
-function handleDateRangeChange(v: [number, number] | null): void {
-  if (v && v.length === 2) {
-    dateRange[0] = v[0];
-    dateRange[1] = v[1];
-  } else {
-    dateRange[0] = null;
-    dateRange[1] = null;
-  }
-}
-
 function applyFilter(): void {
   // 把表单内值同步到 modelValue（触发父组件 useQuery 重新拉取）
   const next: ExperienceListParams = {
     status: form.status || 'all',
     type: form.type || undefined,
-    from: dateRange[0] ?? undefined,
-    to: dateRange[1] ?? undefined,
+    from: dateRange.value ? dateRange.value[0] : undefined,
+    to: dateRange.value ? dateRange.value[1] : undefined,
     tag: form.tag || undefined,
     projectName: form.projectName || undefined,
     limit: form.limit ?? 20,
@@ -111,8 +114,7 @@ function resetFilter(): void {
   form.projectName = undefined;
   form.limit = 20;
   form.offset = 0;
-  dateRange[0] = null;
-  dateRange[1] = null;
+  dateRange.value = null;
   emit('update:modelValue', { status: 'all', limit: 20, offset: 0 });
 }
 </script>
@@ -139,9 +141,8 @@ function resetFilter(): void {
 
     <NFormItem label="时间范围">
       <NDatePicker
+        v-model:value="dateRange"
         type="datetimerange"
-        :value="dateRange[0] && dateRange[1] ? [dateRange[0], dateRange[1]] as [number, number] : null"
-        @update:value="handleDateRangeChange"
         clearable
         style="width: 100%"
       />
@@ -173,7 +174,10 @@ function resetFilter(): void {
     </NFormItem>
 
     <NSpace :size="8" style="margin-top: 12px">
-      <NButton type="primary" size="small" @click="applyFilter">应用</NButton>
+      <!-- M13 修复：激活条件数 badge（>0 时显示） -->
+      <NBadge :value="activeFilterCount" :show="activeFilterCount > 0" type="info">
+        <NButton type="primary" size="small" @click="applyFilter">应用</NButton>
+      </NBadge>
       <NButton size="small" @click="resetFilter">重置</NButton>
     </NSpace>
   </NForm>

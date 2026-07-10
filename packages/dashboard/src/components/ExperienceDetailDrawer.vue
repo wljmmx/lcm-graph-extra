@@ -11,7 +11,7 @@
  * 写操作通过 invokeMcpTool 调用 lcmg_forget / lcmg_pin，由父组件传入回调，
  * 由父组件 useMutation 处理（成功后 invalidate experience-list）。
  */
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import {
   NDrawer,
   NDrawerContent,
@@ -28,6 +28,7 @@ import {
   NSpin,
   NCard,
 } from 'naive-ui';
+import { useBreakpoints } from '../composables/useBreakpoints';
 import EChart from './EChart.vue';
 import QualityChart from './QualityChart.vue';
 import { formatDateTime } from '../utils/format';
@@ -60,6 +61,28 @@ const emit = defineEmits<{
   (e: 'update:show', v: boolean): void;
   (e: 'invoke', tool: string, params: Record<string, unknown>): Promise<McpInvokeResponse> | void;
 }>();
+
+// M3 修复：窄屏抽屉全宽，宽屏固定 640px
+const breakpoints = useBreakpoints({ xs: 0, s: 640, m: 768, l: 1024, xl: 1280 });
+const isNarrowScreen = breakpoints.smaller('m');
+const drawerWidth = computed<number | string>(() =>
+  isNarrowScreen.value ? '100%' : 640,
+);
+
+// L3 修复：成功操作提示 5 秒后自动消失（错误提示常驻）
+const showOpResult = ref(true);
+watch(
+  () => props.opResult,
+  (val) => {
+    if (val?.ok) {
+      showOpResult.value = true;
+      setTimeout(() => { showOpResult.value = false; }, 5000);
+    } else if (val) {
+      showOpResult.value = true;
+    }
+  },
+  { immediate: true },
+);
 
 function typeColor(t: string): 'info' | 'error' | 'warning' | 'success' | 'default' {
   switch (t) {
@@ -143,7 +166,7 @@ function close(): void {
 <template>
   <NDrawer
     :show="props.show"
-    :width="640"
+    :width="drawerWidth"
     placement="right"
     :trap-focus="true"
     :auto-focus="true"
@@ -170,7 +193,7 @@ function close(): void {
         <NSpace vertical :size="12">
           <!-- 写操作结果提示 -->
           <NAlert
-            v-if="props.opResult"
+            v-if="props.opResult && showOpResult"
             :type="props.opResult.ok ? 'success' : 'error'"
             :show-icon="true"
           >

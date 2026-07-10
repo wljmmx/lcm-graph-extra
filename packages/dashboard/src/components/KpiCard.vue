@@ -8,7 +8,7 @@
  * - 数字 value 触发 count-up 动画（requestAnimationFrame，600ms）
  */
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
-import { NCard, NStatistic, NSkeleton } from 'naive-ui';
+import { NCard, NStatistic, NSkeleton, NTooltip } from 'naive-ui';
 
 const props = withDefaults(
   defineProps<{
@@ -22,6 +22,10 @@ const props = withDefaults(
   }>(),
   { loading: false },
 );
+
+const emit = defineEmits<{
+  (e: 'click'): void;
+}>();
 
 // 仅当 value 为数字且超过阈值时判定为超限（变红）
 const overThreshold = computed(
@@ -118,31 +122,51 @@ const displayValue = computed(() => {
 </script>
 
 <template>
-  <NCard size="small" :bordered="true">
+  <NCard
+    size="small"
+    :bordered="true"
+    class="kpi-card"
+    :class="{ 'kpi-card-over': overThreshold }"
+  >
     <!-- 骨架屏占位 -->
     <template v-if="loading">
       <NSkeleton text :repeat="2" />
     </template>
 
-    <NStatistic v-else :label="label" :tabular-nums="true">
-      <template #default>
-        <span
-          :style="{
-            color: valueColor,
-            fontSize: 'var(--fs-display)',
-            fontWeight: 600,
-          }"
-        >{{ displayValue
-        }}<span
-          v-if="unit"
-          style="font-size: var(--fs-body); margin-left: var(--space-xs); font-weight: 400"
-        >{{ unit }}</span></span>
+    <!-- M15 修复：阈值 tooltip（hover 显示阈值 + 超限状态） -->
+    <NTooltip v-else placement="bottom" :disabled="threshold === undefined">
+      <template #trigger>
+        <NStatistic :label="label" :tabular-nums="true">
+          <template #default>
+            <span
+              :style="{
+                color: valueColor,
+                fontSize: 'var(--fs-display)',
+                fontWeight: 600,
+              }"
+            >{{ displayValue
+            }}<span
+              v-if="unit"
+              style="font-size: var(--fs-body); margin-left: var(--space-xs); font-weight: 400"
+            >{{ unit }}</span></span>
+          </template>
+          <template v-if="trend !== undefined" #suffix>
+            <span :style="{ fontSize: 'var(--fs-caption)', color: trendColor }">
+              {{ trendArrow }}{{ Math.abs(trend) }}
+            </span>
+          </template>
+        </NStatistic>
       </template>
-      <template v-if="trend !== undefined" #suffix>
-        <span :style="{ fontSize: 'var(--fs-caption)', color: trendColor }">
-          {{ trendArrow }}{{ Math.abs(trend) }}
-        </span>
-      </template>
-    </NStatistic>
+      阈值：{{ threshold }}{{ unit ?? '' }}{{ overThreshold ? '（已超限）' : '' }}
+    </NTooltip>
   </NCard>
 </template>
+
+<style scoped>
+.kpi-card {
+  transition: box-shadow var(--motion-base);
+}
+.kpi-card-over {
+  border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+}
+</style>
