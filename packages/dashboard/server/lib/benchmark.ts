@@ -53,6 +53,8 @@ export interface BenchmarkRunnerOptions {
   concurrency?: number;
   /** 进度回调（每完成一条 fixture 触发，携带该条结果） */
   onProgress?: (completed: number, total: number, current: BenchmarkFixture, item: BenchmarkItemResult) => void;
+  /** BEIR 数据集下载/解压进度回调（仅 beir-* 测试集触发，与 onProgress 分离避免类型错位） */
+  onDownloadProgress?: (phase: string, progress?: number) => void;
 }
 
 export interface BenchmarkItemResult {
@@ -474,7 +476,7 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
     fixtureSetId = 'custom';
   } else if (opts.fixtureSetId) {
     fixtureSetId = opts.fixtureSetId;
-    fixtures = await loadFixtures(opts.fixtureSetId, opts.beirSubsetSize, opts.onProgress as ((phase: string, progress?: number) => void) | undefined);
+    fixtures = await loadFixtures(opts.fixtureSetId, opts.beirSubsetSize, opts.onDownloadProgress);
   } else {
     fixtureSetId = 'project-scenarios';
     fixtures = PROJECT_SCENARIO_FIXTURES;
@@ -587,15 +589,15 @@ export async function runBenchmark(opts: BenchmarkRunnerOptions): Promise<Benchm
           };
           return result;
         }
+      }).map(async (resultPromise, i) => {
+        // 保持批内并发，但每条 resolve 后立即触发 onProgress（JS 单线程，++ 原子安全）
+        const result = await resultPromise;
+        completed++;
+        opts.onProgress?.(completed, fixtures.length, batch[i], result);
+        return result;
       }),
     );
     items.push(...batchResults);
-    completed += batch.length;
-    if (opts.onProgress) {
-      for (let i = 0; i < batch.length; i++) {
-        opts.onProgress(completed, fixtures.length, batch[i], batchResults[i]);
-      }
-    }
   }
 
   const endedAt = new Date();

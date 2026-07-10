@@ -94,6 +94,14 @@ const BEIR_DATASETS: Record<string, BeirDatasetMeta> = {
       '  export BENCHMARK_BEIR_MIRROR=https://your-mirror.example.com/beir/',
       '  # 下载时会拼接 ${BENCHMARK_BEIR_MIRROR}nfcorpus.zip',
       '',
+      '方法 4（HuggingFace CLI，需登录时使用）:',
+      '  # 若 HuggingFace 镜像返回 401/403，需先安装并登录：',
+      '  pip install -U "huggingface_hub[cli]"',
+      '  hf login   # 在 https://huggingface.co/settings/tokens 创建 Access Token',
+      '  # 登录后即可用 wget/curl 下载，或设置环境变量免登录：',
+      '  export HF_TOKEN=hf_xxxxxxxxxxxx',
+      '  # 缓存目录同方法 1：~/.openclaw/.benchmark/beir/nfcorpus/',
+      '',
       '缓存目录结构（部署后需包含以下文件）:',
       '  ~/.openclaw/.benchmark/beir/nfcorpus/',
       '    ├── corpus.jsonl      # 文档库（每行 {"_id":"doc-1","title":"...","text":"..."}）',
@@ -124,6 +132,14 @@ const BEIR_DATASETS: Record<string, BeirDatasetMeta> = {
       '',
       '方法 2（环境变量覆盖下载源）:',
       '  export BENCHMARK_BEIR_MIRROR=https://your-mirror.example.com/beir/',
+      '',
+      '方法 3（HuggingFace CLI，需登录时使用）:',
+      '  # 若 HuggingFace 镜像返回 401/403，需先安装并登录：',
+      '  pip install -U "huggingface_hub[cli]"',
+      '  hf login   # 在 https://huggingface.co/settings/tokens 创建 Access Token',
+      '  # 或设置环境变量免登录：',
+      '  export HF_TOKEN=hf_xxxxxxxxxxxx',
+      '  # 缓存目录同方法 1：~/.openclaw/.benchmark/beir/scifact/',
       '',
       '缓存目录结构（部署后需包含以下文件）:',
       '  ~/.openclaw/.benchmark/beir/scifact/',
@@ -302,7 +318,21 @@ export async function downloadBeirDataset(datasetName: string, onProgress?: (pha
         signal: AbortSignal.timeout(300_000), // 5 分钟超时
       });
       if (!resp.ok) {
-        errors.push(`[${sourceLabel}] HTTP ${resp.status} ${resp.statusText} — ${url}`);
+        // HuggingFace 需要登录：401/403 时追加专用指引
+        if (resp.status === 401 || resp.status === 403) {
+          errors.push(
+            `[${sourceLabel}] HTTP ${resp.status} ${resp.statusText} — 需要登录\n` +
+            `    该源需要 HuggingFace 身份验证。请执行：\n` +
+            `      pip install -U huggingface_hub\n` +
+            `      hf login   # 在 https://huggingface.co/settings/tokens 创建 token\n` +
+            `    或设置环境变量后重启 dashboard：\n` +
+            `      export HF_TOKEN=hf_xxxxxxxxxxxx\n` +
+            `    也可改用方法 1（wget 从 TU Darmstadt 官方源下载）或方法 3（BENCHMARK_BEIR_MIRROR 镜像）。\n` +
+            `    URL: ${url}`,
+          );
+        } else {
+          errors.push(`[${sourceLabel}] HTTP ${resp.status} ${resp.statusText} — ${url}`);
+        }
         continue;
       }
 

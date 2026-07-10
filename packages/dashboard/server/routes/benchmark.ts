@@ -327,6 +327,68 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
     }
   });
 
+  // POST /api/benchmark/beir/download-stream —— SSE 流式下载（v2.3.4）
+  // 事件：start / progress（phase + percent）/ done / error（含 manualInstructions）
+  // 解决：下载过程无进度反馈、错误 3s 后消失、HF 401/403 无指引等问题
+  app.post('/api/benchmark/beir/download-stream', async (req, reply) => {
+    const body = (req.body as { dataset?: string } | undefined) ?? {};
+    const dataset = (body.dataset ?? '').trim();
+    if (dataset !== 'nfcorpus' && dataset !== 'scifact') {
+      reply.code(400);
+      return { ok: false, error: 'dataset 必须为 nfcorpus 或 scifact' };
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    let clientClosed = false;
+    req.raw.on('close', () => { clientClosed = true; });
+
+    const send = (event: string, data: unknown): void => {
+      if (clientClosed) return;
+      try {
+        reply.raw.write(`event: ${event}\n`);
+        reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        clientClosed = true;
+      }
+    };
+
+    req.log.info({ dataset }, 'BEIR SSE 流式下载开始');
+    send('start', { dataset });
+
+    try {
+      if (isBeirCached(dataset)) {
+        send('progress', { phase: 'loading-from-cache', percent: 100 });
+      } else {
+        // 通过 onProgress 回调实时推送下载/解压进度
+        await downloadBeirDataset(dataset, (phase, progress) => {
+          send('progress', { phase, percent: progress ?? 0 });
+        });
+      }
+      const cacheInfo = getBeirCacheInfo(dataset);
+      send('done', { ok: true, dataset, cacheInfo });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ dataset, err: msg }, 'BEIR SSE 流式下载失败');
+      send('error', {
+        ok: false,
+        dataset,
+        error: msg,
+        manualInstructions: getBeirManualInstructions(dataset),
+      });
+    } finally {
+      try { reply.raw.end(); } catch { /* 连接已断开 */ }
+    }
+
+    return reply;
+  });
+
   // GET /api/benchmark/default-url —— 系统配置中的 QMD 地址 + dashboard 地址
   app.get('/api/benchmark/default-url', async (_req, _reply) => {
     return {
@@ -450,6 +512,9 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
     }
     const o = parsed.opts;
 
+    // 接管响应：避免全局 onSend 钩子在 writeHead 后再加头导致 "Cannot set headers after they are sent"
+    reply.hijack();
+
     // SSE 响应头
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -500,6 +565,10 @@ export async function registerBenchmarkRoutes(app: FastifyInstance): Promise<voi
         concurrency: o.concurrency,
         onProgress: (completed, total, _current, item) => {
           send('progress', { completed, total, item });
+        },
+        onDownloadProgress: (phase, progress) => {
+          // BEIR 下载/解压进度，独立事件类型，避免与压测 progress 混淆
+          send('download-progress', { phase, progress });
         },
       });
 

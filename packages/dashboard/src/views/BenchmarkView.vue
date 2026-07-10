@@ -47,12 +47,11 @@ import {
   fetchBenchmarkFixtures,
   fetchBenchmarkDefaultUrl,
   fetchBenchmarkHistory,
-  downloadBeirDatasetApi,
+  downloadBeirStream,
   runBenchmarkStream,
   downloadBenchmarkMarkdown,
   type BenchmarkFixture,
   type BenchmarkResult,
-  type BenchmarkItemResult,
   type BenchmarkMode,
   type BenchmarkEngine,
   type FixtureSetId,
@@ -60,6 +59,7 @@ import {
   type BenchmarkHistoryItem,
   type MultiTurnSessionStats,
   type CeEngineDiagnostics,
+  type BeirDownloadStreamEvent,
 } from '../api/benchmark';
 
 const message = useMessage();
@@ -132,6 +132,10 @@ const beirMessage = ref<string>('');
 // ===== BEIR 下载状态 =====
 const beirDownloading = ref<boolean>(false);
 const beirManualInstructions = ref<string>('');
+const beirErrorMsg = ref<string>('');
+const beirDownloadPhase = ref<string>('');
+const beirDownloadPercent = ref<number>(0);
+let beirDownloadController: AbortController | null = null;
 
 // ===== 执行状态 =====
 const loading = ref<boolean>(false);
@@ -220,31 +224,76 @@ watch(fixtureSetId, (newId) => {
   if (newId) loadFixtureSetDetails(newId);
 });
 
-// ===== BEIR 预下载 =====
+// ===== BEIR 预下载（SSE 流式，实时推送下载/解压进度）=====
 async function downloadBeir(): Promise<void> {
   if (!isBeirSet.value) return;
   const datasetName = fixtureSetId.value.replace('beir-', '') as 'nfcorpus' | 'scifact';
   beirDownloading.value = true;
   beirManualInstructions.value = '';
-  try {
-    const resp = await downloadBeirDatasetApi(datasetName);
-    if (resp.ok) {
-      message.success(resp.message ?? `${datasetName} 下载完成`);
-      // 刷新测试集列表（更新缓存状态）
-      const setsResp = await fetchBenchmarkFixtureSets();
-      if (setsResp.ok) fixtureSets.value = setsResp.fixtureSets;
-      await loadFixtureSetDetails(fixtureSetId.value);
-    } else {
-      message.error(resp.error ?? '下载失败');
-      // 下载失败时展示手工指引
-      if (resp.manualInstructions) {
-        beirManualInstructions.value = resp.manualInstructions;
+  beirErrorMsg.value = '';
+  beirDownloadPhase.value = '准备下载...';
+  beirDownloadPercent.value = 0;
+
+  beirDownloadController = downloadBeirStream(datasetName, {
+    onEvent: (event: BeirDownloadStreamEvent) => {
+      if (event.type === 'start') {
+        beirDownloadPhase.value = '开始下载...';
+        return;
       }
-    }
-  } catch (e) {
-    message.error(`下载失败: ${e instanceof Error ? e.message : String(e)}`);
-  } finally {
+      if (event.type === 'progress') {
+        beirDownloadPhase.value = event.phase;
+        beirDownloadPercent.value = event.percent;
+        return;
+      }
+      if (event.type === 'done') {
+        beirDownloading.value = false;
+        beirDownloadPhase.value = '';
+        beirDownloadPercent.value = 100;
+        beirDownloadController = null;
+        message.success(`${datasetName} 下载完成`);
+        // 刷新测试集列表（更新缓存状态）+ 重新加载详情
+        void (async () => {
+          const setsResp = await fetchBenchmarkFixtureSets();
+          if (setsResp.ok) fixtureSets.value = setsResp.fixtureSets;
+          await loadFixtureSetDetails(fixtureSetId.value);
+        })();
+        return;
+      }
+      if (event.type === 'error') {
+        beirDownloading.value = false;
+        beirDownloadPhase.value = '';
+        beirDownloadPercent.value = 0;
+        beirDownloadController = null;
+        // 错误常驻展示（NAlert，不自动消失）
+        beirErrorMsg.value = event.error;
+        if (event.manualInstructions) {
+          beirManualInstructions.value = event.manualInstructions;
+        }
+        // message 提示（长 duration，确保用户能看到）
+        message.error(`下载失败: ${event.error}`, { duration: 10000 });
+        return;
+      }
+    },
+    onError: (err) => {
+      beirDownloading.value = false;
+      beirDownloadPhase.value = '';
+      beirDownloadPercent.value = 0;
+      beirDownloadController = null;
+      beirErrorMsg.value = err.message;
+      message.error(`下载请求失败: ${err.message}`, { duration: 10000 });
+    },
+  });
+}
+
+// ===== 中断 BEIR 下载 =====
+function abortBeirDownload(): void {
+  if (beirDownloadController) {
+    beirDownloadController.abort();
+    beirDownloadController = null;
     beirDownloading.value = false;
+    beirDownloadPhase.value = '';
+    beirDownloadPercent.value = 0;
+    message.warning('已中断下载');
   }
 }
 
@@ -287,10 +336,17 @@ async function executeBenchmark(): Promise<void> {
           // 后端确认开始（total 尚未知）
           return;
         }
+        if (event.type === 'download-progress') {
+          // BEIR 数据集下载/解压进度（与压测 progress 分离，仅 toast 提示，不污染日志面板）
+          message.info(`正在准备数据集: ${event.phase} ${event.percent}%`, { duration: 2000 });
+          return;
+        }
         if (event.type === 'progress') {
           liveTotal.value = event.total;
           liveCompleted.value = event.completed;
-          const item: BenchmarkItemResult = event.item;
+          const item = event.item;
+          // 防御性守卫：item 为 undefined 时跳过（避免 TypeError 导致 reader 循环退出）
+          if (!item || !item.fixtureId) return;
           const entry: LiveLogEntry = {
             index: liveLogs.value.length + 1,
             fixtureId: item.fixtureId,
@@ -842,20 +898,55 @@ const hasMultiTurnMeta = computed(() =>
           <span class="muted" style="margin-left: 8px">{{ currentFixtureSet.description }}</span>
         </div>
 
+        <!-- BEIR 下载错误（常驻展示，不自动消失） -->
+        <NAlert
+          v-if="isBeirSet && beirErrorMsg"
+          type="error"
+          :show-icon="true"
+          title="BEIR 数据集下载失败"
+          closable
+          @close="beirErrorMsg = ''"
+        >
+          <pre class="manual-instructions">{{ beirErrorMsg }}</pre>
+        </NAlert>
+
         <!-- BEIR 下载提示 -->
         <NAlert
-          v-if="isBeirSet && currentFixtureSet && !currentFixtureSet.cached"
+          v-if="isBeirSet && currentFixtureSet && !currentFixtureSet.cached && !beirDownloading"
           type="warning"
           :show-icon="true"
           title="BEIR 数据集未缓存"
         >
           <NSpace align="center" :size="8">
             <span>首次使用需从 HuggingFace 下载（约 30s）：</span>
-            <NButton size="tiny" type="primary" :loading="beirDownloading" @click="downloadBeir">
+            <NButton size="tiny" type="primary" @click="downloadBeir">
               立即下载
             </NButton>
           </NSpace>
         </NAlert>
+
+        <!-- BEIR 下载进度（SSE 流式，实时推送下载/解压进度） -->
+        <NAlert
+          v-if="isBeirSet && beirDownloading"
+          type="info"
+          :show-icon="true"
+          title="正在下载 BEIR 数据集..."
+        >
+          <div style="margin-bottom: 8px">
+            <span class="muted" style="font-size: 12px">{{ beirDownloadPhase }}</span>
+            <span style="margin-left: 8px; font-weight: 600">{{ beirDownloadPercent }}%</span>
+          </div>
+          <div class="live-progress" style="margin-bottom: 8px">
+            <div
+              class="live-progress-bar is-running"
+              :style="{ width: `${beirDownloadPercent}%` }"
+            />
+          </div>
+          <NButton size="tiny" quaternary type="error" @click="abortBeirDownload">
+            中断下载
+          </NButton>
+        </NAlert>
+
         <NAlert
           v-else-if="isBeirSet && currentFixtureSet?.cached"
           type="success"

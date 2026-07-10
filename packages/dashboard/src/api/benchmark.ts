@@ -324,6 +324,145 @@ export function downloadBeirDatasetApi(dataset: 'nfcorpus' | 'scifact'): Promise
   return apiPost<BenchmarkBeirDownloadResponse>('/api/benchmark/beir/download', { dataset });
 }
 
+// ---------------------------------------------------------------------------
+// SSE 流式下载（v2.3.4）：实时推送下载/解压进度，错误不自动消失
+// ---------------------------------------------------------------------------
+
+/** BEIR 下载流事件 */
+export type BeirDownloadStreamEvent =
+  | { type: 'start'; dataset: string }
+  | { type: 'progress'; phase: string; percent: number }
+  | { type: 'done'; dataset: string; cacheInfo: BeirCacheInfo | null }
+  | { type: 'error'; dataset: string; error: string; manualInstructions?: string };
+
+/** BEIR 缓存信息 */
+export interface BeirCacheInfo {
+  cached: boolean;
+  path: string;
+  sizeBytes: number;
+  fileCount: number;
+}
+
+/** BEIR 下载流回调 */
+export interface BeirDownloadStreamHandlers {
+  onEvent: (event: BeirDownloadStreamEvent) => void;
+  onError?: (error: Error) => void;
+}
+
+/**
+ * SSE 流式下载 BEIR 数据集。
+ *
+ * 后端 POST /api/benchmark/beir/download-stream 返回 text/event-stream：
+ *   event: start    data: { dataset }
+ *   event: progress data: { phase, percent }
+ *   event: done     data: { ok, dataset, cacheInfo }
+ *   event: error    data: { ok, dataset, error, manualInstructions }
+ *
+ * 返回 AbortController，调用 .abort() 可中断下载。
+ */
+export function downloadBeirStream(
+  dataset: 'nfcorpus' | 'scifact',
+  handlers: BeirDownloadStreamHandlers,
+): AbortController {
+  const controller = new AbortController();
+
+  void (async () => {
+    let resp: Response;
+    try {
+      resp = await fetch('/api/benchmark/beir/download-stream', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+        body: JSON.stringify({ dataset }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    if (!resp.ok || !resp.body) {
+      let detail = '';
+      try { detail = await resp.text(); } catch { /* 忽略 */ }
+      handlers.onError?.(new Error(`下载请求失败: HTTP ${resp.status}${detail ? ` - ${detail}` : ''}`));
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sepIdx: number;
+        while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + 2);
+          const event = parseBeirDownloadChunk(chunk);
+          if (event) handlers.onEvent(event);
+        }
+      }
+      if (buffer.trim()) {
+        const event = parseBeirDownloadChunk(buffer);
+        if (event) handlers.onEvent(event);
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      try { controller.abort(); } catch { /* 忽略 */ }
+      handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return controller;
+}
+
+/** 解析 BEIR 下载 SSE 事件块 */
+function parseBeirDownloadChunk(chunk: string): BeirDownloadStreamEvent | null {
+  const lines = chunk.split('\n');
+  let event = '';
+  const dataLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim());
+    }
+  }
+  if (!event || dataLines.length === 0) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(dataLines.join('\n'));
+  } catch {
+    return null;
+  }
+  const p = payload as Record<string, unknown>;
+  switch (event) {
+    case 'start':
+      return { type: 'start', dataset: String(p.dataset ?? '') };
+    case 'progress':
+      return {
+        type: 'progress',
+        phase: String(p.phase ?? ''),
+        percent: Number(p.percent ?? p.progress ?? 0),
+      };
+    case 'done':
+      return { type: 'done', dataset: String(p.dataset ?? ''), cacheInfo: (p.cacheInfo ?? null) as BeirCacheInfo | null };
+    case 'error':
+      return {
+        type: 'error',
+        dataset: String(p.dataset ?? ''),
+        error: String(p.error ?? '未知错误'),
+        manualInstructions: p.manualInstructions as string | undefined,
+      };
+    default:
+      return null;
+  }
+}
+
 /** 获取 BEIR 手工下载指引 */
 export function fetchBeirManualInstructions(dataset: 'nfcorpus' | 'scifact'): Promise<BenchmarkBeirManualResponse> {
   return apiGet<BenchmarkBeirManualResponse>(`/api/benchmark/beir/manual?dataset=${encodeURIComponent(dataset)}`);
@@ -352,6 +491,7 @@ export function runBenchmark(req: BenchmarkRunRequest): Promise<BenchmarkRunResp
 export type BenchmarkStreamEvent =
   | { type: 'start'; engine: string; fixtureSetId: string }
   | { type: 'progress'; completed: number; total: number; item: BenchmarkItemResult }
+  | { type: 'download-progress'; phase: string; percent: number }
   | { type: 'done'; result: BenchmarkResult }
   | { type: 'error'; error: string };
 
@@ -438,6 +578,8 @@ export function runBenchmarkStream(
       }
     } catch (err) {
       if (controller.signal.aborted) return;
+      // 主动关闭 fetch 连接，避免服务端继续向无人接收的连接写数据
+      try { controller.abort(); } catch { /* 忽略 */ }
       handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
     }
   })();
@@ -478,6 +620,12 @@ function parseSseChunk(chunk: string): BenchmarkStreamEvent | null {
         completed: Number(p.completed ?? 0),
         total: Number(p.total ?? 0),
         item: p.item as BenchmarkItemResult,
+      };
+    case 'download-progress':
+      return {
+        type: 'download-progress',
+        phase: String(p.phase ?? ''),
+        percent: Number(p.percent ?? p.progress ?? 0),
       };
     case 'done':
       return { type: 'done', result: p.result as BenchmarkResult };
