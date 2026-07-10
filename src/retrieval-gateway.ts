@@ -59,8 +59,8 @@ export class RetrievalGateway {
     this.graphAdapter = graphAdapter;
     this.merger = new Merger(mergerConfig);
     // Initialize ExperienceStorage for Layer 4 distilled experience recall
-    this.experienceStorage = new ExperienceStorage(graphAdapter as any, 5);
-    this.tagRegistry = new TagRegistry(graphAdapter as any);
+    this.experienceStorage = new ExperienceStorage(graphAdapter, 5);
+    this.tagRegistry = new TagRegistry(graphAdapter);
     // BUGFIX(P2-10): tagRegistry.load 失败时带退避重试，而非静默吞错
     // 首次启动若 Neo4j 短暂不可用，后续恢复后会重新加载，避免整个会话周期用空 tag
     this.loadTagRegistryWithRetry();

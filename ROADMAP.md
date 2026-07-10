@@ -76,6 +76,193 @@
 | C-3 场景分类置信度门控 | 简单关键词匹配无置信度阈值，误分类导致检索偏向 | 加权关键词匹配 + 置信度门控（0.30）+ 平局打破 + security-audit 独立分类 | 2h |
 
 > 详细修复方案见 [audit/context-pollution-fix-plan-2026-07-10.md](audit/context-pollution-fix-plan-2026-07-10.md)
+> 上述 C-1/C-2/C-3 已于 v2.1.11 落地，H-1~H-6 六项 Harness 优化同步完成。
+
+### 2026-07-10 完整评审新增项（v2.1.12 代码质量与架构优化）
+
+> 评审报告：见 [完整评审报告](#)（2026-07-10 对话中输出）
+> 评审评分：综合 8.4/10，架构 8.5/10，代码质量 8.0/10，上下文污染治理 9.0/10
+
+| 新编号 | 类别 | 短板 | 实现思路 | 成本 |
+|---|---|---|---|---|
+| R-1 拆分 index.ts | P1 架构 | index.ts ~2300 行，闭包内包含全部生命周期逻辑，代码导航/测试/维护困难 | 提取 assemble/afterTurn 为独立模块，通过依赖注入传递单例 | 2-3天 |
+| R-2 GraphQueryExecutor 接口 | P1 类型安全 | `graphAdapter as any` 类型擦除，ExperienceStorage/TagRegistry 依赖隐式接口 | 定义 `GraphQueryExecutor` 接口，让 ExperienceStorage 依赖接口 | 0.5天 |
+| R-3 Neo4j 集成测试 | P2 测试覆盖 | 636 测试全为单元测试 (mock)，检索链路 Cypher 正确性未在真实环境验证 | 添加 `test/integration/retrieval.integration.test.ts`，条件跳过（无 Neo4j 时） | 1天 |
+| R-4 heartbeat 清理过期 session | P2 内存泄漏 | `lastAssembleExpIdsBySession` 和 `sessionWarmupCache` 的清理是被动的，长生命周期进程可能残留 | heartbeat 中增加主动清理逻辑，过期 30min 以上的条目直接删除 | 0.5天 |
+| R-5 输出质量信号反馈 | P2 闭环优化 | H-5 `evaluateOutputQuality` 结果仅写日志，未反馈到后续检索策略 | 将 `overallScore` 作为下一轮 expMinScore 调整因子，低质量输出时提高检索门槛 | 1天 |
+| R-6 性能基准测试 | P3 性能 | 缺少性能回归测试，无法检测检索延迟/内存退化 | 添加 `test/bench/` 目录，覆盖 Merger/检索网关/经验搜索的基准测试 | 1天 |
+| R-7 recordFailure 去重 | P3 韧性 | 每次重试都调用 recordFailure，单次网络抖动可能触发误熔断 | 改为仅最终失败时计数，重试中间失败仅记录日志 | 0.5h |
+| R-8 全文索引 | P3 性能 | EXPERIENCE 节点的 summary/context/title 无索引，CONTAINS 查询全扫描 | 在 Neo4j 中为 EXPERIENCE 节点创建 TEXT INDEX | 0.5天 |
+
+> R-1~R-8 共 8 项，预计总成本 6-7 天，纳入 v2.1.12 版本。
+
+---
+
+## 三-bis、v2.1.12 详细任务（8 项，按依赖关系分三批）
+
+### 第一批：类型安全 + 韧性修复（无依赖，2 项，0.5-1 天）
+
+#### R-2 GraphQueryExecutor 接口
+
+**目标**：消除 `graphAdapter as any` 类型擦除，让 ExperienceStorage/TagRegistry 依赖显式接口。
+
+**实现要点**：
+- 在 [src/types.ts](src/types.ts) 新增 `GraphQueryExecutor` 接口（`query<T>(cypher, params): Promise<T[]>`）
+- [src/experience/storage.ts](src/experience/storage.ts) 构造函数改为接收 `GraphQueryExecutor`
+- [src/experience/tag-registry.ts](src/experience/tag-registry.ts) 同理
+- [src/retrieval-gateway.ts](src/retrieval-gateway.ts) 去掉 `as any`
+- [src/index.ts](src/index.ts) 初始化处去掉 `as any`
+
+**接入点**：[src/types.ts](src/types.ts)、[src/experience/storage.ts](src/experience/storage.ts)、[src/experience/tag-registry.ts](src/experience/tag-registry.ts)、[src/retrieval-gateway.ts](src/retrieval-gateway.ts)、[src/index.ts](src/index.ts)
+
+**成本**：0.5 天
+
+---
+
+#### R-7 recordFailure 去重
+
+**目标**：修复误熔断——单次调用含 2 次重试，每次重试失败都计数，导致单次网络抖动触发熔断。
+
+**实现要点**：
+- [src/circuit-breaker.ts](src/circuit-breaker.ts) `withCircuitBreaker` 中，重试中间失败仅 `logger.debug`，不调 `recordFailure`
+- 仅在最终失败（所有重试耗尽）时调 `recordFailure`
+- 首次成功时调 `recordSuccess`（已有）
+
+**接入点**：[src/circuit-breaker.ts](src/circuit-breaker.ts)
+
+**成本**：0.5 小时
+
+---
+
+### 第二批：架构优化 + 内存泄漏修复（依赖第一批，3 项，2.5-3 天）
+
+#### R-1 拆分 index.ts
+
+**目标**：将 ~2300 行的 `index.ts` 拆分为可维护的模块。
+
+**实现要点**：
+- 新建 `src/assemble/` 目录，提取 assemble 生命周期逻辑：
+  - `src/assemble/retrieval.ts` — 四层检索编排（L2 qmd / L3 Neo4j / L4 exp 并行）
+  - `src/assemble/injection.ts` — 上下文注入（Merger 合并 + Total Control 裁剪 + 冲突检测 + 预热缓存）
+  - `src/assemble/guidance.ts` — 知识引导语 + 工具指引生成（复用 `buildKnowledgeGuidance` 和 `buildToolGuidance`）
+- 新建 `src/after-turn/` 目录，提取 afterTurn 逻辑：
+  - `src/after-turn/experience.ts` — 经验触发检测 + 三元组提取 + Neo4j upsert
+  - `src/after-turn/quality.ts` — 输出质量评估 + G-8 异步验证回路
+- 通过依赖注入接口传递 `graphAdapter`、`expStore`、`merger`、`qmdClient` 等单例
+- `index.ts` 仅保留 `definePluginEntry` 注册 + 单例初始化 + 生命周期分发
+
+**接入点**：[src/index.ts](src/index.ts) → 拆分为 `src/assemble/` + `src/after-turn/`
+
+**成本**：2-3 天
+
+---
+
+#### R-4 heartbeat 清理过期 session
+
+**目标**：防止 `lastAssembleExpIdsBySession` 和 `sessionWarmupCache` 在长生命周期进程中无限增长。
+
+**实现要点**：
+- 在 [src/index.ts](src/index.ts) heartbeat 中增加清理逻辑
+- 遍历 `lastAssembleExpIdsBySession`，删除 `ts < now - 30min` 的条目
+- 遍历 `sessionWarmupCache`，删除过期条目
+- 同时检查 LRU 上限（`LAST_EXP_MAP_MAX=200`，`WARMUP_CACHE_MAX=100`）
+
+**接入点**：[src/index.ts](src/index.ts) heartbeat
+
+**成本**：0.5 天
+
+---
+
+#### R-5 输出质量信号反馈
+
+**目标**：将 H-5 `evaluateOutputQuality` 的结果反馈到后续检索策略，形成闭环。
+
+**实现要点**：
+- 在 [src/index.ts](src/index.ts) afterTurn 中，将 `overallScore` 存入 per-session 状态
+- 在 assemble 中，根据上一轮 `overallScore` 调整 `expMinScore`：
+  - `overallScore >= 0.7` → 保持默认 `expMinScore`
+  - `overallScore < 0.5` → `expMinScore + 0.1`（提高门槛，减少低质量经验干扰）
+  - `overallScore < 0.3` → `expMinScore + 0.2`
+- 信号仅在当前 session 有效，重启后重置
+
+**接入点**：[src/index.ts](src/index.ts) assemble + afterTurn
+
+**成本**：1 天
+
+---
+
+### 第三批：测试 + 性能（前两批完成后，3 项，1.5-2 天）
+
+#### R-3 Neo4j 集成测试
+
+**目标**：验证检索链路 Cypher 查询在真实 Neo4j 环境中的正确性。
+
+**实现要点**：
+- 新建 `test/integration/retrieval.integration.test.ts`
+- 使用 `NEO4J_URI`/`NEO4J_USER`/`NEO4J_PASSWORD` 环境变量连接真实 Neo4j
+- 无环境变量时 `describe.skip` 跳过
+- 覆盖：`searchByQuery`（含标签过滤）、`searchRelevant`（含时间衰减）、`linkRelated`、`getTopExperiences`
+- 每个测试前后清理测试数据
+
+**接入点**：`test/integration/retrieval.integration.test.ts`
+
+**成本**：1 天
+
+---
+
+#### R-6 性能基准测试
+
+**目标**：建立性能回归检测能力。
+
+**实现要点**：
+- 新建 `test/bench/` 目录
+- `test/bench/merger.bench.ts` — Merger.merge 性能（100/1000/5000 条结果）
+- `test/bench/retrieval.bench.ts` — 检索网关并行检索延迟
+- `test/bench/experience.bench.ts` — 经验搜索延迟（Cypher 查询性能）
+- 使用 `vitest` 的 `bench` 功能（或 `tinybench`）
+- 设置性能基线（baseline），CI 中对比检查
+
+**接入点**：`test/bench/`
+
+**成本**：1 天
+
+---
+
+#### R-8 全文索引优化
+
+**目标**：为 EXPERIENCE 节点的全文搜索字段创建索引，减少 CONTAINS 全扫描。
+
+**实现要点**：
+- 在 [src/experience/storage.ts](src/experience/storage.ts) 或 [src/index.ts](src/index.ts) 初始化时执行：
+  ```cypher
+  CREATE TEXT INDEX experience_summary IF NOT EXISTS
+  FOR (e:EXPERIENCE) ON (e.summary)
+  ```
+- 同理为 `context`、`title` 字段创建索引
+- 幂等操作（`IF NOT EXISTS`），重复执行不报错
+
+**接入点**：[src/experience/storage.ts](src/experience/storage.ts) 或 [src/index.ts](src/index.ts) 初始化
+
+**成本**：0.5 天
+
+---
+
+## 三-ter、v2.1.12 实施顺序
+
+```
+第一批（类型安全 + 韧性修复，0.5-1d）:
+  R-2 (GraphQueryExecutor 接口) → R-7 (recordFailure 去重)
+
+第二批（架构优化 + 内存泄漏修复，2.5-3d，依赖第一批）:
+  R-1 (拆分 index.ts) → R-4 (清理过期 session) + R-5 (质量信号反馈)
+
+第三批（测试 + 性能，1.5-2d，依赖前两批）:
+  R-3 (Neo4j 集成测试) + R-6 (性能基准) + R-8 (全文索引)
+```
+
+**产出**：类型安全 + 架构可维护 + 集成测试覆盖 + 性能基线 + 闭环反馈
+
+> 预计总工期 6-7 天，产出 v2.1.12 版本。
 
 ---
 

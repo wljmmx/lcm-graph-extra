@@ -5,7 +5,7 @@
  * 支持 Query-aware 混合搜索（静态 relevanceScore + 动态 query 匹配 + 标签过滤）。
  */
 
-import { GraphAdapter } from '../adapters/graph-adapter';
+import type { GraphQueryExecutor } from '../types.js';
 import type {
   RawExperience,
   DistilledExperience,
@@ -201,12 +201,32 @@ const CLEANUP_EXPIRED = `
 // ---------------------------------------------------------------------------
 
 export class ExperienceStorage {
-  private adapter: GraphAdapter;
+  private adapter: GraphQueryExecutor;
   private defaultLimit: number;
 
-  constructor(adapter: GraphAdapter, defaultLimit: number = 10) {
+  constructor(adapter: GraphQueryExecutor, defaultLimit: number = 10) {
     this.adapter = adapter;
     this.defaultLimit = defaultLimit;
+  }
+
+  /**
+   * R-8: 确保 EXPERIENCE 节点的全文索引存在。
+   * 为 summary、context、title 字段创建 TEXT INDEX，加速 CONTAINS 查询。
+   * 使用 IF NOT EXISTS 保证幂等，重复执行不报错。
+   */
+  async ensureIndexes(): Promise<void> {
+    const indexes = [
+      `CREATE TEXT INDEX experience_summary_idx IF NOT EXISTS FOR (e:${LABEL}) ON (e.summary)`,
+      `CREATE TEXT INDEX experience_context_idx IF NOT EXISTS FOR (e:${LABEL}) ON (e.context)`,
+      `CREATE TEXT INDEX experience_title_idx IF NOT EXISTS FOR (e:${LABEL}) ON (e.title)`,
+    ];
+    for (const cypher of indexes) {
+      try {
+        await this.adapter.query(cypher);
+      } catch {
+        // 索引创建失败非致命（可能 Neo4j 版本不支持 TEXT INDEX）
+      }
+    }
   }
 
   /**

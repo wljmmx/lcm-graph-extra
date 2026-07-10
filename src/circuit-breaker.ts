@@ -113,9 +113,15 @@ export async function withCircuitBreaker<T>(
       return result;
     } catch (err) {
       lastError = err;
-      recordFailure(name);
+      // R-7: 仅对最终失败计数，避免单次网络抖动触发误熔断
+      if (attempt < retries) {
+        // 中间失败：仅记录日志，不增加 failure 计数
+        // logger.debug?.(`[CB] ${label}: retry ${attempt + 1}/${retries + 1} failed, will retry`);
+      }
     }
   }
+  // R-7: 所有重试耗尽，计数最终失败
+  recordFailure(name);
   throw lastError;
 }
 
