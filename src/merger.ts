@@ -35,6 +35,118 @@ const TYPE_PRIORITY: Record<RetrievalType, number> = {
   raw: 2,
 };
 
+/**
+ * H-1: 检索结果 freshness 评分。
+ * 对检索结果施加时间新鲜度加成，防止过时内容长期占据高位。
+ *
+ * @param updatedAt 内容最后更新时间（毫秒时间戳）
+ * @param halfLifeDays 半衰期（天），默认 30
+ * @returns [0, 1] freshness 分数，越新越接近 1
+ */
+export function computeFreshnessBoost(
+  updatedAt?: number | string,
+  halfLifeDays: number = 30,
+): number {
+  if (updatedAt == null) return 0.5; // 无时间信息 → 中性分数
+  const ts = typeof updatedAt === 'string' ? new Date(updatedAt).getTime() : updatedAt;
+  if (isNaN(ts)) return 0.5;
+  const daysSinceUpdate = (Date.now() - ts) / (1000 * 60 * 60 * 24);
+  if (daysSinceUpdate < 0) return 1.0; // 未来时间（时钟偏差）→ 满分
+  return 1.0 / (1.0 + daysSinceUpdate / halfLifeDays);
+}
+
+/** H-4: 检索结果内容冲突 */
+export interface ContentConflict {
+  type: 'negation' | 'version';
+  description: string;
+  positiveSource: string;
+  negativeSource: string;
+  severity: 'high' | 'medium';
+}
+
+/**
+ * H-4: 检索结果冲突检测。
+ * 检测经验层与图谱层/记忆层之间的信息冲突。
+ *
+ * 冲突模式：
+ *   - 否定模式: "不要用 X" / "避免 X" / "X 已被废弃"
+ *   - 版本冲突: "X v2 替代 X v1" / "X 从 v3 开始不再支持"
+ *
+ * 纯规则匹配，零 LLM 调用。
+ *
+ * @param expResults 经验层检索结果
+ * @param graphResults 图谱层检索结果
+ * @param qmdResults 记忆文件检索结果
+ * @returns 冲突信息数组（最多 3 个）
+ */
+export function detectConflicts(
+  expResults: RetrievalResult[],
+  graphResults: RetrievalResult[],
+  qmdResults: RetrievalResult[],
+): ContentConflict[] {
+  const conflicts: ContentConflict[] = [];
+
+  // 1. 否定模式检测
+  const negationPatterns = [
+    /(?:不要|避免|不推荐|废弃|deprecated|avoid|don'?t)\s*(?:使用|调用|采用)?\s*[`]?(\w+)[`]?/gi,
+    /(?:替代|取代|replace|instead\s+of|prefer)\s*[`]?(\w+)[`]?/gi,
+  ];
+
+  for (const exp of expResults) {
+    const content = (exp?.content ?? '').toLowerCase();
+    for (const pattern of negationPatterns) {
+      pattern.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(content)) !== null) {
+        const negatedEntity = match[1]?.toLowerCase();
+        if (!negatedEntity || negatedEntity.length < 2) continue;
+
+        const graphHasEntity = graphResults.some((r) =>
+          (r?.content ?? '').toLowerCase().includes(negatedEntity),
+        );
+        const qmdHasEntity = qmdResults.some((r) =>
+          (r?.content ?? '').toLowerCase().includes(negatedEntity),
+        );
+
+        if (graphHasEntity || qmdHasEntity) {
+          conflicts.push({
+            type: 'negation',
+            description: `经验建议避免使用 "${negatedEntity}"，但知识图谱或记忆文件中包含该实体的引用`,
+            positiveSource: 'experience',
+            negativeSource: graphHasEntity ? 'graph' : 'qmd',
+            severity: 'high',
+          });
+        }
+      }
+    }
+  }
+
+  // 2. 版本冲突检测
+  const versionPatterns = [
+    /(?:v(\d+)|version\s+(\d+))\s*(?:替代|取代|replace|instead)/gi,
+    /(?:不再支持|no longer support|removed in)\s*(?:v(\d+)|version (\d+))/gi,
+  ];
+
+  for (const exp of expResults) {
+    const content = exp?.content ?? '';
+    for (const pattern of versionPatterns) {
+      pattern.lastIndex = 0;
+      if (pattern.test(content)) {
+        conflicts.push({
+          type: 'version',
+          description: '经验包含版本变更信息，知识库中可能包含旧版本内容',
+          positiveSource: 'experience',
+          negativeSource: 'graph/qmd',
+          severity: 'medium',
+        });
+        break;
+      }
+    }
+  }
+
+  return conflicts.slice(0, 3);
+}
+
 export class Merger {
   private config: MergerConfig;
 
@@ -74,7 +186,10 @@ export class Merger {
     // P6-3: Apply temporal decay to graph results (lightweight, mirrors OpenClaw temporalDecay)
     const decayed = this.applyDecayToResults(sorted);
 
-    return decayed.slice(0, this.config.maxResults);
+    // H-1: Apply freshness boost to all results (qmd + graph)
+    const freshBoosted = this.applyFreshnessBoost(decayed);
+
+    return freshBoosted.slice(0, this.config.maxResults);
   }
 
   /**
@@ -196,6 +311,32 @@ export class Merger {
         ...r,
         score: decayedScore,
         metadata: { ...r.metadata, decayedFrom: r.score, decayFactor },
+      };
+    });
+  }
+
+  /**
+   * H-1: Apply freshness boost to all results.
+   * Unlike applyDecayToResults (which only decays old graph results),
+   * this gives a positive boost to recently updated content from any source.
+   *
+   * Formula: finalScore = score * (0.85 + freshnessBoost * 0.15)
+   * Range: [score * 0.85, score * 1.0] — subtle boost, doesn't dominate ranking
+   */
+  private applyFreshnessBoost(results: RetrievalResult[]): RetrievalResult[] {
+    const halfLife = this.config.decayHalfLifeDays ?? 30;
+    if (halfLife <= 0) return results;
+
+    return results.map((r) => {
+      const updatedAt = r.metadata?.updatedAt as number | string | undefined;
+      if (updatedAt == null) return r; // No timestamp → don't modify score
+      const fresh = computeFreshnessBoost(updatedAt, halfLife);
+      // Subtle boost: 0.85 baseline + 0.15 * freshness → [0.85, 1.0]
+      const boostMultiplier = 0.85 + fresh * 0.15;
+      return {
+        ...r,
+        score: r.score * boostMultiplier,
+        metadata: { ...r.metadata, freshnessBoost: fresh },
       };
     });
   }

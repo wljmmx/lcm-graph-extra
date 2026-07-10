@@ -9,6 +9,7 @@
  */
 
 import type { DynamicTag, TagRegistryResult } from './types';
+import type { GraphQueryExecutor } from '../types.js';
 import { getGlobalLogger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -78,16 +79,12 @@ const INCREMENT_FREE_COUNT = `
 // Tag Registry class
 // ---------------------------------------------------------------------------
 
-interface Neo4jAdapter {
-  query<T = any>(cypher: string, params: Record<string, unknown>): Promise<T[]>;
-}
-
 export class TagRegistry {
-  private adapter: Neo4jAdapter;
+  private adapter: GraphQueryExecutor;
   private _cache: DynamicTag[] | null = null;
   private _patternsCache: Array<{ pattern: RegExp; tagId: string; tagLabel: string }> | null = null;
 
-  constructor(adapter: Neo4jAdapter) {
+  constructor(adapter: GraphQueryExecutor) {
     this.adapter = adapter;
   }
 
@@ -102,7 +99,7 @@ export class TagRegistry {
       }>(LOAD_ALL_TAGS, {});
 
       if (rows && rows.length > 0) {
-        this._cache = rows.map((r) => ({
+        this._cache = (rows as any[]).map((r: any) => ({
           id: r.id,
           label: r.label,
           category: r.category as 'scenario' | 'techStack',

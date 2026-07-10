@@ -85,6 +85,7 @@ export interface ExperienceQueryOptions {
   projects?: string[];          // S-6': 项目名过滤（软过滤，命中任一即可）
   minScore?: number;             // 最低相关性分数
   limit?: number;                // 返回上限
+  halfLifeDays?: number;         // C-1: matchCount 时间衰减半衰期（天），默认 30
 }
 
 export interface ExperienceSearchResult {
