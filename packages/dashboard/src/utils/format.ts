@@ -56,6 +56,85 @@ export function formatTimeWithSeconds(ts: number | null | undefined): string {
   return _fmtTimeWithSeconds.format(new Date(ts));
 }
 
+// ----- 按时间粒度格式化（时序图聚合分析用） -----
+const _fmtHour = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  hour12: false,
+});
+const _fmtDay = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+});
+const _fmtMonth = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: '2-digit',
+});
+
+/** 时间粒度类型 */
+export type TimeGranularity = 'raw' | 'hour' | 'day' | 'week' | 'month';
+
+/**
+ * 按时间粒度格式化时间戳。
+ * - raw: HH:mm
+ * - hour: MM-DD HH
+ * - day: MM-DD
+ * - week: 第 N 周（基于 ISO 周计算）
+ * - month: YYYY-MM
+ */
+export function formatByGranularity(ts: number, g: TimeGranularity): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  switch (g) {
+    case 'hour':
+      return _fmtHour.format(d) + ':00';
+    case 'day':
+      return _fmtDay.format(d);
+    case 'week': {
+      // ISO 周数计算
+      const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const dayNum = tmp.getUTCDay() || 7;
+      tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
+      const weekNum = Math.ceil(((tmp.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+      return `${tmp.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+    }
+    case 'month':
+      return _fmtMonth.format(d);
+    case 'raw':
+    default:
+      return _fmtTime.format(d);
+  }
+}
+
+/**
+ * 获取时间戳在指定粒度下的桶 key（用于分组聚合）。
+ * 同一桶的 key 相同，不同桶的 key 不同。
+ */
+export function timeBucketKey(ts: number, g: TimeGranularity): string {
+  const d = new Date(ts);
+  switch (g) {
+    case 'hour':
+      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}`;
+    case 'day':
+      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    case 'week': {
+      const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const dayNum = tmp.getUTCDay() || 7;
+      tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
+      const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
+      const weekNum = Math.ceil(((tmp.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+      return `${tmp.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+    }
+    case 'month':
+      return `${d.getFullYear()}-${d.getMonth()}`;
+    case 'raw':
+    default:
+      return String(ts);
+  }
+}
+
 // ----- Duration -----
 /**
  * 时长格式化（智能 ms/s）。

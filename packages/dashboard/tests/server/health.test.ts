@@ -101,9 +101,9 @@ describe('GET /api/health/history', () => {
     expect(mockQueryHealthHistory).toHaveBeenCalledWith(144);
   });
 
-  it('n 超过上限 1440 时截断', async () => {
-    await app.inject({ method: 'GET', url: '/api/health/history?n=9999' });
-    expect(mockQueryHealthHistory).toHaveBeenCalledWith(1440);
+  it('n 超过上限 8640 时截断', async () => {
+    await app.inject({ method: 'GET', url: '/api/health/history?n=99999' });
+    expect(mockQueryHealthHistory).toHaveBeenCalledWith(8640);
   });
 
   it('db 无数据时返回空数组', async () => {

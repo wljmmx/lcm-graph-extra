@@ -29,6 +29,7 @@ import {
   NSpin,
   NTabs,
   NTabPane,
+  NSelect,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
 import KpiCard from '../components/KpiCard.vue';
@@ -43,7 +44,31 @@ import {
   type AgentStatus,
   type GraphHealthResponse,
 } from '../api/health';
-import { formatTime, formatTimeWithSeconds } from '../utils/format';
+import { formatTime, formatTimeWithSeconds, formatByGranularity, timeBucketKey, type TimeGranularity } from '../utils/format';
+
+// ===== 时序图时间粒度选择 =====
+// 用户可选择按原始(5min)/小时/天/周/月聚合分析，而非仅按时间堆积
+const granularityOptions = [
+  { label: '原始 (5min)', value: 'raw' as TimeGranularity },
+  { label: '按小时', value: 'hour' as TimeGranularity },
+  { label: '按天', value: 'day' as TimeGranularity },
+  { label: '按周', value: 'week' as TimeGranularity },
+  { label: '按月', value: 'month' as TimeGranularity },
+];
+const timeGranularity = ref<TimeGranularity>('raw');
+
+// 根据粒度决定拉取的数据量（n 条原始点）
+// raw: 144 (12h) / hour: 288 (24h) / day: 2016 (7天) / week: 8640 (30天) / month: 8640 (30天)
+const historyN = computed(() => {
+  switch (timeGranularity.value) {
+    case 'hour': return 288;
+    case 'day': return 2016;
+    case 'week': return 8640;
+    case 'month': return 8640;
+    case 'raw':
+    default: return 144;
+  }
+});
 
 // ===== 数据获取（轮询） =====
 // E1 修复: 解构 isError，HTTP 错误不再被静默吞掉
@@ -53,8 +78,8 @@ const { data: latestData, isLoading: latestLoading, isError: latestIsError } = u
   refetchInterval: 10_000,
 });
 const { data: historyData, isLoading: historyLoading, isError: historyIsError } = useQuery({
-  queryKey: ['health-history'],
-  queryFn: () => fetchHealthHistory(144),
+  queryKey: ['health-history', historyN], // 粒度变化时重新拉取
+  queryFn: () => fetchHealthHistory(historyN.value),
   refetchInterval: 60_000,
 });
 const { data: agentData, isLoading: agentLoading, isError: agentIsError } = useQuery({
@@ -75,9 +100,78 @@ const memory = computed<DashboardSnapshot | null>(
   () => latestData.value?.memory ?? null,
 );
 // DB 返回 DESC（最新在前），时序图需要 ASC（最旧在前）
-const historyAsc = computed<HealthSnapshot[]>(() => {
+const rawHistoryAsc = computed<HealthSnapshot[]>(() => {
   const snaps = historyData.value?.snapshots ?? [];
   return [...snaps].reverse();
+});
+
+/**
+ * 按时间粒度聚合历史快照。
+ *
+ * 聚合规则（不同指标用不同聚合函数）：
+ * - pendingMessages / summaryFragments → max（峰值更有意义）
+ * - maxTokenRatio → avg（平均占用）
+ * - lastAssembleMs / lastL2Ms / lastL3Ms / lastL4Ms → avg（平均延迟）
+ * - tierLow / tierMedium / tierHigh → sum（累计次数）
+ * - cbFailures → max
+ * - timestamp → 桶内最新时间戳（用于 X 轴标签）
+ *
+ * raw 粒度直接返回原始数据。
+ */
+const historyAsc = computed<HealthSnapshot[]>(() => {
+  const snaps = rawHistoryAsc.value;
+  const g = timeGranularity.value;
+  if (g === 'raw' || snaps.length === 0) return snaps;
+
+  // 按时间桶分组
+  const buckets = new Map<string, HealthSnapshot[]>();
+  for (const s of snaps) {
+    const key = timeBucketKey(s.timestamp, g);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(s);
+  }
+
+  // 聚合每个桶
+  const result: HealthSnapshot[] = [];
+  for (const [, group] of buckets) {
+    if (group.length === 0) continue;
+    const avg = (field: keyof HealthSnapshot): number => {
+      const vals = group.map((s) => Number(s[field] ?? 0)).filter((v) => !isNaN(v));
+      return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+    };
+    const max = (field: keyof HealthSnapshot): number => {
+      const vals = group.map((s) => Number(s[field] ?? 0)).filter((v) => !isNaN(v));
+      return vals.length > 0 ? Math.max(...vals) : 0;
+    };
+    const sum = (field: keyof HealthSnapshot): number => {
+      const vals = group.map((s) => Number(s[field] ?? 0)).filter((v) => !isNaN(v));
+      return vals.reduce((a, b) => a + b, 0);
+    };
+    // 取桶内最新时间戳作为标签时间
+    const latestTs = Math.max(...group.map((s) => s.timestamp));
+    result.push({
+      timestamp: latestTs,
+      pendingMessages: Math.round(max('pendingMessages')),
+      summaryFragments: Math.round(max('summaryFragments')),
+      maxTokenRatio: Math.round(avg('maxTokenRatio') * 1000) / 1000,
+      cbLcmAvailable: group.every((s) => s.cbLcmAvailable),
+      cbQmdAvailable: group.every((s) => s.cbQmdAvailable),
+      cbNeo4jAvailable: group.every((s) => s.cbNeo4jAvailable),
+      cbLcmFailures: Math.round(max('cbLcmFailures')),
+      cbQmdFailures: Math.round(max('cbQmdFailures')),
+      cbNeo4jFailures: Math.round(max('cbNeo4jFailures')),
+      lastAssembleMs: Math.round(avg('lastAssembleMs')),
+      lastL2Ms: Math.round(avg('lastL2Ms')),
+      lastL3Ms: Math.round(avg('lastL3Ms')),
+      lastL4Ms: Math.round(avg('lastL4Ms')),
+      pendingExperienceCount: Math.round(max('pendingExperienceCount')),
+      distilledExperienceCount: Math.round(max('distilledExperienceCount')),
+      tierLow: Math.round(sum('tierLow')),
+      tierMedium: Math.round(sum('tierMedium')),
+      tierHigh: Math.round(sum('tierHigh')),
+    });
+  }
+  return result;
 });
 const agent = computed<AgentStatus | null>(() => agentData.value ?? null);
 const graphHealth = computed<GraphHealthResponse | null>(
@@ -117,8 +211,22 @@ const kpiCbFailures = computed<number | string>(() => {
 // ===== 最近更新时间（HH:mm:ss） =====
 const lastUpdated = computed(() => formatTimeWithSeconds(db.value?.timestamp));
 
-// ===== 时序图 X 轴标签（HH:mm） =====
-const timeLabels = computed(() => historyAsc.value.map((s) => formatTime(s.timestamp)));
+// ===== 时序图 X 轴标签（按粒度格式化） =====
+const timeLabels = computed(() =>
+  historyAsc.value.map((s) => formatByGranularity(s.timestamp, timeGranularity.value)),
+);
+
+// 粒度选择器右侧提示：说明当前粒度覆盖的时间范围与聚合方式
+const granularityHint = computed(() => {
+  switch (timeGranularity.value) {
+    case 'hour': return '每小时聚合（max/avg），覆盖最近 24h';
+    case 'day': return '每天聚合，覆盖最近 7 天';
+    case 'week': return '每周聚合，覆盖最近 30 天';
+    case 'month': return '每月聚合，覆盖最近 30 天';
+    case 'raw':
+    default: return '原始 5min 采样，覆盖最近 12h';
+  }
+});
 
 // 时序图1：压力信号（双 Y 轴，左：数量，右：比率 0-1）
 const pressureOption = computed(() => ({
@@ -471,6 +579,19 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         >
           后端 /api/health/history 不可达。服务恢复后将自动重试（每 60 秒轮询）。
         </NAlert>
+        <!-- 时间粒度选择器：支持按原始/小时/天/周/月聚合分析，而非仅按时间堆积 -->
+        <div class="granularity-bar">
+          <span class="granularity-label">时间粒度：</span>
+          <NSelect
+            v-model:value="timeGranularity"
+            :options="granularityOptions"
+            size="small"
+            style="width: 160px"
+          />
+          <span class="granularity-hint">
+            {{ granularityHint }}
+          </span>
+        </div>
         <NSpace vertical :size="12">
           <!-- 压力信号（全宽） -->
           <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
@@ -919,5 +1040,22 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
   align-items: center;
   justify-content: center;
   padding: 24px 0;
+}
+/* 时序图时间粒度选择器工具条 */
+.granularity-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.granularity-label {
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.granularity-hint {
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  opacity: 0.8;
 }
 </style>

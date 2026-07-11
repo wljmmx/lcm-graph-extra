@@ -64,7 +64,7 @@ function rowToSnapshot(row: HealthMetricRow): HealthSnapshot {
 }
 
 const DEFAULT_HISTORY_N = 144; // ~12h of 5min heartbeats
-const MAX_HISTORY_N = 1440; // 上限 1440，防止恶意拉取
+const MAX_HISTORY_N = 8640; // 上限 8640（30 天 × 288 条/天），支持按周/月聚合分析
 
 export async function registerHealthRoutes(app: FastifyInstance): Promise<void> {
   // 历史 health_metrics 时序
