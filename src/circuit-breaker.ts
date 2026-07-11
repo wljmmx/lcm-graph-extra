@@ -17,6 +17,10 @@ interface CircuitState {
   lastFailureAt: number | null;
   halfOpenAt: number | null;
   open: boolean;
+  /** P-CB-1: 半开窗口内已有探测请求在途，其余请求继续熔断防雪崩 */
+  halfOpenProbeInFlight: boolean;
+  /** P-CB-1: 探测请求开始时间，超时后自动释放（防探测 hang 导致永久阻塞） */
+  halfOpenProbeStartedAt: number | null;
 }
 
 const state = new Map<Subsystem, CircuitState>();
@@ -30,29 +34,67 @@ const CONFIG = {
 
 function getState(name: Subsystem): CircuitState {
   if (!state.has(name)) {
-    state.set(name, { failures: 0, lastFailureAt: null, halfOpenAt: null, open: false });
+    state.set(name, {
+      failures: 0,
+      lastFailureAt: null,
+      halfOpenAt: null,
+      open: false,
+      halfOpenProbeInFlight: false,
+      halfOpenProbeStartedAt: null,
+    });
   }
   return state.get(name)!;
 }
 
 /**
+ * P-CB-1: 释放半开探测锁。
+ * 探测超时（halfOpenTimeoutMs）后自动释放，防止单个探测 hang 导致永久阻塞。
+ */
+function releaseStaleProbe(s: CircuitState): void {
+  if (s.halfOpenProbeInFlight && s.halfOpenProbeStartedAt) {
+    if (Date.now() - s.halfOpenProbeStartedAt >= CONFIG.halfOpenTimeoutMs) {
+      s.halfOpenProbeInFlight = false;
+      s.halfOpenProbeStartedAt = null;
+    }
+  }
+}
+
+/**
  * 检查子系统是否可用。
+ *
+ * P-CB-1: 半开窗口内仅放行一个探测请求，其余请求继续返回熔断。
+ * 标准熔断器模式：HALF_OPEN 状态下只允许 1 个请求探测服务是否恢复，
+ * 避免高并发场景下大量请求涌入全部失败导致故障雪崩。
  */
 export function isAvailable(name: Subsystem): boolean {
   const s = getState(name);
   if (!s.open) return true;
 
+  releaseStaleProbe(s);
+
   // 检查 cooldown 是否已过 → 转为半开
   if (s.halfOpenAt && Date.now() >= s.halfOpenAt) {
+    // P-CB-1: 半开窗口内仅放行一个探测请求
+    if (s.halfOpenProbeInFlight) {
+      return false;
+    }
     s.open = false;
     s.halfOpenAt = null;
+    s.halfOpenProbeInFlight = true;
+    s.halfOpenProbeStartedAt = Date.now();
     return true;
   }
 
   // 如果 cooldown 已到但没有 halfOpenAt，设置 halfOpen 窗口
   if (s.lastFailureAt && Date.now() - s.lastFailureAt >= CONFIG.cooldownMs && !s.halfOpenAt) {
+    // P-CB-1: 半开窗口内仅放行一个探测请求
+    if (s.halfOpenProbeInFlight) {
+      return false;
+    }
     s.halfOpenAt = Date.now() + CONFIG.halfOpenTimeoutMs;
     s.open = false;
+    s.halfOpenProbeInFlight = true;
+    s.halfOpenProbeStartedAt = Date.now();
     return true;
   }
 
@@ -61,6 +103,8 @@ export function isAvailable(name: Subsystem): boolean {
 
 /**
  * 记录调用成功（重置失败计数）。
+ *
+ * P-CB-1: 探测成功 → 清除半开探测锁，完全恢复到 CLOSED。
  */
 export function recordSuccess(name: Subsystem): void {
   const s = getState(name);
@@ -68,15 +112,21 @@ export function recordSuccess(name: Subsystem): void {
   s.open = false;
   s.halfOpenAt = null;
   s.lastFailureAt = null;
+  s.halfOpenProbeInFlight = false;
+  s.halfOpenProbeStartedAt = null;
 }
 
 /**
  * 记录调用失败（如果达到阈值则熔断）。
+ *
+ * P-CB-1: 探测失败 → 清除半开探测锁，允许下次 cooldown 后重新探测。
  */
 export function recordFailure(name: Subsystem): void {
   const s = getState(name);
   s.failures++;
   s.lastFailureAt = Date.now();
+  s.halfOpenProbeInFlight = false;
+  s.halfOpenProbeStartedAt = null;
 
   if (s.failures >= CONFIG.threshold) {
     s.open = true;
@@ -153,6 +203,8 @@ export function resetCircuitBreaker(name: string): boolean {
   s.open = false;
   s.halfOpenAt = null;
   s.lastFailureAt = null;
+  s.halfOpenProbeInFlight = false;
+  s.halfOpenProbeStartedAt = null;
   return true;
 }
 
@@ -167,5 +219,7 @@ export function resetAllCircuitBreakers(): void {
     s.open = false;
     s.halfOpenAt = null;
     s.lastFailureAt = null;
+    s.halfOpenProbeInFlight = false;
+    s.halfOpenProbeStartedAt = null;
   }
 }
