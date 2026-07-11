@@ -70,10 +70,18 @@ function releaseStaleProbe(s: CircuitState): void {
  * halfOpenAt 在 recordFailure 中设置为 Date.now() + cooldownMs，
  * 语义为"cooldown 到期时间"。fallback 到 lastFailureAt + cooldownMs
  * 仅为防御异常状态（open=true 但 halfOpenAt=null）。
+ *
+ * P-CB-1 修正: 半开时不设置 open=false，保持 open=true，
+ * 仅通过 halfOpenProbeInFlight 控制放行。探测成功后 recordSuccess
+ * 才设置 open=false。否则 open=false 后 isAvailable 直接返回 true，
+ * halfOpenProbeInFlight 限制被跳过。
  */
 export function isAvailable(name: Subsystem): boolean {
   const s = getState(name);
-  if (!s.open) return true;
+  if (!s.open) {
+    // P-CB-1: CLOSED 状态直接放行（halfOpenProbeInFlight 应为 false）
+    return true;
+  }
 
   releaseStaleProbe(s);
 
@@ -82,11 +90,11 @@ export function isAvailable(name: Subsystem): boolean {
     ?? (s.lastFailureAt ? s.lastFailureAt + CONFIG.cooldownMs : null);
 
   if (cooldownDeadline !== null && Date.now() >= cooldownDeadline) {
-    // P-CB-1: 半开窗口内仅放行一个探测请求
+    // P-CB-1: 半开窗口内仅放行一个探测请求，保持 open=true
     if (s.halfOpenProbeInFlight) {
       return false;
     }
-    s.open = false;
+    // 不设置 open=false，保持 OPEN 状态。探测成功后 recordSuccess 才转为 CLOSED。
     s.halfOpenAt = null;
     s.halfOpenProbeInFlight = true;
     s.halfOpenProbeStartedAt = Date.now();
@@ -178,11 +186,15 @@ export async function withCircuitBreaker<T>(
 
 /**
  * 获取所有子系统健康状态快照。
+ *
+ * P-CB-4: 只读检查，不调用 isAvailable()（避免消耗半开探测机会）。
+ * 仅基于 open 字段判断可用性。半开状态（open=true 且 cooldown 已过）
+ * 报告为 unavailable，实际探测由 heartbeat 主动健康探测或业务请求触发。
  */
-export function getHealthSnapshot(): Record<string, { available: boolean; failures: number }> {
-  const snap: Record<string, { available: boolean; failures: number }> = {};
+export function getHealthSnapshot(): Record<string, { available: boolean; failures: number; open: boolean }> {
+  const snap: Record<string, { available: boolean; failures: number; open: boolean }> = {};
   for (const [name, s] of state) {
-    snap[name] = { available: isAvailable(name), failures: s.failures };
+    snap[name] = { available: !s.open, failures: s.failures, open: s.open };
   }
   return snap;
 }

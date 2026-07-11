@@ -1288,6 +1288,40 @@ const pluginEntry: any = definePluginEntry({
             cbQmdFailures: cbStates?.qmd?.failures ?? 0,
             cbNeo4jFailures: cbStates?.neo4j?.failures ?? 0,
           });
+
+          // P-CB-4: 主动健康探测 —— 对 OPEN 状态的子系统发起探测，加速低峰期恢复
+          const { isAvailable, recordSuccess, recordFailure } = await import('./circuit-breaker.js');
+          // qmd 探测
+          if (cbStates?.qmd?.open && isAvailable('qmd')) {
+            // isAvailable 返回 true 表示半开放行了一个探测请求
+            try {
+              const ok = await qmdClient.ping();
+              if (ok) {
+                recordSuccess('qmd');
+                logger?.info?.("heartbeat: P-CB-4 qmd probe succeeded, circuit breaker recovered");
+              } else {
+                recordFailure('qmd');
+              }
+            } catch (probeErr) {
+              recordFailure('qmd');
+              logger?.debug?.("heartbeat: P-CB-4 qmd probe failed", { err: String(probeErr) });
+            }
+          }
+          // neo4j 探测：用 graphAdapter.isConnected 检查（轻量级，不发实际查询）
+          if (cbStates?.neo4j?.open && isAvailable('neo4j')) {
+            try {
+              const ok = graphAdapter?.isConnected ?? false;
+              if (ok) {
+                recordSuccess('neo4j');
+                logger?.info?.("heartbeat: P-CB-4 neo4j probe succeeded, circuit breaker recovered");
+              } else {
+                recordFailure('neo4j');
+              }
+            } catch (probeErr) {
+              recordFailure('neo4j');
+              logger?.debug?.("heartbeat: P-CB-4 neo4j probe failed", { err: String(probeErr) });
+            }
+          }
         } catch (e) { /* health metrics collection failed, non-fatal */
           logger?.debug?.("heartbeat: health metrics collection failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }

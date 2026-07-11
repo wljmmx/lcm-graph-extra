@@ -67,9 +67,20 @@ export async function injectContext(
 
   const sections: { label: string; body: string; layer: number }[] = [];
 
+  /**
+   * P-CP-2: strip 动态 score/citation 标签后哈希，防止分数微小波动导致去重失效。
+   * 去除 "(相关性: 85%)" 和 "[src:N]" 等动态标签，仅对核心内容哈希。
+   */
+  function stableHashKey(label: string, body: string): string {
+    const stableBody = body
+      .replace(/\s*\(相关性:\s*\d+%\)\s*/g, '')
+      .replace(/\s*\[src:\d+\]\s*/g, '');
+    return quickHash(label + stableBody);
+  }
+
   function addSection(label: string, body: string, layer: number): void {
     if (!body) return;
-    const h = quickHash(label + body);
+    const h = stableHashKey(label, body);
     if (allSessionHashes.has(h)) return;
     allSessionHashes.add(h);
     currentRoundHashes.push(h);
@@ -134,7 +145,8 @@ export async function injectContext(
   if (qmdResults && Array.isArray(qmdResults) && qmdResults.length > 0) {
     const qmdItems = qmdResults
       .slice(0, retrievalLimits.qmd)
-      .filter((r: any) => r.score == null || r.score >= 0.3)
+      // P-CP-3: 增加 content 长度下限过滤，减少无意义碎片（< 20 字符的片段对 LLM 无参考价值）
+      .filter((r: any) => (r.score == null || r.score >= 0.3) && String(r.content ?? '').trim().length >= 20)
       .map((r: any, i: number) => {
         const citationTag = citationsMode === 'always' || citationsMode === 'auto'
           ? ' [src:' + String(i+1) + ']'
