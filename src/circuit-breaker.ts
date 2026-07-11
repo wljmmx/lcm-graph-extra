@@ -65,6 +65,11 @@ function releaseStaleProbe(s: CircuitState): void {
  * P-CB-1: 半开窗口内仅放行一个探测请求，其余请求继续返回熔断。
  * 标准熔断器模式：HALF_OPEN 状态下只允许 1 个请求探测服务是否恢复，
  * 避免高并发场景下大量请求涌入全部失败导致故障雪崩。
+ *
+ * P-CB-2: 统一冷却逻辑为单一时间源。
+ * halfOpenAt 在 recordFailure 中设置为 Date.now() + cooldownMs，
+ * 语义为"cooldown 到期时间"。fallback 到 lastFailureAt + cooldownMs
+ * 仅为防御异常状态（open=true 但 halfOpenAt=null）。
  */
 export function isAvailable(name: Subsystem): boolean {
   const s = getState(name);
@@ -72,27 +77,17 @@ export function isAvailable(name: Subsystem): boolean {
 
   releaseStaleProbe(s);
 
-  // 检查 cooldown 是否已过 → 转为半开
-  if (s.halfOpenAt && Date.now() >= s.halfOpenAt) {
+  // P-CB-2: 统一冷却检查，单一时间源 halfOpenAt（fallback 到 lastFailureAt）
+  const cooldownDeadline = s.halfOpenAt
+    ?? (s.lastFailureAt ? s.lastFailureAt + CONFIG.cooldownMs : null);
+
+  if (cooldownDeadline !== null && Date.now() >= cooldownDeadline) {
     // P-CB-1: 半开窗口内仅放行一个探测请求
     if (s.halfOpenProbeInFlight) {
       return false;
     }
     s.open = false;
     s.halfOpenAt = null;
-    s.halfOpenProbeInFlight = true;
-    s.halfOpenProbeStartedAt = Date.now();
-    return true;
-  }
-
-  // 如果 cooldown 已到但没有 halfOpenAt，设置 halfOpen 窗口
-  if (s.lastFailureAt && Date.now() - s.lastFailureAt >= CONFIG.cooldownMs && !s.halfOpenAt) {
-    // P-CB-1: 半开窗口内仅放行一个探测请求
-    if (s.halfOpenProbeInFlight) {
-      return false;
-    }
-    s.halfOpenAt = Date.now() + CONFIG.halfOpenTimeoutMs;
-    s.open = false;
     s.halfOpenProbeInFlight = true;
     s.halfOpenProbeStartedAt = Date.now();
     return true;
@@ -120,10 +115,13 @@ export function recordSuccess(name: Subsystem): void {
  * 记录调用失败（如果达到阈值则熔断）。
  *
  * P-CB-1: 探测失败 → 清除半开探测锁，允许下次 cooldown 后重新探测。
+ * P-CB-3: failures 计数上限为 threshold*2，防止半开窗口内大量请求
+ * 全部失败导致计数无界增长（诊断失真 + reset 后可能立即再次熔断）。
  */
 export function recordFailure(name: Subsystem): void {
   const s = getState(name);
-  s.failures++;
+  // P-CB-3: 限制 failures 上限为 threshold*2，防止无界增长
+  s.failures = Math.min(s.failures + 1, CONFIG.threshold * 2);
   s.lastFailureAt = Date.now();
   s.halfOpenProbeInFlight = false;
   s.halfOpenProbeStartedAt = null;
@@ -146,7 +144,10 @@ export async function withCircuitBreaker<T>(
 ): Promise<T> {
   if (!isAvailable(name)) {
     const s = getState(name);
-    const retryAfter = s.halfOpenAt ? Math.max(0, s.halfOpenAt - Date.now()) : CONFIG.cooldownMs;
+    // P-CB-2: 统一 retryAfter 计算，与 isAvailable 使用相同的 cooldownDeadline 逻辑
+    const cooldownDeadline = s.halfOpenAt
+      ?? (s.lastFailureAt ? s.lastFailureAt + CONFIG.cooldownMs : Date.now() + CONFIG.cooldownMs);
+    const retryAfter = Math.max(0, cooldownDeadline - Date.now());
     throw new Error(`${label}: circuit breaker OPEN (retry in ${Math.ceil(retryAfter / 1000)}s)`);
   }
 

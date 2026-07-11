@@ -13,7 +13,7 @@ export const DEFAULTS = {
   /** 跨轮去重缓存（sessionDedupCache + _sessionOverheadCache 共用） */
   dedup: {
     maxCapacity: 500,        // 最大 session 数
-    ttlMs: 60 * 60 * 1000,   // 1h 未访问即淘汰
+    ttlMs: 4 * 60 * 60 * 1000, // P-CP-1: 4h 未访问即淘汰（原 1h 偏短，长会话中经验重复注入）
     maxRounds: 24,           // 每会话保留的最近轮次哈希窗口
   },
 

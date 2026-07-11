@@ -1,7 +1,7 @@
 /**
  * Session-isolated dedup cache (LRU)
  *
- * - max 500 sessions, 1h TTL
+ * - max 500 sessions, 4h TTL (P-CP-1: 原 1h 偏短，长会话中经验重复注入)
  * - each session tracks hashes for up to 24 rounds of conversation
  */
 import { DEFAULTS } from "../config/defaults.js";
