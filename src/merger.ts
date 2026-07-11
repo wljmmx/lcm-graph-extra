@@ -86,6 +86,13 @@ export function detectConflicts(
 ): ContentConflict[] {
   const conflicts: ContentConflict[] = [];
 
+  // P1-5: 经验层为空时无需检测冲突（否定/版本模式均依赖 exp 内容）
+  if (!expResults || expResults.length === 0) return conflicts;
+  // P1-5: graph 和 qmd 均为空时无法产生跨层冲突
+  if ((!graphResults || graphResults.length === 0) && (!qmdResults || qmdResults.length === 0)) {
+    return conflicts;
+  }
+
   // 1. 否定模式检测
   const negationPatterns = [
     /(?:不要|避免|不推荐|废弃|deprecated|avoid|don'?t)\s*(?:使用|调用|采用)?\s*[`]?(\w+)[`]?/gi,

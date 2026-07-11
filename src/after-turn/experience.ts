@@ -7,7 +7,9 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { appendFile, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { detectExperienceTrigger, extractRawExperience } from '../experience/index.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { cleanBaseURL } from '../utils/url.js';
@@ -29,8 +31,7 @@ export async function extractTriplets(
 
   // A方案：写入提取队列供 graph-memory-pro 后台服务消费（推荐路径）
   try {
-    const { appendFile, mkdir } = await import('node:fs/promises');
-    const { join } = await import('node:path');
+    // P1-6: 已改为静态导入，避免每次 afterTurn 的 await import 开销
     const queueDir = join(
       process.env.HOME || process.env.USERPROFILE || '.',
       '.openclaw', 'graph-memory-pro'

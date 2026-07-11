@@ -332,24 +332,27 @@ export async function performRetrieval(
 
   const parallelMs = Date.now() - parallelStart;
 
-  // ---- Parallel Phase 2: multiGet ----
+  // P1-4: multiGet 与 cascade evaluation 并行化。
+  // multiGet 只依赖 qmdResults，cascade 的重活（judgeRecall/Tier2/Tier3）是 fire-and-forget，
+  // 本地 evaluateTier1 + thompsonRerank 很快。让 multiGet 先启动，cascade 本地部分并行执行，
+  // 最后 await multiGet。原串行 multiGet(50-300ms) + cascade 本地(1-10ms) → 并行 max(300ms, 10ms)。
   const mgStart = Date.now();
   const topFiles = [...new Set(
     (qmdResults ?? []).slice(0, retrievalLimits.qmd).map((r: any) => r.file).filter(Boolean)
   )];
 
-  let fullDocs: string[] = [];
-  if (topFiles.length > 0) {
+  // P1-4: multiGet 启动为 Promise，不立即 await
+  const fullDocsPromise: Promise<string[]> = (async () => {
+    if (topFiles.length === 0) return [];
     try {
-      fullDocs = await ctx.qmdClient.multiGet(topFiles.join(','));
+      return await ctx.qmdClient.multiGet(topFiles.join(','));
     } catch {
       ctx.logger?.debug?.("assemble: qmd multiGet failed, returning empty");
-      fullDocs = [];
+      return [];
     }
-  }
-  const mgMs = Date.now() - mgStart;
+  })();
 
-  // ---- R-2 cascade evaluation ----
+  // ---- R-2 cascade evaluation (与 multiGet 并行) ----
   let cascadeConfidence = { tier1Score: 0.5, needsTier2: false, needsTier3: false, hasFactualClaim: false };
   try {
     const seenIds = new Set<string>();
@@ -532,6 +535,15 @@ export async function performRetrieval(
   } catch (r2Err) {
     ctx.logger?.debug?.("R-2 cascade evaluation skipped", { err: String(r2Err) });
   }
+
+  // P1-4: await multiGet Promise（cascade 本地部分已并行完成）
+  let fullDocs: string[] = [];
+  try {
+    fullDocs = await fullDocsPromise;
+  } catch {
+    fullDocs = [];
+  }
+  const mgMs = Date.now() - mgStart;
 
   return {
     qmdResults,
