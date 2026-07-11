@@ -341,7 +341,7 @@ export class GraphMemoryManager {
 
   clone(): GraphMemoryManager {
     const copy = new GraphMemoryManager();
-    for (const [id, node] of this.nodes) {
+    for (const [, node] of this.nodes) {
       copy.addNode({ ...node });
     }
     for (const edge of this.edges) {

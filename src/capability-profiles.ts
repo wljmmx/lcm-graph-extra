@@ -182,7 +182,6 @@ export function setCurrentProfile(id: CapabilityProfileId): CapabilityProfile {
   if (!CAPABILITY_PROFILES[id]) {
     throw new Error(`Unknown capability profile: ${id}`);
   }
-  const oldId = _currentProfileId;
   _currentProfileId = id;
   const profile = CAPABILITY_PROFILES[id];
   // 通知所有回调

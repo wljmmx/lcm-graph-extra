@@ -62,7 +62,6 @@ export class HealthMetricsCollector {
   // 初始化 promise 缓存，防止并发 collect 触发多次 init 导致 DB 连接泄漏
   private initPromise: Promise<void> | null = null;
   // assemble 指标更新后标记 dirty，下次 persist 时连同最新快照一起写入
-  private dirtySinceLastPersist = false;
 
   /** 收集一次指标快照 */
   collect(snapshot: Partial<HealthSnapshot>): void {
@@ -101,7 +100,6 @@ export class HealthMetricsCollector {
       this.snapshots.shift();
     }
     // 新快照已含当前 assemble 指标，清除 dirty 标记
-    this.dirtySinceLastPersist = false;
 
     // 异步写入 lcm.db（非阻塞）
     this.persistToDb(full).catch(() => { /* non-fatal */ });
@@ -150,7 +148,6 @@ export class HealthMetricsCollector {
     else if (tier === 'medium') latest.tierMedium++;
     else if (tier === 'high') latest.tierHigh++;
     // 非法 tier 值忽略（不静默归入 high）
-    this.dirtySinceLastPersist = true;
 
     // v1.2.0-1: 同步写入延迟直方图（用于 Prometheus P50/P90/P95/P99 暴露）
     latencyHistograms.assemble.observe(assembleMs);
@@ -209,7 +206,6 @@ export class HealthMetricsCollector {
         ? saved
         : latest.tokenSavedRatio * 0.8 + saved * 0.2;
     }
-    this.dirtySinceLastPersist = true;
   }
 
   /**
@@ -388,7 +384,6 @@ export class HealthMetricsCollector {
   /** 重置（测试用）—— 清空内存快照并关闭 DB */
   reset(): void {
     this.snapshots = [];
-    this.dirtySinceLastPersist = false;
     this.close();
   }
 }

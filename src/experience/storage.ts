@@ -202,11 +202,9 @@ const CLEANUP_EXPIRED = `
 
 export class ExperienceStorage {
   private adapter: GraphQueryExecutor;
-  private defaultLimit: number;
 
-  constructor(adapter: GraphQueryExecutor, defaultLimit: number = 10) {
+  constructor(adapter: GraphQueryExecutor) {
     this.adapter = adapter;
-    this.defaultLimit = defaultLimit;
   }
 
   /**
@@ -285,11 +283,9 @@ export class ExperienceStorage {
    */
   async searchByQuery(options: ExperienceQueryOptions): Promise<ExperienceSearchResult[]> {
     const {
-      freeTags: queryFreeTags = [],
       query,
       scenarioTags = [],
       techStackTags = [],
-      projects = [],
       minScore = 0.6,
       limit = 5,
       halfLifeDays = 30,

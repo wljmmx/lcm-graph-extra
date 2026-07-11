@@ -6,7 +6,7 @@
 
 import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
-import { DEFAULTS, llmTimeout } from '../config/defaults.js';
+import { llmTimeout } from '../config/defaults.js';
 import { withKeepAliveIfOllama } from '../utils/url.js';
 import { serializeError } from '../utils/logger.js';
 import { evaluateOutputQuality } from './quality.js';
@@ -32,7 +32,6 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     }
   }
 
-  const _lcAfterStart = Date.now();
   try {
     await ctx.losslessClawAdapter?.afterTurn?.({
       ...params,

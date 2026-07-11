@@ -228,7 +228,6 @@ export class Merger {
       const { primary, supplemental } = this.pickBest(group);
 
       const crossSource = group.sources.size > 1;
-      const basePriority = crossSource ? 0 : 1;
 
       // Primary result
       ranked.push({

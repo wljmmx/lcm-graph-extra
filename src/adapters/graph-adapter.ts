@@ -198,7 +198,6 @@ export class GraphAdapter {
   private neo4jConfig: Neo4jConfig;
   private logger: Logger;
   private _recaller: any = null;
-  private _gmConfig: Record<string, any> = {};
   private _embedFn: any = null;
   private _llm?: (system: string, user: string) => Promise<string>;
 
@@ -240,9 +239,7 @@ export class GraphAdapter {
       // - Initialize Recaller (gm-pro dual-path recall) -
       try {
         // P2-17: 用 buildGmConfig 统一构建，避免重复硬编码
-        const gmCfg: Record<string, any> = buildGmConfig(this.neo4jConfig);
-        this._recaller = new mod.Recaller(this.driver, gmCfg);
-        this._gmConfig = gmCfg;
+        this._recaller = new mod.Recaller(this.driver, buildGmConfig(this.neo4jConfig));
 
         // Set embedding function for community generalized recall
         try {
@@ -421,7 +418,6 @@ export class GraphAdapter {
       let session: any = null;
       try {
         session = this.driver.session();
-        const placeholder = nodeIds.map((_, i) => `$nid${i}`).join(',');
         const batchResult = await session.run(
           `MATCH (n:Task|Skill|Event) WHERE n.id IN $ids RETURN n.id AS id, n.communityId AS communityId`,
           { ids: nodeIds },

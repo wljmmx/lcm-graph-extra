@@ -10,7 +10,7 @@
 
 import { execFile } from 'node:child_process';
 import { writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { getGlobalLogger } from './logger.js';
 
@@ -123,7 +123,6 @@ function exportFallbackPdf(markdown: string, filename: string): PdfExportResult 
   const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
   const totalPages = Math.max(1, Math.ceil(wrappedLines.length / linesPerPage));
 
-  let pdfContent = '';
   const pageObjects: string[] = [];
 
   for (let page = 0; page < totalPages; page++) {

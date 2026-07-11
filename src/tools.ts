@@ -9,7 +9,7 @@ import { Type } from "typebox";
 import * as neo4jDriver from 'neo4j-driver';
 import { createRequire } from "node:module";
 const _lcmRequire = createRequire(import.meta.url);
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
@@ -18,7 +18,7 @@ import { getGlobalLogger } from './utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from './utils/url.js';
 import { exportMarkdownToPdf, exportMarkdownToFile } from './utils/pdf-export.js';
 // P2-9: 接入集中化 LLM 超时常量
-import { DEFAULTS, llmTimeout } from './config/defaults.js';
+import { llmTimeout } from './config/defaults.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -507,11 +507,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         // 优先使用 gm-pro 时间范围结果（已过滤，跳过 Cypher 时间过滤）
         let result: any;
         let usedExperienceNodes = false;
-        let usedGmProNodes = false;
 
         if (gmProNodes && gmProNodes.length > 0) {
           // gm-pro 返回的节点直接构造 records-like 对象供后续 format 处理
-          usedGmProNodes = true;
           usedExperienceNodes = true;
           result = {
             records: gmProNodes.map((n: any) => ({
@@ -1512,7 +1510,6 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // --- Phase 1: Compare lossless-claw conversation IDs with Neo4j ---
       push("## Phase 1: Conversation ↔ Neo4j entity cross-reference\n");
-      let lcmConvIds = new Set<number>();
       let neo4jMsgNodes = 0;
       let orphanNodes = 0;
       let orphanedIds: string[] = [];
@@ -1521,7 +1518,6 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       try {
         db = openDb();
         const convs = db.prepare("SELECT DISTINCT conversation_id FROM messages").all() as any[];
-        lcmConvIds = new Set(convs.map((c: any) => c.conversation_id));
         push(`  lossless-claw: ${convs.length} active conversations\n`);
       } catch (e: any) { push(`  ❌ lossless-claw: ${e.message}\n`); }
       finally { if (db) { try { db.close(); } catch {} } }

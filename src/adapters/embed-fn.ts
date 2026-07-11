@@ -24,7 +24,7 @@
 import type { EmbeddingConfig } from '../types.js';
 import { cleanBaseURL, isOllamaEndpoint } from '../utils/url.js';
 // P2-9: 接入集中化 LLM 超时常量
-import { DEFAULTS, llmTimeout } from '../config/defaults.js';
+import { llmTimeout } from '../config/defaults.js';
 
 // ---------------------------------------------------------------------------
 // LRU 缓存：相同 query 文本的 embedding 结果缓存，避免重复请求 Ollama

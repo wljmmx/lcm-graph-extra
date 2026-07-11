@@ -58,9 +58,7 @@ import { healthMetrics } from './health-metrics.js';
 const lastAssembleExpIdsBySession = new Map<string, { ids: Array<{ id: string; summary: string; query: string }>; ts: number }>();
 
 // R-1: buildKnowledgeGuidance 已提取到 src/assemble/guidance.ts
-import { buildKnowledgeGuidance } from './assemble/guidance.js';
 // R-1: evaluateOutputQuality 已提取到 src/after-turn/quality.ts
-import { evaluateOutputQuality, type OutputQualityMetrics } from './after-turn/quality.js';
 // R-1: assemble 核心逻辑已提取到 src/assemble/index.ts
 import { assemble as assembleCore } from './assemble/index.js';
 import type { AssembleContext } from './assemble/types.js';
@@ -69,16 +67,14 @@ import { afterTurn as afterTurnCore } from './after-turn/index.js';
 import type { AfterTurnContext } from './after-turn/types.js';
 
 // R-2: 成本感知级联管理器 —— 全局单例
-import { cascadeManager, CascadeManager } from './cascade-manager.js';
+import { cascadeManager } from './cascade-manager.js';
 
 // H-6: 会话级预热缓存 — bootstrap 时预加载高频经验，assemble 第一轮注入
 const sessionWarmupCache = new Map<string, any[]>();
 const WARMUP_CACHE_MAX = 100;
-const WARMUP_CACHE_TTL_MS = 30 * 60 * 1000; // 30min TTL
 
 // R-5: 会话级输出质量评分 — afterTurn 评估后录入，assemble 中用于调整检索门槛
 const sessionQualityScores = new Map<string, number>();
-const QUALITY_SCORE_TTL_MS = 60 * 60 * 1000; // 1h TTL
 
 // P0-1: 会话级 LLM Rerank 异步缓存 — fire-and-forget 结果供下一轮 assemble 使用
 const llmRerankCache = new Map<string, { query: string; results: any[]; ts: number }>();
@@ -88,7 +84,6 @@ const LLM_RERANK_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
 // P2-1: L2/L4 检索结果 LRU 缓存（同 query 短期复用，TTL 5min）
 const l2QueryCache = new Map<string, { results: any[]; ts: number }>();
 const l4QueryCache = new Map<string, { results: any[]; ts: number }>();
-const QUERY_CACHE_MAX = 50;
 const QUERY_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
 
 // P2-2: heartbeat 文件 mtimeMs 缓存 —— 仅读取修改时间变化的文件
@@ -97,21 +92,10 @@ const sessionFileCache = new Map<string, { mtimeMs: number; data: any; msgCount:
 // debt 文件缓存解析后的 tokenRatio
 const debtFileCache = new Map<string, { mtimeMs: number; ratio: number }>();
 
-// applyTotalControl 已抽出到 src/plugin/token-control.ts
-import { applyTotalControl } from "./plugin/token-control.js";
-
 // Tool-aware retrieval strategy helpers 已抽出到 src/plugin/tool-guidance.ts
-import {
-  extractAvailableTools,
-  hasSelfCategory,
-  hasToolCategory,
-  listActiveCategories,
-  buildToolGuidance,
-} from "./plugin/tool-guidance.js";
 
 // Session-isolated dedup & overhead caches
-import { getSessionDedup, setMaxDedupRounds, evictStaleDedupPublic } from "./plugin/dedup-cache.js";
-import { getOverhead, setOverhead } from "./plugin/overhead-cache.js";
+import { setMaxDedupRounds, evictStaleDedupPublic } from "./plugin/dedup-cache.js";
 
 // Distillation helpers
 import * as distillationModule from "./plugin/distillation.js";
@@ -205,7 +189,7 @@ const pluginEntry: any = definePluginEntry({
           logger?.warn?.("init: Neo4j unavailable, L3/L4 will be skipped", { err: (err as Error).message });
         }
 
-        expStore = new ExperienceStorage(graphAdapter, 3);
+        expStore = new ExperienceStorage(graphAdapter);
 
         // R-8: 确保 EXPERIENCE 节点全文索引（summary/context/title）
         try {
@@ -893,7 +877,7 @@ const pluginEntry: any = definePluginEntry({
     let lastDebtReconcileRun = 0;
     const DEBT_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
     // Distillation helpers 已抽出到 src/plugin/distillation.ts
-    const { distillOne, runDistillation, resolveDistillationLlm } = distillationModule;
+    const { runDistillation, resolveDistillationLlm } = distillationModule;
 
     async function runHeartbeat() {
       if (!initialized) return;
