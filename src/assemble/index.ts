@@ -6,6 +6,8 @@
 
 import { extractAvailableTools, hasToolCategory } from '../plugin/tool-guidance.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
+// P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
+import { healthMetrics } from '../health-metrics.js';
 import {
   type PressureTier,
   determinePressureTier,
@@ -344,7 +346,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
     // N-4: 记录 assemble 性能指标
     try {
-      const { healthMetrics } = await import('../health-metrics.js');
+      // P0-6: 已改为静态导入
       healthMetrics.recordAssemble(tier, Date.now() - assembleStart, l2_ms, l3_ms, l4_ms);
     } catch (e) { /* non-fatal */
       ctx.logger?.debug?.("recordAssemble failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
@@ -431,7 +433,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   // Final return block
   // ==================================================================
   try {
-    const messageTokens = estimateTokensFromMessages(finalMessages);
+    // P0-5: 缓存 messageTokens，避免对同一 finalMessages 数组重复计算
+    let messageTokens = estimateTokensFromMessages(finalMessages);
     let additionTokens = 0;
     if (typeof systemPromptAddition === "string" && systemPromptAddition.length > 0) {
       additionTokens = estimateTokensFromText(systemPromptAddition);
@@ -443,6 +446,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
         const buffer: any[] = [...finalMessages];
         const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+        // P0-5: per-message token 估算只算一次，trimming 循环中减去即可
         const msgTokenEst: number[] = buffer.map((m: any) => estimateTokensFromMessages([m]));
         let runningTokens = messageTokens;
         while (buffer.length > systemCount + 1) {
@@ -453,11 +457,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           msgTokenEst.splice(idx, 1);
           if (runningTokens + additionTokens <= contextWindow * 0.85) {
             finalMessages = buffer;
+            messageTokens = runningTokens; // P0-5: 复用 trimming 后的 token 数
             break;
           }
         }
-        if (estimateTokensFromMessages(finalMessages) + additionTokens > contextWindow * 0.85) {
+        // P0-5: 仅在 finalMessages 被替换为 buffer 时才需要重算
+        if (finalMessages === buffer && runningTokens + additionTokens > contextWindow * 0.85) {
           finalMessages = buffer;
+          // buffer 未变，messageTokens 已是 runningTokens，无需重算
         }
       }
     }
@@ -469,12 +476,16 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     const validatedMessages = Array.isArray(finalMessages) && finalMessages.length > 0
       ? finalMessages
       : (params.messages ?? []);
+    // P0-5: 仅在 validatedMessages 不是 finalMessages 时重算
+    if (validatedMessages !== finalMessages) {
+      messageTokens = estimateTokensFromMessages(validatedMessages);
+    }
     const validatedAddition = (typeof systemPromptAddition === "string" && systemPromptAddition.trim().length > 0)
       ? systemPromptAddition
       : undefined;
 
     try {
-      const { healthMetrics } = await import('../health-metrics.js');
+      // P0-6: 已改为静态导入
       healthMetrics.recordUxMetrics({
         degraded,
         degradedReasons: degraded ? degradedReasons : undefined,

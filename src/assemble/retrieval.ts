@@ -17,6 +17,8 @@ import { withKeepAliveIfOllama } from '../utils/url.js';
 import { CascadeManager } from '../cascade-manager.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
+// P0-6: 热路径 healthMetrics 静态导入
+import { healthMetrics } from '../health-metrics.js';
 import type { AssembleContext, RetrievalOutput } from './types.js';
 
 /** P2-1: L2/L4 检索结果缓存 TTL（与 L3 searchWithCache 5min 一致） */
@@ -382,7 +384,7 @@ export async function performRetrieval(
       // 主路径直接使用 evaluateTier1 的本地 confidence；judgeRecall 结果异步反馈
       // 到 healthMetrics + cascade arms，影响下一轮 thompsonRerank。
       try {
-        const { healthMetrics } = await import('../health-metrics.js');
+        // P0-6: 已改为静态导入
         healthMetrics.recordCascadeConfidence(confidence.tier1Score ?? 0, 'local');
       } catch (e) { /* non-fatal */
         ctx.logger?.debug?.("recordCascadeConfidence failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
@@ -408,7 +410,7 @@ export async function performRetrieval(
           );
           if (judgeResult && typeof judgeResult.tier1Confidence === 'number') {
             try {
-              const { healthMetrics } = await import('../health-metrics.js');
+              // P0-6: 已改为静态导入
               healthMetrics.recordCascadeConfidence(judgeResult.tier1Confidence, 'gm-pro');
             } catch { /* non-fatal */ }
             // 反馈到 cascade arms（gm-pro 高置信 → 正反馈，影响下一轮采样）

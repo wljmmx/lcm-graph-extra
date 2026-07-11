@@ -1059,78 +1059,81 @@ const pluginEntry: any = definePluginEntry({
           logger?.debug?.("heartbeat: pressure check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }
         
-        // --- 2. qmd MCP health check ---
-        if (qmdClient && typeof qmdClient.ping === "function") {
-          try {
-            const qmdOnline = await qmdClient.ping();
-            if (!qmdOnline) {
-              logger?.warn?.("heartbeat: qmd MCP unavailable");
-            }
-          } catch (e) { /* qmd health check failed, non-fatal */
-            logger?.debug?.("heartbeat: qmd health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
-          }
-        }
-
-        // --- 2b. Graph / Neo4j health check + auto reconnect ---
-        // 图谱连接断开后，heartbeat 每 5 分钟探测一次并尝试自动重连，
-        // 避免服务恢复后需要等用户主动触发检索才能恢复。
-        if (graphAdapter && typeof graphAdapter.health === "function") {
-          try {
-            const graphOk = await graphAdapter.health();
-            if (!graphOk) {
-              logger?.warn?.("heartbeat: graph/neo4j unavailable, will retry on next heartbeat");
-            }
-          } catch (e) { /* graph health check failed, non-fatal */
-            logger?.debug?.("heartbeat: graph health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
-          }
-        }
-
-        // --- 2c. Embedding API health check ---
-        // 定期探测 embedding 服务可用性，更新状态供 dashboard 展示
-        // 和 gm-pro 向量召回的可用性判断。
-        try {
-          const { probeEmbeddingHealth } = await import("./adapters/embed-fn.js");
-          if (typeof probeEmbeddingHealth === "function") {
-            const embedCfg = api.pluginConfig?.embedding;
-            if (embedCfg?.baseURL) {
-              const embedOk = await probeEmbeddingHealth(embedCfg);
-              _lastEmbedHealth = embedOk;
-              if (!embedOk) {
-                logger?.warn?.("heartbeat: embedding API unavailable");
+        // P0-4: 4 个健康检查并行化（原串行 200-800ms → 并行 max(单个) ~200ms）
+        // qmd ping / graph health / embedding probe / snapshot ping 独立无依赖，并行执行。
+        // snapshot server restart 依赖 ping 结果，在并行块之后处理。
+        let _snapshotPingOk = true;
+        await Promise.all([
+          // --- 2. qmd MCP health check ---
+          (async () => {
+            if (qmdClient && typeof qmdClient.ping === "function") {
+              try {
+                const qmdOnline = await qmdClient.ping();
+                if (!qmdOnline) {
+                  logger?.warn?.("heartbeat: qmd MCP unavailable");
+                }
+              } catch (e) {
+                logger?.debug?.("heartbeat: qmd health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
               }
             }
-          }
-        } catch (e) { /* embedding health check failed, non-fatal */
-          logger?.debug?.("heartbeat: embedding health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
-        }
-
-        // --- 2d. Snapshot server health check + auto-restart ---
-        // 插件启动时 snapshot server 可能因端口被占等原因启动失败，
-        // heartbeat 中定期检查并重试启动，确保端口释放后能自动恢复。
-        // 此外，server 可能启动后因运行时错误/崩溃而无响应（started 仍为 true），
-        // 通过主动 ping /internal/health 检测并触发重启。
-        if (snapshotConfig && snapshotHandle) {
-          // 主动健康检查：即使 started=true，也 ping 一次确认 server 真正可响应
-          if (snapshotHandle.started) {
+          })(),
+          // --- 2b. Graph / Neo4j health check ---
+          (async () => {
+            if (graphAdapter && typeof graphAdapter.health === "function") {
+              try {
+                const graphOk = await graphAdapter.health();
+                if (!graphOk) {
+                  logger?.warn?.("heartbeat: graph/neo4j unavailable, will retry on next heartbeat");
+                }
+              } catch (e) {
+                logger?.debug?.("heartbeat: graph health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+              }
+            }
+          })(),
+          // --- 2c. Embedding API health check ---
+          (async () => {
             try {
-              const pingUrl = `http://${snapshotConfig.host}:${snapshotConfig.port}/internal/health`;
-              const pingResp = await fetch(pingUrl, {
-                signal: AbortSignal.timeout(2000),
-              }).catch(() => null);
-              if (!pingResp || !pingResp.ok) {
-                // server 无响应，标记为未启动以触发重试
-                logger?.warn?.(`heartbeat: snapshot server health check failed (port ${snapshotConfig.port} unresponsive), marking for restart`);
-                snapshotHandle.started = false;
-                snapshotHandle.failureReason = 'health check failed: server unresponsive';
-                // 尝试停止旧 server（可能已僵死）
-                try { await snapshotServerStop?.(); } catch {}
-                snapshotServerStop = null;
+              const { probeEmbeddingHealth } = await import("./adapters/embed-fn.js");
+              if (typeof probeEmbeddingHealth === "function") {
+                const embedCfg = api.pluginConfig?.embedding;
+                if (embedCfg?.baseURL) {
+                  const embedOk = await probeEmbeddingHealth(embedCfg);
+                  _lastEmbedHealth = embedOk;
+                  if (!embedOk) {
+                    logger?.warn?.("heartbeat: embedding API unavailable");
+                  }
+                }
               }
-            } catch {
-              // ping 异常，标记为未启动
-              snapshotHandle.started = false;
-              snapshotHandle.failureReason = 'health check threw';
+            } catch (e) {
+              logger?.debug?.("heartbeat: embedding health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
             }
+          })(),
+          // --- 2d. Snapshot server ping (restart 逻辑在并行块后处理) ---
+          (async () => {
+            if (snapshotConfig && snapshotHandle && snapshotHandle.started) {
+              try {
+                const pingUrl = `http://${snapshotConfig.host}:${snapshotConfig.port}/internal/health`;
+                const pingResp = await fetch(pingUrl, {
+                  signal: AbortSignal.timeout(2000),
+                }).catch(() => null);
+                if (!pingResp || !pingResp.ok) {
+                  _snapshotPingOk = false;
+                }
+              } catch {
+                _snapshotPingOk = false;
+              }
+            }
+          })(),
+        ]);
+
+        // --- 2d-续. Snapshot server restart (依赖 ping 结果) ---
+        if (snapshotConfig && snapshotHandle) {
+          if (snapshotHandle.started && !_snapshotPingOk) {
+            logger?.warn?.(`heartbeat: snapshot server health check failed (port ${snapshotConfig.port} unresponsive), marking for restart`);
+            snapshotHandle.started = false;
+            snapshotHandle.failureReason = 'health check failed: server unresponsive';
+            try { await snapshotServerStop?.(); } catch {}
+            snapshotServerStop = null;
           }
           // 重试启动（started=false 时）
           if (!snapshotHandle.started) {
