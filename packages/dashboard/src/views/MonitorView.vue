@@ -44,29 +44,36 @@ import {
   type AgentStatus,
   type GraphHealthResponse,
 } from '../api/health';
-import { formatTime, formatTimeWithSeconds, formatByGranularity, timeBucketKey, type TimeGranularity } from '../utils/format';
+import { formatTime, formatTimeWithSeconds, formatBucketLabel, bucketKeyBySize, timeRangeToMs, timeRangeLabel, bucketSizeLabel, type TimeRange, type BucketSize } from '../utils/format';
 
-// ===== 时序图时间粒度选择 =====
-// 用户可选择按原始(5min)/小时/天/周/月聚合分析，而非仅按时间堆积
-const granularityOptions = [
-  { label: '原始 (5min)', value: 'raw' as TimeGranularity },
-  { label: '按小时', value: 'hour' as TimeGranularity },
-  { label: '按天', value: 'day' as TimeGranularity },
-  { label: '按周', value: 'week' as TimeGranularity },
-  { label: '按月', value: 'month' as TimeGranularity },
+// ===== 时序图：时间范围 + 统计粒度（两个独立维度） =====
+// 时间范围：筛选最近 N 时间内的数据（1h/1d/1w/1m）
+// 统计粒度：数据点如何分桶聚合（实时/1min/5min/10min/1h）
+const timeRangeOptions = [
+  { label: '最近 1 小时', value: '1h' as TimeRange },
+  { label: '最近 1 天', value: '1d' as TimeRange },
+  { label: '最近 1 周', value: '1w' as TimeRange },
+  { label: '最近 1 月', value: '1m' as TimeRange },
 ];
-const timeGranularity = ref<TimeGranularity>('raw');
+const bucketSizeOptions = [
+  { label: '实时记录', value: 'raw' as BucketSize },
+  { label: '1 分钟', value: '1min' as BucketSize },
+  { label: '5 分钟', value: '5min' as BucketSize },
+  { label: '10 分钟', value: '10min' as BucketSize },
+  { label: '1 小时', value: '1h' as BucketSize },
+];
+const timeRange = ref<TimeRange>('1h');
+const bucketSize = ref<BucketSize>('raw');
 
-// 根据粒度决定拉取的数据量（n 条原始点）
-// raw: 144 (12h) / hour: 288 (24h) / day: 2016 (7天) / week: 8640 (30天) / month: 8640 (30天)
+// 根据时间范围决定拉取的数据量（n 条原始点，5min 心跳 = 288/天）
+// 多取 ~10% 余量，前端再按 timestamp 精确过滤
 const historyN = computed(() => {
-  switch (timeGranularity.value) {
-    case 'hour': return 288;
-    case 'day': return 2016;
-    case 'week': return 8640;
-    case 'month': return 8640;
-    case 'raw':
-    default: return 144;
+  switch (timeRange.value) {
+    case '1h': return 24;       // 12 点 + 余量
+    case '1d': return 300;      // 288 + 余量
+    case '1w': return 2100;     // 2016 + 余量
+    case '1m': return 8640;     // 30 天上限
+    default: return 24;
   }
 });
 
@@ -100,13 +107,17 @@ const memory = computed<DashboardSnapshot | null>(
   () => latestData.value?.memory ?? null,
 );
 // DB 返回 DESC（最新在前），时序图需要 ASC（最旧在前）
+// v2.2.4: 按时间范围精确过滤（historyN 只是近似拉取量，这里按 timestamp 严格筛选）
 const rawHistoryAsc = computed<HealthSnapshot[]>(() => {
   const snaps = historyData.value?.snapshots ?? [];
-  return [...snaps].reverse();
+  if (snaps.length === 0) return [];
+  const rangeMs = timeRangeToMs(timeRange.value);
+  const cutoff = Date.now() - rangeMs;
+  return snaps.filter((s) => s.timestamp >= cutoff).reverse();
 });
 
 /**
- * 按时间粒度聚合历史快照。
+ * 按统计粒度聚合历史快照。
  *
  * 聚合规则（不同指标用不同聚合函数）：
  * - pendingMessages / summaryFragments → max（峰值更有意义）
@@ -116,17 +127,17 @@ const rawHistoryAsc = computed<HealthSnapshot[]>(() => {
  * - cbFailures → max
  * - timestamp → 桶内最新时间戳（用于 X 轴标签）
  *
- * raw 粒度直接返回原始数据。
+ * raw 粒度直接返回原始数据（实时记录累计，不聚合）。
  */
 const historyAsc = computed<HealthSnapshot[]>(() => {
   const snaps = rawHistoryAsc.value;
-  const g = timeGranularity.value;
-  if (g === 'raw' || snaps.length === 0) return snaps;
+  const size = bucketSize.value;
+  if (size === 'raw' || snaps.length === 0) return snaps;
 
-  // 按时间桶分组
+  // 按统计粒度分桶
   const buckets = new Map<string, HealthSnapshot[]>();
   for (const s of snaps) {
-    const key = timeBucketKey(s.timestamp, g);
+    const key = bucketKeyBySize(s.timestamp, size);
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key)!.push(s);
   }
@@ -211,21 +222,19 @@ const kpiCbFailures = computed<number | string>(() => {
 // ===== 最近更新时间（HH:mm:ss） =====
 const lastUpdated = computed(() => formatTimeWithSeconds(db.value?.timestamp));
 
-// ===== 时序图 X 轴标签（按粒度格式化） =====
+// ===== 时序图 X 轴标签（按统计粒度格式化） =====
 const timeLabels = computed(() =>
-  historyAsc.value.map((s) => formatByGranularity(s.timestamp, timeGranularity.value)),
+  historyAsc.value.map((s) => formatBucketLabel(s.timestamp, bucketSize.value)),
 );
 
-// 粒度选择器右侧提示：说明当前粒度覆盖的时间范围与聚合方式
-const granularityHint = computed(() => {
-  switch (timeGranularity.value) {
-    case 'hour': return '每小时聚合（max/avg），覆盖最近 24h';
-    case 'day': return '每天聚合，覆盖最近 7 天';
-    case 'week': return '每周聚合，覆盖最近 30 天';
-    case 'month': return '每月聚合，覆盖最近 30 天';
-    case 'raw':
-    default: return '原始 5min 采样，覆盖最近 12h';
-  }
+// 选择器右侧提示：当前时间范围 + 统计粒度 + 数据点数
+const rangeBucketHint = computed(() => {
+  const pts = historyAsc.value.length;
+  const range = timeRangeLabel(timeRange.value);
+  const bucket = bucketSizeLabel(bucketSize.value);
+  let hint = `${range} · 粒度 ${bucket} · ${pts} 个数据点`;
+  if (pts > 2000) hint += '（点数过多，建议选更粗的统计粒度）';
+  return hint;
 });
 
 // 时序图1：压力信号（双 Y 轴，左：数量，右：比率 0-1）
@@ -579,17 +588,24 @@ const activeTab = ref<'kpi' | 'charts' | 'panels'>('kpi');
         >
           后端 /api/health/history 不可达。服务恢复后将自动重试（每 60 秒轮询）。
         </NAlert>
-        <!-- 时间粒度选择器：支持按原始/小时/天/周/月聚合分析，而非仅按时间堆积 -->
+        <!-- 时间范围 + 统计粒度选择器（两个独立维度） -->
         <div class="granularity-bar">
-          <span class="granularity-label">时间粒度：</span>
+          <span class="granularity-label">时间范围：</span>
           <NSelect
-            v-model:value="timeGranularity"
-            :options="granularityOptions"
+            v-model:value="timeRange"
+            :options="timeRangeOptions"
             size="small"
-            style="width: 160px"
+            style="width: 140px"
+          />
+          <span class="granularity-label" style="margin-left: 12px">统计粒度：</span>
+          <NSelect
+            v-model:value="bucketSize"
+            :options="bucketSizeOptions"
+            size="small"
+            style="width: 120px"
           />
           <span class="granularity-hint">
-            {{ granularityHint }}
+            {{ rangeBucketHint }}
           </span>
         </div>
         <NSpace vertical :size="12">

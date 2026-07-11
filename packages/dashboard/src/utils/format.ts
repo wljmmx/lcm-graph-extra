@@ -56,82 +56,99 @@ export function formatTimeWithSeconds(ts: number | null | undefined): string {
   return _fmtTimeWithSeconds.format(new Date(ts));
 }
 
-// ----- 按时间粒度格式化（时序图聚合分析用） -----
-const _fmtHour = new Intl.DateTimeFormat('zh-CN', {
+// ----- 时序图：时间范围 + 统计粒度（两个独立维度） -----
+
+/**
+ * 时间范围：筛选最近 N 时间内的数据。
+ * 与统计粒度独立 —— "最近1天"指数据范围，不决定如何分桶。
+ */
+export type TimeRange = '1h' | '1d' | '1w' | '1m';
+
+/**
+ * 统计粒度：数据点如何分桶聚合。
+ * - raw: 实时记录累计，不聚合（每个原始点独立显示）
+ * - 1min/5min/10min/1h: 按时间窗口分桶，桶内聚合
+ */
+export type BucketSize = 'raw' | '1min' | '5min' | '10min' | '1h';
+
+const _fmtHourBucket = new Intl.DateTimeFormat('zh-CN', {
   month: '2-digit',
   day: '2-digit',
   hour: '2-digit',
   hour12: false,
 });
-const _fmtDay = new Intl.DateTimeFormat('zh-CN', {
-  month: '2-digit',
-  day: '2-digit',
-});
-const _fmtMonth = new Intl.DateTimeFormat('zh-CN', {
-  year: 'numeric',
-  month: '2-digit',
-});
 
-/** 时间粒度类型 */
-export type TimeGranularity = 'raw' | 'hour' | 'day' | 'week' | 'month';
+/** 时间范围 → 毫秒数 */
+export function timeRangeToMs(range: TimeRange): number {
+  switch (range) {
+    case '1h': return 3_600_000;
+    case '1d': return 86_400_000;
+    case '1w': return 604_800_000;
+    case '1m': return 2_592_000_000; // 30 天
+    default: return 3_600_000;
+  }
+}
+
+/** 时间范围 → 中文标签 */
+export function timeRangeLabel(range: TimeRange): string {
+  switch (range) {
+    case '1h': return '最近 1 小时';
+    case '1d': return '最近 1 天';
+    case '1w': return '最近 1 周';
+    case '1m': return '最近 1 月';
+    default: return '';
+  }
+}
 
 /**
- * 按时间粒度格式化时间戳。
- * - raw: HH:mm
- * - hour: MM-DD HH
- * - day: MM-DD
- * - week: 第 N 周（基于 ISO 周计算）
- * - month: YYYY-MM
+ * 获取时间戳在指定统计粒度下的桶 key（用于分组聚合）。
+ * 同一桶的 key 相同，不同桶的 key 不同。
+ * raw 粒度返回唯一 key（每个点独立）。
  */
-export function formatByGranularity(ts: number, g: TimeGranularity): string {
+export function bucketKeyBySize(ts: number, size: BucketSize): string {
+  switch (size) {
+    case '1min': return String(Math.floor(ts / 60_000) * 60_000);
+    case '5min': return String(Math.floor(ts / 300_000) * 300_000);
+    case '10min': return String(Math.floor(ts / 600_000) * 600_000);
+    case '1h': {
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}`;
+    }
+    case 'raw':
+    default:
+      return String(ts);
+  }
+}
+
+/**
+ * 按统计粒度格式化桶标签（X 轴）。
+ * - raw/1min/5min/10min: HH:mm（分钟级桶显示时间）
+ * - 1h: MM-DD HH:00（小时级桶显示日期+小时）
+ */
+export function formatBucketLabel(ts: number, size: BucketSize): string {
   if (!ts) return '—';
   const d = new Date(ts);
-  switch (g) {
-    case 'hour':
-      return _fmtHour.format(d) + ':00';
-    case 'day':
-      return _fmtDay.format(d);
-    case 'week': {
-      // ISO 周数计算
-      const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-      const dayNum = tmp.getUTCDay() || 7;
-      tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
-      const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
-      const weekNum = Math.ceil(((tmp.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
-      return `${tmp.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
-    }
-    case 'month':
-      return _fmtMonth.format(d);
+  switch (size) {
+    case '1h':
+      return _fmtHourBucket.format(d) + ':00';
+    case '1min':
+    case '5min':
+    case '10min':
     case 'raw':
     default:
       return _fmtTime.format(d);
   }
 }
 
-/**
- * 获取时间戳在指定粒度下的桶 key（用于分组聚合）。
- * 同一桶的 key 相同，不同桶的 key 不同。
- */
-export function timeBucketKey(ts: number, g: TimeGranularity): string {
-  const d = new Date(ts);
-  switch (g) {
-    case 'hour':
-      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}`;
-    case 'day':
-      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-    case 'week': {
-      const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-      const dayNum = tmp.getUTCDay() || 7;
-      tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
-      const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
-      const weekNum = Math.ceil(((tmp.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
-      return `${tmp.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
-    }
-    case 'month':
-      return `${d.getFullYear()}-${d.getMonth()}`;
-    case 'raw':
-    default:
-      return String(ts);
+/** 统计粒度 → 中文标签 */
+export function bucketSizeLabel(size: BucketSize): string {
+  switch (size) {
+    case 'raw': return '实时记录';
+    case '1min': return '1 分钟';
+    case '5min': return '5 分钟';
+    case '10min': return '10 分钟';
+    case '1h': return '1 小时';
+    default: return '';
   }
 }
 
