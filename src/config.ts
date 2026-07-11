@@ -99,7 +99,21 @@ export const PluginConfigSchema = Type.Object({
 
   distillationIntervalMs: Type.Number({ default: 2 * 60 * 60 * 1000 }),
 
-  tripletTimeoutMs: Type.Number({ default: 8000 }),
+  tripletTimeoutMs: Type.Number({ default: 60_000 }),
+
+  // v2.2.3: LLM 调用超时集中可配置（针对本地大模型调优，原散落 DEFAULTS 不可覆盖）
+  // 注意：keepAlive 是 Ollama 模型内存驻留时间，不是请求超时，两者无关。
+  llmTimeouts: Type.Optional(Type.Object({
+    rerankTimeoutMs: Type.Optional(Type.Number({ default: 30_000, minimum: 1_000 })),
+    judgeTimeoutMs: Type.Optional(Type.Number({ default: 60_000, minimum: 1_000 })),
+    validateTimeoutMs: Type.Optional(Type.Number({ default: 45_000, minimum: 1_000 })),
+    summarizeTimeoutMs: Type.Optional(Type.Number({ default: 90_000, minimum: 1_000 })),
+    embedTimeoutMs: Type.Optional(Type.Number({ default: 60_000, minimum: 1_000 })),
+    graphLlmTimeoutMs: Type.Optional(Type.Number({ default: 90_000, minimum: 1_000 })),
+    cascadeTier2Ms: Type.Optional(Type.Number({ default: 60_000, minimum: 1_000 })),
+    cascadeTier3Ms: Type.Optional(Type.Number({ default: 90_000, minimum: 1_000 })),
+    distillMs: Type.Optional(Type.Number({ default: 120_000, minimum: 1_000 })),
+  })),
 
   // M-10: experienceTtlIntervalMs 需在 schema 中声明，否则用户无法通过 openclaw.json 配置
   // （heartbeat 中用 api.pluginConfig?.experienceTtlIntervalMs 读取，缺失则 fallback 24h）
@@ -282,7 +296,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   cliTimeout: 30_000,
   cliFallbackSearchType: 'search',
   distillationIntervalMs: 2 * 60 * 60 * 1000,
-  tripletTimeoutMs: 8000,
+  tripletTimeoutMs: 60_000,
   experienceTtlIntervalMs: 24 * 60 * 60 * 1000,
 };
 

@@ -74,7 +74,7 @@ describe('Config Schema Compatibility — real-world config', () => {
     expect(parsed.cliTimeout).toBe(30000);
     expect(parsed.cliFallbackSearchType).toBe('search');
     expect(parsed.distillationIntervalMs).toBe(2 * 60 * 60 * 1000);
-    expect(parsed.tripletTimeoutMs).toBe(8000);
+    expect(parsed.tripletTimeoutMs).toBe(60_000);
   });
 
   it('should passthrough extra fields without rejecting them', () => {

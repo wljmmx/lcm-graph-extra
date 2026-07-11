@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
 // v1.2.0-3: 业务指标 —— 跟踪蒸馏成功率
 import { businessMetrics } from '../health-metrics.js';
+import { llmTimeout } from '../config/defaults.js';
 
 export function isOllamaModel(model: string): boolean {
   // 判断主会话模型是否为 Ollama 本地模型。
@@ -68,7 +69,8 @@ export async function distillOne(
     + ' relatedConcepts (array of 2-5 short keywords/phrases representing closely related topics or concepts for cross-linking).'
     + ' Return ONLY JSON.';
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
+  // v2.2.3: 原 15s 硬编码 → 可配置（默认 120s，蒸馏输入较长，本地大模型需更宽容）
+  const timer = setTimeout(() => controller.abort(), llmTimeout('distillMs'));
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;

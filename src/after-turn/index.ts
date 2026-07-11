@@ -6,7 +6,7 @@
 
 import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
-import { DEFAULTS } from '../config/defaults.js';
+import { DEFAULTS, llmTimeout } from '../config/defaults.js';
 import { withKeepAliveIfOllama } from '../utils/url.js';
 import { serializeError } from '../utils/logger.js';
 import { evaluateOutputQuality } from './quality.js';
@@ -165,7 +165,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                 const resp = await fetch(llm.baseURL + '/chat/completions', {
                   method: 'POST', headers,
                   body: JSON.stringify(body),
-                  signal: AbortSignal.timeout(DEFAULTS.llm.validateTimeoutMs),
+                  signal: AbortSignal.timeout(llmTimeout('validateTimeoutMs')),
                 });
                 if (!resp.ok) return;
                 const data: any = await resp.json();

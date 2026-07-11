@@ -20,6 +20,7 @@ export interface RecallConfidence {
 }
 
 import { getGlobalLogger } from './utils/logger.js';
+import { llmTimeout } from './config/defaults.js';
 
 /** Thompson 采样的 Beta 分布臂 */
 interface BetaArm {
@@ -182,10 +183,12 @@ export class CascadeManager {
     const prompt = `Given the user query and the following search results, determine which results are truly relevant to answering the query.\nQuery: "${query.slice(0, 500)}"\nResults:\n${resultList}\n\nReturn a JSON array of objects with "id" and "relevant" (true/false) for each result. Example: [{"id":"result_id","relevant":true}]. Return ONLY JSON.`;
 
     try {
-      // 加 10s 超时，防止 LLM 挂起导致 Promise 永久 pending
+      // 加超时，防止 LLM 挂起导致 Promise 永久 pending
+      // v2.2.3: 原 10s 硬编码 → 可配置（默认 60s，兼容本地大模型）
+      const tier2TimeoutMs = llmTimeout('cascadeTier2Ms');
       let tier2Timer: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<string>((_, reject) => {
-        tier2Timer = setTimeout(() => reject(new Error('Tier2 LLM timeout')), 10_000);
+        tier2Timer = setTimeout(() => reject(new Error('Tier2 LLM timeout')), tier2TimeoutMs);
       });
       timeoutPromise.catch(() => {}); // 预吞 rejection 防 unhandledRejection
       const response = await Promise.race([llmFn(prompt), timeoutPromise]);
@@ -252,10 +255,11 @@ export class CascadeManager {
       return claims;
     };
 
-    // 15s 超时保护
+    // 超时保护：v2.2.3 原 15s 硬编码 → 可配置（默认 90s）
+    const tier3TimeoutMs = llmTimeout('cascadeTier3Ms');
     let tier3Timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      tier3Timer = setTimeout(() => reject(new Error('Tier3 verification timeout')), 15_000);
+      tier3Timer = setTimeout(() => reject(new Error('Tier3 verification timeout')), tier3TimeoutMs);
     });
     timeoutPromise.catch(() => {}); // 预吞 rejection
 

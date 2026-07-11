@@ -22,7 +22,7 @@ import type { Logger } from '../utils/logger.js';
 import { resolveLogger, getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
 // P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
-import { DEFAULTS } from '../config/defaults.js';
+import { DEFAULTS, llmTimeout } from '../config/defaults.js';
 // v1.2.0-3: 业务指标 —— 跟踪 searchWithCache 的 TTL 命中率
 import { businessMetrics } from '../health-metrics.js';
 
@@ -888,7 +888,7 @@ export class GraphAdapter {
         { model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 },
         keepAlive,
       );
-      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(DEFAULTS.llm.graphLlmTimeoutMs) });
+      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(llmTimeout('graphLlmTimeoutMs')) });
       if (!res.ok) throw new Error('LLM ' + res.status);
       const data = await res.json();
       return (data as any)?.choices?.[0]?.message?.content ?? '';

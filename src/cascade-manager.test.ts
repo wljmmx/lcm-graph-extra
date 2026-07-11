@@ -10,8 +10,9 @@
  * - arms LRU 淘汰
  * - 采样函数健壮性（退化输入不崩溃）
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { CascadeManager, cascadeManager } from './cascade-manager.js';
+import { configureLlmTimeouts } from './config/defaults.js';
 
 describe('CascadeManager', () => {
   let mgr: CascadeManager;
@@ -202,14 +203,17 @@ describe('CascadeManager', () => {
       expect(out).toEqual([]);
     });
 
-    it('LLM 超时（>10s）返回空数组', async () => {
-      const slowLlm = async () => new Promise<string>((resolve) => setTimeout(() => resolve('[]'), 12_000));
+    it('LLM 超时返回空数组', async () => {
+      // v2.2.3: 超时已可配置，测试中设为 1s 避免等待 60s 默认值
+      configureLlmTimeouts({ cascadeTier2Ms: 1000 });
+      const slowLlm = async () => new Promise<string>((resolve) => setTimeout(() => resolve('[]'), 5_000));
       const start = Date.now();
       const out = await mgr.evaluateTier2('q', [{ id: 'a', content: 'x' }], slowLlm);
       const elapsed = Date.now() - start;
       expect(out).toEqual([]);
-      // 应在 ~10s 超时后返回，而非等待 12s
-      expect(elapsed).toBeLessThan(11_500);
+      // 应在 ~1s 超时后返回，而非等待 5s
+      expect(elapsed).toBeLessThan(3_000);
+      configureLlmTimeouts({}); // 恢复默认
     });
   });
 

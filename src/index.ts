@@ -28,7 +28,7 @@ import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { PluginConfigSchema } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
-import { DEFAULTS } from "./config/defaults.js";
+import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
 
 import {
   getConversationId,
@@ -242,6 +242,9 @@ const pluginEntry: any = definePluginEntry({
         if (api.pluginConfig?.lcmMonitor?.dedupRounds) {
           setMaxDedupRounds(api.pluginConfig.lcmMonitor.dedupRounds);
         }
+
+        // v2.2.3: 从 pluginConfig 应用 LLM 超时覆盖（支持 openclaw.json 中 llmTimeouts 配置）
+        configureLlmTimeouts(api.pluginConfig?.llmTimeouts);
 
         // Read provider model context window from openclaw.json
         try {
@@ -520,7 +523,7 @@ const pluginEntry: any = definePluginEntry({
               if (msg.includes('aborted')) {
                 logger?.warn?.("compact: DAG compaction aborted by host", { err: serializeError(ceErr) });
               } else if (msg.includes('timeout')) {
-                logger?.warn?.("compact: DAG compaction timed out after 30s", { err: serializeError(ceErr) });
+                logger?.warn?.("compact: DAG compaction timed out after 300s", { err: serializeError(ceErr) });
               } else {
                 logger?.warn?.("compact: background DAG compaction failed", { err: serializeError(ceErr) });
               }
@@ -584,7 +587,7 @@ const pluginEntry: any = definePluginEntry({
             if (msg.includes('aborted')) {
               logger?.warn?.("compact: onCompaction hook aborted by host", { err: serializeError(hookErr) });
             } else if (msg.includes('timeout')) {
-              logger?.warn?.("compact: onCompaction hook timed out after 30s", { err: serializeError(hookErr) });
+              logger?.warn?.("compact: onCompaction hook timed out after 300s", { err: serializeError(hookErr) });
             } else {
               logger?.warn?.("compact: onCompaction hook failed (non-fatal)", { err: serializeError(hookErr) });
             }

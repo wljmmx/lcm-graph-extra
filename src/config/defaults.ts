@@ -9,6 +9,51 @@
  * 注：当前仅作为常量声明集中点；运行时配置覆盖仍走 PluginConfigSchema。
  * 各消费方 import 此处的常量，避免魔术数字散落。
  */
+
+/**
+ * LLM 调用超时默认值（v2.2.3 重新调优）。
+ *
+ * 背景：原默认值（3s/8s/10s）针对远程 API 设计，本地大模型（qwen3.6 q_4 on 4090+64G）
+ * 单次推理 3-60s + Ollama 串行排队，频繁误超时导致 rerank/triplet/validation 持续失败。
+ *
+ * 注意：keepAlive（如 '1h'）是 Ollama 模型内存驻留时间，不是请求超时，两者无关。
+ */
+const LLM_TIMEOUT_DEFAULTS = {
+  rerankTimeoutMs: 30_000,       // merger LLM rerank（原 3s → 30s，兼容 72B 排队）
+  judgeTimeoutMs: 60_000,        // R-2 Tier 2 LLM judgment（原 10s → 60s）
+  validateTimeoutMs: 45_000,     // G-8 afterTurn 相关性验证（原 8s → 45s）
+  summarizeTimeoutMs: 90_000,    // 经验回顾摘要（原 20s → 90s，输入较长）
+  embedTimeoutMs: 60_000,        // embedding 调用（原 30s → 60s，embed 通常较快但留余量）
+  graphLlmTimeoutMs: 90_000,     // graph-adapter LLM / 三元组提取 fetch fallback（原 30s → 90s）
+  /** cascade Tier2 LLM 判断超时（原 cascade-manager.ts 硬编码 10s） */
+  cascadeTier2Ms: 60_000,
+  /** cascade Tier3 工具验证超时（原 cascade-manager.ts 硬编码 15s） */
+  cascadeTier3Ms: 90_000,
+  /** 单条经验蒸馏超时（原 distillation.ts 硬编码 15s） */
+  distillMs: 120_000,
+} as const;
+
+export type LlmTimeoutField = keyof typeof LLM_TIMEOUT_DEFAULTS;
+
+// 运行时覆盖（由 index.ts 从 pluginConfig.llmTimeouts 应用，允许用户通过 openclaw.json 调整）
+let llmTimeoutOverrides: Partial<typeof LLM_TIMEOUT_DEFAULTS> = {};
+
+/**
+ * 从 config 应用 LLM 超时覆盖（插件初始化时调用一次）。
+ * 仅覆盖显式提供的字段，其余保持默认值。
+ */
+export function configureLlmTimeouts(overrides?: Partial<typeof LLM_TIMEOUT_DEFAULTS>): void {
+  if (overrides) llmTimeoutOverrides = { ...overrides };
+}
+
+/**
+ * 读取 LLM 超时值：优先运行时覆盖（来自 config.llmTimeouts），否则默认值。
+ * 消费方应使用此函数而非直接读 DEFAULTS.llm.*，以支持运行时配置覆盖。
+ */
+export function llmTimeout(field: LlmTimeoutField): number {
+  return llmTimeoutOverrides[field] ?? LLM_TIMEOUT_DEFAULTS[field];
+}
+
 export const DEFAULTS = {
   /** 跨轮去重缓存（sessionDedupCache + _sessionOverheadCache 共用） */
   dedup: {
@@ -43,15 +88,10 @@ export const DEFAULTS = {
   },
 
   // BUGFIX(P2-9): LLM 调用超时集中化（原散落 6 处硬编码 1.5s~30s，跨 20 倍不一致）。
-  /** LLM 调用超时（P2-9: 集中化，原散落 6 处硬编码 1.5s~30s） */
-  llm: {
-    rerankTimeoutMs: 3_000,       // merger LLM rerank（原 1500 过短，慢模型易误超时）
-    judgeTimeoutMs: 10_000,       // R-2 Tier 2 LLM judgment（原 8000）
-    validateTimeoutMs: 8_000,     // G-8 afterTurn 相关性验证（原 5000）
-    summarizeTimeoutMs: 20_000,   // 经验回顾摘要（原 15000）
-    embedTimeoutMs: 30_000,       // embedding 调用（原 30000，保持不变）
-    graphLlmTimeoutMs: 30_000,    // graph-adapter LLM（原 30000，保持不变）
-  },
+  // v2.2.3: 针对 4090+64G+qwen3.6 q_4 本地模型重新调优（原 3s/8s/10s 在本地大模型下频繁误超时）。
+  //   - 单次推理：32B q_4 ≈ 3-10s，72B q_4(CPU offload) ≈ 15-60s
+  //   - 并发排队：rerank+triplet+validation+Tier2 同轮触发，Ollama 串行排队 → 需更宽容超时
+  llm: LLM_TIMEOUT_DEFAULTS,
 
   /** 图谱适配器（graph-adapter.ts） */
   graph: {

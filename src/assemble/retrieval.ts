@@ -11,7 +11,7 @@
 
 import { detectScenarioAndAdjustLimits } from '../lcm-bridge.js';
 import { withCircuitBreaker } from '../circuit-breaker.js';
-import { DEFAULTS } from '../config/defaults.js';
+import { DEFAULTS, llmTimeout } from '../config/defaults.js';
 import { hasSelfCategory } from '../plugin/tool-guidance.js';
 import { withKeepAliveIfOllama } from '../utils/url.js';
 import { CascadeManager } from '../cascade-manager.js';
@@ -297,7 +297,7 @@ export async function performRetrieval(
                   const resp = await fetch(llmCfg!.baseURL + '/chat/completions', {
                     method: 'POST', headers,
                     body: JSON.stringify(body),
-                    signal: AbortSignal.timeout(DEFAULTS.llm.rerankTimeoutMs),
+                    signal: AbortSignal.timeout(llmTimeout('rerankTimeoutMs')),
                   });
                   if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
                   const data: any = await resp.json();
@@ -475,7 +475,7 @@ export async function performRetrieval(
               const resp = await fetch(llm.baseURL + '/chat/completions', {
                 method: 'POST', headers,
                 body: JSON.stringify(body),
-                signal: AbortSignal.timeout(DEFAULTS.llm.judgeTimeoutMs),
+                signal: AbortSignal.timeout(llmTimeout('judgeTimeoutMs')),
               });
               if (!resp.ok) throw new Error(`LLM HTTP ${resp.status}`);
               const data: any = await resp.json();

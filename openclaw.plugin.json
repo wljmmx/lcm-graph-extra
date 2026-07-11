@@ -171,7 +171,25 @@
       },
       "tripletTimeoutMs": {
         "type": "integer",
-        "default": 8000
+        "default": 60000,
+        "minimum": 1000,
+        "description": "Timeout (ms) for afterTurn triplet extraction LLM call. Default 60s (tuned for local large models). Was 8s (too short for local qwen3.6 q_4)."
+      },
+      "llmTimeouts": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rerankTimeoutMs": { "type": "integer", "default": 30000, "minimum": 1000, "description": "LLM rerank timeout (ms). Default 30s." },
+          "judgeTimeoutMs": { "type": "integer", "default": 60000, "minimum": 1000, "description": "Cascade Tier2 LLM judgment fetch timeout (ms). Default 60s." },
+          "validateTimeoutMs": { "type": "integer", "default": 45000, "minimum": 1000, "description": "G-8 experience relevance validation timeout (ms). Default 45s." },
+          "summarizeTimeoutMs": { "type": "integer", "default": 90000, "minimum": 1000, "description": "Experience review summary timeout (ms). Default 90s." },
+          "embedTimeoutMs": { "type": "integer", "default": 60000, "minimum": 1000, "description": "Embedding call timeout (ms). Default 60s." },
+          "graphLlmTimeoutMs": { "type": "integer", "default": 90000, "minimum": 1000, "description": "Graph-adapter LLM (triplet extraction fetch fallback) timeout (ms). Default 90s." },
+          "cascadeTier2Ms": { "type": "integer", "default": 60000, "minimum": 1000, "description": "Cascade Tier2 LLM Promise.race timeout (ms). Default 60s." },
+          "cascadeTier3Ms": { "type": "integer", "default": 90000, "minimum": 1000, "description": "Cascade Tier3 tool verification timeout (ms). Default 90s." },
+          "distillMs": { "type": "integer", "default": 120000, "minimum": 1000, "description": "Single experience distillation timeout (ms). Default 120s." }
+        },
+        "description": "LLM call timeouts (ms). Tuned for local large models (4090+64G+qwen3.6 q_4). NOTE: keepAlive is Ollama model memory retention time, NOT request timeout — they are unrelated."
       },
       "experienceTtlIntervalMs": {
         "type": "integer",
@@ -423,7 +441,8 @@
             "type": "integer"
           },
           "keepAlive": {
-            "type": "string"
+            "type": "string",
+            "description": "Ollama model memory retention time (e.g. '1h' = keep model loaded 1h after last request). This is NOT a request timeout — see llmTimeouts for request timeouts."
           }
         }
       },
@@ -454,7 +473,8 @@
           },
           "keepAlive": {
             "type": "string",
-            "default": "1h"
+            "default": "1h",
+            "description": "Ollama model memory retention time (e.g. '1h' = keep model loaded 1h after last request). This is NOT a request timeout — see llmTimeouts for request timeouts."
           }
         }
       },

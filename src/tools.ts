@@ -18,7 +18,7 @@ import { getGlobalLogger } from './utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from './utils/url.js';
 import { exportMarkdownToPdf, exportMarkdownToFile } from './utils/pdf-export.js';
 // P2-9: 接入集中化 LLM 超时常量
-import { DEFAULTS } from './config/defaults.js';
+import { DEFAULTS, llmTimeout } from './config/defaults.js';
 
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
@@ -212,7 +212,7 @@ async function generateExperienceSummary(records: any[], usedExperienceNodes: bo
       const resp = await fetch(baseURL + '/chat/completions', {
         method: 'POST', headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(DEFAULTS.llm.summarizeTimeoutMs),
+        signal: AbortSignal.timeout(llmTimeout('summarizeTimeoutMs')),
       });
       if (resp.ok) {
         const data: any = await resp.json();
