@@ -11,8 +11,16 @@
  * - 端口被占时启动失败 + started=false（不抛错）
  * - 端口被自身残留实例占用时识别为 self-stale
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { startDashboardSnapshotServer, type SnapshotProviders, type SnapshotServerHandle } from './dashboard-snapshot.js';
+
+// mock tools.js 的 getRegisteredToolHandler，避免引入完整插件依赖
+vi.mock('./tools.js', () => ({
+  getRegisteredToolHandler: vi.fn(),
+  closeSharedDb: vi.fn(),
+}));
+import { getRegisteredToolHandler } from './tools.js';
+const mockGetHandler = vi.mocked(getRegisteredToolHandler);
 
 // 随机端口避免冲突
 function getRandomPort(): number {
@@ -475,6 +483,163 @@ describe('DashboardSnapshotServer', () => {
       const body = await resp.json();
       expect(body.status).toBe('unhealthy');
       expect(body.source).toBe('local');
+    });
+  });
+
+  describe('POST /internal/mcp-invoke', () => {
+    beforeEach(() => {
+      mockGetHandler.mockReset();
+    });
+
+    it('缺失 tool → 200 + ok:false + missing tool', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ params: {} }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('missing tool');
+    });
+
+    it('非白名单工具 → ok:false + not allowed', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'dangerous_tool', params: {} }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('not allowed');
+    });
+
+    it('工具未注册 → ok:false + not registered', async () => {
+      mockGetHandler.mockReturnValue(undefined);
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'lcmg_distill', params: { limit: 50 } }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('not registered');
+    });
+
+    it('成功调用工具 handler → ok:true + result', async () => {
+      const fakeResult = {
+        content: [{ type: 'text', text: 'distilled 5 experiences' }],
+        details: { ok: true, metrics: { limit: 50, triggered: 5 } },
+      };
+      mockGetHandler.mockReturnValue(async () => fakeResult);
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'lcmg_distill', params: { limit: 50 } }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(true);
+      expect(body.result).toEqual(fakeResult);
+      // handler 应被调用，参数含 toolCallId + params
+      expect(mockGetHandler).toHaveBeenCalledWith('lcmg_distill');
+    });
+
+    it('handler 抛异常 → ok:false + error message', async () => {
+      mockGetHandler.mockReturnValue(async () => {
+        throw new Error('distillation failed: LLM unavailable');
+      });
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'lcmg_distill', params: {} }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('distillation failed');
+    });
+
+    it('非法 JSON body → ok:false + invalid JSON', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: 'not-json{',
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('invalid JSON');
+    });
+
+    it('GET 方法 → 405', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`);
+      expect(resp.status).toBe(405);
     });
   });
 });

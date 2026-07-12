@@ -21,6 +21,8 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { getGlobalLogger } from './utils/logger.js';
 // v1.2.0-1/3: 直方图与业务指标（用于 Prometheus /metrics 暴露）
 import { latencyHistograms, businessMetrics } from './health-metrics.js';
+// MCP 工具调用：从 tools.ts 注册表中查询 handler
+import { getRegisteredToolHandler } from './tools.js';
 
 // v1.0.1-1/4: Basic Auth + IP 白名单配置（与 dashboard 共用 DASHBOARD_AUTH）
 interface SnapshotAuthConfig {
@@ -142,6 +144,62 @@ function sendTooManyRequests(res: ServerResponse, remaining: number, resetIn: nu
     message: `请求频率超限：每 ${RATE_LIMIT_WINDOW_MS / 1000}s 内最多 ${RATE_LIMIT_MAX} 次。请稍后重试。`,
     retryAfter: Math.ceil(resetIn / 1000),
   }));
+}
+
+/**
+ * MCP 工具调用白名单。
+ *
+ * 与 packages/dashboard/server/routes/experience.ts 的 ALLOWED_MCP_TOOLS 保持一致，
+ * 在 snapshot server 侧再做一次白名单校验（纵深防御，避免 dashboard 被绕过时直接调用危险工具）。
+ */
+const ALLOWED_MCP_TOOLS = new Set<string>([
+  'lcmg_maintain',
+  'lcmg_diagnose',
+  'lcmg_distill',
+  'lcmg_compact',
+  'lcmg_reset_breaker',
+  'lcmg_backup',
+  'lcmg_restore',
+  'lcmg_sync',
+  'lcmg_import',
+  'lcmg_forget',
+  'lcmg_pin',
+]);
+
+/**
+ * 从 tools.ts 注册表中查询 handler 并执行 MCP 工具调用。
+ *
+ * @param rawBody 原始请求体字符串（JSON）
+ * @returns { ok: boolean, result?: unknown, error?: string }
+ */
+async function invokeMcpToolFromRegistry(rawBody: string): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+  let parsed: { tool?: string; params?: Record<string, unknown> };
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return { ok: false, error: 'invalid JSON body' };
+  }
+  const tool = parsed.tool;
+  const params = parsed.params ?? {};
+  if (!tool || typeof tool !== 'string') {
+    return { ok: false, error: 'missing tool' };
+  }
+  if (!ALLOWED_MCP_TOOLS.has(tool)) {
+    return { ok: false, error: `tool "${tool}" not allowed` };
+  }
+  const handler = getRegisteredToolHandler(tool);
+  if (!handler || typeof handler !== 'function') {
+    return { ok: false, error: `tool "${tool}" not registered` };
+  }
+  // 合成 toolCallId（dashboard 转发的调用没有真实 toolCallId）
+  const toolCallId = `dashboard-invoke-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    const result = await handler(toolCallId, params);
+    return { ok: true, result };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
 }
 
 /** Dashboard 快照聚合数据结构 */
@@ -763,6 +821,33 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
             }
             return;
           }
+        }
+
+        // ===== MCP 工具调用端点（dashboard 转发写操作到此） =====
+        // Dashboard server (packages/dashboard/server/lib/mcp.ts) 把前端 POST /api/mcp/invoke
+        // 转发到此处。本端点直接调用 tools.ts 中已注册的工具 handler，无需经过 OpenClaw host。
+        if (url === '/internal/mcp-invoke') {
+          if (req.method !== 'POST') {
+            res.writeHead(405, { 'Content-Type': 'application/json', 'Allow': 'POST' });
+            res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed: use POST' }));
+            return;
+          }
+          // 读取请求体
+          let body = '';
+          req.on('data', (chunk) => { body += chunk; if (body.length > 1_000_000) req.destroy(); });
+          req.on('end', () => {
+            invokeMcpToolFromRegistry(body)
+              .then((result) => {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(result));
+              })
+              .catch((err) => {
+                getGlobalLogger().warn('[dashboard-snapshot] /internal/mcp-invoke failed', { err: err instanceof Error ? err.message : String(err) });
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: 'invoke failed: ' + (err instanceof Error ? err.message : String(err)) }));
+              });
+          });
+          return;
         }
 
         // 非 GET 请求（能力档次端点除外）拒绝

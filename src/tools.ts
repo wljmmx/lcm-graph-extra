@@ -23,6 +23,28 @@ import { llmTimeout } from './config/defaults.js';
 // Module-level Neo4j config, initialized by registerOperationalTools
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
 
+/**
+ * 已注册 MCP 工具处理器注册表。
+ *
+ * Dashboard snapshot server 通过 /internal/mcp-invoke 端点直接调用这些 handler，
+ * 避免依赖 OpenClaw host 暴露 HTTP invoke 端点（host 实际只暴露 LLM API）。
+ * key = toolName, value = wrapped execute function（含审计日志）
+ */
+const _registeredToolHandlers = new Map<string, (toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>>();
+
+/**
+ * 供 dashboard snapshot server 查询已注册的工具 handler。
+ * 未注册时返回 undefined。
+ */
+export function getRegisteredToolHandler(name: string): ((toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>) | undefined {
+  return _registeredToolHandlers.get(name);
+}
+
+/** 供测试重置注册表 */
+export function _resetRegisteredToolHandlers(): void {
+  _registeredToolHandlers.clear();
+}
+
 // Module-level QMD URL helper
 let _pluginQmdUrl = "http://127.0.0.1:8081";
 
@@ -422,6 +444,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
       return result;
     };
+    // 捕获 wrapped execute（含审计日志）到注册表，供 dashboard snapshot server 的
+    // /internal/mcp-invoke 端点直接调用。若同名工具已注册则覆盖（热重载场景）。
+    _registeredToolHandlers.set(toolName, toolDef.execute);
     return originalRegisterTool(toolDef);
   };
   // ===================================================================

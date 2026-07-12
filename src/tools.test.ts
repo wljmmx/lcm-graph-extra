@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { registerOperationalToolsWithDashboard } from './tools';
+import { registerOperationalToolsWithDashboard, getRegisteredToolHandler, _resetRegisteredToolHandlers } from './tools';
 
 /**
  * 工具注册的 SDK 接口契约验证：
@@ -13,6 +13,7 @@ describe('registerOperationalToolsWithDashboard — SDK 接口契约', () => {
 
   beforeEach(() => {
     registeredTools = [];
+    _resetRegisteredToolHandlers();
     mockApi = {
       registerTool: vi.fn((tool: any) => {
         registeredTools.push(tool);
@@ -130,6 +131,40 @@ describe('registerOperationalToolsWithDashboard — SDK 接口契约', () => {
       } catch { /* 抛错可接受 */ }
     }
     expect(foundErrorDetails, '没有工具返回 details: { ok: false }').toBe(true);
+  });
+
+  // ─── 工具处理器注册表（供 dashboard snapshot server /internal/mcp-invoke 调用）────
+
+  it('注册后 getRegisteredToolHandler 可按名查询 handler', () => {
+    for (const tool of registeredTools) {
+      const handler = getRegisteredToolHandler(tool.name);
+      expect(handler, `工具 ${tool.name} 未进入注册表`).toBeDefined();
+      expect(typeof handler, `工具 ${tool.name} handler 不是函数`).toBe('function');
+    }
+  });
+
+  it('注册表包含全部 11 个白名单工具（dashboard 可调用）', () => {
+    const whitelist = [
+      'lcmg_maintain', 'lcmg_diagnose', 'lcmg_distill', 'lcmg_compact',
+      'lcmg_reset_breaker', 'lcmg_backup', 'lcmg_restore', 'lcmg_sync',
+      'lcmg_import', 'lcmg_forget', 'lcmg_pin',
+    ];
+    for (const name of whitelist) {
+      expect(getRegisteredToolHandler(name), `白名单工具 ${name} 未注册`).toBeDefined();
+    }
+  });
+
+  it('注册表中的 handler 是 wrapped 版本（含审计日志包装，函数体非原始）', () => {
+    // wrapped handler 与原始 tool.execute 不是同一引用（被替换为审计包装）
+    for (const tool of registeredTools) {
+      const handler = getRegisteredToolHandler(tool.name);
+      // tool.execute 已被替换为 wrapped 版本，handler 引用的是同一个 wrapped 函数
+      expect(handler, `工具 ${tool.name} handler 应与 wrapped tool.execute 同引用`).toBe(tool.execute);
+    }
+  });
+
+  it('未注册的工具名返回 undefined', () => {
+    expect(getRegisteredToolHandler('nonexistent_tool')).toBeUndefined();
   });
 });
 

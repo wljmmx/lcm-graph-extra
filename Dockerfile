@@ -54,7 +54,8 @@ ENV LOG_LEVEL=info
 ENV DASHBOARD_PORT=7421
 ENV DASHBOARD_HOST=0.0.0.0
 ENV PLUGIN_SNAPSHOT_URL=http://127.0.0.1:7423
-ENV OPENCLAW_MCP_URL=http://127.0.0.1:18789
+# OPENCLAW_MCP_URL 仅用于 agent 状态检查（routes/agent.ts），默认 http://127.0.0.1:18789
+# MCP 工具调用走 PLUGIN_SNAPSHOT_URL 的 /internal/mcp-invoke 端点
 # v1.0.1-2: Docker 生产环境强制启用 Basic Auth（启动时检查）
 # 若未设置 DASHBOARD_AUTH，容器启动时打印 CRITICAL 警告
 

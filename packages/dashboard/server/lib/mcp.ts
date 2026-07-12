@@ -1,11 +1,18 @@
 /**
  * OpenClaw MCP 工具调用客户端。
  *
- * 写路径统一通过本模块转发到 OpenClaw MCP host HTTP 接口。
- * 默认 host: http://127.0.0.1:18789
+ * 写路径统一通过本模块转发到插件 snapshot server 的 /internal/mcp-invoke 端点。
+ *
+ * 架构说明：
+ * - OpenClaw host 端口 18789 是 LLM API（Ollama 桥接），不暴露 MCP invoke HTTP 端点
+ * - 插件 snapshot server 端口 7423 与插件同进程，可直接调用已注册的工具 handler
+ * - 因此 dashboard 转发到 snapshot server，而非 OpenClaw host
+ *
+ * 默认 host: http://127.0.0.1:7423（与 PLUGIN_SNAPSHOT_URL 对齐）
  */
 
-const MCP_HOST = process.env.OPENCLAW_MCP_URL ?? 'http://127.0.0.1:18789';
+// 与 server/lib/snapshot.ts / routes/config.ts / routes/graph-health.ts 共用 env var
+const MCP_HOST = process.env.PLUGIN_SNAPSHOT_URL ?? 'http://127.0.0.1:7423';
 
 // 30s 超时
 const MCP_TIMEOUT_MS = 30_000;
@@ -30,7 +37,7 @@ export async function invokeMcpTool(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MCP_TIMEOUT_MS);
   try {
-    const resp = await fetch(`${MCP_HOST}/api/mcp/invoke`, {
+    const resp = await fetch(`${MCP_HOST}/internal/mcp-invoke`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ tool, params }),
