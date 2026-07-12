@@ -208,6 +208,23 @@ export class ExperienceStorage {
   }
 
   /**
+   * 检查底层 graphAdapter 是否已连接 Neo4j。
+   *
+   * graphAdapter.query() 在 driver 为 null 时静默返回 []，
+   * 调用方需要通过此方法判断连接状态，避免误以为"无数据"。
+   */
+  get isConnected(): boolean {
+    const a = this.adapter as any;
+    // GraphAdapter 有 isConnected getter（返回 !!this.driver）
+    if (a && typeof a.isConnected === 'boolean') return a.isConnected;
+    // 兜底：尝试调用 isConnected 方法（某些适配器可能是方法而非 getter）
+    if (a && typeof a.isConnected === 'function') {
+      try { return Boolean(a.isConnected()); } catch { return false; }
+    }
+    return false;
+  }
+
+  /**
    * R-8: 确保 EXPERIENCE 节点的全文索引存在。
    * 为 summary、context、title 字段创建 TEXT INDEX，加速 CONTAINS 查询。
    * 使用 IF NOT EXISTS 保证幂等，重复执行不报错。

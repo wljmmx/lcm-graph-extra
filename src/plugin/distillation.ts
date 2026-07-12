@@ -227,17 +227,49 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
 
   // 2. 检查 graphAdapter 连接状态
   // graphAdapter.query 在 driver 为 null 时静默返回 []，需要显式检查连接状态
-  const adapter = expStoreRef?.adapter;
-  if (adapter && typeof adapter.isConnected === 'boolean') {
-    result.graphConnected = adapter.isConnected ? 'connected' : 'disconnected';
-    if (!adapter.isConnected) {
-      result.error = 'Neo4j not connected — graphAdapter.driver is null. ' +
-        'Check Neo4j is running and config (neo4j.url / neo4j.auth) is correct in openclaw.json.';
-      log?.warn?.('distillation: Neo4j not connected, fetchPending will return empty');
-      return result;
+  // ExperienceStorage 暴露 isConnected getter，委托给 graphAdapter.isConnected
+  const storeConnected = typeof expStoreRef?.isConnected === 'boolean'
+    ? expStoreRef.isConnected
+    : typeof expStoreRef?.isConnected === 'function'
+      ? (() => { try { return Boolean(expStoreRef.isConnected()); } catch { return false; } })()
+      : null;
+
+  if (storeConnected !== null) {
+    result.graphConnected = storeConnected ? 'connected' : 'disconnected';
+    if (!storeConnected) {
+      // graphAdapter 在插件初始化时可能连接失败，但 Neo4j 现在可能已恢复。
+      // 尝试重新连接 graphAdapter（connect() 内部有防重复逻辑，安全重试）。
+      log?.info?.('distillation: graphAdapter not connected, attempting reconnect...');
+      try {
+        const adapter = (expStoreRef as any)?.adapter;
+        if (adapter && typeof adapter.connect === 'function') {
+          const reconnected = await adapter.connect();
+          if (reconnected) {
+            result.graphConnected = 'connected';
+            log?.info?.('distillation: graphAdapter reconnected successfully');
+          } else {
+            result.error = 'Neo4j not connected — graphAdapter.connect() returned false. ' +
+              'Check Neo4j is running and config (neo4j.url / neo4j.auth) is correct in openclaw.json. ' +
+              'Note: lcmg_maintain/diagnose use a separate driver (getNeo4jDriver) and may connect ' +
+              'even when graphAdapter failed during plugin init.';
+            log?.warn?.('distillation: graphAdapter reconnect failed');
+            return result;
+          }
+        } else {
+          result.error = 'Neo4j not connected and graphAdapter has no connect() method. ' +
+            'Plugin initialization may have failed — check logs for "Neo4j unavailable" warnings.';
+          log?.warn?.('distillation: graphAdapter has no connect() method');
+          return result;
+        }
+      } catch (reconnectErr) {
+        result.error = 'Neo4j reconnect failed: ' + (reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr));
+        log?.warn?.('distillation: graphAdapter reconnect threw', { err: result.error });
+        return result;
+      }
     }
   } else {
     result.graphConnected = 'unknown';
+    log?.warn?.('distillation: cannot determine Neo4j connection status (isConnected not available)');
   }
 
   try {
