@@ -87,13 +87,18 @@ export async function distillOne(
   // P1-4: prompt 增加 tags 字段，让 LLM 同时产出多维度标签（scenario/techStack/severity/freeTags）。
   // S-11': Zettelkasten 增强 — 增加 relatedConcepts 字段，提取 2-5 个相关概念/关键词，
   // 用于后续在经验网络中建立 RELATED_TO 边，形成知识图谱连接。
-  const prompt = 'Summarize the following experience into a concise lesson.' + '\nSource: ' + raw.source + '\nContext: ' + raw.context + '\nDetail: ' + raw.detail
+  //
+  // BUGFIX: qwen3 系列模型默认开启思考模式，思考内容会消耗全部 max_tokens 导致
+  // content 为空（finish_reason: length）。通过 /no_think 软开关关闭思考模式。
+  // 注意：Ollama 的 think 参数仅适用于原生 API (/api/chat)，OpenAI 兼容端点
+  // (/v1/chat/completions) 不支持，必须用 /no_think prompt 软开关。
+  const prompt = '/no_think\nSummarize the following experience into a concise lesson.' + '\nSource: ' + raw.source + '\nContext: ' + raw.context + '\nDetail: ' + raw.detail
     + '\nReturn a JSON with: title, summary, type (lesson|failure|correction|fix|best_practice), relevanceScore (0-1),'
     + ' scenario (array, subset of: bug-fix|feature-dev|code-review|config-debug|deployment|performance-opt|security-audit|refactor),'
     + ' techStack (array, subset of: frontend|backend|devops|database|mobile|ai-ml|infrastructure|general),'
     + ' severity (one of: critical|major|minor), freeTags (array of short strings),'
     + ' relatedConcepts (array of 2-5 short keywords/phrases representing closely related topics or concepts for cross-linking).'
-    + ' Return ONLY JSON.';
+    + ' Return ONLY JSON without any thinking process.';
   const controller = new AbortController();
   // v2.2.3: 原 15s 硬编码 → 可配置（默认 120s，蒸馏输入较长，本地大模型需更宽容）
   const timer = setTimeout(() => controller.abort(), llmTimeout('distillMs'));
@@ -101,15 +106,10 @@ export async function distillOne(
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
     // 仅 Ollama 端点注入 keep_alive，避免模型 5 分钟后卸载导致冷启动延迟
-    // BUGFIX: qwen3 系列模型默认开启思考模式（thinking），输出会放到 reasoning_content 字段，
-    // content 字段为空。蒸馏只需要 JSON 结果，不需要推理过程，关闭思考模式可：
-    //   1. 确保 content 字段有值
-    //   2. 大幅减少生成时间（不产生思考 token）
-    //   3. 降低 token 消耗
-    // Ollama OpenAI 兼容端点通过 "think": false 关闭（qwen3 专用参数）
+    // max_tokens=4096: 即使 /no_think 未完全生效，也留足空间让 content 在思考后生成
     const body = withKeepAliveIfOllama(
       llm.baseURL,
-      { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 1024, think: false },
+      { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 4096 },
       llm.keepAlive,
     );
     const resp = await fetch(llm.baseURL + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
@@ -123,12 +123,17 @@ export async function distillOne(
     }
     const data: any = await resp.json();
     const msg = data?.choices?.[0]?.message;
-    // qwen3 思考模式：content 可能为空，实际输出在 reasoning_content 中
-    // think:false 应已关闭思考，但作为兜底也检查 reasoning_content
+    // qwen3 思考模式兜底：
+    // 1. content 可能为空，实际输出在 reasoning_content 中
+    // 2. content 可能包含 <think>...</think> 标签，需要剥离
     let text = msg?.content;
     if (!text && msg?.reasoning_content) {
       log?.info?.('distillOne: content empty, falling back to reasoning_content', { rawId: raw.id, model: llm.model });
       text = msg.reasoning_content;
+    }
+    if (text) {
+      // 剥离 <think>...</think> 块（qwen3 思考内容包裹标签）
+      text = stripThinkTags(text);
     }
     if (!text) {
       const errMsg = `LLM returned empty content (model: ${llm.model}, endpoint: ${llm.baseURL}, finish_reason: ${data?.choices?.[0]?.finish_reason})`;
@@ -224,6 +229,26 @@ function extractJsonFromText(text: string): string {
   }
   // 3. 返回原文
   return text.trim();
+}
+
+/**
+ * 剥离 qwen3 思考模式产生的 <think>...</think> 标签块。
+ *
+ * 即使使用了 /no_think 软开关，某些情况下模型仍可能输出思考内容。
+ * 思考内容包裹在 <think>...</think> 标签中，需要移除后再提取 JSON。
+ *
+ * 同时处理未闭合的 <think> 标签（max_tokens 截断时可能只有开标签）。
+ */
+function stripThinkTags(text: string): string {
+  // 移除完整的 <think>...</think> 块
+  let result = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  // 处理未闭合的 <think> 标签（截断时只有开标签，后面全是思考内容）
+  // 这种情况下 <think> 之后的内容都是思考，JSON 可能在 <think> 之前
+  const openTagIdx = result.indexOf('<think>');
+  if (openTagIdx !== -1 && result.toLowerCase().indexOf('</think>') === -1) {
+    result = result.slice(0, openTagIdx);
+  }
+  return result.trim();
 }
 
 /** 蒸馏结果汇总 */
