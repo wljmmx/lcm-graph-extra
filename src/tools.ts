@@ -375,9 +375,10 @@ export interface DashboardToolContext {
    * 回溯已有对话记录，从历史消息中提取经验并写入 PENDING 队列。
    * 用于修复后补录因 graphAdapter 未连接等原因丢失的经验。
    * @param limit 最多处理多少条会话
-   * @returns { processed: number, extracted: number, errors: string[] }
+   * @param force 是否强制重新处理已处理过的会话（默认 false，跳过已处理）
+   * @returns { processed: number, extracted: number, skipped: number, errors: string[] }
    */
-  backfillExperiences?: (limit: number) => Promise<{ processed: number; extracted: number; errors: string[] }>;
+  backfillExperiences?: (limit: number, force?: boolean) => Promise<{ processed: number; extracted: number; skipped: number; errors: string[] }>;
   triggerCompact?: (conversationId?: number) => Promise<boolean>;
   resetBreaker?: (name: string) => boolean;
   /** 共享的 QmdClient 单例（由 index.ts 注入）；未注入时工具回退到 new QmdClient */
@@ -2186,12 +2187,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_backfill",
     label: "经验回溯",
-    description: "从历史对话记录中重新提取经验写入 PENDING 队列。用于修复 graphAdapter 连接问题后补录丢失的经验。处理完成后请运行 lcmg_distill 进行蒸馏。",
+    description: "从历史对话记录中重新提取经验写入 PENDING 队列。用于修复 graphAdapter 连接问题后补录丢失的经验。处理完成后请运行 lcmg_distill 进行蒸馏。默认跳过已处理过的会话，设置 force=true 可强制重新处理。",
     parameters: Type.Object({
       limit: Type.Optional(Type.Number({
         description: "最多处理的会话数，默认 20",
         minimum: 1,
         maximum: 500,
+      })),
+      force: Type.Optional(Type.Boolean({
+        description: "是否强制重新处理已处理过的会话（默认 false，跳过已处理）",
       })),
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
@@ -2206,15 +2210,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
       const limit = params.limit ?? 20;
+      const force = params.force === true;
       try {
         if (signal?.aborted) {
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
-        const result = await dashboardContext.backfillExperiences(limit);
+        const result = await dashboardContext.backfillExperiences(limit, force);
         const lines: string[] = [];
         lines.push('# 经验回溯报告');
         lines.push('');
         lines.push(`处理会话数: ${result.processed}`);
+        lines.push(`跳过已处理: ${result.skipped}`);
         lines.push(`提取经验数: ${result.extracted}`);
         if (result.errors.length > 0) {
           lines.push(`错误数: ${result.errors.length}`);
@@ -2230,6 +2236,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lines.push('');
         if (result.extracted > 0) {
           lines.push('[INFO] 经验已写入 PENDING 队列，请运行 **lcmg_distill** 进行蒸馏。');
+        } else if (result.processed === 0 && result.skipped > 0) {
+          lines.push('[INFO] 所有会话均已处理过，无新数据。');
+          lines.push('如需重新处理，请设置 force=true 强制回溯。');
         } else {
           lines.push('[INFO] 未检测到任何经验触发条件。');
           lines.push('可能原因：');
@@ -2242,7 +2251,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             ok: result.errors.length === 0,
             metrics: {
               limit,
+              force,
               processed: result.processed,
+              skipped: result.skipped,
               extracted: result.extracted,
               errorCount: result.errors.length,
             },

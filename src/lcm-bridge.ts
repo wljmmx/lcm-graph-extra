@@ -10,6 +10,7 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -685,5 +686,76 @@ function openLcmDbDirect(): any {
   } catch {
     _lcmDb = null;
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Backfill state: 已处理会话记录（避免重复回溯）
+// ---------------------------------------------------------------------------
+
+const BACKFILL_STATE_PATH = join(homedir(), '.openclaw', 'backfill-state.json');
+
+interface BackfillState {
+  /** 已处理过的 conversation_id 列表 */
+  processedConversations: number[];
+  /** 最近一次回溯运行时间（ISO 字符串） */
+  lastRunAt?: string;
+}
+
+/** 读取 backfill state 文件；不存在或损坏时返回空 state */
+export function getBackfillState(): BackfillState {
+  try {
+    if (!existsSync(BACKFILL_STATE_PATH)) {
+      return { processedConversations: [] };
+    }
+    const raw = readFileSync(BACKFILL_STATE_PATH, 'utf8');
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data?.processedConversations)) {
+      return { processedConversations: [] };
+    }
+    return {
+      processedConversations: data.processedConversations.filter(
+        (n: unknown) => typeof n === 'number' && Number.isFinite(n),
+      ),
+      lastRunAt: typeof data.lastRunAt === 'string' ? data.lastRunAt : undefined,
+    };
+  } catch {
+    return { processedConversations: [] };
+  }
+}
+
+/**
+ * 标记会话为已处理，并持久化到 state 文件。
+ * 多次调用同一 conversationId 是幂等的（数组去重）。
+ */
+export function markConversationsBackfilled(conversationIds: number[]): void {
+  if (conversationIds.length === 0) return;
+  const state = getBackfillState();
+  const existing = new Set(state.processedConversations);
+  for (const id of conversationIds) {
+    if (typeof id === 'number' && Number.isFinite(id)) existing.add(id);
+  }
+  const newState: BackfillState = {
+    processedConversations: Array.from(existing).sort((a, b) => a - b),
+    lastRunAt: new Date().toISOString(),
+  };
+  try {
+    mkdirSync(join(homedir(), '.openclaw'), { recursive: true });
+    writeFileSync(BACKFILL_STATE_PATH, JSON.stringify(newState, null, 2), 'utf8');
+  } catch {
+    // 写入失败不影响回溯流程，下次会重新处理
+  }
+}
+
+/**
+ * 重置 backfill state（清空已处理记录），允许重新回溯所有会话。
+ */
+export function resetBackfillState(): void {
+  try {
+    if (existsSync(BACKFILL_STATE_PATH)) {
+      writeFileSync(BACKFILL_STATE_PATH, JSON.stringify({ processedConversations: [] }, null, 2), 'utf8');
+    }
+  } catch {
+    // ignore
   }
 }

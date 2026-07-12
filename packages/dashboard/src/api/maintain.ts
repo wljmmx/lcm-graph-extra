@@ -25,8 +25,8 @@ export function invokeDistill(limit: number): Promise<McpInvokeResponse> {
 }
 
 /** 经验回溯：从历史对话中提取经验写入 PENDING 队列 */
-export function invokeBackfill(limit: number): Promise<McpInvokeResponse> {
-  return invokeMcpTool('lcmg_backfill', { limit });
+export function invokeBackfill(limit: number, force: boolean = false): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_backfill', { limit, force });
 }
 
 /** 触发 compact：conversationId 省略时处理最紧急债务 */

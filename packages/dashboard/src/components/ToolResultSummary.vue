@@ -76,6 +76,7 @@ const chips = computed<MetricChip[]>(() => {
     case 'lcmg_backfill':
       return [
         { label: '处理会话', value: m.processed as number, variant: 'count', tone: 'default' },
+        { label: '跳过已处理', value: m.skipped as number, variant: 'count', tone: 'default' },
         { label: '提取经验', value: m.extracted as number, variant: 'count', tone: m.extracted > 0 ? 'success' : 'default' },
         { label: '错误', value: m.errorCount as number, variant: 'count', tone: m.errorCount > 0 ? 'danger' : 'default' },
       ];

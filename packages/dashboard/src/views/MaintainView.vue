@@ -49,6 +49,7 @@ const distillLimit = ref<number>(50);
 
 // 卡片 2.5：经验回溯
 const backfillLimit = ref<number>(20);
+const backfillForce = ref<boolean>(false);
 
 // 卡片 3：compact
 const compactConversationId = ref<number | null>(null);
@@ -272,8 +273,8 @@ function executeBackfill(): void {
   runMutation({
     cardKey: 'backfill',
     tool: 'lcmg_backfill',
-    params: { limit: backfillLimit.value },
-    invokeFn: () => invokeBackfill(backfillLimit.value),
+    params: { limit: backfillLimit.value, force: backfillForce.value },
+    invokeFn: () => invokeBackfill(backfillLimit.value, backfillForce.value),
   });
 }
 
@@ -435,7 +436,7 @@ function executeImport(): void {
         <NGi>
           <OperationCard
             title="经验回溯"
-            description="从历史对话记录中重新提取经验写入 PENDING 队列。修复连接问题后使用。"
+            description="从历史对话记录中重新提取经验写入 PENDING 队列。修复连接问题后使用。默认跳过已处理过的会话。"
             icon="history"
             :confirm-level="0"
             :loading="!!loadingMap.backfill"
@@ -454,6 +455,12 @@ function executeImport(): void {
                   size="small"
                   style="width: 100%"
                 />
+              </NFormItem>
+              <NFormItem label="强制重处理" size="small" :show-feedback="false">
+                <NSwitch v-model:value="backfillForce" size="small" />
+                <span style="margin-left: 8px; font-size: 12px; color: #999">
+                  {{ backfillForce ? '重新处理所有会话' : '跳过已处理会话' }}
+                </span>
               </NFormItem>
             </template>
           </OperationCard>

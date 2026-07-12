@@ -76,8 +76,10 @@ const { invokeMcpToolMock } = vi.hoisted(() => ({
             driftCount: 0,
             pinnedNodes: 8,
             processed: 10,
+            skipped: 5,
             extracted: 3,
             errorCount: 0,
+            force: false,
           },
         },
       },
@@ -190,7 +192,7 @@ describe('MaintainView', () => {
     expect(backfillCard).toBeTruthy();
     backfillCard!.vm.$emit('execute');
     await flushPromises();
-    expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_backfill', expect.objectContaining({ limit: 20 }));
+    expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_backfill', expect.objectContaining({ limit: 20, force: false }));
   });
 
   it('点击 backup 卡片执行按钮触发 invokeMcpTool', async () => {
