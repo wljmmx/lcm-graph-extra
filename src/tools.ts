@@ -2074,17 +2074,54 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (signal?.aborted) {
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
-        await dashboardContext.runDistillation(limit);
+        const result = await dashboardContext.runDistillation(limit);
+        // runDistillation 返回 { pending, succeeded, failed, linked, llmModel, llmBaseURL }
+        const r = result as { pending?: number; succeeded?: number; failed?: number; linked?: number; llmModel?: string; llmBaseURL?: string } | undefined;
+        const pending = r?.pending ?? 0;
+        const succeeded = r?.succeeded ?? 0;
+        const failed = r?.failed ?? 0;
+        const linked = r?.linked ?? 0;
+        const llmModel = r?.llmModel ?? 'unknown';
+
+        // 构建结果摘要文本
+        const lines: string[] = [];
+        lines.push('# Distillation Report');
+        lines.push('');
+        lines.push(`LLM Model: ${llmModel}`);
+        lines.push(`Pending experiences: ${pending}`);
+        lines.push(`Successfully distilled: ${succeeded}`);
+        if (failed > 0) {
+          lines.push(`Failed: ${failed} (see logs for details)`);
+        }
+        if (linked > 0) {
+          lines.push(`Related links created: ${linked}`);
+        }
+        lines.push('');
+        if (pending === 0) {
+          lines.push('[INFO] No pending experiences to distill.');
+          lines.push('Pending experiences are created automatically during conversations when');
+          lines.push('corrections, failures, or explicit save triggers are detected.');
+        } else if (succeeded === 0 && failed > 0) {
+          lines.push('[WARNING] All distillation attempts failed. Check:');
+          lines.push(`  - LLM endpoint is reachable (${r?.llmBaseURL ?? 'unknown'})`);
+          lines.push('  - LLM model name is correct');
+          lines.push('  - LLM returns valid JSON (not markdown-wrapped)');
+          lines.push('  - Plugin logs for detailed error messages');
+        } else {
+          lines.push(`[OK] Distillation complete: ${succeeded}/${pending} succeeded.`);
+        }
+
         return {
-          content: [{
-            type: "text" as const,
-            text: `✅ Distillation triggered for up to ${limit} pending experience(s).`,
-          }],
+          content: [{ type: "text" as const, text: lines.join("\n") }],
           details: {
             ok: true,
             metrics: {
               limit,
-              triggered: true,
+              pending,
+              succeeded,
+              failed,
+              linked,
+              llmModel,
             },
           },
         };

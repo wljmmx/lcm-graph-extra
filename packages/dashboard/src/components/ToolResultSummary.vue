@@ -65,8 +65,11 @@ const chips = computed<MetricChip[]>(() => {
 
     case 'lcmg_distill':
       return [
-        { label: '处理上限', value: m.limit as number, variant: 'count', tone: 'default' },
-        { label: '已触发', value: m.triggered ? '是' : '否', variant: 'bool', tone: m.triggered ? 'success' : 'danger' },
+        { label: '待处理', value: m.pending as number, variant: 'count', tone: 'default' },
+        { label: '成功蒸馏', value: m.succeeded as number, variant: 'count', tone: 'success' },
+        { label: '失败', value: m.failed as number, variant: 'count', tone: m.failed > 0 ? 'danger' : 'default' },
+        { label: '关联建立', value: m.linked as number, variant: 'count', tone: m.linked > 0 ? 'success' : 'default' },
+        { label: 'LLM 模型', value: m.llmModel as string, variant: 'text', tone: 'default' },
       ];
 
     case 'lcmg_compact':

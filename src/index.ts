@@ -763,8 +763,9 @@ const pluginEntry: any = definePluginEntry({
         }
         const storeRef = expStore;
         if (!storeRef) throw new Error('expStore not initialized');
-        await runDistillation(storeRef, api, logger, limit);
-        return { limit };
+        // runDistillation 返回结构化结果（pending/succeeded/failed/linked/llmModel）
+        const result = await runDistillation(storeRef, api, logger, limit);
+        return result;
       },
       triggerCompact: async (conversationId?: number) => {
         // 写入 compact 债务（若指定会话）并立即触发调度器处理

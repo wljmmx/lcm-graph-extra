@@ -47,7 +47,11 @@ const { invokeMcpToolMock } = vi.hoisted(() => ({
           ok: true,
           metrics: {
             limit: 50,
-            triggered: true,
+            pending: 5,
+            succeeded: 4,
+            failed: 1,
+            linked: 2,
+            llmModel: 'ollama/qwen3.6:27b',
             durationMs: 1200,
             dedupMerged: 5,
             pass: 10,
