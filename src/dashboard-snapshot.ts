@@ -948,6 +948,14 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
         });
       });
 
+      // BUGFIX: Node.js 18+ 的 http.Server 默认 requestTimeout=300000ms (5min)，
+      // 但蒸馏 50 条经验（qwen3.6:27b 开思考模式）可能耗时 30-60 分钟，
+      // 5min 超时会导致连接被服务器强制关闭。
+      // 设置 requestTimeout=0（禁用）、headersTimeout 保持默认，
+      // 让 MCP 调用超时由 dashboard server 端的 getTimeoutForTool() 统一控制。
+      server!.requestTimeout = 0;
+      server!.keepAliveTimeout = 120_000;  // 2min，长连接复用
+
       // listen 成功
       handle.started = true;
     } catch (err: any) {

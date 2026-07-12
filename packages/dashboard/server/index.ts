@@ -41,6 +41,19 @@ async function main(): Promise<void> {
     logger: {
       level: process.env.LOG_LEVEL ?? 'info',
     },
+    // BUGFIX: Node.js 18+ 的 http.Server 默认 requestTimeout=300000ms (5min)，
+    // 但蒸馏/回溯等长任务可能耗时 30-60 分钟（本地大模型），
+    // 禁用 server 级 requestTimeout，让超时由路由层（getTimeoutForTool）统一控制。
+    connectionTimeout: 0,
+  });
+
+  // 禁用底层 http.Server 的 requestTimeout（Fastify 不直接暴露此选项，
+  // 需在 server 实例创建后设置）
+  app.addHook('onReady', () => {
+    const server = app.server as any;
+    if (server && typeof server.requestTimeout !== 'undefined') {
+      server.requestTimeout = 0;
+    }
   });
 
   // Basic Auth 中间件（DASHBOARD_AUTH 启用时生效）
