@@ -156,6 +156,7 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
   'lcmg_maintain',
   'lcmg_diagnose',
   'lcmg_distill',
+  'lcmg_backfill',
   'lcmg_compact',
   'lcmg_reset_breaker',
   'lcmg_backup',

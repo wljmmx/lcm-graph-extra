@@ -43,6 +43,10 @@ import {
 // P0-1: 静态导入经验提取函数，供 afterTurn 中直接调用。
 import { UserProfileTracker } from './experience/user-profile.js';
 
+// Backfill: 经验回溯导入
+import { detectExperienceTrigger, extractRawExperience } from './experience/index.js';
+import { getAllConversations } from './lcm-bridge.js';
+
 // S-7': 用户画像轻量版 —— 全局单例，带时间衰减
 // 用于经验搜索的个性化加权，不持久化（重启重置）
 const userProfile = new UserProfileTracker();
@@ -781,6 +785,64 @@ const pluginEntry: any = definePluginEntry({
         const mergedApi = { ...api, pluginConfig: mergeEntriesNeo4jConfig(api) };
         const result = await runDistillation(storeRef, mergedApi, logger, limit);
         return result;
+      },
+      backfillExperiences: async (limit: number) => {
+        // 从 LCM DB 读取历史会话，回溯提取经验写入 PENDING 队列。
+        // 用于修复 graphAdapter 连接问题后补录之前丢失的经验。
+        try {
+          await ensureInitialized();
+        } catch (initErr) {
+          const msg = initErr instanceof Error ? initErr.message : String(initErr);
+          throw new Error('plugin init failed: ' + msg);
+        }
+        const storeRef = expStore;
+        if (!storeRef) throw new Error('expStore not initialized');
+
+        const conversations = getAllConversations(limit);
+        const errors: string[] = [];
+        let extracted = 0;
+
+        logger?.info?.(`[backfill] scanning ${conversations.length} conversations for experiences`);
+
+        for (const conv of conversations) {
+          try {
+            const msgs = conv.messages;
+            if (msgs.length < 2) continue;
+
+            // 逐条消息检测触发条件（priorMessages 为当前消息之前的所有消息）
+            for (let i = 0; i < msgs.length; i++) {
+              const msg = msgs[i];
+              const priorMessages = msgs.slice(0, i);
+
+              // 将消息转换为 detectExperienceTrigger 需要的格式
+              const msgObj: Record<string, unknown> = {
+                role: msg.role,
+                content: msg.content,
+              };
+
+              try {
+                const trigger = detectExperienceTrigger(msgObj, priorMessages as any);
+                if (!trigger) continue;
+
+                const raw = extractRawExperience(trigger, msgObj, conv.sessionId);
+                await storeRef.saveRaw(raw);
+                extracted++;
+                logger?.debug?.(`[backfill] experience extracted: source=${trigger}, id=${raw.id}, conv=${conv.sessionId}`);
+              } catch (itemErr) {
+                // 单条消息提取失败，记录但不中断
+                const errMsg = itemErr instanceof Error ? itemErr.message : String(itemErr);
+                logger?.debug?.(`[backfill] single message extraction failed: ${errMsg}`);
+              }
+            }
+          } catch (convErr) {
+            const errMsg = convErr instanceof Error ? convErr.message : String(convErr);
+            errors.push(`会话 ${conv.sessionId}: ${errMsg}`);
+            logger?.warn?.(`[backfill] conversation ${conv.sessionId} failed: ${errMsg}`);
+          }
+        }
+
+        logger?.info?.(`[backfill] completed: ${conversations.length} conversations, ${extracted} experiences extracted, ${errors.length} errors`);
+        return { processed: conversations.length, extracted, errors };
       },
       triggerCompact: async (conversationId?: number) => {
         // 写入 compact 债务（若指定会话）并立即触发调度器处理

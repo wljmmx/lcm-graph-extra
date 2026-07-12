@@ -29,6 +29,7 @@ import {
   invokeMaintain,
   invokeDiagnose,
   invokeDistill,
+  invokeBackfill,
   invokeCompact,
   invokeResetBreaker,
   invokeBackup,
@@ -45,6 +46,9 @@ const message = useMessage();
 
 // 卡片 2：蒸馏
 const distillLimit = ref<number>(50);
+
+// 卡片 2.5：经验回溯
+const backfillLimit = ref<number>(20);
 
 // 卡片 3：compact
 const compactConversationId = ref<number | null>(null);
@@ -264,6 +268,15 @@ function executeDistill(): void {
   });
 }
 
+function executeBackfill(): void {
+  runMutation({
+    cardKey: 'backfill',
+    tool: 'lcmg_backfill',
+    params: { limit: backfillLimit.value },
+    invokeFn: () => invokeBackfill(backfillLimit.value),
+  });
+}
+
 function executeCompact(): void {
   const params: Record<string, unknown> = {};
   if (compactConversationId.value !== null && compactConversationId.value !== undefined) {
@@ -410,6 +423,34 @@ function executeImport(): void {
                   v-model:value="distillLimit"
                   :min="1"
                   :max="200"
+                  size="small"
+                  style="width: 100%"
+                />
+              </NFormItem>
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 2.5: 经验回溯 -->
+        <NGi>
+          <OperationCard
+            title="经验回溯"
+            description="从历史对话记录中重新提取经验写入 PENDING 队列。修复连接问题后使用。"
+            icon="history"
+            :confirm-level="0"
+            :loading="!!loadingMap.backfill"
+            tool-name="lcmg_backfill"
+            :last-status="lastResultMap.backfill?.status ?? null"
+            :last-details="lastResultMap.backfill?.details ?? null"
+            :last-text="lastResultMap.backfill?.text ?? null"
+            @execute="executeBackfill"
+          >
+            <template #form>
+              <NFormItem label="处理会话数" size="small" :show-feedback="false">
+                <NInputNumber
+                  v-model:value="backfillLimit"
+                  :min="1"
+                  :max="500"
                   size="small"
                   style="width: 100%"
                 />

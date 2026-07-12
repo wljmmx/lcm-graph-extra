@@ -606,3 +606,84 @@ export function trimSummariesToBudget(
 // ---------------------------------------------------------------------------
 // P3-8: 原 __test__ 导出（LCM_DB_PATH, getDb）无任何测试引用，属死代码，已收敛移除。
 // 如未来测试需要内部钩子，应通过 vitest 的 vi.mock 或独立 test-utils 模块注入，而非污染生产导出。
+
+// ---------------------------------------------------------------------------
+// Backfill: 获取所有会话及消息（供经验回溯工具使用）
+// ---------------------------------------------------------------------------
+
+/** 会话消息（简化版，仅经验提取所需字段） */
+export interface ConversationMessage {
+  seq: number;
+  role: string;
+  content: string;
+}
+
+/** 会话及消息 */
+export interface ConversationWithMessages {
+  conversationId: number;
+  sessionId: string;
+  messages: ConversationMessage[];
+}
+
+/**
+ * 从 LCM DB 中获取所有活跃会话及其消息。
+ * 用于经验回溯工具（lcmg_backfill）重新扫描历史对话。
+ *
+ * @param limit 最多返回多少条会话
+ * @returns 会话列表（按 conversation_id 降序，最新会话在前）
+ */
+export function getAllConversations(limit: number): ConversationWithMessages[] {
+  const db = openLcmDbDirect();
+  if (!db) return [];
+
+  try {
+    const convs = db.prepare(
+      'SELECT conversation_id, session_id FROM conversations WHERE active = 1 ORDER BY conversation_id DESC LIMIT ?'
+    ).all(limit) as Array<{ conversation_id: number; session_id: string }>;
+
+    const results: ConversationWithMessages[] = [];
+    for (const conv of convs) {
+      try {
+        const msgs = db.prepare(
+          'SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq ASC'
+        ).all(conv.conversation_id) as Array<{ seq: number; role: string; content: string }>;
+
+        if (msgs.length >= 2) {
+          results.push({
+            conversationId: conv.conversation_id,
+            sessionId: conv.session_id,
+            messages: msgs.map((m) => ({
+              seq: m.seq,
+              role: m.role,
+              content: m.content ?? '',
+            })),
+          });
+        }
+      } catch {
+        // 单条会话读取失败，跳过
+      }
+    }
+
+    return results;
+  } finally {
+    // 不关闭 DB（共享单例）
+  }
+}
+
+/**
+ * 打开 LCM DB 的单例连接（与 lcm-bridge 内部共用）。
+ * 不暴露给外部，仅内部使用。
+ */
+function openLcmDbDirect(): any {
+  if (_lcmDb) {
+    try { _lcmDb.prepare('SELECT 1').get(); return _lcmDb; } catch { _lcmDb = null; }
+  }
+  try {
+    const { DatabaseSync } = _lcmRequire('node:sqlite');
+    _lcmDb = new DatabaseSync(LCM_DB_PATH);
+    return _lcmDb;
+  } catch {
+    _lcmDb = null;
+    return null;
+  }
+}

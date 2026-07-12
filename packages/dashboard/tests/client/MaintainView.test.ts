@@ -75,6 +75,9 @@ const { invokeMcpToolMock } = vi.hoisted(() => ({
             orphanedNodes: 0,
             driftCount: 0,
             pinnedNodes: 8,
+            processed: 10,
+            extracted: 3,
+            errorCount: 0,
           },
         },
       },
@@ -178,6 +181,16 @@ describe('MaintainView', () => {
     await flushPromises();
     // invokeMcpTool 应被调用，参数为 lcmg_distill
     expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_distill', expect.objectContaining({ limit: 50 }));
+  });
+
+  it('点击 backfill 卡片执行按钮触发 invokeMcpTool', async () => {
+    const wrapper = mountView();
+    const cards = wrapper.findAllComponents({ name: 'OperationCard' });
+    const backfillCard = cards.find((c) => c.props('title') === '经验回溯');
+    expect(backfillCard).toBeTruthy();
+    backfillCard!.vm.$emit('execute');
+    await flushPromises();
+    expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_backfill', expect.objectContaining({ limit: 20 }));
   });
 
   it('点击 backup 卡片执行按钮触发 invokeMcpTool', async () => {

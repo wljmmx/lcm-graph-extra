@@ -22,8 +22,8 @@ describe('registerOperationalToolsWithDashboard — SDK 接口契约', () => {
     registerOperationalToolsWithDashboard(mockApi, undefined);
   });
 
-  it('注册了 18 个工具', () => {
-    expect(registeredTools).toHaveLength(18);
+  it('注册了 19 个工具', () => {
+    expect(registeredTools).toHaveLength(19);
   });
 
   it('每个工具都包含非空 label 字段（SDK AgentTool 必填）', () => {

@@ -73,6 +73,13 @@ const chips = computed<MetricChip[]>(() => {
         { label: 'LLM 模型', value: m.llmModel as string, variant: 'text', tone: 'default' },
       ];
 
+    case 'lcmg_backfill':
+      return [
+        { label: '处理会话', value: m.processed as number, variant: 'count', tone: 'default' },
+        { label: '提取经验', value: m.extracted as number, variant: 'count', tone: m.extracted > 0 ? 'success' : 'default' },
+        { label: '错误', value: m.errorCount as number, variant: 'count', tone: m.errorCount > 0 ? 'danger' : 'default' },
+      ];
+
     case 'lcmg_compact':
       return [
         { label: '目标', value: m.target as string, variant: 'text', tone: 'default' },

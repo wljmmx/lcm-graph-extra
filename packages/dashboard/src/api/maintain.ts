@@ -24,6 +24,11 @@ export function invokeDistill(limit: number): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_distill', { limit });
 }
 
+/** 经验回溯：从历史对话中提取经验写入 PENDING 队列 */
+export function invokeBackfill(limit: number): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_backfill', { limit });
+}
+
 /** 触发 compact：conversationId 省略时处理最紧急债务 */
 export function invokeCompact(conversationId?: number): Promise<McpInvokeResponse> {
   const params: Record<string, unknown> = {};

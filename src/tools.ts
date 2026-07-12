@@ -371,6 +371,13 @@ export function registerOperationalTools(api: any): void {
 export interface DashboardToolContext {
   expStore?: any;
   runDistillation?: (limit: number) => Promise<any>;
+  /**
+   * 回溯已有对话记录，从历史消息中提取经验并写入 PENDING 队列。
+   * 用于修复后补录因 graphAdapter 未连接等原因丢失的经验。
+   * @param limit 最多处理多少条会话
+   * @returns { processed: number, extracted: number, errors: string[] }
+   */
+  backfillExperiences?: (limit: number) => Promise<{ processed: number; extracted: number; errors: string[] }>;
   triggerCompact?: (conversationId?: number) => Promise<boolean>;
   resetBreaker?: (name: string) => boolean;
   /** 共享的 QmdClient 单例（由 index.ts 注入）；未注入时工具回退到 new QmdClient */
@@ -2167,6 +2174,85 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return {
           content: [{ type: "text" as const, text: `❌ Distillation failed: ${e?.message ?? String(e)}` }],
           details: { ok: false, error: `❌ Distillation failed: ${e?.message ?? String(e)}` },
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 13.5 lcmg_backfill — 回溯已有对话记录提取经验
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_backfill",
+    label: "经验回溯",
+    description: "从历史对话记录中重新提取经验写入 PENDING 队列。用于修复 graphAdapter 连接问题后补录丢失的经验。处理完成后请运行 lcmg_distill 进行蒸馏。",
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number({
+        description: "最多处理的会话数，默认 20",
+        minimum: 1,
+        maximum: 500,
+      })),
+    }),
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      if (!dashboardContext?.backfillExperiences) {
+        return {
+          content: [{ type: "text" as const, text: "Error: dashboard context not available" }],
+          details: { ok: false, error: "Error: dashboard context not available" },
+          isError: true,
+        };
+      }
+      const limit = params.limit ?? 20;
+      try {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+        }
+        const result = await dashboardContext.backfillExperiences(limit);
+        const lines: string[] = [];
+        lines.push('# 经验回溯报告');
+        lines.push('');
+        lines.push(`处理会话数: ${result.processed}`);
+        lines.push(`提取经验数: ${result.extracted}`);
+        if (result.errors.length > 0) {
+          lines.push(`错误数: ${result.errors.length}`);
+          lines.push('');
+          lines.push('## 错误详情');
+          for (const err of result.errors.slice(0, 10)) {
+            lines.push(`- ${err}`);
+          }
+          if (result.errors.length > 10) {
+            lines.push(`- ... 及其他 ${result.errors.length - 10} 条`);
+          }
+        }
+        lines.push('');
+        if (result.extracted > 0) {
+          lines.push('[INFO] 经验已写入 PENDING 队列，请运行 **lcmg_distill** 进行蒸馏。');
+        } else {
+          lines.push('[INFO] 未检测到任何经验触发条件。');
+          lines.push('可能原因：');
+          lines.push('  - 对话中没有触发纠正/失败/修复/显式保存等关键词');
+          lines.push('  - 会话消息数过少（至少需要 2 条消息）');
+        }
+        return {
+          content: [{ type: "text" as const, text: lines.join("\n") }],
+          details: {
+            ok: result.errors.length === 0,
+            metrics: {
+              limit,
+              processed: result.processed,
+              extracted: result.extracted,
+              errorCount: result.errors.length,
+            },
+          },
+          isError: result.errors.length > 0,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ 回溯失败: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ 回溯失败: ${e?.message ?? String(e)}` },
           isError: true,
         };
       }
