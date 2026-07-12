@@ -65,6 +65,7 @@ const chips = computed<MetricChip[]>(() => {
 
     case 'lcmg_distill':
       return [
+        { label: 'Neo4j', value: (m.graphConnected as string) || 'unknown', variant: 'text', tone: m.graphConnected === 'connected' ? 'success' : m.graphConnected === 'disconnected' ? 'danger' : 'default' },
         { label: '待处理', value: m.pending as number, variant: 'count', tone: 'default' },
         { label: '成功蒸馏', value: m.succeeded as number, variant: 'count', tone: 'success' },
         { label: '失败', value: m.failed as number, variant: 'count', tone: m.failed > 0 ? 'danger' : 'default' },

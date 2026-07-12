@@ -2075,19 +2075,26 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const result = await dashboardContext.runDistillation(limit);
-        // runDistillation 返回 { pending, succeeded, failed, linked, llmModel, llmBaseURL }
-        const r = result as { pending?: number; succeeded?: number; failed?: number; linked?: number; llmModel?: string; llmBaseURL?: string } | undefined;
+        // runDistillation 返回 { pending, succeeded, failed, linked, llmModel, llmBaseURL, graphConnected, error }
+        const r = result as {
+          pending?: number; succeeded?: number; failed?: number; linked?: number;
+          llmModel?: string; llmBaseURL?: string; graphConnected?: string; error?: string;
+        } | undefined;
         const pending = r?.pending ?? 0;
         const succeeded = r?.succeeded ?? 0;
         const failed = r?.failed ?? 0;
         const linked = r?.linked ?? 0;
         const llmModel = r?.llmModel ?? 'unknown';
+        const graphConnected = r?.graphConnected ?? 'unknown';
+        const distillError = r?.error;
 
         // 构建结果摘要文本
         const lines: string[] = [];
         lines.push('# Distillation Report');
         lines.push('');
         lines.push(`LLM Model: ${llmModel}`);
+        lines.push(`LLM Endpoint: ${r?.llmBaseURL ?? 'unknown'}`);
+        lines.push(`Neo4j: ${graphConnected}`);
         lines.push(`Pending experiences: ${pending}`);
         lines.push(`Successfully distilled: ${succeeded}`);
         if (failed > 0) {
@@ -2097,24 +2104,44 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           lines.push(`Related links created: ${linked}`);
         }
         lines.push('');
-        if (pending === 0) {
+
+        // 根据状态给出诊断信息
+        if (distillError) {
+          // 有明确错误（如 Neo4j 未连接）
+          lines.push(`[ERROR] ${distillError}`);
+        } else if (graphConnected === 'disconnected') {
+          lines.push('[ERROR] Neo4j is not connected. Distillation cannot proceed.');
+          lines.push('Check:');
+          lines.push('  - Neo4j server is running');
+          lines.push('  - openclaw.json neo4j config (url / username / password) is correct');
+          lines.push('  - Plugin logs for "Neo4j unavailable" warnings during init');
+        } else if (pending === 0) {
           lines.push('[INFO] No pending experiences to distill.');
           lines.push('Pending experiences are created automatically during conversations when');
           lines.push('corrections, failures, or explicit save triggers are detected.');
+          lines.push('');
+          lines.push('If you have been chatting but see 0 pending, possible causes:');
+          lines.push('  - afterTurn hook did not detect experience triggers');
+          lines.push('  - expStore was not initialized when afterTurn ran');
+          lines.push('  - Neo4j write failed silently (check logs for "saveRaw failed")');
         } else if (succeeded === 0 && failed > 0) {
           lines.push('[WARNING] All distillation attempts failed. Check:');
           lines.push(`  - LLM endpoint is reachable (${r?.llmBaseURL ?? 'unknown'})`);
-          lines.push('  - LLM model name is correct');
+          lines.push(`  - LLM model name is correct (${llmModel})`);
           lines.push('  - LLM returns valid JSON (not markdown-wrapped)');
           lines.push('  - Plugin logs for detailed error messages');
         } else {
           lines.push(`[OK] Distillation complete: ${succeeded}/${pending} succeeded.`);
         }
 
+        // 如果 Neo4j 未连接或存在错误，标记为 isError 让用户在 UI 上看到红色状态
+        const hasError = graphConnected === 'disconnected' || !!distillError;
+
         return {
           content: [{ type: "text" as const, text: lines.join("\n") }],
           details: {
-            ok: true,
+            ok: !hasError,
+            error: hasError ? (distillError || 'Neo4j not connected') : undefined,
             metrics: {
               limit,
               pending,
@@ -2122,8 +2149,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               failed,
               linked,
               llmModel,
+              graphConnected,
             },
           },
+          isError: hasError,
         };
       } catch (e: any) {
         return {

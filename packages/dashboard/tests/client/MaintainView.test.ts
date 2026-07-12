@@ -52,6 +52,7 @@ const { invokeMcpToolMock } = vi.hoisted(() => ({
             failed: 1,
             linked: 2,
             llmModel: 'ollama/qwen3.6:27b',
+            graphConnected: 'connected',
             durationMs: 1200,
             dedupMerged: 5,
             pass: 10,

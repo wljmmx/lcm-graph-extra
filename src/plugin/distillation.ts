@@ -25,10 +25,14 @@ export function isOllamaModel(model: string): boolean {
 }
 
 export function resolveDistillationLlm(apiRef: any) {
-  const runtimeLlm = apiRef.runtimeContext?.llm;
+  // 优先从 runtimeContext.llm 读取（SDK 注入的运行时会话模型）
+  const runtimeLlm = apiRef?.runtimeContext?.llm;
+  // 插件配置：openclaw.json 中 plugins.entries.lcm-graph-extra.config
+  // 注意：属性名是 pluginConfig，不是 config（api.config 是 workspace 配置）
+  const pluginConfig = apiRef?.pluginConfig ?? apiRef?.config ?? {};
   // 默认 keepAlive（可被 distillationLlm.keepAlive 覆盖）
-  const defaultKeepAlive = (apiRef.config as any)?.distillationLlm?.keepAlive
-    || (apiRef.config as any)?.embedding?.keepAlive
+  const defaultKeepAlive = pluginConfig?.distillationLlm?.keepAlive
+    || pluginConfig?.embedding?.keepAlive
     || '1h';
   // Session model is local Ollama → reuse it to avoid GPU model swapping
   if (runtimeLlm?.model && isOllamaModel(runtimeLlm.model)) {
@@ -39,13 +43,21 @@ export function resolveDistillationLlm(apiRef: any) {
       keepAlive: defaultKeepAlive,
     };
   }
-  const dLlm = (apiRef.config as any)?.distillationLlm;
+  const dLlm = pluginConfig?.distillationLlm;
   if (dLlm?.provider === 'openclaw_hooks') return {
     model: dLlm.model || 'ollama/qwen3.6:27b',
     apiKey: '',
-    baseURL: cleanBaseURL('http://127.0.0.1:18789/v1'),
+    baseURL: cleanBaseURL(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
     keepAlive: dLlm.keepAlive || defaultKeepAlive,
   };
+  if (dLlm?.provider && dLlm?.model) {
+    return {
+      model: dLlm.model,
+      apiKey: dLlm.apiKey || '',
+      baseURL: cleanBaseURL(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+      keepAlive: dLlm.keepAlive || defaultKeepAlive,
+    };
+  }
   return {
     model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini',
     apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
@@ -186,6 +198,10 @@ export interface DistillationResult {
   linked: number;
   llmModel: string;
   llmBaseURL: string;
+  /** Neo4j/graphAdapter 连接状态：connected / disconnected / unknown */
+  graphConnected?: string;
+  /** 初始化或查询错误信息（fetchPending 失败等） */
+  error?: string;
 }
 
 export async function runDistillation(expStoreRef: any, apiRef: any, log: any, limit?: number): Promise<DistillationResult> {
@@ -197,19 +213,45 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     llmModel: '',
     llmBaseURL: '',
   };
+
+  // 1. 先解析 LLM 配置（即使 pending=0 也返回，方便用户确认配置是否正确）
+  try {
+    const llm = resolveDistillationLlm(apiRef);
+    result.llmModel = llm.model;
+    result.llmBaseURL = llm.baseURL;
+  } catch (llmErr) {
+    log?.warn?.('distillation: resolveDistillationLlm failed', { err: String(llmErr) });
+    result.llmModel = '(config resolve failed)';
+    result.llmBaseURL = '';
+  }
+
+  // 2. 检查 graphAdapter 连接状态
+  // graphAdapter.query 在 driver 为 null 时静默返回 []，需要显式检查连接状态
+  const adapter = expStoreRef?.adapter;
+  if (adapter && typeof adapter.isConnected === 'boolean') {
+    result.graphConnected = adapter.isConnected ? 'connected' : 'disconnected';
+    if (!adapter.isConnected) {
+      result.error = 'Neo4j not connected — graphAdapter.driver is null. ' +
+        'Check Neo4j is running and config (neo4j.url / neo4j.auth) is correct in openclaw.json.';
+      log?.warn?.('distillation: Neo4j not connected, fetchPending will return empty');
+      return result;
+    }
+  } else {
+    result.graphConnected = 'unknown';
+  }
+
   try {
     // limit 控制单批拉取数量，默认 5（与历史行为一致），dashboard lcmg_distill 可传入更大值
     const fetchLimit = limit && limit > 0 ? limit : 5;
     const pending = await expStoreRef.fetchPending(fetchLimit);
     result.pending = pending.length;
     if (!pending.length) {
-      log?.info?.('distillation: no pending experiences to process');
+      log?.info?.('distillation: no pending experiences to process', { llmModel: result.llmModel, graphConnected: result.graphConnected });
       return result;
     }
-    log?.info?.('distillation: processing ' + String(pending.length) + ' pending');
+    log?.info?.('distillation: processing ' + String(pending.length) + ' pending', { llmModel: result.llmModel });
+    // 重新解析 LLM 配置用于实际调用（前面已解析过一次用于结果展示，此处复用）
     const llm = resolveDistillationLlm(apiRef);
-    result.llmModel = llm.model;
-    result.llmBaseURL = llm.baseURL;
     // BUGFIX(P2-2/3): 原为串行 for-await，每条 distillOne 是一次 LLM 调用（含 15s 超时），
     // 5 条串行最坏 75s。改为分批并发处理，每批 concurrency 条用 Promise.allSettled 并发执行。
     // 每条蒸馏按 raw.id 隔离、无跨条数据依赖，并发安全；单条失败不影响其他条。
@@ -293,6 +335,10 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
       })()));
     }
     log?.info?.('distillation: completed', { pending: result.pending, succeeded: result.succeeded, failed: result.failed, linked: result.linked, model: result.llmModel });
-  } catch (e) { log?.warn?.("distillation batch failed", { err: String(e) }); }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log?.warn?.("distillation batch failed", { err: msg });
+    result.error = msg;
+  }
   return result;
 }
