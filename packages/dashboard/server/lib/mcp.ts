@@ -20,7 +20,17 @@
  *   - 50条并发3：最长 (50/3) * 180s ≈ 3000s
  *   - backfill 100会话：每会话检测+提取，无 LLM 调用，约 30-120s
  *   - sync repair：SQLite + Neo4j 批量 MERGE，约 60-300s
+ *
+ * BUGFIX(v2.2.5): Node.js fetch（基于 undici）默认 headersTimeout=300000ms (5min)
+ * 和 bodyTimeout=300000ms (5min)，即使 AbortController 设置为 60 分钟，
+ * undici 仍会在 5 分钟时因等待响应头超时中断 fetch（报 "fetch failed"）。
+ * undici 在 Node.js 中不作为可导入模块暴露，无法通过 Agent 自定义超时。
+ * 解决方案：改用 node:http 原生模块，它没有 undici 的 5 分钟默认超时问题，
+ * 超时完全由 setTimeout + req.destroy() 控制。
  */
+
+import { request, type RequestOptions } from 'node:http';
+import { URL } from 'node:url';
 
 // 与 server/lib/snapshot.ts / routes/config.ts / routes/graph-health.ts 共用 env var
 const MCP_HOST = process.env.PLUGIN_SNAPSHOT_URL ?? 'http://127.0.0.1:7423';
@@ -87,6 +97,61 @@ export interface McpInvokeResponse {
 }
 
 /**
+ * 使用 node:http 发送 POST 请求（避免 undici/fetch 的 5 分钟默认超时）。
+ *
+ * node:http 的 socket 超时需要手动设置，没有 undici 的 headersTimeout/bodyTimeout
+ * 限制，适合长任务调用。
+ */
+function httpPost(
+  url: string,
+  body: string,
+  timeoutMs: number,
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const options: RequestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port || 80,
+      path: parsed.pathname + parsed.search,
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      },
+    };
+
+    const req = request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf-8'),
+        });
+      });
+      res.on('error', reject);
+    });
+
+    // 总超时控制：到达超时后销毁请求
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`TIMEOUT_AFTER_${timeoutMs}ms`));
+    }, timeoutMs);
+
+    req.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    req.on('close', () => {
+      clearTimeout(timer);
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
  * 调用 OpenClaw MCP 工具。
  *
  * @param tool 工具名，如 "lcmg_maintain"
@@ -97,22 +162,19 @@ export async function invokeMcpTool(
   params: Record<string, unknown>,
 ): Promise<McpInvokeResponse> {
   const timeoutMs = getTimeoutForTool(tool);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(`${MCP_HOST}/internal/mcp-invoke`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ tool, params }),
-      signal: controller.signal,
-    });
-    if (!resp.ok) {
+    const { status, body } = await httpPost(
+      `${MCP_HOST}/internal/mcp-invoke`,
+      JSON.stringify({ tool, params }),
+      timeoutMs,
+    );
+    if (status !== 200) {
       return {
         ok: false,
-        error: `MCP host HTTP ${resp.status}: ${await safeReadText(resp)}`,
+        error: `MCP host HTTP ${status}: ${body.slice(0, 500)}`,
       };
     }
-    const data = (await resp.json()) as Partial<McpInvokeResponse>;
+    const data = JSON.parse(body) as Partial<McpInvokeResponse>;
     return {
       ok: Boolean(data.ok),
       result: data.result,
@@ -120,21 +182,10 @@ export async function invokeMcpTool(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // 超时（abort）单独提示，便于排查
-    if (err instanceof Error && err.name === 'AbortError') {
+    // 超时单独提示，便于排查
+    if (msg.startsWith('TIMEOUT_AFTER_')) {
       return { ok: false, error: `MCP 调用超时（${timeoutMs}ms，工具: ${tool}）。该工具超时阈值为 ${Math.round(timeoutMs / 1000)}s，可通过环境变量 MCP_TIMEOUT_MS 调整。` };
     }
     return { ok: false, error: `MCP 调用失败: ${msg}` };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** 安全读取响应文本（失败时回退） */
-async function safeReadText(resp: Response): Promise<string> {
-  try {
-    return await resp.text();
-  } catch {
-    return '<unreadable body>';
   }
 }
