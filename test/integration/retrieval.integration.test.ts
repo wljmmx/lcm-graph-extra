@@ -1,9 +1,9 @@
 /**
  * ExperienceStorage 集成测试 — 验证 Cypher 查询在真实 Neo4j 环境中的正确性。
  *
- * 前置条件:
- *   - NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD 环境变量
- *   - 无环境变量时整个套件跳过（describe.skip）
+ * 运行模式:
+ *   - 有 NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD 环境变量时，使用真实 Neo4j
+ *   - 无环境变量时，使用内存 mock 适配器（验证存储逻辑）
  *
  * 运行:
  *   npx vitest run test/integration/retrieval.integration.test.ts
@@ -62,28 +62,368 @@ function makeRaw(overrides: Partial<RawExperience> = {}): RawExperience {
 }
 
 // ---------------------------------------------------------------------------
+// 内存 mock 适配器 — 模拟 Neo4j Cypher 行为
+// ---------------------------------------------------------------------------
+
+class InMemoryNeo4jAdapter implements GraphQueryExecutor {
+  private nodes = new Map<string, Record<string, unknown>>();
+
+  async query<T = Record<string, unknown>>(
+    cypher: string,
+    params?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>[]> {
+    const p = params ?? {};
+    const c = cypher.trim();
+
+    // CREATE TEXT INDEX — noop
+    if (c.startsWith('CREATE TEXT INDEX')) return [] as any;
+
+    // CALL db.index.fulltext — 模拟不可用，触发降级
+    if (c.startsWith('CALL db.index.fulltext')) throw new Error('fulltext index not available in mock');
+
+    // MERGE (upsert)
+    if (c.startsWith('MERGE')) {
+      const id = p.id as string;
+      const props = (p.props ?? {}) as Record<string, unknown>;
+      const isDistilled = c.includes("'DISTILLED'");
+      const existing = this.nodes.get(id);
+      const node: Record<string, unknown> = existing ? { ...existing } : {};
+      node.id = id; // 确保 id 存储在节点属性中
+      // e += $props
+      for (const [k, v] of Object.entries(props)) {
+        node[k] = v;
+      }
+      // ON CREATE SET
+      if (!existing) {
+        node.createdAt = Date.now();
+      }
+      // status
+      if (isDistilled) {
+        node.status = 'DISTILLED';
+      } else if (!existing) {
+        node.status = 'PENDING';
+      }
+      this.nodes.set(id, node);
+      return [] as any;
+    }
+
+    // DELETE (cleanup: WHERE e.id STARTS WITH "test-")
+    if (c.includes('DETACH DELETE')) {
+      const prefix = (c.match(/STARTS WITH "(.*?)"/) || [])[1];
+      if (prefix) {
+        for (const [id] of [...this.nodes]) {
+          if (id.startsWith(prefix)) this.nodes.delete(id);
+        }
+      }
+      return [] as any;
+    }
+
+    // SET e.matchCount = coalesce(e.matchCount, 0) + 1
+    if (c.includes('SET e.matchCount = coalesce')) {
+      const id = p.id as string;
+      const node = this.nodes.get(id);
+      if (node) {
+        node.matchCount = (node.matchCount as number || 0) + 1;
+        node.lastRecalledAt = Date.now();
+      }
+      return [] as any;
+    }
+
+    // SET e.qualityScore
+    if (c.includes('SET e.qualityScore')) {
+      const id = p.id as string;
+      const node = this.nodes.get(id);
+      if (node) {
+        node.qualityScore = p.qualityScore;
+        const delta = p.delta as number;
+        const cur = (node.relevanceScore as number) ?? 0.5;
+        if (delta > 0) node.relevanceScore = Math.min(cur + delta, 1.0);
+        else if (delta < 0) node.relevanceScore = Math.max(cur + delta, 0.3);
+        node.lastValidatedAt = Date.now();
+      }
+      return [] as any;
+    }
+
+    // DELETE e (单节点删除)
+    if (c.includes('DELETE e') && !c.includes('DETACH')) {
+      const id = p.id as string;
+      this.nodes.delete(id);
+      return [] as any;
+    }
+
+    // cleanupExpired
+    if (c.includes('expiresAt < timestamp()') && c.includes('DELETE e')) {
+      let deleted = 0;
+      const batchSize = (p.batchSize as number) || 100;
+      for (const [id, node] of [...this.nodes]) {
+        if (deleted >= batchSize) break;
+        const exp = node.expiresAt as number | undefined;
+        if (exp !== undefined && exp < Date.now()) {
+          this.nodes.delete(id);
+          deleted++;
+        }
+      }
+      return [{ deleted }] as any;
+    }
+
+    // decayMatchCount
+    if (c.includes('round(e.matchCount * 0.5)')) {
+      const staleMs = Number((c.match(/timestamp\(\) - (\d+)/) || [])[1] || 0);
+      let decayed = 0;
+      for (const [, node] of this.nodes) {
+        const lr = node.lastRecalledAt as number | undefined;
+        if (lr && lr < Date.now() - staleMs && (node.matchCount as number) > 0) {
+          node.matchCount = Math.round((node.matchCount as number) * 0.5);
+          decayed++;
+        }
+      }
+      return [{ decayed }] as any;
+    }
+
+    // count(e) — 直接查询 count
+    if (c.includes('RETURN count(e) AS cnt')) {
+      const id = p.id as string;
+      const cnt = this.nodes.has(id) ? 1 : 0;
+      return [{ cnt }] as any;
+    }
+
+    // RETURN e.status AS status — 直接查节点属性
+    if (c.includes('RETURN e.status AS status')) {
+      const id = p.id as string;
+      const node = this.nodes.get(id);
+      if (!node) return [] as any;
+      const result: Record<string, unknown> = {};
+      if (c.includes('e.status AS status')) result.status = node.status;
+      if (c.includes('e.detail AS detail')) result.detail = node.detail;
+      if (c.includes('e.relevanceScore AS relevanceScore')) result.relevanceScore = node.relevanceScore;
+      return [result] as any;
+    }
+
+    // RETURN e.matchCount AS matchCount, e.lastRecalledAt AS lastRecalledAt
+    if (c.includes('RETURN e.matchCount AS matchCount')) {
+      const id = p.id as string;
+      const node = this.nodes.get(id);
+      if (!node) return [] as any;
+      return [{
+        matchCount: node.matchCount ?? 0,
+        lastRecalledAt: node.lastRecalledAt ?? null,
+      }] as any;
+    }
+
+    // SEARCH_RELEVANT — 按 relevanceScore 排序
+    if (c.includes('ORDER BY e.relevanceScore DESC') && c.includes('decayedMatchCount DESC')) {
+      const minScore = (p.minScore as number) ?? 0;
+      const limit = (p.limit as number) ?? 5;
+      const results = [...this.nodes.values()]
+        .filter(n => n.status === 'DISTILLED')
+        .filter(n => (n.relevanceScore as number) >= minScore)
+        .filter(n => !n.expiresAt || (n.expiresAt as number) > Date.now())
+        .filter(n => !n.state || n.state !== 'superseded')
+        .sort((a, b) => (b.relevanceScore as number) - (a.relevanceScore as number))
+        .slice(0, limit);
+      return results.map(n => this._nodeToRow(n)) as any;
+    }
+
+    // searchByQuery CONTAINS 路径
+    if (c.includes('queryMatch') || c.includes('CONTAINS toLower')) {
+      return this._searchByContains(c, p);
+    }
+
+    // SEARCH_BY_CONTEXT
+    if (c.includes('toLower(e.context) CONTAINS')) {
+      const keyword = (p.keyword as string) || '';
+      const limit = (p.limit as number) ?? 5;
+      const results = [...this.nodes.values()]
+        .filter(n => n.status === 'DISTILLED')
+        .filter(n => !n.state || n.state !== 'superseded')
+        .filter(n => !n.expiresAt || (n.expiresAt as number) > Date.now())
+        .filter(n => ((n.context as string) || '').toLowerCase().includes(keyword.toLowerCase()))
+        .sort((a, b) => (b.relevanceScore as number) - (a.relevanceScore as number))
+        .slice(0, limit);
+      return results.map(n => this._nodeToRow(n)) as any;
+    }
+
+    // getTopExperiences
+    if (c.includes('ORDER BY e.matchCount DESC')) {
+      const limitMatch = c.match(/LIMIT (\d+)/);
+      const limit = limitMatch ? Number(limitMatch[1]) : 3;
+      const results = [...this.nodes.values()]
+        .filter(n => n.status === 'DISTILLED')
+        .filter(n => !n.state || n.state !== 'superseded')
+        .filter(n => (n.relevanceScore as number) >= 0.6)
+        .filter(n => !n.expiresAt || (n.expiresAt as number) > Date.now())
+        .sort((a, b) => ((b.matchCount as number) || 0) - ((a.matchCount as number) || 0)
+          || (b.relevanceScore as number) - (a.relevanceScore as number))
+        .slice(0, limit);
+      return results.map(n => this._nodeToRow(n)) as any;
+    }
+
+    // FETCH_PENDING
+    if (c.includes("e.status = 'PENDING'") && c.includes('e.source AS source')) {
+      const limit = (p.limit as number) ?? 200;
+      const results = [...this.nodes.values()]
+        .filter(n => n.status === 'PENDING')
+        .sort((a, b) => (a.createdAt as number) - (b.createdAt as number))
+        .slice(0, limit);
+      return results.map(n => ({
+        id: n.id,
+        source: n.source,
+        context: n.context,
+        detail: n.detail,
+        projectName: n.projectName,
+        taskId: n.taskId,
+        createdAt: n.createdAt,
+      })) as any;
+    }
+
+    // linkRelated
+    if (c.includes('MERGE (e)-[r:RELATED_TO]')) {
+      return [{ linked: 0 }] as any;
+    }
+
+    // findRelatedByConcepts
+    if (c.includes('RETURN other.id AS id')) {
+      return [] as any;
+    }
+
+    return [] as any;
+  }
+
+  private _nodeToRow(n: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: n.id,
+      title: n.title ?? '',
+      summary: n.summary ?? '',
+      detail: n.detail ?? '',
+      context: n.context ?? '',
+      relevanceScore: n.relevanceScore ?? 0,
+      createdAt: n.createdAt ?? Date.now(),
+      matchCount: n.matchCount ?? 0,
+      rawIds: n.rawIds ?? '',
+      type: n.type ?? 'lesson',
+      tags_scenario: n.tags_scenario ?? '',
+      tags_techStack: n.tags_techStack ?? '',
+      tags_severity: n.tags_severity ?? '',
+      tags_free: n.tags_free ?? '',
+    };
+  }
+
+  private _searchByContains(cypher: string, p: Record<string, unknown>): Record<string, unknown>[] {
+    const minScore = (p.minScore as number) ?? 0;
+    const limit = (p.limit as number) ?? 5;
+    const queryKeyword = ((p.queryKeyword as string) || '').toLowerCase();
+    const scenarioTags = (p.scenarioTags as string[]) || [];
+    const techStackTags = (p.techStackTags as string[]) || [];
+    const queryFreeTags = (p.queryFreeTags as string[]) || [];
+    const projects = (p.projects as string[]) || [];
+    const halfLifeDays = (p.halfLifeDays as number) ?? 30;
+
+    const hasFilters = scenarioTags.length > 0 || techStackTags.length > 0 || projects.length > 0;
+
+    let results = [...this.nodes.values()]
+      .filter(n => n.status === 'DISTILLED')
+      .filter(n => !n.state || n.state !== 'superseded')
+      .filter(n => (n.relevanceScore as number) >= minScore)
+      .filter(n => !n.expiresAt || (n.expiresAt as number) > Date.now());
+
+    // 项目过滤（软过滤）
+    if (projects.length > 0) {
+      const lowerProjects = projects.map(p => p.toLowerCase());
+      results = results.filter(n => {
+        const pn = ((n.projectName as string) || '').toLowerCase();
+        return pn === '' || lowerProjects.includes(pn);
+      });
+    }
+
+    // 标签过滤
+    if (hasFilters) {
+      results = results.filter(n => {
+        const scenarios = ((n.tags_scenario as string) || '').split(',').filter(Boolean);
+        const techStacks = ((n.tags_techStack as string) || '').split(',').filter(Boolean);
+        const matchScenario = scenarioTags.some(s => scenarios.includes(s));
+        const matchTech = techStackTags.some(t => techStacks.includes(t));
+        return matchScenario || matchTech;
+      });
+    }
+
+    // 计算 queryMatch
+    const scored = results.map(n => {
+      let queryMatch = 0;
+      if (queryKeyword) {
+        if (((n.summary as string) || '').toLowerCase().includes(queryKeyword)) queryMatch += 1.0;
+        if (((n.context as string) || '').toLowerCase().includes(queryKeyword)) queryMatch += 0.5;
+        if (((n.title as string) || '').toLowerCase().includes(queryKeyword)) queryMatch += 0.7;
+      }
+      // freeTags 匹配
+      if (queryFreeTags.length > 0) {
+        const freeTags = ((n.tags_free as string) || '').split(',').filter(Boolean);
+        const lowerQueryFree = queryFreeTags.map(f => f.toLowerCase());
+        if (freeTags.some(f => lowerQueryFree.includes(f.toLowerCase()))) {
+          queryMatch += 0.3;
+        }
+      }
+      // decayedMatchCount
+      let decayedMatchCount: number;
+      const mc = (n.matchCount as number) || 0;
+      if (n.lastRecalledAt) {
+        const daysSince = (Date.now() - (n.lastRecalledAt as number)) / (1000 * 60 * 60 * 24);
+        decayedMatchCount = mc * Math.pow(0.5, daysSince / halfLifeDays);
+      } else {
+        decayedMatchCount = mc * 0.5;
+      }
+      return { node: n, queryMatch, decayedMatchCount };
+    });
+
+    // ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) + (decayedMatchCount * 0.1) DESC
+    scored.sort((a, b) => {
+      const sa = (b.node.relevanceScore as number) * 0.6 + b.queryMatch * 0.4 + b.decayedMatchCount * 0.1;
+      const sb = (a.node.relevanceScore as number) * 0.6 + a.queryMatch * 0.4 + a.decayedMatchCount * 0.1;
+      return sa - sb;
+    });
+
+    return scored.slice(0, limit).map(s => {
+      const row = this._nodeToRow(s.node);
+      row.queryMatch = s.queryMatch;
+      return row;
+    });
+  }
+
+  clear() {
+    this.nodes.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 测试套件
 // ---------------------------------------------------------------------------
 
-const suite = hasNeo4j ? describe : describe.skip;
+// 真实 Neo4j 环境
+let driver: neo4j.Driver | null = null;
+let mockAdapter: InMemoryNeo4jAdapter | null = null;
 
-suite('ExperienceStorage Integration', () => {
-  let driver: neo4j.Driver;
-  let storage: ExperienceStorage;
-
-  beforeAll(async () => {
+beforeAll(async () => {
+  if (hasNeo4j) {
     driver = neo4j.driver(
       NEO4J_URI!,
       neo4j.auth.basic(NEO4J_USER!, NEO4J_PASSWORD!),
     );
+  } else {
+    mockAdapter = new InMemoryNeo4jAdapter();
+  }
+});
 
-    // 将 neo4j driver 包装为 GraphQueryExecutor 接口
+afterAll(async () => {
+  if (driver) await driver.close();
+});
+
+function createStorage(): ExperienceStorage {
+  if (hasNeo4j && driver) {
     const adapter: GraphQueryExecutor = {
       query: async <T = Record<string, unknown>>(
         cypher: string,
         params?: Record<string, unknown>,
       ): Promise<Record<string, unknown>[]> => {
-        const session = driver.session();
+        const session = driver!.session();
         try {
           const result = await session.run(cypher, params ?? {});
           return result.records.map((r) => {
@@ -98,23 +438,28 @@ suite('ExperienceStorage Integration', () => {
         }
       },
     };
+    return new ExperienceStorage(adapter);
+  }
+  return new ExperienceStorage(mockAdapter!);
+}
 
-    storage = new ExperienceStorage(adapter, 5);
-  });
-
-  afterAll(async () => {
-    if (driver) await driver.close();
-  });
+describe('ExperienceStorage Integration', () => {
+  let storage: ExperienceStorage;
 
   beforeEach(async () => {
-    // 清理所有测试数据（ID 以 "test-" 开头）
-    const session = driver.session();
-    try {
-      await session.run(
-        'MATCH (e:EXPERIENCE) WHERE e.id STARTS WITH "test-" DETACH DELETE e',
-      );
-    } finally {
-      await session.close();
+    storage = createStorage();
+    if (hasNeo4j && driver) {
+      // 清理所有测试数据（ID 以 "test-" 开头）
+      const session = driver.session();
+      try {
+        await session.run(
+          'MATCH (e:EXPERIENCE) WHERE e.id STARTS WITH "test-" DETACH DELETE e',
+        );
+      } finally {
+        await session.close();
+      }
+    } else {
+      mockAdapter!.clear();
     }
   });
 
@@ -281,44 +626,68 @@ suite('ExperienceStorage Integration', () => {
     // 写入原始经验
     await storage.saveRaw(raw);
 
-    // 直接用 driver 查询验证 status=PENDING
-    const session1 = driver.session();
-    let result: any;
-    try {
-      const res = await session1.run(
-        'MATCH (e:EXPERIENCE {id: $id}) RETURN e.status AS status, e.detail AS detail',
-        { id: rawId },
-      );
-      result = res.records[0];
-    } finally {
-      await session1.close();
-    }
-    expect(result.get('status')).toBe('PENDING');
-    expect(result.get('detail')).toBe(raw.detail);
+    if (hasNeo4j && driver) {
+      // 真实 Neo4j 环境：直接用 driver 查询验证
+      const session1 = driver.session();
+      let result: any;
+      try {
+        const res = await session1.run(
+          'MATCH (e:EXPERIENCE {id: $id}) RETURN e.status AS status, e.detail AS detail',
+          { id: rawId },
+        );
+        result = res.records[0];
+      } finally {
+        await session1.close();
+      }
+      expect(result.get('status')).toBe('PENDING');
+      expect(result.get('detail')).toBe(raw.detail);
 
-    // 写入精炼经验（覆盖）
-    const distilled = makeDistilled({
-      id: rawId,
-      type: 'lesson',
-      relevanceScore: 0.85,
-      summary: 'Distilled summary for the raw experience',
-      detail: 'Refined detail after distillation',
-    });
-    await storage.saveDistilled(distilled);
+      // 写入精炼经验（覆盖）
+      const distilled = makeDistilled({
+        id: rawId,
+        type: 'lesson',
+        relevanceScore: 0.85,
+        summary: 'Distilled summary for the raw experience',
+        detail: 'Refined detail after distillation',
+      });
+      await storage.saveDistilled(distilled);
 
-    // 验证 status 变为 DISTILLED
-    const session2 = driver.session();
-    try {
-      const res = await session2.run(
-        'MATCH (e:EXPERIENCE {id: $id}) RETURN e.status AS status, e.detail AS detail, e.relevanceScore AS relevanceScore',
-        { id: rawId },
-      );
-      const record = res.records[0];
-      expect(record.get('status')).toBe('DISTILLED');
-      expect(record.get('detail')).toBe('Refined detail after distillation');
-      expect(record.get('relevanceScore')).toBe(0.85);
-    } finally {
-      await session2.close();
+      // 验证 status 变为 DISTILLED
+      const session2 = driver.session();
+      try {
+        const res = await session2.run(
+          'MATCH (e:EXPERIENCE {id: $id}) RETURN e.status AS status, e.detail AS detail, e.relevanceScore AS relevanceScore',
+          { id: rawId },
+        );
+        const record = res.records[0];
+        expect(record.get('status')).toBe('DISTILLED');
+        expect(record.get('detail')).toBe('Refined detail after distillation');
+        expect(record.get('relevanceScore')).toBe(0.85);
+      } finally {
+        await session2.close();
+      }
+    } else {
+      // Mock 环境：通过 storage API 验证
+      const results = await storage.searchRelevant(0, 10);
+      // raw 初始为 PENDING，searchRelevant 只返回 DISTILLED，不应包含
+      expect(results.find(r => r.experience.id === rawId)).toBeUndefined();
+
+      // 写入精炼经验
+      const distilled = makeDistilled({
+        id: rawId,
+        type: 'lesson',
+        relevanceScore: 0.85,
+        summary: 'Distilled summary for the raw experience',
+        detail: 'Refined detail after distillation',
+      });
+      await storage.saveDistilled(distilled);
+
+      // 验证 status 变为 DISTILLED（通过 searchRelevant 能查到）
+      const results2 = await storage.searchRelevant(0, 10);
+      const found = results2.find(r => r.experience.id === rawId);
+      expect(found).toBeDefined();
+      expect(found!.experience.detail).toBe('Refined detail after distillation');
+      expect(found!.experience.relevanceScore).toBe(0.85);
     }
   });
 
@@ -336,20 +705,29 @@ suite('ExperienceStorage Integration', () => {
 
     await storage.incrementMatchCount('test-matchcount');
 
-    // 直接查询验证
-    const session = driver.session();
-    try {
-      const res = await session.run(
-        'MATCH (e:EXPERIENCE {id: $id}) RETURN e.matchCount AS matchCount, e.lastRecalledAt AS lastRecalledAt',
-        { id: 'test-matchcount' },
-      );
-      const record = res.records[0];
-      const mc = neo4j.integer.toNumber(record.get('matchCount'));
-      expect(mc).toBe(1);
-      expect(record.get('lastRecalledAt')).toBeDefined();
-      expect(record.get('lastRecalledAt')).not.toBeNull();
-    } finally {
-      await session.close();
+    if (hasNeo4j && driver) {
+      // 直接查询验证
+      const session = driver.session();
+      try {
+        const res = await session.run(
+          'MATCH (e:EXPERIENCE {id: $id}) RETURN e.matchCount AS matchCount, e.lastRecalledAt AS lastRecalledAt',
+          { id: 'test-matchcount' },
+        );
+        const record = res.records[0];
+        const mc = neo4j.integer.toNumber(record.get('matchCount'));
+        expect(mc).toBe(1);
+        expect(record.get('lastRecalledAt')).toBeDefined();
+        expect(record.get('lastRecalledAt')).not.toBeNull();
+      } finally {
+        await session.close();
+      }
+    } else {
+      // Mock 环境：再次 incrementMatchCount 后通过 searchRelevant 验证 matchCount
+      await storage.incrementMatchCount('test-matchcount');
+      const results = await storage.searchRelevant(0, 10);
+      const found = results.find(r => r.experience.id === 'test-matchcount');
+      expect(found).toBeDefined();
+      expect(found!.experience.matchCount).toBe(2);
     }
   });
 
@@ -376,17 +754,19 @@ suite('ExperienceStorage Integration', () => {
     });
     await storage.saveDistilled(exp2);
 
-    // 验证只有 1 个节点
-    const session = driver.session();
-    try {
-      const res = await session.run(
-        'MATCH (e:EXPERIENCE {id: $id}) RETURN count(e) AS cnt',
-        { id },
-      );
-      const record = res.records[0];
-      expect(neo4j.integer.toNumber(record.get('cnt'))).toBe(1);
-    } finally {
-      await session.close();
+    if (hasNeo4j && driver) {
+      // 验证只有 1 个节点
+      const session = driver.session();
+      try {
+        const res = await session.run(
+          'MATCH (e:EXPERIENCE {id: $id}) RETURN count(e) AS cnt',
+          { id },
+        );
+        const record = res.records[0];
+        expect(neo4j.integer.toNumber(record.get('cnt'))).toBe(1);
+      } finally {
+        await session.close();
+      }
     }
 
     // 验证最新属性生效
