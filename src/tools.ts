@@ -203,7 +203,7 @@ async function generateExperienceSummary(records: any[], usedExperienceNodes: bo
     name: rec.get("e.name") ?? "Unknown",
     type: usedExperienceNodes ? (rec.get("e.communityId") ?? "lesson") : "event",
     desc: (rec.get("e.description") ?? "").slice(0, 200),
-    seen: rec.get("e.validatedCount") ?? 0,
+    seen: neo4jToNumber(rec.get("e.validatedCount")),
     confidence: ((Number(rec.get("e.pagerank") ?? 0)) * 100).toFixed(0) + "%",
   }));
 
@@ -272,6 +272,21 @@ async function generateExperienceSummary(records: any[], usedExperienceNodes: bo
 // ---------------------------------------------------------------------------
 // Neo4j connection pool — single shared driver, per-call sessions only
 // ---------------------------------------------------------------------------
+
+/**
+ * 将 Neo4j Integer 对象安全转为原生 number。
+ * neo4j-driver 6.x 的 Integer valueOf() 返回 BigInt，
+ * 直接用于算术运算(+, +=)或 new Date() 会抛
+ * "Cannot mix BigInt and other types" / "Cannot convert a BigInt value to a number"。
+ */
+function neo4jToNumber(val: any): number {
+  if (val === null || val === undefined) return 0;
+  if (typeof val?.toNumber === 'function') return val.toNumber();
+  if (typeof val === 'number') return val;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : 0;
+}
+
 let _neo4jDriver: any = null;
 let _neo4jDriverReady: Promise<any> | null = null;
 
@@ -623,7 +638,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           const data = result.records.map((rec: any) => ({
             id: rec.get("e.id"), name: rec.get("e.name"),
             confidence: (Number(rec.get("e.pagerank") ?? 0) * 100).toFixed(0) + "%",
-            occurrences: rec.get("e.validatedCount"),
+            occurrences: neo4jToNumber(rec.get("e.validatedCount")),
             solutions: usedExperienceNodes ? [] : (rec.get("solutions") as any[])
               .filter((s: any) => s.fix)
               .map((s: any) => ({ name: s.fix.properties.name, instruction: s.relation?.properties?.instruction })),
@@ -641,7 +656,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         for (const rec of result.records) {
           const name = rec.get("e.name") ?? "Unknown";
           const conf = ((Number(rec.get("e.pagerank") ?? 0)) * 100).toFixed(0);
-          const seen = rec.get("e.validatedCount") ?? 0;
+          const seen = neo4jToNumber(rec.get("e.validatedCount"));
           const desc = rec.get("e.description") ?? "";
           const sols: any[] = usedExperienceNodes ? [] : (rec.get("solutions") ?? []).filter((s: any) => s.fix);
           if (format === "markdown") {

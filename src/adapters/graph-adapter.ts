@@ -714,7 +714,11 @@ export class GraphAdapter {
             RETURN count(*) AS cnt
           `;
           const result = await session.run(cypher, { nodes });
-          uc += result.records[0]?.get('cnt') ?? 0;
+          // BUGFIX: neo4j-driver 6.x Integer 的 valueOf() 返回 BigInt，
+          // `number += Integer` 会抛 "Cannot mix BigInt and other types"。
+          // 必须显式调用 toNumber() 转为原生 number。
+          const cntVal = result.records[0]?.get('cnt');
+          uc += (typeof cntVal?.toNumber === 'function' ? cntVal.toNumber() : Number(cntVal)) || 0;
         }
       }
 
