@@ -290,10 +290,34 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
   try {
     // limit 控制单批拉取数量，默认 5（与历史行为一致），dashboard lcmg_distill 可传入更大值
     const fetchLimit = limit && limit > 0 ? limit : 5;
+
+    // 诊断：fetchPending 前先统计 Neo4j 中的节点状态分布
+    let diagTotal = -1;
+    let diagByStatus: Record<string, number> = {};
+    try {
+      if (typeof expStoreRef.countAll === 'function') {
+        diagTotal = await expStoreRef.countAll();
+      }
+      if (typeof expStoreRef.countByStatus === 'function') {
+        diagByStatus = await expStoreRef.countByStatus();
+      }
+      log?.info?.('distillation: Neo4j EXPERIENCE node status', { total: diagTotal, byStatus: diagByStatus });
+    } catch (diagErr) {
+      log?.warn?.('distillation: diagnostic count query failed', { err: String(diagErr) });
+    }
+
     const pending = await expStoreRef.fetchPending(fetchLimit);
     result.pending = pending.length;
     if (!pending.length) {
-      log?.info?.('distillation: no pending experiences to process', { llmModel: result.llmModel, graphConnected: result.graphConnected });
+      log?.info?.('distillation: no pending experiences to process', {
+        llmModel: result.llmModel,
+        graphConnected: result.graphConnected,
+        neo4jTotal: diagTotal,
+        neo4jByStatus: diagByStatus,
+      });
+      // 诊断信息附加到 result 供工具 handler 展示
+      (result as any).neo4jTotal = diagTotal;
+      (result as any).neo4jByStatus = diagByStatus;
       return result;
     }
     log?.info?.('distillation: processing ' + String(pending.length) + ' pending', { llmModel: result.llmModel });

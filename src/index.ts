@@ -879,8 +879,21 @@ const pluginEntry: any = definePluginEntry({
           }
         }
 
-        logger?.info?.(`[backfill] completed: processed=${conversations.length}, skipped=${skipped}, extracted=${extracted}, errors=${errors.length}`);
-        return { processed: conversations.length, extracted, skipped, errors };
+        // 诊断：写入后立即验证 Neo4j 中的实际节点数量
+        let verifyTotal = -1;
+        let verifyPending = 0;
+        let verifyByStatus: Record<string, number> = {};
+        try {
+          verifyTotal = await storeRef.countAll();
+          verifyByStatus = await storeRef.countByStatus();
+          verifyPending = verifyByStatus['PENDING'] ?? 0;
+          logger?.info?.(`[backfill] verify after writes: total=${verifyTotal}, pending=${verifyPending}, byStatus=${JSON.stringify(verifyByStatus)}`);
+        } catch (verifyErr) {
+          logger?.warn?.(`[backfill] verify query failed: ${verifyErr instanceof Error ? verifyErr.message : String(verifyErr)}`);
+        }
+
+        logger?.info?.(`[backfill] completed: processed=${conversations.length}, skipped=${skipped}, extracted=${extracted}, errors=${errors.length}, neo4jTotal=${verifyTotal}, neo4jPending=${verifyPending}`);
+        return { processed: conversations.length, extracted, skipped, errors, neo4jTotal: verifyTotal, neo4jPending: verifyPending, neo4jByStatus: verifyByStatus };
       },
       triggerCompact: async (conversationId?: number) => {
         // 写入 compact 债务（若指定会话）并立即触发调度器处理

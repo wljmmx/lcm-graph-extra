@@ -184,6 +184,21 @@ const DELETE_BY_ID = `
 `;
 
 /**
+ * 诊断：统计各 status 的 EXPERIENCE 节点数量。
+ * 用于 backfill 写入后验证、distill 排查 pending=0 问题。
+ */
+const COUNT_BY_STATUS = `
+  MATCH (e:${LABEL})
+  RETURN e.status AS status, count(e) AS cnt
+`;
+
+/** 诊断：统计 EXPERIENCE 节点总数 */
+const COUNT_ALL = `
+  MATCH (e:${LABEL})
+  RETURN count(e) AS total
+`;
+
+/**
  * N-3: 查询并删除已过期的 EXPERIENCE 节点（expiresAt < 当前时间）。
  * 检索时已按 expiresAt 过滤，但节点本身仍留在图中占用空间。
  * 批量删除（每批最多 batchSize 个），避免单次删除过多导致事务过大。
@@ -633,6 +648,37 @@ export class ExperienceStorage {
       ...r,
       createdAt: new Date(r.createdAt),
     }));
+  }
+
+  /**
+   * 诊断：统计各 status 的 EXPERIENCE 节点数量。
+   * 返回如 { PENDING: 5, DISTILLED: 10, null: 3 }
+   */
+  async countByStatus(): Promise<Record<string, number>> {
+    try {
+      const rows = await this.adapter.query(COUNT_BY_STATUS, {});
+      const result: Record<string, number> = {};
+      for (const r of rows || []) {
+        const statusVal = (r as any).status;
+        const key: string = typeof statusVal === 'string' ? statusVal : '(null)';
+        const cnt = (r as any).cnt as any;
+        result[key] = typeof cnt?.toNumber === 'function' ? cnt.toNumber() : Number(cnt) || 0;
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  }
+
+  /** 诊断：统计 EXPERIENCE 节点总数 */
+  async countAll(): Promise<number> {
+    try {
+      const rows = await this.adapter.query(COUNT_ALL, {});
+      const total = (rows?.[0] as any)?.total as any;
+      return typeof total?.toNumber === 'function' ? total.toNumber() : Number(total) || 0;
+    } catch {
+      return -1;
+    }
   }
 
   /**

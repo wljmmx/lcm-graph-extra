@@ -378,7 +378,7 @@ export interface DashboardToolContext {
    * @param force 是否强制重新处理已处理过的会话（默认 false，跳过已处理）
    * @returns { processed: number, extracted: number, skipped: number, errors: string[] }
    */
-  backfillExperiences?: (limit: number, force?: boolean) => Promise<{ processed: number; extracted: number; skipped: number; errors: string[] }>;
+  backfillExperiences?: (limit: number, force?: boolean) => Promise<{ processed: number; extracted: number; skipped: number; errors: string[]; neo4jTotal?: number; neo4jPending?: number; neo4jByStatus?: Record<string, number> }>;
   triggerCompact?: (conversationId?: number) => Promise<boolean>;
   resetBreaker?: (name: string) => boolean;
   /** 共享的 QmdClient 单例（由 index.ts 注入）；未注入时工具回退到 new QmdClient */
@@ -2092,10 +2092,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         const result = await dashboardContext.runDistillation(limit);
-        // runDistillation 返回 { pending, succeeded, failed, linked, llmModel, llmBaseURL, graphConnected, error }
+        // runDistillation 返回 { pending, succeeded, failed, linked, llmModel, llmBaseURL, graphConnected, error, neo4jTotal, neo4jByStatus }
         const r = result as {
           pending?: number; succeeded?: number; failed?: number; linked?: number;
           llmModel?: string; llmBaseURL?: string; graphConnected?: string; error?: string;
+          neo4jTotal?: number; neo4jByStatus?: Record<string, number>;
         } | undefined;
         const pending = r?.pending ?? 0;
         const succeeded = r?.succeeded ?? 0;
@@ -2104,6 +2105,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const llmModel = r?.llmModel ?? 'unknown';
         const graphConnected = r?.graphConnected ?? 'unknown';
         const distillError = r?.error;
+        const neo4jTotal = r?.neo4jTotal;
+        const neo4jByStatus = r?.neo4jByStatus;
 
         // 构建结果摘要文本
         const lines: string[] = [];
@@ -2119,6 +2122,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         }
         if (linked > 0) {
           lines.push(`Related links created: ${linked}`);
+        }
+        // 诊断信息：Neo4j 中的实际节点统计
+        if (neo4jTotal !== undefined && neo4jTotal >= 0) {
+          lines.push(`Neo4j EXPERIENCE 总数: ${neo4jTotal}`);
+          if (neo4jByStatus && Object.keys(neo4jByStatus).length > 0) {
+            lines.push(`状态分布: ${JSON.stringify(neo4jByStatus)}`);
+          }
         }
         lines.push('');
 
@@ -2141,6 +2151,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           lines.push('  - afterTurn hook did not detect experience triggers');
           lines.push('  - expStore was not initialized when afterTurn ran');
           lines.push('  - Neo4j write failed silently (check logs for "saveRaw failed")');
+          if (neo4jTotal !== undefined && neo4jTotal > 0) {
+            lines.push('');
+            lines.push(`[DIAG] Neo4j 有 ${neo4jTotal} 个 EXPERIENCE 节点，但 pending=0。`);
+            lines.push('说明节点存在但 status 不是 PENDING。可能是：');
+            lines.push('  - 节点已被蒸馏（status=DISTILLED）');
+            lines.push('  - 节点 status 为 null（saveRaw 写入异常）');
+          } else if (neo4jTotal === 0) {
+            lines.push('');
+            lines.push('[DIAG] Neo4j 中没有任何 EXPERIENCE 节点。');
+            lines.push('说明 backfill 的 saveRaw 写入未生效，或 graphAdapter 连接的数据库不正确。');
+          }
         } else if (succeeded === 0 && failed > 0) {
           lines.push('[WARNING] All distillation attempts failed. Check:');
           lines.push(`  - LLM endpoint is reachable (${r?.llmBaseURL ?? 'unknown'})`);
@@ -2167,6 +2188,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               linked,
               llmModel,
               graphConnected,
+              neo4jTotal: neo4jTotal ?? -1,
             },
           },
           isError: hasError,
@@ -2222,6 +2244,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lines.push(`处理会话数: ${result.processed}`);
         lines.push(`跳过已处理: ${result.skipped}`);
         lines.push(`提取经验数: ${result.extracted}`);
+        // 诊断信息：Neo4j 中的实际节点数
+        if (result.neo4jTotal !== undefined) {
+          lines.push(`Neo4j 经验总数: ${result.neo4jTotal}`);
+          lines.push(`Neo4j PENDING 数: ${result.neo4jPending ?? 0}`);
+          if (result.neo4jByStatus && Object.keys(result.neo4jByStatus).length > 0) {
+            lines.push(`状态分布: ${JSON.stringify(result.neo4jByStatus)}`);
+          }
+        }
         if (result.errors.length > 0) {
           lines.push(`错误数: ${result.errors.length}`);
           lines.push('');
@@ -2234,7 +2264,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           }
         }
         lines.push('');
-        if (result.extracted > 0) {
+        if (result.extracted > 0 && (result.neo4jPending ?? 0) === 0) {
+          lines.push('[WARNING] 提取了经验但 Neo4j PENDING 数为 0！');
+          lines.push('这说明 saveRaw 写入失败或写入了错误的数据库。');
+          lines.push('请检查日志中的 [backfill] verify 信息。');
+        } else if (result.extracted > 0) {
           lines.push('[INFO] 经验已写入 PENDING 队列，请运行 **lcmg_distill** 进行蒸馏。');
         } else if (result.processed === 0 && result.skipped > 0) {
           lines.push('[INFO] 所有会话均已处理过，无新数据。');
@@ -2256,6 +2290,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               skipped: result.skipped,
               extracted: result.extracted,
               errorCount: result.errors.length,
+              neo4jTotal: result.neo4jTotal ?? -1,
+              neo4jPending: result.neo4jPending ?? 0,
             },
           },
           isError: result.errors.length > 0,
