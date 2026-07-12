@@ -101,9 +101,15 @@ export async function distillOne(
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
     // 仅 Ollama 端点注入 keep_alive，避免模型 5 分钟后卸载导致冷启动延迟
+    // BUGFIX: qwen3 系列模型默认开启思考模式（thinking），输出会放到 reasoning_content 字段，
+    // content 字段为空。蒸馏只需要 JSON 结果，不需要推理过程，关闭思考模式可：
+    //   1. 确保 content 字段有值
+    //   2. 大幅减少生成时间（不产生思考 token）
+    //   3. 降低 token 消耗
+    // Ollama OpenAI 兼容端点通过 "think": false 关闭（qwen3 专用参数）
     const body = withKeepAliveIfOllama(
       llm.baseURL,
-      { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 512 },
+      { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 1024, think: false },
       llm.keepAlive,
     );
     const resp = await fetch(llm.baseURL + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
@@ -116,10 +122,17 @@ export async function distillOne(
       return null;
     }
     const data: any = await resp.json();
-    const text = data?.choices?.[0]?.message?.content;
+    const msg = data?.choices?.[0]?.message;
+    // qwen3 思考模式：content 可能为空，实际输出在 reasoning_content 中
+    // think:false 应已关闭思考，但作为兜底也检查 reasoning_content
+    let text = msg?.content;
+    if (!text && msg?.reasoning_content) {
+      log?.info?.('distillOne: content empty, falling back to reasoning_content', { rawId: raw.id, model: llm.model });
+      text = msg.reasoning_content;
+    }
     if (!text) {
-      const errMsg = `LLM returned empty content (model: ${llm.model}, endpoint: ${llm.baseURL})`;
-      log?.warn?.('distillOne: LLM returned empty content', { rawId: raw.id, model: llm.model });
+      const errMsg = `LLM returned empty content (model: ${llm.model}, endpoint: ${llm.baseURL}, finish_reason: ${data?.choices?.[0]?.finish_reason})`;
+      log?.warn?.('distillOne: LLM returned empty content', { rawId: raw.id, model: llm.model, finishReason: data?.choices?.[0]?.finish_reason });
       errorSink?.push(errMsg);
       return null;
     }
