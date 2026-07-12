@@ -712,9 +712,20 @@ export class GraphAdapter {
   
   /**
    * Run raw Cypher query (for experience storage layer).
+   *
+   * BUGFIX: 原代码 `if (!this.driver) return []` 静默返回空数组，
+   * 导致 ExperienceStorage.saveRaw / fetchPending 等写入/查询操作
+   * 在 Neo4j 未连接时"成功"返回但实际无任何数据持久化。
+   * 这造成 afterTurn 写入的 PENDING 经验全部丢失，distill 时 pending=0。
+   *
+   * 现在：driver 为 null 时抛出明确错误，让上层（ExperienceStorage）
+   * 能捕获并记录日志，而非静默成功。
    */
   async query<T = Record<string, unknown>>(cypher: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]> {
-    if (!this.driver) return [];
+    if (!this.driver) {
+      throw new Error('Neo4j driver not initialized — graphAdapter is not connected. ' +
+        'Call connect() first or check Neo4j availability.');
+    }
     const session = this.driver.session();
     try {
       const safeParams = params ? Object.fromEntries(
