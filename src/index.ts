@@ -749,9 +749,18 @@ const pluginEntry: any = definePluginEntry({
     const dashboardContext: DashboardToolContext = {
       expStore: undefined, // expStore 在闭包内延迟访问，由 runDistillation 回调内部读取
       // BUGFIX(P1-4): 注入 qmdClient 单例，供 5 个 MCP 工具复用（避免每次 new QmdClient）
+      // 注意：创建时 qmdClient 可能仍是 null（ensureInitialized 未执行），
+      // tools.ts 的 acquireQmdClient 有 new QmdClient fallback，因此可接受。
       qmdClient: qmdClient ?? undefined,
       runDistillation: async (limit: number) => {
-        // 包装内部 runDistillation(expStoreRef, apiRef, log, limit?)，延迟读取 expStore 当前值
+        // Dashboard 可能在第一次 assemble（触发 ensureInitialized）之前调用工具，
+        // 此处显式确保插件已初始化，避免 expStore 为 null。
+        try {
+          await ensureInitialized();
+        } catch (initErr) {
+          const msg = initErr instanceof Error ? initErr.message : String(initErr);
+          throw new Error('plugin init failed: ' + msg);
+        }
         const storeRef = expStore;
         if (!storeRef) throw new Error('expStore not initialized');
         await runDistillation(storeRef, api, logger, limit);
@@ -759,6 +768,10 @@ const pluginEntry: any = definePluginEntry({
       },
       triggerCompact: async (conversationId?: number) => {
         // 写入 compact 债务（若指定会话）并立即触发调度器处理
+        // onCompaction hook 依赖 losslessClawAdapter，需确保已初始化
+        try {
+          await ensureInitialized();
+        } catch { /* 初始化失败时仍允许写 debt，scheduler 会尝试处理 */ }
         const { triggerNow } = await import('./core/debt-manager.js');
         if (conversationId != null) {
           const P = DEFAULTS.heartbeat.pressure;
@@ -769,6 +782,7 @@ const pluginEntry: any = definePluginEntry({
       },
       resetBreaker: (name: string) => {
         // 仅 neo4j 需要额外重置 graphAdapter 连接标志（circuit-breaker 状态由 tools.ts 内重置）
+        // graphAdapter 可能为 null（未初始化），此时仅重置 circuit-breaker 状态即可
         try {
           if (name === 'neo4j') {
             graphAdapter?.resetConnectFlag?.();
