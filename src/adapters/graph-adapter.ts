@@ -27,6 +27,59 @@ import { DEFAULTS, llmTimeout } from '../config/defaults.js';
 import { businessMetrics } from '../health-metrics.js';
 
 
+// ---------------------------------------------------------------------------
+// Neo4j Integer / BigInt 安全转换
+// ---------------------------------------------------------------------------
+// neo4j-driver 6.x 的 Integer 对象 valueOf() 在内部存储为 BigInt 时返回 BigInt，
+// 导致 new Date(integer) / Math.trunc(integer) / +integer 抛出
+// "Cannot convert a BigInt value to a number"。
+// 在 query() 返回边界统一把 Integer 转为原生 number，隔离 driver 内部类型。
+
+/**
+ * 递归遍历对象/数组，把所有 Neo4j Integer 转为原生 number。
+ * 安全处理嵌套结构和数组。非 Integer 值原样返回。
+ */
+function convertNeo4jIntegers(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (neo4jDriver.isInt(obj)) {
+    return obj.toNumber();
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(convertNeo4jIntegers);
+  }
+  if (typeof obj === 'object' && obj.constructor === Object) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = convertNeo4jIntegers(v);
+    }
+    return out;
+  }
+  return obj;
+}
+
+/**
+ * 清理传给 Neo4j driver 的参数：把 Integer 对象转为原生 number（driver 会重新包装），
+ * 避免上层传入的 Integer 对象与 driver 内部类型冲突。
+ * 对 LIMIT/batchSize 等整数参数用 neo4jDriver.int() 包装。
+ */
+function sanitizeNeo4jParams(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(params).map(([k, v]) => {
+      // Integer 对象 → 原生 number（driver 内部会重新包装）
+      if (neo4jDriver.isInt(v)) {
+        return [k, v.toNumber()];
+      }
+      if (typeof v !== 'number') return [k, v];
+      // LIMIT/OFFSET/count params must be Neo4j integers
+      if (/^(limit|batchSize|max_depth|iterations|timeout)$/.test(k)) {
+        return [k, neo4jDriver.int(Math.trunc(v))];
+      }
+      // Score/threshold params keep float precision
+      return [k, v];
+    })
+  );
+}
+
 class LRUCache<K, V> {
   private map = new Map<K, { value: V; expiresAt: number }>();
   constructor(private capacity: number, private ttlMs: number) {}
@@ -728,19 +781,13 @@ export class GraphAdapter {
     }
     const session = this.driver.session();
     try {
-      const safeParams = params ? Object.fromEntries(
-        Object.entries(params).map(([k, v]) => {
-          if (typeof v !== "number") return [k, v];
-          // LIMIT/OFFSET/count params must be Neo4j integers
-          if (/^(limit|batchSize|max_depth|iterations|timeout)$/.test(k)) {
-            return [k, neo4jDriver.int(Math.trunc(v))];
-          }
-          // Score/threshold params keep float precision
-          return [k, v];
-        })
-      ) : {};
+      const safeParams = params ? sanitizeNeo4jParams(params) : {};
       const result = await session.run(cypher, safeParams);
-      return result.records.map((r: any) => r.toObject() as Record<string, unknown>);
+      // BUGFIX: neo4j-driver 6.x 的 Integer 对象 valueOf() 返回 BigInt，
+      // 上层代码 new Date(integer) / Math.trunc(integer) 会报
+      // "Cannot convert a BigInt value to a number"。
+      // 在返回边界统一把 Integer 转为原生 number，隔离 driver 内部类型。
+      return result.records.map((r: any) => convertNeo4jIntegers(r.toObject()) as Record<string, unknown>);
     } finally {
       await session.close();
     }
