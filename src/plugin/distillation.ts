@@ -8,7 +8,7 @@
  * - runDistillation: batch process pending experiences
  */
 import { randomUUID } from 'node:crypto';
-import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
+import { withKeepAliveIfOllama, ensureOllamaV1Path } from '../utils/url.js';
 // v1.2.0-3: 业务指标 —— 跟踪蒸馏成功率
 import { businessMetrics } from '../health-metrics.js';
 import { llmTimeout } from '../config/defaults.js';
@@ -18,10 +18,22 @@ export function isOllamaModel(model: string): boolean {
   // 识别依据：
   //   1. 显式 provider 前缀：`ollama/...`、`ollama-256k/...`
   //   2. Ollama 默认 tag 后缀：`:latest`
+  //   3. Ollama model:tag 命名格式：`qwen3.6:27b`、`llama3:8b` 等
+  //      （OpenAI/Anthropic/Gemini 模型名不含冒号，冒号是 Ollama 的 tag 分隔符）
   // 注意：原逻辑 `!model.includes('/')` 会把 `gpt-4o-mini`、`claude-3-5-sonnet`
   // 等不含 `/` 的远程模型名误判为 Ollama，导致错误地走 Ollama baseURL。
   // 已去除该过宽分支。
-  return model.startsWith('ollama/') || model.startsWith('ollama-256k/') || model.endsWith(':latest');
+  if (model.startsWith('ollama/') || model.startsWith('ollama-256k/') || model.endsWith(':latest')) {
+    return true;
+  }
+  // model:tag 格式检测：不含 / 但含 :（排除 litellm provider/model:tag 格式，
+  // 那些已被上面的 ollama/ 前缀分支覆盖）
+  // 例：qwen3.6:27b, llama3:8b, mistral:7b-instruct
+  // 排除 OpenAI fine-tune 格式 ft:gpt-4o:xxx（含多个冒号）
+  if (!model.includes('/') && /^[a-zA-Z0-9._-]+:[a-zA-Z0-9._-]+$/.test(model)) {
+    return true;
+  }
+  return false;
 }
 
 export function resolveDistillationLlm(apiRef: any) {
@@ -39,7 +51,7 @@ export function resolveDistillationLlm(apiRef: any) {
     return {
       model: runtimeLlm.model,
       apiKey: runtimeLlm.apiKey || '',
-      baseURL: cleanBaseURL(runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+      baseURL: ensureOllamaV1Path(runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1'),
       keepAlive: defaultKeepAlive,
     };
   }
@@ -47,21 +59,21 @@ export function resolveDistillationLlm(apiRef: any) {
   if (dLlm?.provider === 'openclaw_hooks') return {
     model: dLlm.model || 'ollama/qwen3.6:27b',
     apiKey: '',
-    baseURL: cleanBaseURL(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+    baseURL: ensureOllamaV1Path(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
     keepAlive: dLlm.keepAlive || defaultKeepAlive,
   };
   if (dLlm?.provider && dLlm?.model) {
     return {
       model: dLlm.model,
       apiKey: dLlm.apiKey || '',
-      baseURL: cleanBaseURL(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+      baseURL: ensureOllamaV1Path(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
       keepAlive: dLlm.keepAlive || defaultKeepAlive,
     };
   }
   return {
     model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini',
     apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
-    baseURL: cleanBaseURL(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
+    baseURL: ensureOllamaV1Path(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
     keepAlive: defaultKeepAlive,
   };
 }
@@ -70,6 +82,7 @@ export async function distillOne(
   raw: { id: string; source: string; context: string; detail: string },
   llm: { model: string; apiKey: string; baseURL: string; keepAlive?: string },
   log?: { warn?: (msg: string, meta?: any) => void; debug?: (msg: string, meta?: any) => void; info?: (msg: string, meta?: any) => void },
+  errorSink?: string[],
 ): Promise<any | null> {
   // P1-4: prompt 增加 tags 字段，让 LLM 同时产出多维度标签（scenario/techStack/severity/freeTags）。
   // S-11': Zettelkasten 增强 — 增加 relatedConcepts 字段，提取 2-5 个相关概念/关键词，
@@ -97,13 +110,17 @@ export async function distillOne(
     clearTimeout(timer);
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '<unreadable>');
+      const errMsg = `HTTP ${resp.status} from ${llm.baseURL}/chat/completions (model: ${llm.model}): ${errBody.slice(0, 200)}`;
       log?.warn?.('distillOne: LLM HTTP error', { status: resp.status, model: llm.model, baseURL: llm.baseURL, rawId: raw.id, errBody: errBody.slice(0, 300) });
+      errorSink?.push(errMsg);
       return null;
     }
     const data: any = await resp.json();
     const text = data?.choices?.[0]?.message?.content;
     if (!text) {
+      const errMsg = `LLM returned empty content (model: ${llm.model}, endpoint: ${llm.baseURL})`;
       log?.warn?.('distillOne: LLM returned empty content', { rawId: raw.id, model: llm.model });
+      errorSink?.push(errMsg);
       return null;
     }
     // 本地模型常把 JSON 包在 ```json ... ``` 代码块中，直接 JSON.parse 会失败。
@@ -113,7 +130,9 @@ export async function distillOne(
     try {
       parsed = JSON.parse(jsonText);
     } catch (parseErr) {
+      const errMsg = `LLM returned non-JSON content (parse error: ${parseErr})`;
       log?.warn?.('distillOne: LLM returned non-JSON content', { rawId: raw.id, parseErr: String(parseErr), textPreview: text.slice(0, 300) });
+      errorSink?.push(errMsg);
       return null;
     }
     // P1-4: 校验并收敛 tags，防止 LLM 返回非法值写入 Neo4j。
@@ -157,9 +176,13 @@ export async function distillOne(
     clearTimeout(timer);
     const errName = err instanceof Error ? err.name : '';
     if (errName === 'AbortError') {
+      const errMsg = `LLM call timeout after ${llmTimeout('distillMs')}ms (model: ${llm.model}, endpoint: ${llm.baseURL})`;
       log?.warn?.('distillOne: LLM call timeout', { rawId: raw.id, timeoutMs: llmTimeout('distillMs') });
+      errorSink?.push(errMsg);
     } else {
+      const errMsg = `Unexpected error: ${err instanceof Error ? err.message : String(err)} (endpoint: ${llm.baseURL})`;
       log?.warn?.('distillOne: unexpected error', { rawId: raw.id, err: err instanceof Error ? err.message : String(err) });
+      errorSink?.push(errMsg);
     }
     return null;
   }
@@ -202,6 +225,8 @@ export interface DistillationResult {
   graphConnected?: string;
   /** 初始化或查询错误信息（fetchPending 失败等） */
   error?: string;
+  /** 第一条 distillOne 失败的具体原因（HTTP 状态码/超时/JSON 解析失败等） */
+  firstDistillError?: string;
 }
 
 export async function runDistillation(expStoreRef: any, apiRef: any, log: any, limit?: number): Promise<DistillationResult> {
@@ -332,11 +357,13 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
       if (raw) { const n = Number(raw); if (Number.isFinite(n) && n > 0) return Math.min(n, 10); }
       return 3;
     })();
+    // 收集 distillOne 的错误详情，取第一条供结果展示（避免用户只看到 "see logs"）
+    const distillErrors: string[] = [];
     for (let i = 0; i < pending.length; i += concurrency) {
       const batch = pending.slice(i, i + concurrency);
       await Promise.allSettled(batch.map((raw: any) => (async () => {
         try {
-          const distilled = await distillOne(raw, llm, log);
+          const distilled = await distillOne(raw, llm, log, distillErrors);
           if (distilled) {
             await expStoreRef.saveDistilled(distilled);
             await expStoreRef.deleteById(raw.id);
@@ -406,6 +433,10 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
       })()));
     }
     log?.info?.('distillation: completed', { pending: result.pending, succeeded: result.succeeded, failed: result.failed, linked: result.linked, model: result.llmModel });
+    // 将第一条蒸馏错误附到结果上，让用户在报告中看到具体原因
+    if (distillErrors.length > 0) {
+      result.firstDistillError = distillErrors[0];
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     log?.warn?.("distillation batch failed", { err: msg });

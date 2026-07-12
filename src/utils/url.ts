@@ -108,3 +108,28 @@ export function withKeepAliveIfOllama(
   }
   return baseBody;
 }
+
+/**
+ * 确保 Ollama 端点的 baseURL 包含 /v1 路径。
+ *
+ * Ollama 的 OpenAI 兼容端点是 http://host:11434/v1/chat/completions，
+ * 但用户配置中常写 http://host:11434（不带 /v1），导致 fetch 拼出
+ * http://host:11434/chat/completions → 404。
+ *
+ * 仅对 Ollama 端点（isOllamaEndpoint 判定）补全 /v1，
+ * 其他端点（OpenAI / vLLM / LM Studio 等）原样返回。
+ *
+ * @example
+ *   ensureOllamaV1Path('http://192.168.50.5:11434')    → 'http://192.168.50.5:11434/v1'
+ *   ensureOllamaV1Path('http://127.0.0.1:11434/v1')    → 'http://127.0.0.1:11434/v1'  (已有 /v1，不变)
+ *   ensureOllamaV1Path('https://api.openai.com/v1')    → 'https://api.openai.com/v1'  (非 Ollama，不变)
+ */
+export function ensureOllamaV1Path(baseURL: string | undefined | null): string {
+  const cleaned = cleanBaseURL(baseURL);
+  if (!cleaned) return '';
+  // 仅 Ollama 端点需要补全
+  if (!isOllamaEndpoint(cleaned)) return cleaned;
+  // 已有 /v1 后缀则不重复添加
+  if (/\/v\d+$/.test(cleaned)) return cleaned;
+  return cleaned + '/v1';
+}

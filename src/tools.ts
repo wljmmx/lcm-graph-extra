@@ -2112,6 +2112,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           pending?: number; succeeded?: number; failed?: number; linked?: number;
           llmModel?: string; llmBaseURL?: string; graphConnected?: string; error?: string;
           neo4jTotal?: number; neo4jByStatus?: Record<string, number>;
+          firstDistillError?: string;
         } | undefined;
         const pending = r?.pending ?? 0;
         const succeeded = r?.succeeded ?? 0;
@@ -2120,6 +2121,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const llmModel = r?.llmModel ?? 'unknown';
         const graphConnected = r?.graphConnected ?? 'unknown';
         const distillError = r?.error;
+        const firstDistillError = r?.firstDistillError;
         const neo4jTotal = r?.neo4jTotal;
         const neo4jByStatus = r?.neo4jByStatus;
 
@@ -2178,13 +2180,22 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             lines.push('说明 backfill 的 saveRaw 写入未生效，或 graphAdapter 连接的数据库不正确。');
           }
         } else if (succeeded === 0 && failed > 0) {
-          lines.push('[WARNING] All distillation attempts failed. Check:');
+          lines.push('[WARNING] All distillation attempts failed.');
+          if (firstDistillError) {
+            lines.push('');
+            lines.push(`First error: ${firstDistillError}`);
+          }
+          lines.push('');
+          lines.push('Check:');
           lines.push(`  - LLM endpoint is reachable (${r?.llmBaseURL ?? 'unknown'})`);
           lines.push(`  - LLM model name is correct (${llmModel})`);
           lines.push('  - LLM returns valid JSON (not markdown-wrapped)');
           lines.push('  - Plugin logs for detailed error messages');
         } else {
           lines.push(`[OK] Distillation complete: ${succeeded}/${pending} succeeded.`);
+          if (failed > 0 && firstDistillError) {
+            lines.push(`(${failed} failed, first error: ${firstDistillError})`);
+          }
         }
 
         // 如果 Neo4j 未连接或存在错误，标记为 isError 让用户在 UI 上看到红色状态
@@ -2204,6 +2215,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               llmModel,
               graphConnected,
               neo4jTotal: neo4jTotal ?? -1,
+              firstDistillError: firstDistillError || '',
             },
           },
           isError: hasError,
