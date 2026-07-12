@@ -753,6 +753,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // BUGFIX(P1-5): writeFileSync → fsp.writeFile（大 JSON 同步写会长时间阻塞事件循环）
       await fsp.writeFile(backupPath, JSON.stringify(backup, null, 2), "utf-8");
       const msgCount = (backup.lcm as any).conversations.reduce((a: number, c: any) => a + (c.messages?.length ?? 0), 0);
+      const sizeKB = Math.round(JSON.stringify(backup).length / 1024);
       return {
         content: [{
           type: "text" as const,
@@ -761,10 +762,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             `  Neo4j: ${(backup.neo4j as any).entities.length} entities, ${(backup.neo4j as any).relationships.length} relationships`,
             `  lossless-claw: ${(backup.lcm as any).conversations.length} conversations, ${msgCount} messages`,
             `  Files: ${(backup.files as any[]).length} files`,
-            `  Size: ${(JSON.stringify(backup).length / 1024).toFixed(0)} KB`,
+            `  Size: ${sizeKB} KB`,
           ].join("\n"),
         }],
-        details: { ok: true },
+        details: {
+          ok: true,
+          metrics: {
+            path: backupPath,
+            neo4jEntities: (backup.neo4j as any).entities.length,
+            neo4jRelationships: (backup.neo4j as any).relationships.length,
+            lcmConversations: (backup.lcm as any).conversations.length,
+            lcmMessages: msgCount,
+            files: (backup.files as any[]).length,
+            sizeKB,
+          },
+        },
       };
     },
   });
@@ -904,7 +916,26 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       report.push("\n✅ Restore complete.");
-      return { content: [{ type: "text" as const, text: report.join("\n") }], details: { ok: true } };
+      // 从 report 中提取结构化指标
+      const neo4jLine = report.find(l => l.includes("Neo4j:") && l.includes("Restored"));
+      const lcmLine = report.find(l => l.includes("lossless-claw:") && l.includes("Restored"));
+      const filesLine = report.find(l => l.includes("Files:") && l.includes("Restored"));
+      return {
+        content: [{ type: "text" as const, text: report.join("\n") }],
+        details: {
+          ok: true,
+          metrics: {
+            dryRun,
+            path: safeBackupPath,
+            targets,
+            neo4jEntities: neo4jLine ? parseInt((neo4jLine.match(/Restored (\d+) entities/) || [])[1] || '0', 10) : (dryRun ? (data.neo4j as any)?.entities?.length ?? 0 : 0),
+            neo4jRelationships: neo4jLine ? parseInt((neo4jLine.match(/(\d+) relationships/) || [])[1] || '0', 10) : (dryRun ? (data.neo4j as any)?.relationships?.length ?? 0 : 0),
+            lcmMessages: lcmLine ? parseInt((lcmLine.match(/Restored (\d+) messages/) || [])[1] || '0', 10) : (dryRun ? (data.lcm as any)?.conversations?.reduce((a: number, c: any) => a + (c.messages?.length ?? 0), 0) ?? 0 : 0),
+            files: filesLine ? parseInt((filesLine.match(/Restored (\d+) files/) || [])[1] || '0', 10) : (dryRun ? (data.files as any[])?.length ?? 0 : 0),
+            skipped: filesLine ? parseInt((filesLine.match(/skipped (\d+) unsafe/) || [])[1] || '0', 10) : 0,
+          },
+        },
+      };
     },
   });
 
@@ -927,6 +958,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       const limit = params.limit ?? 50;
       const lines: string[] = [];
       let total = 0;
+      let filesImported = 0;
 
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {
@@ -976,13 +1008,25 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
               await session.run("MERGE (n:MemoryFile {id: $id}) SET n.name = $name, n.content = $content", { id: `file-${file}`, name: file, content });
               fCount++;
+              filesImported = fCount;
             }
           } finally { await closeNeo4j(driver, session); }
           lines.push(`✅ Imported ${fCount} memory files into Neo4j`);
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
-      return { content: [{ type: "text" as const, text: lines.join("\n") || "No data imported." }], details: { ok: true } };
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") || "No data imported." }],
+        details: {
+          ok: true,
+          metrics: {
+            source: params.source,
+            limit,
+            messagesImported: total,
+            filesImported,
+          },
+        },
+      };
     },
   });
 
@@ -1167,7 +1211,18 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       p("  Pass: " + pass + "  Warnings: " + warns + "  Failures: " + fails);
       p(fails === 0 ? "  Status: OK" : "  Status: DEGRADED (" + fails + " issues)");
 
-      return { content: [{ type: "text" as const, text: L.join("\n") }], details: { ok: true } };
+      return {
+        content: [{ type: "text" as const, text: L.join("\n") }],
+        details: {
+          ok: true,
+          metrics: {
+            pass,
+            warnings: warns,
+            failures: fails,
+            status: fails === 0 ? 'OK' : 'DEGRADED',
+          },
+        },
+      };
     },
   });
 // ===================================================================
@@ -1740,7 +1795,27 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       push("\n✅ Sync check complete.");
-      return { content: [{ type: "text" as const, text: lines.join("") }], details: { ok: true } };
+      return {
+        content: [{ type: "text" as const, text: lines.join("") }],
+        details: {
+          ok: true,
+          metrics: {
+            mode,
+            dryRun: isDryRun,
+            activeConversations: (() => {
+              const m = lines.find(l => l.includes("active conversations"));
+              return m ? parseInt((m.match(/(\d+) active conversations/) || [])[1] || '0', 10) : 0;
+            })(),
+            neo4jMsgNodes,
+            orphanedNodes: orphanNodes,
+            driftCount,
+            pinnedNodes: (() => {
+              const m = lines.find(l => l.includes("Pinned nodes:"));
+              return m ? parseInt((m.match(/Pinned nodes: (\d+)/) || [])[1] || '0', 10) : 0;
+            })(),
+          },
+        },
+      };
     },
   });
   // ===================================================================
@@ -1921,7 +1996,22 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lines.push("");
         lines.push("[OK] Maintenance complete.");
 
-        return { content: [{ type: "text" as const, text: lines.join("\n") }], details: { ok: true } };
+        const debtReconciled = lines.find(l => l.includes("Orphans deleted"));
+        return {
+          content: [{ type: "text" as const, text: lines.join("\n") }],
+          details: {
+            ok: true,
+            metrics: {
+              durationMs: result?.durationMs ?? 0,
+              dedupMerged: result?.dedup?.mergedCount ?? 0,
+              pagerankTopK: result?.pagerank?.topK?.length ?? 0,
+              communitiesDetected: result?.community?.communities?.size ?? 0,
+              communitySummaries: result?.communitySummaries ?? 0,
+              orphansDeleted: debtReconciled ? parseInt((debtReconciled.match(/Orphans deleted: (\d+)/) || [])[1] || '0', 10) : 0,
+              tombstonesDeleted: debtReconciled ? parseInt((lines.find(l => l.includes("Tombstones deleted"))?.match(/Tombstones deleted: (\d+)/) || [])[1] || '0', 10) : 0,
+            },
+          },
+        };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], details: { ok: false, error: "Maintenance failed: " + msg }, isError: true };
@@ -1965,7 +2055,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             type: "text" as const,
             text: `✅ Distillation triggered for up to ${limit} pending experience(s).`,
           }],
-          details: { ok: true },
+          details: {
+            ok: true,
+            metrics: {
+              limit,
+              triggered: true,
+            },
+          },
         };
       } catch (e: any) {
         return {
@@ -2015,7 +2111,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               ? `✅ Compact completed for ${target}.`
               : `⚠️ Compact triggered for ${target} but did not produce a summary (may retry).`,
           }],
-          details: { ok: true },
+          details: {
+            ok: true,
+            metrics: {
+              target,
+              summaryProduced: ok,
+              conversationId: params.conversationId ?? null,
+            },
+          },
         };
       } catch (e: any) {
         return {
@@ -2065,7 +2168,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               ? `✅ Circuit breaker reset for "${name}"${name === 'neo4j' ? (adapterReset ? ' + GraphAdapter connect flag reset' : '') : ''}.`
               : `❌ Failed to reset circuit breaker for "${name}".`,
           }],
-          details: { ok: true },
+          details: {
+            ok: reset,
+            metrics: {
+              name,
+              adapterReset,
+            },
+          },
         };
       } catch (e: any) {
         return {

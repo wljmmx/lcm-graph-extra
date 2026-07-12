@@ -41,7 +41,38 @@ const { invokeMcpToolMock } = vi.hoisted(() => ({
   invokeMcpToolMock: vi.fn(
     async (tool: string, _params: Record<string, unknown>) => ({
       ok: true,
-      result: { tool, mock: true },
+      result: {
+        content: [{ type: 'text', text: `✅ ${tool} completed.` }],
+        details: {
+          ok: true,
+          metrics: {
+            limit: 50,
+            triggered: true,
+            durationMs: 1200,
+            dedupMerged: 5,
+            pass: 10,
+            warnings: 0,
+            failures: 0,
+            status: 'OK',
+            neo4jEntities: 100,
+            neo4jRelationships: 50,
+            lcmConversations: 3,
+            lcmMessages: 200,
+            files: 5,
+            sizeKB: 512,
+            messagesImported: 42,
+            filesImported: 3,
+            source: 'all',
+            mode: 'check',
+            dryRun: true,
+            activeConversations: 5,
+            neo4jMsgNodes: 150,
+            orphanedNodes: 0,
+            driftCount: 0,
+            pinnedNodes: 8,
+          },
+        },
+      },
     }),
   ),
 }));
@@ -76,9 +107,14 @@ vi.mock('@tanstack/vue-query', async () => {
 });
 
 // ===== mock ../../src/api/experience：捕获 invokeMcpTool 调用 =====
-vi.mock('../../src/api/experience', () => ({
-  invokeMcpTool: invokeMcpToolMock,
-}));
+// 同时提供 extractDetails / extractText 的真实实现（测试需要解析 result）
+vi.mock('../../src/api/experience', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/api/experience')>();
+  return {
+    ...actual,
+    invokeMcpTool: invokeMcpToolMock,
+  };
+});
 
 import MaintainView from '../../src/views/MaintainView.vue';
 

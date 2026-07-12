@@ -37,6 +37,7 @@ import {
   invokeImport,
 } from '../api/maintain';
 import type { McpInvokeResponse } from '../api/experience';
+import { extractDetails, extractText } from '../api/experience';
 
 const message = useMessage();
 
@@ -127,6 +128,12 @@ function validateOpenclawPath(p: string): string | null {
 
 const logs = ref<OperationLogEntry[]>([]);
 const loadingMap = reactive<Record<string, boolean>>({});
+/** 每张卡片最近一次完成的执行结果（用于卡片内摘要展示） */
+const lastResultMap = reactive<Record<string, {
+  status: 'success' | 'error';
+  details: OperationLogEntry['details'];
+  text: OperationLogEntry['text'];
+}>>({});
 let nextLogId = 1;
 // cardKey → 当前 running 日志 ID（用于 onSuccess/onError 回填）
 const pendingLogIds = new Map<string, number>();
@@ -174,13 +181,20 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
     const logId = pendingLogIds.get(vars.cardKey);
     if (logId !== undefined) {
       const log = logs.value.find((l) => l.id === logId);
+      const details = extractDetails(data.result);
+      const text = extractText(data.result);
+      const status = data.ok ? 'success' as const : 'error' as const;
       patchLog(logId, {
-        status: data.ok ? 'success' : 'error',
+        status,
         result: data.result,
         error: data.error,
+        details,
+        text,
         durationMs: log ? Date.now() - log.ts : 0,
       });
       pendingLogIds.delete(vars.cardKey);
+      // 记录卡片级摘要
+      lastResultMap[vars.cardKey] = { status, details, text };
     }
     loadingMap[vars.cardKey] = false;
   },
@@ -194,6 +208,7 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
         durationMs: log ? Date.now() - log.ts : 0,
       });
       pendingLogIds.delete(vars.cardKey);
+      lastResultMap[vars.cardKey] = { status: 'error', details: null, text: null };
     }
     loadingMap[vars.cardKey] = false;
   },
@@ -351,6 +366,10 @@ function executeImport(): void {
             icon="database"
             :confirm-level="1"
             :loading="!!loadingMap.maintain"
+            tool-name="lcmg_maintain"
+            :last-status="lastResultMap.maintain?.status ?? null"
+            :last-details="lastResultMap.maintain?.details ?? null"
+            :last-text="lastResultMap.maintain?.text ?? null"
             @execute="executeMaintain"
           />
         </NGi>
@@ -363,6 +382,10 @@ function executeImport(): void {
             icon="activity"
             :confirm-level="0"
             :loading="!!loadingMap.diagnose"
+            tool-name="lcmg_diagnose"
+            :last-status="lastResultMap.diagnose?.status ?? null"
+            :last-details="lastResultMap.diagnose?.details ?? null"
+            :last-text="lastResultMap.diagnose?.text ?? null"
             @execute="executeDiagnose"
           />
         </NGi>
@@ -375,6 +398,10 @@ function executeImport(): void {
             icon="flask"
             :confirm-level="0"
             :loading="!!loadingMap.distill"
+            tool-name="lcmg_distill"
+            :last-status="lastResultMap.distill?.status ?? null"
+            :last-details="lastResultMap.distill?.details ?? null"
+            :last-text="lastResultMap.distill?.text ?? null"
             @execute="executeDistill"
           >
             <template #form>
@@ -399,6 +426,10 @@ function executeImport(): void {
             icon="compress"
             :confirm-level="1"
             :loading="!!loadingMap.compact"
+            tool-name="lcmg_compact"
+            :last-status="lastResultMap.compact?.status ?? null"
+            :last-details="lastResultMap.compact?.details ?? null"
+            :last-text="lastResultMap.compact?.text ?? null"
             @execute="executeCompact"
           >
             <template #form>
@@ -424,6 +455,10 @@ function executeImport(): void {
             danger
             :confirm-level="1"
             :loading="!!loadingMap.reset_breaker"
+            tool-name="lcmg_reset_breaker"
+            :last-status="lastResultMap.reset_breaker?.status ?? null"
+            :last-details="lastResultMap.reset_breaker?.details ?? null"
+            :last-text="lastResultMap.reset_breaker?.text ?? null"
             @execute="executeResetBreaker"
           >
             <template #form>
@@ -446,6 +481,10 @@ function executeImport(): void {
             icon="trash"
             :confirm-level="1"
             :loading="!!loadingMap.ttl_cleanup"
+            tool-name="lcmg_maintain"
+            :last-status="lastResultMap.ttl_cleanup?.status ?? null"
+            :last-details="lastResultMap.ttl_cleanup?.details ?? null"
+            :last-text="lastResultMap.ttl_cleanup?.text ?? null"
             @execute="executeTtlCleanup"
           />
         </NGi>
@@ -458,6 +497,10 @@ function executeImport(): void {
             icon="save"
             :confirm-level="0"
             :loading="!!loadingMap.backup"
+            tool-name="lcmg_backup"
+            :last-status="lastResultMap.backup?.status ?? null"
+            :last-details="lastResultMap.backup?.details ?? null"
+            :last-text="lastResultMap.backup?.text ?? null"
             @execute="executeBackup"
           >
             <template #form>
@@ -486,6 +529,10 @@ function executeImport(): void {
             danger
             :confirm-level="2"
             :loading="!!loadingMap.restore"
+            tool-name="lcmg_restore"
+            :last-status="lastResultMap.restore?.status ?? null"
+            :last-details="lastResultMap.restore?.details ?? null"
+            :last-text="lastResultMap.restore?.text ?? null"
             @execute="executeRestore"
           >
             <template #form>
@@ -535,6 +582,10 @@ function executeImport(): void {
             :danger="syncDanger"
             :confirm-level="syncConfirmLevel"
             :loading="!!loadingMap.sync"
+            tool-name="lcmg_sync"
+            :last-status="lastResultMap.sync?.status ?? null"
+            :last-details="lastResultMap.sync?.details ?? null"
+            :last-text="lastResultMap.sync?.text ?? null"
             @execute="executeSync"
           >
             <template #form>
@@ -571,6 +622,10 @@ function executeImport(): void {
             icon="download"
             :confirm-level="1"
             :loading="!!loadingMap.import"
+            tool-name="lcmg_import"
+            :last-status="lastResultMap.import?.status ?? null"
+            :last-details="lastResultMap.import?.details ?? null"
+            :last-text="lastResultMap.import?.text ?? null"
             @execute="executeImport"
           >
             <template #form>

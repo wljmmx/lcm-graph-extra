@@ -18,6 +18,7 @@
 import { computed, ref, watch, onUnmounted } from 'vue';
 import { NCard, NButton, NPopconfirm, NTag, NSpace } from 'naive-ui';
 import Icon from './Icon.vue';
+import ToolResultSummary from './ToolResultSummary.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -31,12 +32,29 @@ const props = withDefaults(
     confirmLevel?: 0 | 1 | 2;
     /** 是否加载中（执行按钮禁用 + loading） */
     loading?: boolean;
+    /** MCP 工具名（用于 ToolResultSummary 解析） */
+    toolName?: string;
+    /** 最近一次执行结果的状态 */
+    lastStatus?: 'success' | 'error' | null;
+    /** 最近一次执行结果的结构化指标 */
+    lastDetails?: {
+      ok: boolean;
+      error?: string;
+      aborted?: boolean;
+      metrics?: Record<string, unknown>;
+    } | null;
+    /** 最近一次执行结果的文本内容 */
+    lastText?: string | null;
   }>(),
   {
     icon: '',
     danger: false,
     confirmLevel: 0,
     loading: false,
+    toolName: '',
+    lastStatus: null,
+    lastDetails: null,
+    lastText: null,
   },
 );
 
@@ -149,6 +167,29 @@ const elapsedLabel = computed(() => {
     <!-- 参数表单 slot -->
     <div class="card-form">
       <slot name="form" />
+    </div>
+
+    <!-- 最近执行结果摘要（非 loading 时显示） -->
+    <div v-if="lastStatus && !loading" class="card-result">
+      <div class="card-result-header">
+        <span
+          :class="['result-dot', lastStatus === 'success' ? 'result-dot--success' : 'result-dot--error']"
+        />
+        <span class="result-label">最近结果</span>
+        <NTag
+          :type="lastStatus === 'success' ? 'success' : 'error'"
+          size="tiny"
+          round
+        >
+          {{ lastStatus === 'success' ? '成功' : '失败' }}
+        </NTag>
+      </div>
+      <ToolResultSummary
+        :tool="toolName"
+        :status="lastStatus"
+        :details="lastDetails"
+        :text="lastText"
+      />
     </div>
 
     <!-- 执行按钮：根据 confirmLevel 切换 UI -->
@@ -290,6 +331,39 @@ const elapsedLabel = computed(() => {
 .card-footer {
   display: flex;
   justify-content: flex-end;
+}
+/* 最近执行结果摘要 */
+.card-result {
+  margin-bottom: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--color-border-strong);
+}
+.card-result-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.result-label {
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
+  flex: 1;
+}
+.result-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.result-dot--success {
+  background: var(--color-success);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-success) 20%, transparent);
+}
+.result-dot--error {
+  background: var(--color-danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-danger) 20%, transparent);
 }
 .warn-text {
   color: var(--color-danger);

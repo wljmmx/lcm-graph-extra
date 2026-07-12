@@ -23,6 +23,7 @@ import {
   NButton,
 } from 'naive-ui';
 import { formatTimeWithSeconds, formatDuration } from '../utils/format';
+import ToolResultSummary from './ToolResultSummary.vue';
 
 export interface OperationLogEntry {
   id: number;
@@ -33,6 +34,15 @@ export interface OperationLogEntry {
   error?: string;
   ts: number;
   durationMs?: number;
+  /** 结构化指标（从 result 中提取） */
+  details?: {
+    ok: boolean;
+    error?: string;
+    aborted?: boolean;
+    metrics?: Record<string, unknown>;
+  } | null;
+  /** 文本内容（从 result.content[0].text 提取） */
+  text?: string | null;
 }
 
 const props = defineProps<{
@@ -90,11 +100,12 @@ function prettyJson(v: unknown): string {
     />
     <!-- M9 修复：去除 clickable（列表项无点击交互，避免误导用户） -->
     <NList v-else bordered>
-      <NListItem v-for="log in displayLogs" :key="log.id">
+      <NListItem v-for="log in displayLogs" :key="log.id" class="log-item">
+        <!-- 第一行：时间 + 工具名 + 状态 tag + 耗时 -->
         <NSpace align="center" :size="8" wrap>
           <NText depth="3" class="log-time">{{ formatTimeWithSeconds(log.ts) }}</NText>
           <NText class="log-tool">{{ log.tool }}</NText>
-          <NTag :type="statusType(log.status)" size="small">
+          <NTag :type="statusType(log.status)" size="small" round>
             {{ statusLabel(log.status) }}
           </NTag>
           <NText v-if="log.durationMs !== undefined" depth="3" class="log-duration">
@@ -102,19 +113,28 @@ function prettyJson(v: unknown): string {
           </NText>
         </NSpace>
 
+        <!-- 第二行：结构化结果摘要（metric chips） -->
+        <ToolResultSummary
+          v-if="log.status !== 'running'"
+          :tool="log.tool"
+          :status="log.status"
+          :details="log.details"
+          :text="log.text"
+        />
+
         <!-- 错误信息：直接展示（红色），无需展开 -->
         <div v-if="log.error" class="log-section">
           <NText type="error" class="log-section-label">错误：</NText>
           <pre class="log-pre log-error">{{ log.error }}</pre>
         </div>
 
-        <!-- 可展开：参数 + 结果（错误已直接展示，不重复） -->
+        <!-- 可展开：原始参数 + 原始结果 JSON（默认折叠） -->
         <NCollapse
           v-if="(log.params && Object.keys(log.params).length > 0) || (log.result !== undefined && log.result !== null)"
           class="log-collapse"
           :default-expanded-names="[]"
         >
-          <NCollapseItem title="详情" name="detail">
+          <NCollapseItem title="原始数据" name="detail">
             <div v-if="log.params && Object.keys(log.params).length > 0" class="log-section">
               <NText depth="3" class="log-section-label">参数：</NText>
               <pre class="log-pre">{{ prettyJson(log.params) }}</pre>
@@ -131,6 +151,9 @@ function prettyJson(v: unknown): string {
 </template>
 
 <style scoped>
+.log-item {
+  padding: var(--space-sm) var(--space-md) !important;
+}
 .log-time {
   font-family: var(--font-family-mono);
   font-size: var(--fs-caption);

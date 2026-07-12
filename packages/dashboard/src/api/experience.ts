@@ -61,10 +61,54 @@ export interface ExperienceListParams {
   offset?: number;
 }
 
+/** MCP 工具返回的结构化指标 */
+export interface McpToolDetails {
+  ok: boolean;
+  error?: string;
+  aborted?: boolean;
+  metrics?: Record<string, unknown>;
+}
+
 export interface McpInvokeResponse {
   ok: boolean;
   result?: unknown;
   error?: string;
+}
+
+/**
+ * 从 MCP invoke 响应中提取 details 结构化指标。
+ *
+ * result 可能的形态：
+ *   - { content: [...], details: { ok, metrics } }  — OpenClaw MCP host 直接透传
+ *   - { ok, metrics }  — 已解包
+ *   - undefined / null  — 无结构化数据
+ */
+export function extractDetails(result: unknown): McpToolDetails | null {
+  if (!result || typeof result !== 'object') return null;
+  const r = result as Record<string, unknown>;
+  // 形态 1：MCP 标准返回 { content, details }
+  if (r.details && typeof r.details === 'object') {
+    return r.details as McpToolDetails;
+  }
+  // 形态 2：直接包含 ok + metrics
+  if (typeof r.ok === 'boolean' && r.metrics) {
+    return r as unknown as McpToolDetails;
+  }
+  return null;
+}
+
+/** 从 MCP invoke 响应中提取 text 内容（用于 fallback 展示） */
+export function extractText(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null;
+  const r = result as Record<string, unknown>;
+  if (Array.isArray(r.content)) {
+    const textPart = (r.content as unknown[]).find(
+      (c) => c && typeof c === 'object' && (c as Record<string, unknown>).type === 'text',
+    );
+    if (textPart) return String((textPart as Record<string, unknown>).text ?? '');
+  }
+  if (typeof r.text === 'string') return r.text;
+  return null;
 }
 
 /** 把列表参数编码为 query string */
