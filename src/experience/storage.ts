@@ -164,16 +164,26 @@ const SEARCH_QUERY_TAG_FILTER = `AND (
              OR ANY(t IN split(coalesce(e.tags_techStack, ''), ',') WHERE t <> '' AND t IN $techStackTags)
            )`;
 
+/**
+ * 拉取待蒸馏经验。
+ *
+ * 重试机制：除 PENDING 节点外，也拉取 FAILED 且 retryCount < $maxRetries 的节点，
+ * 让失败的经验在后续蒸馏中自动重试。超过 maxRetries 的节点不再自动拉取，
+ * 需通过 resetFailedToPending() 手动重置后才会重新进入队列。
+ */
 const FETCH_PENDING = `
   MATCH (e:${LABEL})
   WHERE e.status = 'PENDING'
+     OR (e.status = 'FAILED' AND coalesce(e.retryCount, 0) < $maxRetries)
   RETURN e.id AS id,
          e.source AS source,
          e.context AS context,
          e.detail AS detail,
          e.projectName AS projectName,
          e.taskId AS taskId,
-         e.createdAt AS createdAt
+         e.createdAt AS createdAt,
+         e.retryCount AS retryCount,
+         e.status AS status
   ORDER BY e.createdAt ASC
   LIMIT $limit
 `;
@@ -181,6 +191,41 @@ const FETCH_PENDING = `
 const DELETE_BY_ID = `
   MATCH (e:${LABEL} {id: $id})
   DELETE e
+`;
+
+/**
+ * 标记蒸馏失败：status → FAILED，retryCount + 1，记录错误信息与失败时间。
+ * 下次 fetchPending 会在 retryCount < maxRetries 时自动重新拉取该节点。
+ */
+const MARK_FAILED = `
+  MATCH (e:${LABEL} {id: $id})
+  SET e.status = 'FAILED',
+      e.retryCount = coalesce(e.retryCount, 0) + 1,
+      e.lastError = $error,
+      e.lastFailedAt = timestamp()
+`;
+
+/**
+ * 重置已耗尽重试次数的 FAILED 节点回 PENDING，清零 retryCount。
+ * 用于手动触发"重试失败经验"：resetFailedToPending(all) 重置全部 FAILED，
+ * resetFailedToPending(exhausted, maxRetries) 仅重置 retryCount >= maxRetries 的节点。
+ */
+const RESET_FAILED_TO_PENDING = `
+  MATCH (e:${LABEL})
+  WHERE e.status = 'FAILED'
+    AND ($mode = 'all' OR coalesce(e.retryCount, 0) >= $maxRetries)
+  SET e.status = 'PENDING',
+      e.retryCount = 0,
+      e.lastError = null,
+      e.resetAt = timestamp()
+  RETURN count(e) AS reset
+`;
+
+/** 统计 FAILED 节点中已耗尽重试次数（retryCount >= maxRetries）的数量 */
+const COUNT_FAILED_EXHAUSTED = `
+  MATCH (e:${LABEL})
+  WHERE e.status = 'FAILED' AND coalesce(e.retryCount, 0) >= $maxRetries
+  RETURN count(e) AS cnt
 `;
 
 /**
@@ -637,15 +682,23 @@ export class ExperienceStorage {
   }
 
   /**
-   * 获取所有 PENDING 经验的原始记录（供 dreaming/cron 批量总结）
+   * 获取所有待蒸馏经验的原始记录（供 dreaming/cron 批量总结）。
+   *
+   * 重试机制：除 PENDING 节点外，也返回 FAILED 且 retryCount < maxRetries 的节点，
+   * 让失败经验在后续蒸馏中自动重试。超过 maxRetries 的节点需手动 resetFailedToPending。
+   *
+   * @param maxRetries 最大自动重试次数（默认 3，可通过 LCMG_DISTILL_MAX_RETRIES 配置）
    */
-  async fetchPending(limit: number = 200): Promise<PendingRow[]> {
+  async fetchPending(limit: number = 200, maxRetries?: number): Promise<PendingRow[]> {
+    const maxR = maxRetries ?? getDistillMaxRetries();
     const rows = await this.adapter.query<PendingRow>(
       FETCH_PENDING,
-      { limit: Math.trunc(limit) },
+      { limit: Math.trunc(limit), maxRetries: Math.trunc(maxR) },
     );
     return (rows || []).map((r: any) => ({
       ...r,
+      retryCount: typeof r.retryCount === 'number' ? r.retryCount : 0,
+      status: r.status || 'PENDING',
       createdAt: new Date(r.createdAt),
     }));
   }
@@ -682,10 +735,61 @@ export class ExperienceStorage {
   }
 
   /**
-   * 删除经验（TTL 清理用）
+   * 删除经验（TTL 清理用，蒸馏成功后删除原 PENDING/FAILED 节点）
    */
   async deleteById(id: string): Promise<void> {
     await this.adapter.query(DELETE_BY_ID, { id });
+  }
+
+  /**
+   * 标记蒸馏失败：status → FAILED，retryCount + 1，记录错误信息。
+   * 节点不会被删除，下次 fetchPending 在 retryCount < maxRetries 时会自动重新拉取。
+   *
+   * @param id 经验节点 ID
+   * @param error 失败原因（HTTP 错误 / 超时 / JSON 解析失败等）
+   */
+  async markFailed(id: string, error: string): Promise<void> {
+    try {
+      await this.adapter.query(MARK_FAILED, { id, error: String(error).slice(0, 500) });
+    } catch {
+      // markFailed 失败不应阻断蒸馏主流程，静默忽略
+    }
+  }
+
+  /**
+   * 重置 FAILED 节点回 PENDING，清零 retryCount，让其重新进入蒸馏队列。
+   *
+   * @param mode 'all' = 重置所有 FAILED 节点；'exhausted' = 仅重置 retryCount >= maxRetries 的节点
+   * @param maxRetries 仅 mode='exhausted' 时使用
+   * @returns 重置的节点数量
+   */
+  async resetFailedToPending(mode: 'all' | 'exhausted' = 'all', maxRetries?: number): Promise<number> {
+    const maxR = maxRetries ?? getDistillMaxRetries();
+    try {
+      const rows = await this.adapter.query(
+        RESET_FAILED_TO_PENDING,
+        { mode, maxRetries: Math.trunc(maxR) },
+      );
+      const cnt = (rows?.[0] as any)?.reset;
+      return typeof cnt?.toNumber === 'function' ? cnt.toNumber() : Number(cnt) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * 统计已耗尽重试次数的 FAILED 节点数量（retryCount >= maxRetries）。
+   * 用于蒸馏报告展示"待手动重试"的数量。
+   */
+  async countFailedExhausted(maxRetries?: number): Promise<number> {
+    const maxR = maxRetries ?? getDistillMaxRetries();
+    try {
+      const rows = await this.adapter.query(COUNT_FAILED_EXHAUSTED, { maxRetries: Math.trunc(maxR) });
+      const cnt = (rows?.[0] as any)?.cnt;
+      return typeof cnt?.toNumber === 'function' ? cnt.toNumber() : Number(cnt) || 0;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -789,6 +893,23 @@ interface PendingRow {
   projectName: string | null;
   taskId: string | null;
   createdAt: Date;
+  /** 重试次数（FAILED 节点被重新拉取时 > 0，PENDING 新节点为 0） */
+  retryCount?: number;
+  /** 节点当前状态（PENDING 或 FAILED） */
+  status?: string;
+}
+
+/**
+ * 获取蒸馏最大自动重试次数。
+ * 默认 3 次，可通过环境变量 LCMG_DISTILL_MAX_RETRIES 配置（最小 1，最大 10）。
+ */
+function getDistillMaxRetries(): number {
+  const raw = process.env.LCMG_DISTILL_MAX_RETRIES;
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 1) return Math.min(Math.trunc(n), 10);
+  }
+  return 3;
 }
 
 function rowToDistilled(r: ExperienceSearchRow): DistilledExperience {

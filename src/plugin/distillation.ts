@@ -265,6 +265,12 @@ export interface DistillationResult {
   error?: string;
   /** 第一条 distillOne 失败的具体原因（HTTP 状态码/超时/JSON 解析失败等） */
   firstDistillError?: string;
+  /** 本次处理中来自 FAILED 重试的经验数量（retryCount > 0） */
+  retriedFailed?: number;
+  /** 已耗尽重试次数（retryCount >= maxRetries）的 FAILED 节点数量，需手动重置 */
+  skippedFailed?: number;
+  /** 最大自动重试次数（用于展示） */
+  maxRetries?: number;
 }
 
 export async function runDistillation(expStoreRef: any, apiRef: any, log: any, limit?: number): Promise<DistillationResult> {
@@ -400,12 +406,18 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     for (let i = 0; i < pending.length; i += concurrency) {
       const batch = pending.slice(i, i + concurrency);
       await Promise.allSettled(batch.map((raw: any) => (async () => {
+        // 记录 errorSink 长度，用于提取本条经验的失败原因
+        const errIdxBefore = distillErrors.length;
         try {
           const distilled = await distillOne(raw, llm, log, distillErrors);
           if (distilled) {
             await expStoreRef.saveDistilled(distilled);
             await expStoreRef.deleteById(raw.id);
             result.succeeded++;
+            // 统计重试成功的经验数量
+            if ((raw.retryCount ?? 0) > 0) {
+              result.retriedFailed = (result.retriedFailed ?? 0) + 1;
+            }
             // v1.2.0-3: 记录蒸馏成功
             businessMetrics.recordDistill(true);
             // v1.2.0-3: 记录经验质量分（基于 relevanceScore）
@@ -458,22 +470,51 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
               }
             }
           } else {
-            // v1.2.0-3: distillOne 返回 null（LLM 解析失败或超时）→ 记录蒸馏失败
+            // v1.2.0-3: distillOne 返回 null（LLM 解析失败或超时）→ 标记 FAILED + retryCount+1
             result.failed++;
             businessMetrics.recordDistill(false);
+            // 提取本条经验的失败原因（errorSink 中新增的最后一条）
+            const itemError = distillErrors.length > errIdxBefore
+              ? distillErrors[distillErrors.length - 1]
+              : 'LLM returned null (unknown reason)';
+            if (typeof expStoreRef.markFailed === 'function') {
+              await expStoreRef.markFailed(raw.id, itemError);
+              log?.debug?.('distillation: marked FAILED', { rawId: raw.id, retryCount: (raw.retryCount ?? 0) + 1, error: itemError.slice(0, 100) });
+            }
           }
         } catch (e) {
           result.failed++;
           log?.warn?.("distillation item failed", { err: String(e) });
           // v1.2.0-3: 记录蒸馏失败
           businessMetrics.recordDistill(false);
+          // 异常也标记 FAILED，让失败经验可被重试
+          const itemError = distillErrors.length > errIdxBefore
+            ? distillErrors[distillErrors.length - 1]
+            : `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
+          if (typeof expStoreRef.markFailed === 'function') {
+            await expStoreRef.markFailed(raw.id, itemError);
+          }
         }
       })()));
     }
-    log?.info?.('distillation: completed', { pending: result.pending, succeeded: result.succeeded, failed: result.failed, linked: result.linked, model: result.llmModel });
+    log?.info?.('distillation: completed', {
+      pending: result.pending, succeeded: result.succeeded, failed: result.failed,
+      linked: result.linked, retriedFailed: result.retriedFailed ?? 0, model: result.llmModel,
+    });
     // 将第一条蒸馏错误附到结果上，让用户在报告中看到具体原因
     if (distillErrors.length > 0) {
       result.firstDistillError = distillErrors[0];
+    }
+    // 统计已耗尽重试次数的 FAILED 节点数量（需手动重置才能再次蒸馏）
+    try {
+      if (typeof expStoreRef.countFailedExhausted === 'function') {
+        result.maxRetries = Number(process.env.LCMG_DISTILL_MAX_RETRIES) > 0
+          ? Math.min(Number(process.env.LCMG_DISTILL_MAX_RETRIES), 10)
+          : 3;
+        result.skippedFailed = await expStoreRef.countFailedExhausted(result.maxRetries);
+      }
+    } catch {
+      // 非致命，忽略
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

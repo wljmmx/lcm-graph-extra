@@ -2113,6 +2113,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           llmModel?: string; llmBaseURL?: string; graphConnected?: string; error?: string;
           neo4jTotal?: number; neo4jByStatus?: Record<string, number>;
           firstDistillError?: string;
+          retriedFailed?: number; skippedFailed?: number; maxRetries?: number;
         } | undefined;
         const pending = r?.pending ?? 0;
         const succeeded = r?.succeeded ?? 0;
@@ -2124,6 +2125,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const firstDistillError = r?.firstDistillError;
         const neo4jTotal = r?.neo4jTotal;
         const neo4jByStatus = r?.neo4jByStatus;
+        const retriedFailed = r?.retriedFailed ?? 0;
+        const skippedFailed = r?.skippedFailed ?? 0;
+        const maxRetries = r?.maxRetries ?? 3;
 
         // 构建结果摘要文本
         const lines: string[] = [];
@@ -2135,7 +2139,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lines.push(`Pending experiences: ${pending}`);
         lines.push(`Successfully distilled: ${succeeded}`);
         if (failed > 0) {
-          lines.push(`Failed: ${failed} (see logs for details)`);
+          lines.push(`Failed: ${failed} (marked FAILED, will auto-retry up to ${maxRetries} times)`);
+        }
+        if (retriedFailed > 0) {
+          lines.push(`Retried from previous failures: ${retriedFailed} (included in pending)`);
         }
         if (linked > 0) {
           lines.push(`Related links created: ${linked}`);
@@ -2191,10 +2198,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           lines.push(`  - LLM model name is correct (${llmModel})`);
           lines.push('  - LLM returns valid JSON (not markdown-wrapped)');
           lines.push('  - Plugin logs for detailed error messages');
+          lines.push('');
+          lines.push(`Failed experiences are marked FAILED and will auto-retry (up to ${maxRetries} times) in subsequent distill runs.`);
+          if (skippedFailed > 0) {
+            lines.push(`[NOTE] ${skippedFailed} experience(s) have exhausted all ${maxRetries} retries.`);
+            lines.push('Run lcmg_distill_retry to reset them back to PENDING for another attempt.');
+          }
         } else {
           lines.push(`[OK] Distillation complete: ${succeeded}/${pending} succeeded.`);
           if (failed > 0 && firstDistillError) {
             lines.push(`(${failed} failed, first error: ${firstDistillError})`);
+          }
+          if (skippedFailed > 0) {
+            lines.push('');
+            lines.push(`[NOTE] ${skippedFailed} experience(s) have exhausted all ${maxRetries} auto-retries.`);
+            lines.push('Run lcmg_distill_retry to reset them for another attempt.');
           }
         }
 
@@ -2216,6 +2234,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               graphConnected,
               neo4jTotal: neo4jTotal ?? -1,
               firstDistillError: firstDistillError || '',
+              retriedFailed,
+              skippedFailed,
+              maxRetries,
             },
           },
           isError: hasError,
@@ -2231,7 +2252,92 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   });
 
   // ===================================================================
-  // 13.5 lcmg_backfill — 回溯已有对话记录提取经验
+  // 13.5 lcmg_distill_retry — 重置 FAILED 经验回 PENDING，允许重新蒸馏
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_distill_retry",
+    label: "重试失败经验",
+    description: "重置蒸馏失败的 FAILED 经验回 PENDING 状态，清零重试次数，使其可被 lcmg_distill 重新处理。mode=all 重置所有 FAILED 节点；mode=exhausted 仅重置已耗尽自动重试次数的节点（默认）。",
+    parameters: Type.Object({
+      mode: Type.Optional(Type.String({
+        description: "重置模式：exhausted（默认，仅重置 retryCount >= maxRetries 的节点）或 all（重置所有 FAILED 节点）",
+      })),
+    }),
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      const expStore = dashboardContext?.expStore;
+      if (!expStore) {
+        return {
+          content: [{ type: "text" as const, text: "Error: expStore not available" }],
+          details: { ok: false, error: "expStore not available" },
+          isError: true,
+        };
+      }
+      const mode = params.mode === 'all' ? 'all' : 'exhausted';
+      try {
+        // 先统计当前 FAILED 节点情况
+        let failedExhausted = 0;
+        let failedTotal = 0;
+        try {
+          if (typeof expStore.countFailedExhausted === 'function') {
+            failedExhausted = await expStore.countFailedExhausted();
+          }
+          if (typeof expStore.countByStatus === 'function') {
+            const byStatus = await expStore.countByStatus();
+            failedTotal = byStatus?.FAILED ?? 0;
+          }
+        } catch {
+          // 非致命
+        }
+
+        const resetCount = typeof expStore.resetFailedToPending === 'function'
+          ? await expStore.resetFailedToPending(mode)
+          : 0;
+
+        const lines: string[] = [];
+        lines.push('# Retry Failed Experiences');
+        lines.push('');
+        lines.push(`Mode: ${mode}`);
+        if (failedTotal > 0 || failedExhausted > 0) {
+          lines.push(`FAILED nodes before reset: ${failedTotal} (exhausted: ${failedExhausted})`);
+        }
+        lines.push(`Reset to PENDING: ${resetCount}`);
+        lines.push('');
+        if (resetCount > 0) {
+          lines.push('[OK] Reset complete. Run lcmg_distill to re-process these experiences.');
+        } else {
+          lines.push('[INFO] No FAILED nodes were reset.');
+          if (mode === 'exhausted' && failedTotal > 0) {
+            lines.push(`There are ${failedTotal} FAILED node(s), but none have exhausted retries yet.`);
+            lines.push('They will auto-retry in the next lcmg_distill run.');
+            lines.push('Use mode=all to reset all FAILED nodes regardless of retry count.');
+          } else if (failedTotal === 0) {
+            lines.push('There are no FAILED experience nodes to reset.');
+          }
+        }
+
+        return {
+          content: [{ type: "text" as const, text: lines.join("\n") }],
+          details: {
+            ok: true,
+            metrics: { mode, resetCount, failedTotal, failedExhausted },
+          },
+          isError: false,
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text" as const, text: `❌ Reset failed: ${e?.message ?? String(e)}` }],
+          details: { ok: false, error: `❌ Reset failed: ${e?.message ?? String(e)}` },
+          isError: true,
+        };
+      }
+    },
+  });
+
+  // ===================================================================
+  // 13.6 lcmg_backfill — 回溯已有对话记录提取经验
   // ===================================================================
   api.registerTool({
     name: "lcmg_backfill",

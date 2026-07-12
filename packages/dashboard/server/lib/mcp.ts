@@ -50,6 +50,7 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   // quick: 单次 Cypher 操作，无 LLM
   lcmg_pin: 10_000,
   lcmg_forget: 10_000,
+  lcmg_distill_retry: 10_000,   // 重置 FAILED→PENDING，单次 Cypher UPDATE
 
   // standard: 轻量操作
   lcmg_maintain: 60_000,        // dedup + PageRank + community

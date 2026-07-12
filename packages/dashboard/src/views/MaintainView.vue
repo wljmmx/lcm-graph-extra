@@ -29,6 +29,7 @@ import {
   invokeMaintain,
   invokeDiagnose,
   invokeDistill,
+  invokeDistillRetry,
   invokeBackfill,
   invokeCompact,
   invokeResetBreaker,
@@ -46,6 +47,13 @@ const message = useMessage();
 
 // 卡片 2：蒸馏
 const distillLimit = ref<number>(50);
+
+// 卡片 2.1：重试失败经验
+const retryMode = ref<'exhausted' | 'all'>('exhausted');
+const retryModeOptions = [
+  { label: '仅重试已耗尽 (exhausted)', value: 'exhausted' },
+  { label: '重试全部失败 (all)', value: 'all' },
+];
 
 // 卡片 2.5：经验回溯
 const backfillLimit = ref<number>(20);
@@ -269,6 +277,15 @@ function executeDistill(): void {
   });
 }
 
+function executeDistillRetry(): void {
+  runMutation({
+    cardKey: 'distill_retry',
+    tool: 'lcmg_distill_retry',
+    params: { mode: retryMode.value },
+    invokeFn: () => invokeDistillRetry(retryMode.value),
+  });
+}
+
 function executeBackfill(): void {
   runMutation({
     cardKey: 'backfill',
@@ -408,7 +425,7 @@ function executeImport(): void {
         <NGi>
           <OperationCard
             title="触发蒸馏"
-            description="从 PENDING 经验批量蒸馏为 DISTILLED（调用 LLM 提取结构化经验）。"
+            description="从 PENDING 经验批量蒸馏为 DISTILLED（调用 LLM 提取结构化经验）。失败的经验自动重试（最多 3 次）。"
             icon="flask"
             :confirm-level="0"
             :loading="!!loadingMap.distill"
@@ -424,6 +441,33 @@ function executeImport(): void {
                   v-model:value="distillLimit"
                   :min="1"
                   :max="200"
+                  size="small"
+                  style="width: 100%"
+                />
+              </NFormItem>
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 2.1: 重试失败经验 -->
+        <NGi>
+          <OperationCard
+            title="重试失败经验"
+            description="重置蒸馏失败的 FAILED 经验回 PENDING 状态，清零重试次数，使其可被重新蒸馏。已耗尽自动重试次数的经验需在此重置后才会重新进入队列。"
+            icon="refresh"
+            :confirm-level="0"
+            :loading="!!loadingMap.distill_retry"
+            tool-name="lcmg_distill_retry"
+            :last-status="lastResultMap.distill_retry?.status ?? null"
+            :last-details="lastResultMap.distill_retry?.details ?? null"
+            :last-text="lastResultMap.distill_retry?.text ?? null"
+            @execute="executeDistillRetry"
+          >
+            <template #form>
+              <NFormItem label="重置范围" size="small" :show-feedback="false">
+                <NSelect
+                  v-model:value="retryMode"
+                  :options="retryModeOptions"
                   size="small"
                   style="width: 100%"
                 />

@@ -24,6 +24,11 @@ export function invokeDistill(limit: number): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_distill', { limit });
 }
 
+/** 重试失败经验：重置 FAILED 节点回 PENDING，mode=all|exhausted */
+export function invokeDistillRetry(mode: 'all' | 'exhausted' = 'exhausted'): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_distill_retry', { mode });
+}
+
 /** 经验回溯：从历史对话中提取经验写入 PENDING 队列 */
 export function invokeBackfill(limit: number, force: boolean = false): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_backfill', { limit, force });
