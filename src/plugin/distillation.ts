@@ -245,8 +245,23 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
         if (adapter && typeof adapter.connect === 'function') {
           const reconnected = await adapter.connect();
           if (reconnected) {
-            result.graphConnected = 'connected';
-            log?.info?.('distillation: graphAdapter reconnected successfully');
+            // BUGFIX: connect() 可能返回 true 但 driver 实际为 null
+            // （gm-pro getDriver 返回 null + acquireDriver 异常被 catch）。
+            // 必须重新检查 isConnected 确认 driver 确实已建立。
+            const nowConnected = typeof expStoreRef.isConnected === 'boolean'
+              ? expStoreRef.isConnected
+              : false;
+            if (nowConnected) {
+              result.graphConnected = 'connected';
+              log?.info?.('distillation: graphAdapter reconnected successfully');
+            } else {
+              result.graphConnected = 'disconnected';
+              result.error = 'graphAdapter.connect() returned true but driver is still null. ' +
+                'This indicates graph-memory-pro module loaded but Neo4j driver creation failed. ' +
+                'Check Neo4j is running and config is correct in openclaw.json.';
+              log?.warn?.('distillation: connect() returned true but isConnected is false');
+              return result;
+            }
           } else {
             result.error = 'Neo4j not connected — graphAdapter.connect() returned false. ' +
               'Check Neo4j is running and config (neo4j.url / neo4j.auth) is correct in openclaw.json. ' +

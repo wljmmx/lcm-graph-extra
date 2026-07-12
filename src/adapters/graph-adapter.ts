@@ -226,14 +226,19 @@ export class GraphAdapter {
       if (!this.driver) {
         // graph-memory-pro 尚未初始化驱动 → 自己建一个
         // Use connection pool instead of creating new driver each time
+        // acquireDriver 内部调用 verifyConnectivity，失败时抛异常
         this.driver = await acquireDriver(this.neo4jConfig);
-        if (this.driver) {
-          try {
-            await this.driver.verifyConnectivity();
-          } catch (connErr) {
-            this.logger?.warn?.(`[graph-adapter] connectivity verify failed, pool may recover: ${connErr}`);
-          }
+      }
+      // BUGFIX: 如果 driver 仍为 null（理论上 acquireDriver 要么返回 driver 要么抛异常，
+      // 但防御性检查），返回 false 而非 true，避免 isConnected 误报为 connected
+      if (!this.driver) {
+        this.logger?.warn?.('[graph-adapter] connect: no driver available after all attempts');
+        this._connectRetryCount++;
+        if (this._connectRetryCount >= this.maxRetries) {
+          this._connectFailed = true;
+          this._lastFailTime = Date.now();
         }
+        return false;
       }
 
       // - Initialize Recaller (gm-pro dual-path recall) -

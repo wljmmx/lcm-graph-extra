@@ -18,7 +18,7 @@
 
 // @ts-ignore - plugin-sdk types only available at runtime
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
-import { registerOperationalToolsWithDashboard, closeNeo4jDriver, type DashboardToolContext } from './tools.js';
+import { registerOperationalToolsWithDashboard, closeNeo4jDriver, mergeEntriesNeo4jConfig, type DashboardToolContext } from './tools.js';
 import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboard-snapshot.js';
 import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
@@ -163,7 +163,11 @@ const pluginEntry: any = definePluginEntry({
           : undefined;
 
         // -- 插件自有参数 (来自 plugins.lcm-graph-extra) --
-        const pluginConfig = api.pluginConfig ?? {};
+        // BUGFIX: 合并 openclaw.json entries 配置，确保 graphAdapter 和
+        // getNeo4jDriver() 使用相同的配置来源。
+        // 原问题：api.pluginConfig 可能不包含 entries 中的 neo4j 配置，
+        // 导致 graphAdapter 连接失败但 getNeo4jDriver()（tools.ts）连接成功。
+        const pluginConfig: any = mergeEntriesNeo4jConfig(api) ?? api.pluginConfig ?? {};
         const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? 'search';
         const cliTimeout = pluginConfig.cliTimeout ?? 30_000;
         // 优化: 允许通过 pluginConfig.qmdMcpTimeout 覆盖 MCP 超时（默认 3000ms）
@@ -183,10 +187,17 @@ const pluginEntry: any = definePluginEntry({
         );
 
         // Connect once; if Neo4j unavailable, still initialize so L2 works
+        // BUGFIX: connect() 内部 catch 所有异常并返回 false（不抛出），
+        // 原 catch 块是死代码。改为检查返回值，正确记录连接失败状态。
+        let graphConnected = false;
         try {
-          await graphAdapter.connect();
+          graphConnected = await graphAdapter.connect();
         } catch (err) {
-          logger?.warn?.("init: Neo4j unavailable, L3/L4 will be skipped", { err: (err as Error).message });
+          logger?.warn?.("init: graphAdapter.connect() threw", { err: (err as Error).message });
+        }
+        if (!graphConnected) {
+          logger?.warn?.("init: Neo4j unavailable (connect returned false), L3/L4 will be skipped. " +
+            "Distillation will attempt reconnect on demand.");
         }
 
         expStore = new ExperienceStorage(graphAdapter);
@@ -763,8 +774,12 @@ const pluginEntry: any = definePluginEntry({
         }
         const storeRef = expStore;
         if (!storeRef) throw new Error('expStore not initialized');
-        // runDistillation 返回结构化结果（pending/succeeded/failed/linked/llmModel）
-        const result = await runDistillation(storeRef, api, logger, limit);
+        // BUGFIX: 传 merged config 给 runDistillation，确保 resolveDistillationLlm
+        // 能读到 entries 中的 distillationLlm 配置（与 graphAdapter 使用同一配置来源）。
+        // 原问题：api.pluginConfig 可能不包含 entries 中的 distillationLlm，
+        // 导致 LLM 配置回退到默认值（gpt-4o-mini）而非用户配置的本地模型。
+        const mergedApi = { ...api, pluginConfig: mergeEntriesNeo4jConfig(api) };
+        const result = await runDistillation(storeRef, mergedApi, logger, limit);
         return result;
       },
       triggerCompact: async (conversationId?: number) => {

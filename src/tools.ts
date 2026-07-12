@@ -317,9 +317,18 @@ export async function closeNeo4jDriver(): Promise<void> {
  * Try to merge neo4j config from entries if not present in api.config.
  * OpenClaw may place plugin config under entries instead of plugins,
  * so we read openclaw.json and merge it in.
+ *
+ * 导出供 index.ts 在创建 graphAdapter 时使用，确保 graphAdapter 和
+ * getNeo4jDriver() 使用相同的配置来源（避免 graphAdapter 连接失败
+ * 但 getNeo4jDriver() 连接成功的不一致问题）。
  */
-function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
-  const config = (api.config || {}) as Record<string, unknown>;
+export function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
+  // 合并 api.config（workspace 配置）和 api.pluginConfig（插件配置）
+  // 两者都可能包含 neo4j 配置，pluginConfig 优先级更高
+  const config = {
+    ...(api.config || {}),
+    ...(api.pluginConfig || {}),
+  } as Record<string, unknown>;
   // If neo4j already present AND has a valid URI, use as-is
   if (config && 'neo4j' in config && (config.neo4j as any)?.uri) {
     return config;
