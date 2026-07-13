@@ -1,8 +1,14 @@
 /**
- * Tool-aware retrieval strategy helpers
+ * Tool-aware retrieval strategy helpers + Smart Tool Guidance.
  *
- * 根据 assemble params.availableTools 判断可用工具类别，
- * 决定是否注入工具指引到 systemPromptAddition。
+ * 4 层策略（Agent Harness 最佳实践）：
+ *   L1 场景驱动 —— 根据 query 场景只推荐相关工具
+ *   L2 渐进披露 —— 首轮不注入工具，agent 真正需要时才提示
+ *   L3 使用追踪 —— 已使用的工具不再重复提示
+ *   L4 疲劳衰减 —— 连续 N 轮未用某工具，降低其推荐权重
+ *
+ * SessionToolTracker 是会话级状态，按 sessionKey 隔离。
+ * 主入口：buildSmartToolGuidance()，替代旧版硬编码工具列表。
  */
 
 /** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
@@ -289,4 +295,219 @@ export function buildAdaptiveToolGuidance(
 
   // 未知层级：默认回退到 medium 层级输出
   return buildMediumTierGuidance(availableTools);
+}
+
+// ============================================================================
+// Smart Tool Guidance — 4 层策略（L1-L4）
+// ============================================================================
+
+/** 单次工具注入记录 */
+interface ToolInjectionRecord {
+  /** 工具名 */
+  tool: string;
+  /** 注入的轮次（assemble 调用次数） */
+  round: number;
+  /** 该轮是否被 agent 实际调用 */
+  used: boolean;
+}
+
+/** 会话级工具追踪状态 */
+interface SessionToolState {
+  /** 已注入的工具记录（按注入轮次排列） */
+  injections: ToolInjectionRecord[];
+  /** 本轮 assemble 序号（从 1 开始） */
+  round: number;
+  /** 上一轮是否注入了工具指引 */
+  lastHadGuidance: boolean;
+}
+
+/** 会话级工具追踪器（LRU + TTL，按 sessionKey 隔离） */
+const trackerCache = new Map<string, SessionToolState>();
+const TRACKER_MAX_SESSIONS = 500;
+const TRACKER_TTL_MS = 4 * 60 * 60 * 1000; // 4h
+
+function getTracker(sessionKey: string): SessionToolState {
+  let state = trackerCache.get(sessionKey);
+  if (!state) {
+    // LRU 清理
+    if (trackerCache.size >= TRACKER_MAX_SESSIONS) {
+      const oldest = trackerCache.keys().next().value;
+      if (oldest !== undefined) trackerCache.delete(oldest);
+    }
+    state = { injections: [], round: 0, lastHadGuidance: false };
+    trackerCache.set(sessionKey, state);
+  }
+  // TTL 清理
+  const now = Date.now();
+  for (const [key, s] of trackerCache) {
+    if (now - (s as any)._lastAccess > TRACKER_TTL_MS) trackerCache.delete(key);
+  }
+  (state as any)._lastAccess = now;
+  return state;
+}
+
+/** 从消息历史中提取 agent 实际调用的工具名 */
+export function extractUsedTools(messages: any[]): string[] {
+  const used = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue;
+    const content = msg.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part?.type === 'tool_use' && typeof part?.name === 'string') {
+        used.add(part.name.toLowerCase());
+      }
+    }
+  }
+  return [...used];
+}
+
+/**
+ * 标记轮次开始并回填上一轮工具使用情况。
+ * 调用时机：每次 assemble 开始时（在 buildSmartToolGuidance 之前）。
+ */
+export function beginToolGuidanceRound(
+  sessionKey: string,
+  messages: any[],
+): void {
+  const state = getTracker(sessionKey);
+  state.round++;
+
+  // 回填上一轮：检查上一轮注入的工具是否被 agent 实际调用
+  const usedTools = extractUsedTools(messages);
+  const usedSet = new Set(usedTools);
+  for (const inj of state.injections) {
+    if (inj.round === state.round - 1) {
+      inj.used = usedSet.has(inj.tool);
+    }
+  }
+}
+
+/**
+ * 场景到推荐工具的映射表（按推荐优先级排序）
+ */
+const SCENARIO_TOOL_MAP: Record<string, string[]> = {
+  'bug-fix':        ['lcmg_search', 'lcmg_experience_report', 'lcmg_diagnose', 'lcmg_get_document'],
+  'config-debug':   ['lcmg_search', 'lcmg_qmd_status', 'lcmg_diagnose', 'lcmg_config_get'],
+  'feature-dev':    ['lcmg_search', 'lcmg_get_document', 'lcmg_batch_get'],
+  'code-review':    ['lcmg_experience_report', 'lcmg_search'],
+  'security-audit': ['lcmg_search', 'lcmg_experience_report', 'lcmg_diagnose'],
+  'deployment':     ['lcmg_backup', 'lcmg_diagnose', 'lcmg_sync'],
+  'performance-opt':['lcmg_search', 'lcmg_diagnose'],
+  'refactor':       ['lcmg_search', 'lcmg_get_document'],
+};
+
+/** 工具简短描述 */
+const TOOL_DESC_MAP: Record<string, string> = {
+  'lcmg_search': '搜索记忆库',
+  'lcmg_experience_report': '经验报告',
+  'lcmg_diagnose': '系统诊断',
+  'lcmg_get_document': '读取文档',
+  'lcmg_batch_get': '批量读取',
+  'lcmg_qmd_status': '记忆库状态',
+  'lcmg_config_get': '读取配置',
+  'lcmg_backup': '备份数据',
+  'lcmg_sync': '同步数据',
+  'lcmg_maintain': '维护任务',
+};
+
+/** 疲劳衰减阈值：连续未使用超过 N 轮后不再推荐 */
+const FATIGUE_THRESHOLD = 3;
+
+/** 渐进披露：前 N 轮不注入工具指引（让 agent 先专注理解任务） */
+const PROGRESSIVE_DISCLOSURE_ROUNDS = 0;
+
+/**
+ * 构建智能工具指引（4 层策略）。
+ *
+ * 替代旧版硬编码 `## 记忆系统分工` 的常量注入。
+ * 仅在以下条件之一满足时注入工具指引：
+ *   1. 场景匹配到相关工具（L1）
+ *   2. 已过渐进披露轮次且 agent 从未使用过工具（L2）
+ * 不注入的情况：
+ *   - agent 已使用过推荐工具 → 不再重复提示（L3）
+ *   - 连续 3 轮未使用 → 疲劳衰减，不再提示（L4）
+ *   - 高压力 tier → 不注入任何工具指引以节省上下文
+ *
+ * @param tier 压力层级（high 时直接返回空字符串）
+ * @param scenario 当前场景（可为 null）
+ * @param availableTools 可用工具列表
+ * @param sessionKey 会话标识
+ * @returns 工具指引字符串，空字符串表示本轮不注入
+ */
+export function buildSmartToolGuidance(
+  tier: string,
+  scenario: string | null,
+  availableTools: string[],
+  sessionKey: string,
+): string {
+  // 高压力模式：不注入任何工具指引，节省上下文
+  if (tier === 'high') return '';
+
+  const state = getTracker(sessionKey);
+
+  // L2 渐进披露：前 N 轮不注入工具指引
+  if (state.round <= PROGRESSIVE_DISCLOSURE_ROUNDS) return '';
+
+  // 确定本轮候选工具
+  let candidateTools: string[] = [];
+  if (scenario && SCENARIO_TOOL_MAP[scenario]) {
+    // L1 场景驱动：只取场景相关工具
+    const availableSet = new Set(availableTools);
+    candidateTools = SCENARIO_TOOL_MAP[scenario]
+      .filter((t) => availableSet.has(t))
+      .slice(0, 3);
+  }
+
+  // 如果场景未命中或没有可用工具，不注入
+  if (candidateTools.length === 0) {
+    state.lastHadGuidance = false;
+    return '';
+  }
+
+  // L3+L4：过滤已使用和疲劳的工具
+  const unusedTools = candidateTools.filter((tool) => {
+    const relevantInjections = state.injections.filter((i) => i.tool === tool);
+    // L3：已使用过 → 不再提示
+    if (relevantInjections.some((i) => i.used)) return false;
+    // L4：连续未使用超过阈值 → 疲劳衰减
+    const unusedStreak = relevantInjections.reduce((streak, inj) => {
+      return inj.used ? 0 : streak + 1;
+    }, 0);
+    return unusedStreak < FATIGUE_THRESHOLD;
+  });
+
+  if (unusedTools.length === 0) {
+    state.lastHadGuidance = false;
+    return '';
+  }
+
+  // 记录本轮注入
+  for (const tool of unusedTools) {
+    state.injections.push({ tool, round: state.round, used: false });
+  }
+  state.lastHadGuidance = true;
+
+  // 构建简洁指引（仅工具名 + 简短描述，不展开全部工具列表）
+  const lines = ['## 相关工具提示'];
+  lines.push(
+    '以下工具可能在当前场景有用。已自动注入的知识库通常已包含所需信息，',
+    '优先基于已有上下文直接执行，仅在必要时使用工具。',
+  );
+  for (const tool of unusedTools) {
+    const desc = TOOL_DESC_MAP[tool] ?? '';
+    lines.push(`- **${tool}**${desc ? ': ' + desc : ''}`);
+  }
+
+  return lines.join('\n');
+}
+
+/** 供 heartbeat 清理过期 tracker 的公开入口 */
+export function evictStaleToolTrackers(): void {
+  const now = Date.now();
+  for (const [key, state] of trackerCache) {
+    if (now - ((state as any)._lastAccess ?? 0) > TRACKER_TTL_MS) {
+      trackerCache.delete(key);
+    }
+  }
 }

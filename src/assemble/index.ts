@@ -4,7 +4,7 @@
  * 组合 retrieval / injection / guidance 三个子模块，实现完整的 assemble 生命周期。
  */
 
-import { extractAvailableTools, hasToolCategory } from '../plugin/tool-guidance.js';
+import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
@@ -75,6 +75,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         ", hasGraph=" + hasGraphTool + ", hasExperience=" + hasExperienceTool
       );
     }
+
+    // Smart Tool Guidance: 会话级工具追踪（L1-L4 策略），在每轮 assemble 开头调用
+    const _toolSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+      : typeof params.session_id === 'string' ? params.session_id : '';
+    beginToolGuidanceRound(_toolSessionKey, params.messages ?? []);
 
     // ==================================================================
     // 1. Window Monitor — pressure check + tier determination
@@ -362,6 +367,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       availableTools, maxContextChars, contextWindow,
       citationsMode, modelFullId,
       retrievalOutput.qmdQuery,
+      retrievalOutput.scenario ?? null,
     );
 
     systemPromptAddition = injectionOutput.systemPromptAddition;
@@ -407,22 +413,25 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     if (typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
-        && availableTools.length > 0 && !systemPromptAddition.includes('## 当前可用工具')) {
-      const toolSection = '\n\n## 当前可用工具\n' +
-        availableTools.map((t: string) => '- `' + t + '`').join('\n');
-      systemPromptAddition += toolSection;
+        && availableTools.length > 0) {
+      const smartGuidance = buildSmartToolGuidance(
+        tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey,
+      );
+      if (smartGuidance) {
+        systemPromptAddition += '\n\n' + smartGuidance;
+      }
     }
 
-    if (systemPromptAddition.length > 0 && !systemPromptAddition.includes('## 记忆系统分工')) {
-      systemPromptAddition += '\n\n## 记忆系统分工\n' +
-        '- **自动注入**（无需调用）：知识图谱（Neo4j）+ 经验层（EXPERIENCE）+ qmd 全文索引，已通过 systemPromptAddition 自动加载\n' +
-        '- **memory_search**：搜索 Markdown 记忆（MEMORY.md + daily log）+ 知识图谱节点（由 graph-memory-pro 提供 Corpus Supplement）\n' +
-        '- **memory_get**：读取指定 Markdown 记忆文件\n' +
-        '- **gm_record**：手动写入知识图谱节点（SKILL/TASK/EVENT）\n' +
-        '- **gm_maintain**：手动触发图谱维护（去重+PageRank+社区检测）+ 查看统计\n' +
-        '- **gm_reembed**：批量重新向量化缺失 embedding 的节点\n' +
-        '- **lcmg_search**：跨引擎搜索（qmd+graph+experience 混合召回）\n' +
-        '- **lcmg_diagnose**：诊断 5 个子系统健康状态\n';
+    // Smart Tool Guidance: 通用模型（非 ollama）也使用场景驱动工具注入
+    if (typeof modelFullId !== 'string' || (!modelFullId.startsWith('ollama/') && !modelFullId.startsWith('ollama-256k/'))) {
+      if (availableTools.length > 0) {
+        const smartGuidance = buildSmartToolGuidance(
+          tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey,
+        );
+        if (smartGuidance && systemPromptAddition.length > 0) {
+          systemPromptAddition += '\n\n' + smartGuidance;
+        }
+      }
     }
   } catch (err) {
     const e = err instanceof Error ? err : new Error(String(err));

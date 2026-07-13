@@ -84,4 +84,6 @@ export interface InjectionOutput {
   currentRoundHashes: string[];
   removedSections: { label: string; chars: number }[];
   expResults: any[];
+  /** 当前场景标识（来自 detectScenarioAndAdjustLimits），供智能工具引导使用 */
+  scenario: string | null;
 }

@@ -37,6 +37,7 @@ export async function injectContext(
   citationsMode: string,
   modelFullId: string,
   qmdQuery: string,
+  scenario: string | null,
 ): Promise<InjectionOutput> {
   // Session-isolated cross-round dedup
   const sessionKey = typeof params.sessionKey === 'string'
@@ -291,5 +292,5 @@ export async function injectContext(
     }
   }
 
-  return { systemPromptAddition, currentRoundHashes, removedSections, expResults: finalExpResults };
+  return { systemPromptAddition, currentRoundHashes, removedSections, expResults: finalExpResults, scenario };
 }
