@@ -59,8 +59,12 @@ export const TOOL_CATEGORIES: Record<string, ReadonlySet<string>> = {
   graph: new Set(["lcmg_search", "lcmg_pin", "lcmg_import"]),
   experience: new Set(["lcmg_experience_report"]),
   qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
-  maintenance: new Set(["lcmg_maintain", "lcmg_diagnose"]),
+  maintenance: new Set([
+    "lcmg_maintain", "lcmg_diagnose", "lcmg_forget",
+    "lcmg_distill", "lcmg_compact", "lcmg_reset_breaker",
+  ]),
   lifecycle: new Set(["lcmg_backup", "lcmg_restore", "lcmg_sync"]),
+  config: new Set(["lcmg_config_get", "lcmg_config_set"]),
 };
 
 /** Check if a tool category is available (exact match, no fallback). */
@@ -93,6 +97,7 @@ export function buildToolGuidance(availableTools: string[]): string {
     qmd: { label: "记忆文件", desc: "QMD 文档管理" },
     maintenance: { label: "系统维护", desc: "健康检查与修复" },
     lifecycle: { label: "生命周期", desc: "备份/恢复/同步" },
+    config: { label: "系统配置", desc: "读取/修改配置" },
   };
 
   const lines = ["## [Available Tools]"];
@@ -137,18 +142,6 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   'lcmg_config_set': '修改配置',
 };
 
-/**
- * 场景到推荐工具的映射表（按推荐优先级排序）
- */
-const SCENARIO_RECOMMENDATIONS: Record<string, string[]> = {
-  'bug-fix': ['lcmg_search', 'lcmg_experience_report', 'lcmg_diagnose'],
-  'config-debug': ['lcmg_search', 'lcmg_qmd_status', 'lcmg_diagnose'],
-  'feature-dev': ['lcmg_search', 'lcmg_get_document', 'lcmg_batch_get'],
-  'code-review': ['lcmg_experience_report', 'lcmg_search'],
-  'security-audit': ['lcmg_search', 'lcmg_experience_report', 'lcmg_diagnose'],
-  'deployment': ['lcmg_backup', 'lcmg_sync', 'lcmg_diagnose'],
-};
-
 /** 工具类别中文标签 —— 用于 low 层级分组展示 */
 const ADAPTIVE_CATEGORY_LABELS: Record<string, string> = {
   graph: '知识图谱',
@@ -156,6 +149,7 @@ const ADAPTIVE_CATEGORY_LABELS: Record<string, string> = {
   qmd: '记忆文件',
   maintenance: '系统维护',
   lifecycle: '生命周期',
+  config: '系统配置',
 };
 
 /**
@@ -178,19 +172,11 @@ export function getToolDescription(toolName: string, maxLen?: number): string {
 }
 
 /**
- * 根据场景获取推荐工具列表
- * 仅返回当前可用的工具，按推荐优先级排序，最多取前 3 个
- * @param scenario 场景标识
- * @param available 当前可用工具列表
- * @returns 推荐工具列表
+ * 根据场景获取推荐工具列表（类别驱动匹配）。
+ * 返回当前可用工具中匹配场景类别的工具，最多 5 个。
  */
 export function getRecommendedTools(scenario: string, available: string[]): string[] {
-  const recommended = SCENARIO_RECOMMENDATIONS[scenario];
-  // 未知场景无推荐
-  if (!recommended) return [];
-  const availableSet = new Set(available);
-  // 按推荐顺序过滤出当前可用的工具，最多取 3 个
-  return recommended.filter(t => availableSet.has(t)).slice(0, 3);
+  return matchToolsForScenario(scenario, available);
 }
 
 /**
@@ -224,9 +210,9 @@ function buildLowTierGuidance(scenario: string | null, availableTools: string[])
     }
   }
 
-  // 场景推荐工具（Top 3）
+  // 场景推荐工具（类别驱动，Top 3）
   if (scenario) {
-    const recommended = getRecommendedTools(scenario, availableTools);
+    const recommended = getRecommendedTools(scenario, availableTools).slice(0, 3);
     if (recommended.length > 0) {
       lines.push(`\n### 场景推荐 (scenario: ${scenario})`);
       recommended.forEach((t, i) => {
@@ -300,6 +286,106 @@ export function buildAdaptiveToolGuidance(
 // ============================================================================
 // Smart Tool Guidance — 4 层策略（L1-L4）
 // ============================================================================
+
+// ---------------------------------------------------------------------------
+// 工具类别系统：按语义类别匹配，而非硬编码工具名
+// LCM 工具优先查 TOOL_CATEGORIES，系统工具按名称模式推断
+// ---------------------------------------------------------------------------
+
+/** 工具名称模式 → 语义类别（用于非 LCM 工具的自动归类） */
+const TOOL_NAME_PATTERNS: Record<string, RegExp[]> = {
+  search:    [/search/i, /find/i, /grep/i, /glob/i, /query/i, /retrieve/i, /lookup/i, /scan/i],
+  document:  [/read/i, /^get_/i, /fetch/i, /^cat$/i, /show/i, /view/i, /open/i, /document/i],
+  file:      [/write/i, /edit/i, /create/i, /save/i, /^mk/i, /touch/i, /delete/i, /remove/i, /^mv$/i, /^cp$/i, /rename/i, /^ls$/i, /list/i],
+  shell:     [/run/i, /exec/i, /shell/i, /bash/i, /command/i, /script/i, /terminal/i],
+  web:       [/web/i, /browser/i, /^url$/i, /http/i, /fetch_page/i, /scrape/i],
+  task:      [/task/i, /todo/i, /plan/i, /schedule/i],
+  diagnosis: [/diagnose/i, /health/i, /status/i, /check/i, /probe/i, /ping/i, /validate/i],
+  config:    [/config/i, /setting/i, /preference/i, /profile/i],
+  experience:[/experience/i, /report/i, /history/i, /^log$/i],
+  maintenance:[/maintain/i, /compact/i, /distill/i, /forget/i, /reset/i, /clean/i, /repair/i, /fix/i, /^ttl/i],
+  lifecycle: [/backup/i, /restore/i, /sync/i, /import/i, /export/i, /^pin$/i, /archive/i],
+  graph:     [/graph/i, /node/i, /edge/i, /neo4j/i, /^gm_/i],
+};
+
+/** 类别中文标签（用于工具描述自动推断） */
+const CATEGORY_LABELS: Record<string, string> = {
+  search: '搜索', document: '读取', file: '文件操作', shell: '执行命令',
+  web: '网络', task: '任务', diagnosis: '诊断', config: '配置',
+  experience: '经验', maintenance: '维护', lifecycle: '数据管理', graph: '知识图谱',
+};
+
+/**
+ * 归类一个工具：返回其所属的语义类别列表。
+ * 优先查 LCM 工具的 TOOL_CATEGORIES，再按名称模式推断。
+ */
+function categorizeTool(toolName: string): string[] {
+  const lower = toolName.toLowerCase();
+  // 1. 精确匹配 LCM 工具类别
+  const explicitCats: string[] = [];
+  for (const [cat, names] of Object.entries(TOOL_CATEGORIES)) {
+    if (names.has(lower)) explicitCats.push(cat);
+  }
+  if (explicitCats.length > 0) return explicitCats;
+  // 2. 名称模式推断
+  const cats: string[] = [];
+  for (const [cat, patterns] of Object.entries(TOOL_NAME_PATTERNS)) {
+    if (patterns.some((re) => re.test(lower))) {
+      cats.push(cat);
+    }
+  }
+  return cats;
+}
+
+/** 工具描述：已知工具用精确描述，未知工具按类别标签推断 */
+function inferToolDescription(toolName: string): string {
+  const lower = toolName.toLowerCase();
+  if (TOOL_DESCRIPTIONS[lower]) return TOOL_DESCRIPTIONS[lower];
+  const cats = categorizeTool(toolName);
+  if (cats.length === 0) return '';
+  return CATEGORY_LABELS[cats[0]] ?? '';
+}
+
+/** 场景 → 需要的能力类别映射（按优先级排序） */
+const SCENARIO_CATEGORY_MAP: Record<string, string[]> = {
+  'bug-fix':        ['search', 'document', 'file', 'diagnosis', 'experience', 'shell'],
+  'config-debug':   ['search', 'config', 'diagnosis', 'document'],
+  'feature-dev':    ['search', 'document', 'file', 'shell', 'task'],
+  'code-review':    ['search', 'document', 'experience'],
+  'security-audit': ['search', 'diagnosis', 'experience', 'shell'],
+  'deployment':     ['lifecycle', 'diagnosis', 'shell', 'search'],
+  'performance-opt':['search', 'diagnosis', 'shell'],
+  'refactor':       ['search', 'document', 'file', 'shell'],
+};
+
+/**
+ * 根据场景从 availableTools 中匹配相关工具。
+ * 不依赖硬编码工具名——任何工具只要类别匹配就会被推荐。
+ * 按类别匹配数 + 类别优先级排序，最多取 5 个。
+ */
+function matchToolsForScenario(scenario: string, availableTools: string[]): string[] {
+  const wantedCategories = SCENARIO_CATEGORY_MAP[scenario];
+  if (!wantedCategories || wantedCategories.length === 0) return [];
+
+  const categorySet = new Set(wantedCategories);
+  const categoryPriority = new Map(wantedCategories.map((c, i) => [c, i]));
+  const scored: { tool: string; score: number; priority: number }[] = [];
+
+  for (const tool of availableTools) {
+    const toolCats = categorizeTool(tool);
+    const matchCount = toolCats.filter((c) => categorySet.has(c)).length;
+    if (matchCount === 0) continue;
+    // 取最高优先级（数字越小越优先）
+    const bestPriority = Math.min(
+      ...toolCats.filter((c) => categorySet.has(c)).map((c) => categoryPriority.get(c) ?? 999),
+    );
+    scored.push({ tool, score: matchCount, priority: bestPriority });
+  }
+
+  // 按匹配数降序，同匹配数按优先级升序
+  scored.sort((a, b) => b.score - a.score || a.priority - b.priority);
+  return scored.map((s) => s.tool).slice(0, 5);
+}
 
 /** 单次工具注入记录 */
 interface ToolInjectionRecord {
@@ -383,34 +469,6 @@ export function beginToolGuidanceRound(
   }
 }
 
-/**
- * 场景到推荐工具的映射表（按推荐优先级排序）
- */
-const SCENARIO_TOOL_MAP: Record<string, string[]> = {
-  'bug-fix':        ['lcmg_search', 'lcmg_experience_report', 'lcmg_diagnose', 'lcmg_get_document'],
-  'config-debug':   ['lcmg_search', 'lcmg_qmd_status', 'lcmg_diagnose', 'lcmg_config_get'],
-  'feature-dev':    ['lcmg_search', 'lcmg_get_document', 'lcmg_batch_get'],
-  'code-review':    ['lcmg_experience_report', 'lcmg_search'],
-  'security-audit': ['lcmg_search', 'lcmg_experience_report', 'lcmg_diagnose'],
-  'deployment':     ['lcmg_backup', 'lcmg_diagnose', 'lcmg_sync'],
-  'performance-opt':['lcmg_search', 'lcmg_diagnose'],
-  'refactor':       ['lcmg_search', 'lcmg_get_document'],
-};
-
-/** 工具简短描述 */
-const TOOL_DESC_MAP: Record<string, string> = {
-  'lcmg_search': '搜索记忆库',
-  'lcmg_experience_report': '经验报告',
-  'lcmg_diagnose': '系统诊断',
-  'lcmg_get_document': '读取文档',
-  'lcmg_batch_get': '批量读取',
-  'lcmg_qmd_status': '记忆库状态',
-  'lcmg_config_get': '读取配置',
-  'lcmg_backup': '备份数据',
-  'lcmg_sync': '同步数据',
-  'lcmg_maintain': '维护任务',
-};
-
 /** 疲劳衰减阈值：连续未使用超过 N 轮后不再推荐 */
 const FATIGUE_THRESHOLD = 3;
 
@@ -422,7 +480,7 @@ const PROGRESSIVE_DISCLOSURE_ROUNDS = 0;
  *
  * 替代旧版硬编码 `## 记忆系统分工` 的常量注入。
  * 仅在以下条件之一满足时注入工具指引：
- *   1. 场景匹配到相关工具（L1）
+ *   1. 场景匹配到相关工具（L1）—— 按类别匹配，不限于 LCM 工具
  *   2. 已过渐进披露轮次且 agent 从未使用过工具（L2）
  * 不注入的情况：
  *   - agent 已使用过推荐工具 → 不再重复提示（L3）
@@ -431,7 +489,7 @@ const PROGRESSIVE_DISCLOSURE_ROUNDS = 0;
  *
  * @param tier 压力层级（high 时直接返回空字符串）
  * @param scenario 当前场景（可为 null）
- * @param availableTools 可用工具列表
+ * @param availableTools 可用工具列表（包含 LCM 工具 + 系统工具）
  * @param sessionKey 会话标识
  * @returns 工具指引字符串，空字符串表示本轮不注入
  */
@@ -451,12 +509,9 @@ export function buildSmartToolGuidance(
 
   // 确定本轮候选工具
   let candidateTools: string[] = [];
-  if (scenario && SCENARIO_TOOL_MAP[scenario]) {
-    // L1 场景驱动：只取场景相关工具
-    const availableSet = new Set(availableTools);
-    candidateTools = SCENARIO_TOOL_MAP[scenario]
-      .filter((t) => availableSet.has(t))
-      .slice(0, 3);
+  if (scenario) {
+    // L1 场景驱动：按类别匹配，不限 LCM 工具
+    candidateTools = matchToolsForScenario(scenario, availableTools);
   }
 
   // 如果场景未命中或没有可用工具，不注入
@@ -495,7 +550,7 @@ export function buildSmartToolGuidance(
     '优先基于已有上下文直接执行，仅在必要时使用工具。',
   );
   for (const tool of unusedTools) {
-    const desc = TOOL_DESC_MAP[tool] ?? '';
+    const desc = inferToolDescription(tool);
     lines.push(`- **${tool}**${desc ? ': ' + desc : ''}`);
   }
 
