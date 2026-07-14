@@ -96,31 +96,31 @@ const REFERENCE_PRESETS: ReferencePreset[] = [
     id: 'qwen3.6-27b',
     label: 'Qwen3.6 27B',
     desc: 'Ollama 本地 · 通用推理',
-    config: { provider: 'ollama', model: 'qwen3.6:27b', temperature: 0.6, timeoutMs: 120_000, systemPrompt: '' },
+    config: { provider: 'ollama', model: 'qwen3.6:27b', temperature: 0.6, timeoutMs: 900_000, systemPrompt: '' },
   },
   {
     id: 'qwen3.6-35b-a3b',
     label: 'Qwen3.6 35B-A3B',
     desc: 'Ollama 本地 · MoE 推理',
-    config: { provider: 'ollama', model: 'qwen3.6:35b-a3b', temperature: 0.6, timeoutMs: 120_000, systemPrompt: '' },
+    config: { provider: 'ollama', model: 'qwen3.6:35b-a3b', temperature: 0.6, timeoutMs: 900_000, systemPrompt: '' },
   },
   {
     id: 'deepseek-v4-flash',
     label: 'DeepSeek-V4 Flash',
     desc: 'DeepSeek API · 快速推理',
-    config: { provider: 'deepseek', model: 'deepseek-v4-flash', temperature: 0.7, timeoutMs: 90_000, systemPrompt: '' },
+    config: { provider: 'deepseek', model: 'deepseek-v4-flash', temperature: 0.7, timeoutMs: 900_000, systemPrompt: '' },
   },
   {
     id: 'deepseek-v4-pro',
     label: 'DeepSeek-V4 Pro',
     desc: 'DeepSeek API · 深度推理',
-    config: { provider: 'deepseek', model: 'deepseek-v4-pro', temperature: 0.6, timeoutMs: 90_000, systemPrompt: '' },
+    config: { provider: 'deepseek', model: 'deepseek-v4-pro', temperature: 0.6, timeoutMs: 900_000, systemPrompt: '' },
   },
   {
     id: 'qwyoth',
     label: 'Qwyoth',
     desc: 'Ollama 本地 · 多视角推理',
-    config: { provider: 'ollama', model: 'Qwyoth', temperature: 0.6, timeoutMs: 120_000, systemPrompt: '' },
+    config: { provider: 'ollama', model: 'Qwyoth', temperature: 0.6, timeoutMs: 900_000, systemPrompt: '' },
   },
 ];
 
@@ -271,19 +271,19 @@ const AGGREGATOR_PRESETS: AggregatorPreset[] = [
     id: 'qwen3.6',
     label: 'Qwen3.6 27B',
     desc: '本地 Ollama，通用推理',
-    config: { provider: 'ollama', model: 'qwen3.6:27b', temperature: 0.3, timeoutMs: 180_000, systemPrompt: '' },
+    config: { provider: 'ollama', model: 'qwen3.6:27b', temperature: 0.3, timeoutMs: 1_200_000, systemPrompt: '' },
   },
   {
     id: 'deepseek-r1',
     label: 'DeepSeek-R1 14B',
     desc: '本地 Ollama，强推理',
-    config: { provider: 'ollama', model: 'deepseek-r1:14b', temperature: 0.3, timeoutMs: 180_000, systemPrompt: '' },
+    config: { provider: 'ollama', model: 'deepseek-r1:14b', temperature: 0.3, timeoutMs: 1_200_000, systemPrompt: '' },
   },
   {
     id: 'gpt-4o',
     label: 'GPT-4o',
     desc: 'OpenAI 云端，高精度',
-    config: { provider: 'openai', model: 'gpt-4o', temperature: 0.3, timeoutMs: 120_000, systemPrompt: '' },
+    config: { provider: 'openai', model: 'gpt-4o', temperature: 0.3, timeoutMs: 1_200_000, systemPrompt: '' },
   },
 ];
 
@@ -305,7 +305,7 @@ const aggregatorCustom = reactive<MoaModelConfig>({
   provider: 'ollama',
   model: '',
   temperature: 0.3,
-  timeoutMs: 180_000,
+  timeoutMs: 1_200_000,
   systemPrompt: '',
   apiKey: '',
   baseURL: '',

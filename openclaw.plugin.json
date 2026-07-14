@@ -644,6 +644,130 @@
             "default": []
           }
         }
+      },
+      "moa": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "MoA (Mixture of Agents) 多模型分层协作配置",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "是否启用 MoA 多模型协作"
+          },
+          "complexityThreshold": {
+            "type": "number",
+            "default": 0.6,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "任务复杂度阈值，超过此值触发 MoA"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["parallel", "serial"],
+            "default": "serial",
+            "description": "协作模式：parallel 并行 / serial 串行"
+          },
+          "referenceModels": {
+            "type": "array",
+            "description": "参考模型列表（2-4 个，从不同视角分析）",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": ["openai", "ollama", "deepseek", "custom", "openclaw_hooks"],
+                  "default": "ollama"
+                },
+                "model": {
+                  "type": "string",
+                  "default": "qwen3.6:27b"
+                },
+                "temperature": {
+                  "type": "number",
+                  "default": 0.6,
+                  "minimum": 0,
+                  "maximum": 2
+                },
+                "systemPrompt": {
+                  "type": "string",
+                  "default": ""
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "default": 900000,
+                  "minimum": 1000,
+                  "description": "超时时间（ms），本地模型建议 15-30 分钟"
+                },
+                "apiKey": {
+                  "type": "string",
+                  "sensitive": true
+                },
+                "baseURL": {
+                  "type": "string"
+                },
+                "keepAlive": {
+                  "type": "string",
+                  "default": "1h"
+                }
+              }
+            },
+            "default": []
+          },
+          "aggregatorModel": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "聚合模型配置（合并多个参考模型输出）",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": ["openai", "ollama", "deepseek", "custom", "openclaw_hooks"],
+                "default": "ollama"
+              },
+              "model": {
+                "type": "string",
+                "default": "qwen3.6:27b"
+              },
+              "temperature": {
+                "type": "number",
+                "default": 0.3,
+                "minimum": 0,
+                "maximum": 2
+              },
+              "systemPrompt": {
+                "type": "string",
+                "default": ""
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "default": 1200000,
+                "minimum": 1000,
+                "description": "超时时间（ms），聚合模型建议 20-30 分钟"
+              },
+              "apiKey": {
+                "type": "string",
+                "sensitive": true
+              },
+              "baseURL": {
+                "type": "string"
+              },
+              "keepAlive": {
+                "type": "string",
+                "default": "1h"
+              }
+            }
+          },
+          "enabledTiers": {
+            "type": "array",
+            "description": "仅在指定压力层级下触发 MoA",
+            "items": {
+              "type": "string",
+              "enum": ["low", "medium"]
+            },
+            "default": ["low"]
+          }
+        }
       }
     }
   },
