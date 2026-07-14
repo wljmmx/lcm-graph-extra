@@ -444,7 +444,7 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
 
           <NEmpty
             v-if="referenceModels.length === 0"
-            description="暂无参考模型，点击"添加模型"配置"
+            description="暂无参考模型，点击「添加模型」配置"
             style="padding: 24px 0"
           />
 
