@@ -29,7 +29,7 @@ function getConfigPath(): string {
 }
 
 /** 读取 openclaw.json 原始 JSON 对象 */
-function readRawConfig(): Record<string, unknown> {
+export function readRawConfig(): Record<string, unknown> {
   const path = getConfigPath();
   if (!existsSync(path)) return {};
   try {
@@ -51,7 +51,7 @@ function readRawConfig(): Record<string, unknown> {
 }
 
 /** 写回 openclaw.json（保留其他字段，仅更新 lcm-graph-extra 配置段） */
-function writeRawConfig(updates: Record<string, unknown>): void {
+export function writeRawConfig(updates: Record<string, unknown>): void {
   const path = getConfigPath();
   let root: Record<string, unknown> = {};
   if (existsSync(path)) {
@@ -121,7 +121,7 @@ const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' |
 };
 
 /** 按点分路径获取嵌套值 */
-function getByPath(obj: Record<string, unknown>, path: string): unknown {
+export function getByPath(obj: Record<string, unknown>, path: string): unknown {
   const parts = path.split('.');
   let cur: unknown = obj;
   for (const p of parts) {

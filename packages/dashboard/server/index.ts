@@ -22,6 +22,7 @@ import { registerExperienceRoutes } from './routes/experience';
 import { registerMemoryRoutes } from './routes/memory';
 import { registerGraphHealthRoutes } from './routes/graph-health';
 import { registerConfigRoutes } from './routes/config';
+import { registerMoaRoutes } from './routes/moa';
 import { registerQmdTestRoutes } from './routes/qmd-test';
 import { registerBenchmarkRoutes } from './routes/benchmark';
 import { closeNeo4j } from './lib/neo4j';
@@ -172,6 +173,7 @@ async function main(): Promise<void> {
   await registerGraphHealthRoutes(app);
   // v1.1.0-1/2/3: 配置管理路由（运行时配置查看 / schema 文档 / 白名单热更新）
   await registerConfigRoutes(app);
+  await registerMoaRoutes(app);
   // v1.2.0: QMD MCP 测试路由（10x/20x 反复测试 + 平均延迟统计）
   await registerQmdTestRoutes(app);
   // v2.2.0: Benchmark 性能压测路由（标准测试集 + 召回率/tokens/压缩率/性能分布 + 报告）
