@@ -149,6 +149,7 @@ export const PluginConfigSchema = Type.Object({
       provider: Type.Union([
         Type.Literal('openai'),
         Type.Literal('ollama'),
+        Type.Literal('deepseek'),
         Type.Literal('custom'),
         Type.Literal('openclaw_hooks'),
       ], { default: 'ollama' }),
@@ -164,11 +165,13 @@ export const PluginConfigSchema = Type.Object({
       provider: Type.Union([
         Type.Literal('openai'),
         Type.Literal('ollama'),
+        Type.Literal('deepseek'),
         Type.Literal('custom'),
         Type.Literal('openclaw_hooks'),
       ], { default: 'ollama' }),
       model: Type.String({ default: 'qwen3.6:27b' }),
       temperature: Type.Number({ default: 0.3, minimum: 0, maximum: 2 }),
+      systemPrompt: Type.Optional(Type.String({ default: '' })),
       timeoutMs: Type.Number({ default: 180_000, minimum: 1_000 }),
       apiKey: Type.Optional(Type.String()),
       baseURL: Type.Optional(Type.String()),
