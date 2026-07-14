@@ -30,7 +30,9 @@
       "lcmg_reset_breaker",
       "lcmg_config_get",
       "lcmg_config_set",
-      "lcmg_moa_reply"
+      "lcmg_moa_reply",
+      "lcmg_distill_retry",
+      "lcmg_backfill"
     ]
   },
   "toolMetadata": {
@@ -90,6 +92,12 @@
     },
     "lcmg_moa_reply": {
       "description": "Get the pre-computed MoA (Mixture of Agents) response synthesized by multiple reference models and an aggregator model"
+    },
+    "lcmg_distill_retry": {
+      "description": "Reset failed distilling experiences back to PENDING so they can be retried"
+    },
+    "lcmg_backfill": {
+      "description": "Re-extract experience from historical conversations into the PENDING queue"
     }
   },
   "configSchema": {

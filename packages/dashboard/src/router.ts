@@ -17,6 +17,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/qmd-test', redirect: { path: '/testing', query: { tab: 'qmd-test' } } },
   // 设置页（MOA 配置 + 模型管理）
   { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
+  // MoA 性能监控
+  { path: '/moa-performance', name: 'moa-performance', component: () => import('./views/MoaPerformanceView.vue') },
 ];
 
 export const router = createRouter({

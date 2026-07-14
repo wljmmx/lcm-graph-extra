@@ -96,6 +96,7 @@ const menuOptions = computed<MenuOption[]>(() => [
   { label: renderLinkLabel('/maintain', '维护'), key: '/maintain' },
   { label: renderLinkLabel('/testing', '测试中心'), key: '/testing' },
   { label: renderLinkLabel('/settings', '设置'), key: '/settings' },
+  { label: renderLinkLabel('/moa-performance', 'MoA 性能'), key: '/moa-performance' },
 ]);
 </script>
 

@@ -23,6 +23,7 @@ import {
   type AggregatorModelConfig,
   type LlmCallResult,
 } from './types.js';
+import { recordMoaRun } from './perf-tracker.js';
 
 // ============================================================================
 // 模块级缓存：MoA 聚合结果，供 lcmg_moa_reply 工具跨轮次读取
@@ -331,6 +332,11 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger?.warn?.('[moa] Reference models phase failed', { err: errMsg });
+    recordMoaRun(query, null, errMsg, {
+      mode: config.mode,
+      referenceModels: config.referenceModels,
+      aggregatorModel: config.aggregatorModel,
+    });
     return null;
   }
 
@@ -346,6 +352,11 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
   const validRefs = referenceResults.filter((r) => !r.text.startsWith('[Reference model error:'));
   if (validRefs.length === 0) {
     logger?.warn?.('[moa] All reference models failed, skipping aggregation');
+    recordMoaRun(query, null, 'All reference models failed', {
+      mode: config.mode,
+      referenceModels: config.referenceModels,
+      aggregatorModel: config.aggregatorModel,
+    });
     return null;
   }
 
@@ -366,6 +377,11 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger?.warn?.('[moa] Aggregator model failed', { err: errMsg });
+    recordMoaRun(query, null, errMsg, {
+      mode: config.mode,
+      referenceModels: config.referenceModels,
+      aggregatorModel: config.aggregatorModel,
+    });
     return null;
   }
 
@@ -390,6 +406,13 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
 
   // 存入缓存（供 lcmg_moa_reply 工具读取）
   setMoaResultCache(result.finalResponse);
+
+  // 记录性能数据（供 Dashboard 查询）
+  recordMoaRun(query, result, null, {
+    mode: config.mode,
+    referenceModels: config.referenceModels,
+    aggregatorModel: config.aggregatorModel,
+  });
 
   logger?.info?.('[moa] Pipeline completed', {
     totalMs,

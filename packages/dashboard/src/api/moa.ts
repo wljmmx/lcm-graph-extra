@@ -77,3 +77,49 @@ export function updateMoaConfig(updates: Record<string, unknown>): Promise<MoaCo
 export function fetchMoaStatus(): Promise<MoaStatusResponse> {
   return apiGet<MoaStatusResponse>('/api/moa/status');
 }
+
+// ─── 性能追踪 ──────────────────────────────────────────────────────────────
+
+export interface MoaRunRecord {
+  id: string;
+  timestamp: number;
+  queryPreview: string;
+  totalMs: number;
+  refMs: number;
+  aggMs: number;
+  totalTokens: number;
+  refCount: number;
+  validRefCount: number;
+  refTimings: number[];
+  refModels: string[];
+  refTokens: number[];
+  aggModel: string;
+  aggTokens: number;
+  responseLen: number;
+  success: boolean;
+  error?: string;
+  mode: string;
+}
+
+export interface MoaPerformanceData {
+  totalRuns: number;
+  successRuns: number;
+  failedRuns: number;
+  avgTotalMs: number;
+  avgRefMs: number;
+  avgAggMs: number;
+  totalTokens: number;
+  avgTokens: number;
+  recentRuns: MoaRunRecord[];
+}
+
+export interface MoaPerformanceResponse {
+  ok: boolean;
+  data?: MoaPerformanceData;
+  error?: string;
+}
+
+/** 获取 MoA 性能追踪数据 */
+export function fetchMoaPerformance(): Promise<MoaPerformanceResponse> {
+  return apiGet<MoaPerformanceResponse>('/api/moa/performance');
+}

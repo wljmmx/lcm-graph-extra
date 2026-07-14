@@ -14,6 +14,9 @@
 import type { FastifyInstance } from 'fastify';
 import { readRawConfig, writeRawConfig, getByPath } from './config';
 import { redactSensitive } from '../lib/operation-logs';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // MOA 配置类型
@@ -230,5 +233,33 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
       } : null,
     };
     return { ok: true, status };
+  });
+
+  // GET /api/moa/performance —— MoA 管道性能追踪数据
+  app.get('/api/moa/performance', async (_req, _reply) => {
+    const perfFile = join(homedir(), '.openclaw', 'moa-perf.json');
+    if (!existsSync(perfFile)) {
+      return {
+        ok: true,
+        data: {
+          totalRuns: 0,
+          successRuns: 0,
+          failedRuns: 0,
+          avgTotalMs: 0,
+          avgRefMs: 0,
+          avgAggMs: 0,
+          totalTokens: 0,
+          avgTokens: 0,
+          recentRuns: [],
+        },
+      };
+    }
+    try {
+      const raw = readFileSync(perfFile, 'utf-8');
+      const data = JSON.parse(raw);
+      return { ok: true, data };
+    } catch {
+      return { ok: false, error: 'Failed to read MoA performance data' };
+    }
   });
 }
