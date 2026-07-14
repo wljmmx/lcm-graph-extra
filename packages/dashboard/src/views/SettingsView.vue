@@ -183,8 +183,50 @@ function saveReferenceModels(): void {
   });
 }
 
-// ===== 聚合模型管理 =====
-const aggregatorModel = reactive<MoaModelConfig>({
+// ===== 聚合模型预设 =====
+interface AggregatorPreset {
+  id: string;
+  label: string;
+  desc: string;
+  config: MoaModelConfig;
+}
+
+const AGGREGATOR_PRESETS: AggregatorPreset[] = [
+  {
+    id: 'qwen3.6',
+    label: 'Qwen3.6 27B',
+    desc: '本地 Ollama，通用推理',
+    config: { provider: 'ollama', model: 'qwen3.6:27b', temperature: 0.3, timeoutMs: 180_000, systemPrompt: '' },
+  },
+  {
+    id: 'deepseek-r1',
+    label: 'DeepSeek-R1 14B',
+    desc: '本地 Ollama，强推理',
+    config: { provider: 'ollama', model: 'deepseek-r1:14b', temperature: 0.3, timeoutMs: 180_000, systemPrompt: '' },
+  },
+  {
+    id: 'gpt-4o',
+    label: 'GPT-4o',
+    desc: 'OpenAI 云端，高精度',
+    config: { provider: 'openai', model: 'gpt-4o', temperature: 0.3, timeoutMs: 120_000, systemPrompt: '' },
+  },
+];
+
+const selectedAggregatorPreset = ref<string>('');
+
+// 判断当前聚合模型是否匹配某个预设
+function detectPreset(cfg: MoaModelConfig | null | undefined): string {
+  if (!cfg) return '';
+  for (const preset of AGGREGATOR_PRESETS) {
+    if (cfg.provider === preset.config.provider && cfg.model === preset.config.model) {
+      return preset.id;
+    }
+  }
+  return 'custom';
+}
+
+// 自定义聚合模型（高级设置）
+const aggregatorCustom = reactive<MoaModelConfig>({
   provider: 'ollama',
   model: '',
   temperature: 0.3,
@@ -195,37 +237,64 @@ const aggregatorModel = reactive<MoaModelConfig>({
   keepAlive: '1h',
 });
 
+const showAggregatorAdvanced = ref(false);
+
+// 同步服务器配置到本地
 watch(moaConfig, (cfg) => {
-  if (cfg && cfg.aggregatorModel) {
-    aggregatorModel.provider = cfg.aggregatorModel.provider;
-    aggregatorModel.model = cfg.aggregatorModel.model;
-    aggregatorModel.temperature = cfg.aggregatorModel.temperature;
-    aggregatorModel.timeoutMs = cfg.aggregatorModel.timeoutMs;
-    aggregatorModel.systemPrompt = cfg.aggregatorModel.systemPrompt ?? '';
-    aggregatorModel.baseURL = cfg.aggregatorModel.baseURL ?? '';
-    aggregatorModel.keepAlive = cfg.aggregatorModel.keepAlive ?? '1h';
+  if (cfg) {
+    const presetId = detectPreset(cfg.aggregatorModel);
+    selectedAggregatorPreset.value = presetId;
+    if (cfg.aggregatorModel) {
+      aggregatorCustom.provider = cfg.aggregatorModel.provider;
+      aggregatorCustom.model = cfg.aggregatorModel.model;
+      aggregatorCustom.temperature = cfg.aggregatorModel.temperature;
+      aggregatorCustom.timeoutMs = cfg.aggregatorModel.timeoutMs;
+      aggregatorCustom.systemPrompt = cfg.aggregatorModel.systemPrompt ?? '';
+      aggregatorCustom.baseURL = cfg.aggregatorModel.baseURL ?? '';
+      aggregatorCustom.keepAlive = cfg.aggregatorModel.keepAlive ?? '1h';
+      showAggregatorAdvanced.value = presetId === 'custom';
+    }
   }
 }, { immediate: true });
 
-function saveAggregatorModel(): void {
-  if (!aggregatorModel.model.trim()) {
+function onAggregatorPresetChange(presetId: string): void {
+  if (presetId === 'custom') {
+    showAggregatorAdvanced.value = true;
+    return;
+  }
+  showAggregatorAdvanced.value = false;
+  const preset = AGGREGATOR_PRESETS.find((p) => p.id === presetId);
+  if (!preset) return;
+  configMutation.mutate({ aggregatorModel: { ...preset.config } });
+}
+
+function saveAggregatorCustom(): void {
+  if (!aggregatorCustom.model.trim()) {
     message.warning('请输入聚合模型名称');
     return;
   }
   const clean: Record<string, unknown> = {
-    provider: aggregatorModel.provider,
-    model: aggregatorModel.model,
-    temperature: aggregatorModel.temperature,
-    timeoutMs: aggregatorModel.timeoutMs,
-    systemPrompt: aggregatorModel.systemPrompt ?? '',
-    baseURL: aggregatorModel.baseURL ?? '',
-    keepAlive: aggregatorModel.keepAlive ?? '1h',
+    provider: aggregatorCustom.provider,
+    model: aggregatorCustom.model,
+    temperature: aggregatorCustom.temperature,
+    timeoutMs: aggregatorCustom.timeoutMs,
+    systemPrompt: aggregatorCustom.systemPrompt ?? '',
+    baseURL: aggregatorCustom.baseURL ?? '',
+    keepAlive: aggregatorCustom.keepAlive ?? '1h',
   };
-  if (aggregatorModel.apiKey && aggregatorModel.apiKey !== '***') {
-    clean.apiKey = aggregatorModel.apiKey;
+  if (aggregatorCustom.apiKey && aggregatorCustom.apiKey !== '***') {
+    clean.apiKey = aggregatorCustom.apiKey;
   }
   configMutation.mutate({ aggregatorModel: clean });
 }
+
+const presetOptions = computed(() => [
+  ...AGGREGATOR_PRESETS.map((p) => ({
+    label: `${p.label} — ${p.desc}`,
+    value: p.id,
+  })),
+  { label: '自定义（高级设置）', value: 'custom' },
+]);
 
 // ===== 状态标签 =====
 const statusLabel = computed(() => {
@@ -404,106 +473,128 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
 
         <!-- ===== 区块 3：聚合模型 ===== -->
         <NCard title="聚合模型" size="small">
-          <template #header-extra>
-            <NButton
-              size="tiny"
-              type="primary"
-              :loading="configMutation.isPending.value"
-              @click="saveAggregatorModel"
-            >
-              保存聚合模型
-            </NButton>
-          </template>
-
           <div class="setting-desc" style="margin-bottom: 12px">
-            聚合模型负责合并多个参考模型的输出，temperature 建议偏低（0.3 以下）以保证一致性。
+            聚合模型负责合并多个参考模型的输出。选择一个预设模型，或使用自定义高级设置。
           </div>
 
-          <NGrid :cols="'1 s:1 m:2'" :x-gap="16" :y-gap="12" responsive="screen">
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">提供商</span>
-                <NSelect
-                  v-model:value="aggregatorModel.provider"
-                  :options="providerOptions"
-                  size="small"
-                  style="width: 160px"
-                />
-              </div>
-            </NGi>
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">模型名</span>
-                <NInput
-                  v-model:value="aggregatorModel.model"
-                  size="small"
-                  style="width: 200px"
-                  placeholder="qwen3.6:27b"
-                />
-              </div>
-            </NGi>
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">Temperature</span>
-                <NInputNumber
-                  v-model:value="aggregatorModel.temperature"
-                  :min="0"
-                  :max="2"
-                  :step="0.1"
-                  size="small"
-                  style="width: 100px"
-                />
-              </div>
-            </NGi>
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">超时 (ms)</span>
-                <NInputNumber
-                  v-model:value="aggregatorModel.timeoutMs"
-                  :min="1000"
-                  :max="600000"
-                  :step="10000"
-                  size="small"
-                  style="width: 120px"
-                />
-              </div>
-            </NGi>
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">Base URL</span>
-                <NInput
-                  v-model:value="aggregatorModel.baseURL"
-                  size="small"
-                  style="width: 200px"
-                  placeholder="可选"
-                />
-              </div>
-            </NGi>
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">Keep Alive</span>
-                <NInput
-                  v-model:value="aggregatorModel.keepAlive"
-                  size="small"
-                  style="width: 100px"
-                  placeholder="1h"
-                />
-              </div>
-            </NGi>
-            <NGi>
-              <div class="form-row">
-                <span class="form-label">API Key</span>
-                <NInput
-                  v-model:value="aggregatorModel.apiKey"
-                  size="small"
-                  style="width: 200px"
-                  placeholder="留空保留现有值"
-                  type="password"
-                  show-password-on="click"
-                />
-              </div>
-            </NGi>
-          </NGrid>
+          <div class="aggregator-preset-row">
+            <div class="form-row" style="flex: 1">
+              <span class="form-label">聚合模型</span>
+              <NSelect
+                :value="selectedAggregatorPreset"
+                :options="presetOptions"
+                size="small"
+                style="width: 280px"
+                placeholder="选择聚合模型"
+                @update:value="onAggregatorPresetChange"
+              />
+            </div>
+            <span v-if="selectedAggregatorPreset && selectedAggregatorPreset !== 'custom'" class="preset-applied">
+              <NTag size="tiny" type="success">已应用</NTag>
+            </span>
+          </div>
+
+          <!-- 高级设置（自定义模式） -->
+          <template v-if="selectedAggregatorPreset === 'custom'">
+            <NDivider style="margin: 12px 0" />
+            <div class="advanced-header">
+              <span class="advanced-title">高级设置</span>
+              <NButton
+                size="tiny"
+                type="primary"
+                :loading="configMutation.isPending.value"
+                @click="saveAggregatorCustom"
+              >
+                保存聚合模型
+              </NButton>
+            </div>
+
+            <NGrid :cols="'1 s:1 m:2'" :x-gap="16" :y-gap="12" responsive="screen" style="margin-top: 8px">
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">提供商</span>
+                  <NSelect
+                    v-model:value="aggregatorCustom.provider"
+                    :options="providerOptions"
+                    size="small"
+                    style="width: 160px"
+                  />
+                </div>
+              </NGi>
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">模型名</span>
+                  <NInput
+                    v-model:value="aggregatorCustom.model"
+                    size="small"
+                    style="width: 200px"
+                    placeholder="qwen3.6:27b"
+                  />
+                </div>
+              </NGi>
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">Temperature</span>
+                  <NInputNumber
+                    v-model:value="aggregatorCustom.temperature"
+                    :min="0"
+                    :max="2"
+                    :step="0.1"
+                    size="small"
+                    style="width: 100px"
+                  />
+                </div>
+              </NGi>
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">超时 (ms)</span>
+                  <NInputNumber
+                    v-model:value="aggregatorCustom.timeoutMs"
+                    :min="1000"
+                    :max="600000"
+                    :step="10000"
+                    size="small"
+                    style="width: 120px"
+                  />
+                </div>
+              </NGi>
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">Base URL</span>
+                  <NInput
+                    v-model:value="aggregatorCustom.baseURL"
+                    size="small"
+                    style="width: 200px"
+                    placeholder="可选"
+                  />
+                </div>
+              </NGi>
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">Keep Alive</span>
+                  <NInput
+                    v-model:value="aggregatorCustom.keepAlive"
+                    size="small"
+                    style="width: 100px"
+                    placeholder="1h"
+                  />
+                </div>
+              </NGi>
+              <NGi>
+                <div class="form-row">
+                  <span class="form-label">API Key</span>
+                  <NInput
+                    v-model:value="aggregatorCustom.apiKey"
+                    size="small"
+                    style="width: 200px"
+                    placeholder="留空保留现有值"
+                    type="password"
+                    show-password-on="click"
+                  />
+                </div>
+              </NGi>
+            </NGrid>
+          </template>
         </NCard>
       </NSpace>
     </template>
@@ -667,5 +758,28 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
   white-space: nowrap;
   min-width: 80px;
   text-align: right;
+}
+
+.aggregator-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preset-applied {
+  display: flex;
+  align-items: center;
+}
+
+.advanced-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.advanced-title {
+  font-weight: 500;
+  font-size: var(--fs-body);
+  color: var(--color-text-secondary);
 }
 </style>
