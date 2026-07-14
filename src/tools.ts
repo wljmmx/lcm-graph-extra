@@ -2719,6 +2719,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       + "This tool returns the result synthesized by multiple reference models "
       + "and an aggregator model. Call this when instructed to get the MoA response. "
       + "The tool result is the final response and should be returned to the user as-is.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
         return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
