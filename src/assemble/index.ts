@@ -442,9 +442,24 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             refCount: moaConfig.referenceModels?.length ?? 0,
           });
 
+          // 构建对话上下文（最近 3 轮用户/助手消息，帮助聚合模型理解讨论背景）
+          const conversationContext = (() => {
+            const recent = finalMessages.slice(-6); // 最近 3 轮（用户 + 助手）
+            return recent
+              .filter((m: any) => m?.role === 'user' || m?.role === 'assistant')
+              .map((m: any) => {
+                const content = typeof m.content === 'string' ? m.content
+                  : Array.isArray(m.content) ? m.content.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join(' ') : '';
+                const preview = content.slice(0, 300);
+                return `[${m.role}] ${preview}`;
+              })
+              .join('\n');
+          })();
+
           const moaResult = await runMoaPipeline({
             query: queryText,
             retrievalContext,
+            conversationContext,
             config: moaConfig,
             api: ctx.api,
             logger: ctx.logger,

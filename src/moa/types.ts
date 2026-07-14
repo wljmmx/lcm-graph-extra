@@ -98,6 +98,8 @@ export interface MoaPipelineContext {
   query: string;
   /** 检索上下文（来自 L2/L3/L4） */
   retrievalContext: string;
+  /** 对话上下文（最近几轮对话摘要，帮助聚合模型理解讨论背景） */
+  conversationContext: string;
   /** MoA 配置 */
   config: MoaConfig;
   /** API 引用（用于 resolveDistillationLlm） */

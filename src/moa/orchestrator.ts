@@ -214,9 +214,10 @@ async function runReferenceModels(
  * 构建聚合模型提示词。
  *
  * 聚合模型接收：
- * 1. 原始用户查询
- * 2. 知识库检索结果（L2/L3/L4）
- * 3. 所有参考模型输出
+ * 1. 对话上下文（最近几轮讨论，帮助理解背景）
+ * 2. 原始用户查询
+ * 3. 知识库检索结果（L2/L3/L4）
+ * 4. 所有参考模型输出
  *
  * 聚合模型可调用工具、执行命令，承接 Hermes 完整 Agent 能力。
  */
@@ -224,12 +225,17 @@ function buildAggregatorPrompt(
   query: string,
   retrievalContext: string,
   referenceOutputs: string[],
+  conversationContext: string,
 ): string {
   const refSections = referenceOutputs
     .map((output, i) => `### 参考模型 ${i + 1} 分析\n${output}`)
     .join('\n\n');
 
-  return `## 原始用户问题
+  const convSection = conversationContext
+    ? `## 对话上下文（帮助理解用户意图）\n${conversationContext}\n\n`
+    : '';
+
+  return `${convSection}## 原始用户问题
 ${query}
 
 ## 知识库检索结果（参考）
@@ -241,12 +247,15 @@ ${refSections}
 ## 聚合要求
 你是一个聚合模型，负责综合以上参考意见，生成最终回复。
 
-1. **批判性评估**：审视以上参考意见，识别矛盾、遗漏和潜在错误
-2. **去重合并**：合并相似观点，避免重复
-3. **综合优化**：综合形成结构化、准确、完整的最终回复
-4. **避免幻觉**：不确定的内容需明确标注，优先使用知识库检索结果中的事实
-5. **工具调用**：如有需要，可直接调用工具获取额外信息
-6. **输出格式**：直接输出最终答案，不需要标注"综合意见"或"聚合结果"等前缀
+**重要：必须严格针对用户问题回答，不要引入与问题无关的话题。**
+
+1. **锚定用户问题**：始终以用户问题为核心，不要偏离到其他话题
+2. **批判性评估**：审视以上参考意见，识别矛盾、遗漏和潜在错误
+3. **去重合并**：合并相似观点，避免重复
+4. **综合优化**：综合形成结构化、准确、完整的最终回复
+5. **避免幻觉**：不确定的内容需明确标注，优先使用知识库检索结果中的事实
+6. **工具调用**：如有需要，可直接调用工具获取额外信息
+7. **输出格式**：直接输出最终答案，不需要标注"综合意见"或"聚合结果"等前缀
 
 请现在生成最终回复：`;
 }
@@ -266,10 +275,11 @@ async function runAggregatorModel(
   retrievalContext: string,
   referenceResults: LlmCallResult[],
   aggConfig: AggregatorModelConfig,
+  conversationContext: string,
   signal?: AbortSignal,
 ): Promise<LlmCallResult> {
   const referenceTexts = referenceResults.map((r) => r.text);
-  const aggregatorPrompt = buildAggregatorPrompt(query, retrievalContext, referenceTexts);
+  const aggregatorPrompt = buildAggregatorPrompt(query, retrievalContext, referenceTexts, conversationContext);
 
   return callLlm(
     '', // 聚合模型不使用 system prompt（所有指令在 user message 中）
@@ -301,7 +311,7 @@ async function runAggregatorModel(
  * @returns 管道结果
  */
 export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipelineResult | null> {
-  const { query, retrievalContext, config, api, logger, signal } = ctx;
+  const { query, retrievalContext, conversationContext, config, api, logger, signal } = ctx;
   const pipelineStart = Date.now();
 
   if (signal?.aborted) {
@@ -372,6 +382,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       retrievalContext,
       validRefs,
       config.aggregatorModel,
+      conversationContext,
       signal,
     );
   } catch (err) {
@@ -434,15 +445,19 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
  * 构建 MoA 工具调用指令（注入 systemPromptAddition）。
  *
  * 指令主模型调用 lcmg_moa_reply 工具获取预计算的 MoA 回复。
- * 工具结果直接返回用户，不经过主模型二次处理。
+ * 主模型应将 MoA 结果作为主要参考，但有责任验证其与用户问题的相关性。
+ * 如果 MoA 结果明显偏离用户问题，主模型应忽略并自行回答。
  */
 export function buildMoaToolInstruction(): string {
-  return `## MoA Direct Reply
-The MoA (Mixture of Agents) system has pre-computed a response using multiple reference models and an aggregator model.
+  return `## MoA (Mixture of Agents) Reference Response
+The MoA system has pre-computed a response using multiple reference models and an aggregator model.
 
-IMPORTANT: Call the \`lcmg_moa_reply\` tool to retrieve the pre-computed response.
-After receiving the tool result, output it EXACTLY as-is without any modification, commentary, or additional text.
-Do NOT call any other tools.`;
+**Instructions:**
+1. Call the \`lcmg_moa_reply\` tool to retrieve the pre-computed response.
+2. **Verify relevance**: Check that the MoA response actually addresses the user's question.
+3. If the MoA response is relevant and on-topic, use it as your primary answer (you may lightly polish formatting).
+4. If the MoA response is clearly about the wrong topic or doesn't address the user's question, **ignore it** and answer the user's question yourself based on the conversation context.
+5. Do NOT mention "MoA" or "aggregator" in your response to the user.`;
 }
 
 // ============================================================================
