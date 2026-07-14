@@ -374,6 +374,106 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     expResults = injectionOutput.expResults;
 
     // ==================================================================
+    // 4.5 MoA (Mixture of Agents) 管道
+    // 仅复杂任务 + 启用 tiers 时触发
+    // 参考模型并行发散 → 聚合模型收敛裁决 → 结果存入缓存供 lcmg_moa_reply 工具读取
+    // ==================================================================
+    try {
+      const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
+      if (moaConfig?.enabled
+          && Array.isArray(moaConfig?.referenceModels)
+          && moaConfig.referenceModels.length >= 2
+          && moaConfig.referenceModels.length <= 4
+          && moaConfig.enabledTiers?.includes(tier)) {
+
+        // 延迟导入避免循环依赖
+        const { computeTaskComplexity } = await import('../moa/complexity.js');
+        const { runMoaPipeline, buildMoaToolInstruction } = await import('../moa/orchestrator.js');
+
+        // 提取查询文本
+        const queryText = (() => {
+          const lastMsg = finalMessages[finalMessages.length - 1];
+          if (lastMsg?.role === 'user') {
+            if (typeof lastMsg.content === 'string') return lastMsg.content;
+            if (Array.isArray(lastMsg.content)) {
+              return lastMsg.content
+                .filter((p: any) => p?.type === 'text')
+                .map((p: any) => p.text)
+                .join('\n');
+            }
+          }
+          return '';
+        })();
+
+        // 构建检索上下文
+        const retrievalContext = (() => {
+          const parts: string[] = [];
+          if (qmdResults?.length) {
+            parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+          }
+          if (graphResults?.length) {
+            parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+          }
+          if (expResults?.length) {
+            parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
+          }
+          return parts.join('\n\n');
+        })();
+
+        const complexity = computeTaskComplexity(
+          queryText,
+          finalMessages,
+          retrievalOutput.scenario ?? null,
+          tier,
+        );
+
+        ctx.logger?.debug?.('[assemble] MoA complexity check', {
+          score: complexity.score,
+          threshold: moaConfig.complexityThreshold,
+          reasons: complexity.reasons,
+          tier,
+        });
+
+        if (complexity.score >= moaConfig.complexityThreshold) {
+          ctx.logger?.info?.('[assemble] MoA triggered', {
+            complexity: complexity.score,
+            reasons: complexity.reasons,
+            mode: moaConfig.mode,
+            refCount: moaConfig.referenceModels?.length ?? 0,
+          });
+
+          const moaResult = await runMoaPipeline({
+            query: queryText,
+            retrievalContext,
+            config: moaConfig,
+            api: ctx.api,
+            logger: ctx.logger,
+            signal,
+          });
+
+          if (moaResult?.finalResponse) {
+            // 注入 MoA 工具调用指令
+            systemPromptAddition = buildMoaToolInstruction() + '\n\n' + systemPromptAddition;
+
+            ctx.logger?.info?.('[assemble] MoA pipeline completed', {
+              totalMs: moaResult.totalMs,
+              estimatedTokens: moaResult.estimatedTokens,
+              responseLen: moaResult.finalResponse.length,
+              refCount: moaResult.referenceOutputs.length,
+            });
+          } else {
+            ctx.logger?.warn?.('[assemble] MoA pipeline returned no result, falling back to normal flow');
+          }
+        }
+      }
+    } catch (moaErr) {
+      // MoA 失败不影响主流程，降级到正常推理
+      ctx.logger?.warn?.('[assemble] MoA pipeline failed, falling back to normal flow', {
+        err: moaErr instanceof Error ? moaErr.message : String(moaErr),
+      });
+    }
+
+    // ==================================================================
     // 5. Cleanup: strip reasoning, dedup, local model tool injection
     // ==================================================================
     finalMessages = finalMessages.map((msg: any) => {

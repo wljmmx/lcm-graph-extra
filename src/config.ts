@@ -140,6 +140,46 @@ export const PluginConfigSchema = Type.Object({
     port: Type.Number({ default: 7423, minimum: 1, maximum: 65535 }),
   })),
 
+  // MoA (Mixture of Agents) 多模型分层协作配置
+  moa: Type.Optional(Type.Object({
+    enabled: Type.Boolean({ default: false }),
+    complexityThreshold: Type.Number({ default: 0.6, minimum: 0, maximum: 1 }),
+    mode: Type.Union([Type.Literal('parallel'), Type.Literal('serial')], { default: 'serial' }),
+    referenceModels: Type.Array(Type.Object({
+      provider: Type.Union([
+        Type.Literal('openai'),
+        Type.Literal('ollama'),
+        Type.Literal('custom'),
+        Type.Literal('openclaw_hooks'),
+      ], { default: 'ollama' }),
+      model: Type.String({ default: 'qwen3.6:27b' }),
+      temperature: Type.Number({ default: 0.6, minimum: 0, maximum: 2 }),
+      systemPrompt: Type.String({ default: '' }),
+      timeoutMs: Type.Number({ default: 120_000, minimum: 1_000 }),
+      apiKey: Type.Optional(Type.String()),
+      baseURL: Type.Optional(Type.String()),
+      keepAlive: Type.Optional(Type.String({ default: '1h' })),
+    }), { default: [] }),
+    aggregatorModel: Type.Optional(Type.Object({
+      provider: Type.Union([
+        Type.Literal('openai'),
+        Type.Literal('ollama'),
+        Type.Literal('custom'),
+        Type.Literal('openclaw_hooks'),
+      ], { default: 'ollama' }),
+      model: Type.String({ default: 'qwen3.6:27b' }),
+      temperature: Type.Number({ default: 0.3, minimum: 0, maximum: 2 }),
+      timeoutMs: Type.Number({ default: 180_000, minimum: 1_000 }),
+      apiKey: Type.Optional(Type.String()),
+      baseURL: Type.Optional(Type.String()),
+      keepAlive: Type.Optional(Type.String({ default: '1h' })),
+    })),
+    enabledTiers: Type.Array(
+      Type.Union([Type.Literal('low'), Type.Literal('medium')]),
+      { default: ['low'] },
+    ),
+  })),
+
   embedding: Type.Optional(Type.Object({
     apiKey: Type.Optional(Type.String()),
     baseURL: Type.Optional(Type.String()),
@@ -324,6 +364,7 @@ export function validateConfig(input: unknown): PluginConfig {
   };
   if (!config.distillationLlm) config.distillationLlm = { provider: 'openclaw_hooks', model: 'ollama/qwen3.6:27b' };
   if (!config.neo4j) config.neo4j = { uri: 'bolt://localhost:7687', user: 'neo4j', password: '' };
+  if (!config.moa) config.moa = { enabled: false, complexityThreshold: 0.6, mode: 'serial', referenceModels: [], aggregatorModel: undefined, enabledTiers: ['low'] };
 
   const result = Value.Errors(PluginConfigSchema, config);
 

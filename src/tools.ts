@@ -2705,6 +2705,40 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
     },
   });
+
+  // ===================================================================
+  // 19. lcmg_moa_reply —— MoA 聚合回复透传
+  // v2.2.0: MoA (Mixture of Agents) 预计算回复透传工具。
+  // 参考模型层（并行发散）+ 聚合模型层（收敛裁决）的结果通过此工具返回。
+  // 主模型调用此工具后，工具结果直接作为最终回复返回用户。
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_moa_reply",
+    label: "MoA 聚合回复",
+    description: "Get the pre-computed MoA (Mixture of Agents) response. "
+      + "This tool returns the result synthesized by multiple reference models "
+      + "and an aggregator model. Call this when instructed to get the MoA response. "
+      + "The tool result is the final response and should be returned to the user as-is.",
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      // 延迟导入避免循环依赖
+      const { getMoaResultCache } = await import('./moa/orchestrator.js');
+      const result = getMoaResultCache();
+      if (!result) {
+        return {
+          content: [{ type: "text" as const, text: "No MoA result available. The MoA pipeline may not have been triggered for this request, or the pre-computed response has already been consumed." }],
+          details: { ok: false, error: 'no_moa_result' },
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: result }],
+        details: { ok: true },
+      };
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

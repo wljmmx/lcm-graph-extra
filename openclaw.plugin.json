@@ -29,7 +29,8 @@
       "lcmg_compact",
       "lcmg_reset_breaker",
       "lcmg_config_get",
-      "lcmg_config_set"
+      "lcmg_config_set",
+      "lcmg_moa_reply"
     ]
   },
   "toolMetadata": {
@@ -86,6 +87,9 @@
     },
     "lcmg_config_set": {
       "description": "Update a configuration field (whitelist-controlled)"
+    },
+    "lcmg_moa_reply": {
+      "description": "Get the pre-computed MoA (Mixture of Agents) response synthesized by multiple reference models and an aggregator model"
     }
   },
   "configSchema": {

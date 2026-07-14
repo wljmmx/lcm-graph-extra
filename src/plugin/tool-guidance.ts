@@ -22,7 +22,7 @@ export function extractAvailableTools(params: any): string[] {
     "lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import",
     "lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get",
     "lcmg_maintain","lcmg_diagnose","lcmg_forget","lcmg_distill","lcmg_compact",
-    "lcmg_reset_breaker","lcmg_config_get","lcmg_config_set",
+    "lcmg_reset_breaker","lcmg_config_get","lcmg_config_set","lcmg_moa_reply",
   ];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
@@ -38,6 +38,7 @@ export const SELF_REGISTERED_TOOLS = new Set([
   "lcmg_backup", "lcmg_restore", "lcmg_sync",
   "lcmg_forget", "lcmg_distill", "lcmg_compact", "lcmg_reset_breaker",
   "lcmg_config_get", "lcmg_config_set",
+  "lcmg_moa_reply",
 ]);
 
 /** Tool category to tool name mapping. */
