@@ -111,7 +111,8 @@ export async function injectContext(
       ctx.logger?.debug?.("S-7 personalized experience rerank failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
 
-    const expBody = personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
+    const expBody = '⚠️ 以下经验来自历史对话，可能【主题不同】。请仅引用与当前问题直接相关的经验。\n\n'
+        + personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
     addSection('## 💡 经验总结（历史经验参考）', expBody, 5);
     for (const e of personalizedResults) {
       // P1-1: 已改为静态导入，直接使用 backgroundTasks
