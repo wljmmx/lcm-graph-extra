@@ -83,8 +83,50 @@ function saveConfig(): void {
   });
 }
 
+// ===== 参考模型预设 =====
+interface ReferencePreset {
+  id: string;
+  label: string;
+  desc: string;
+  config: MoaModelConfig;
+}
+
+const REFERENCE_PRESETS: ReferencePreset[] = [
+  {
+    id: 'qwen3.6-27b',
+    label: 'Qwen3.6 27B',
+    desc: 'Ollama 本地 · 通用推理',
+    config: { provider: 'ollama', model: 'qwen3.6:27b', temperature: 0.6, timeoutMs: 120_000, systemPrompt: '' },
+  },
+  {
+    id: 'qwen3.6-14b',
+    label: 'Qwen3.6 14B',
+    desc: 'Ollama 本地 · 轻量推理',
+    config: { provider: 'ollama', model: 'qwen3.6:14b', temperature: 0.7, timeoutMs: 120_000, systemPrompt: '' },
+  },
+  {
+    id: 'deepseek-r1-14b',
+    label: 'DeepSeek-R1 14B',
+    desc: 'Ollama 本地 · 强推理',
+    config: { provider: 'ollama', model: 'deepseek-r1:14b', temperature: 0.6, timeoutMs: 120_000, systemPrompt: '' },
+  },
+  {
+    id: 'gpt-4o',
+    label: 'GPT-4o',
+    desc: 'OpenAI 云端 · 高精度',
+    config: { provider: 'openai', model: 'gpt-4o', temperature: 0.7, timeoutMs: 90_000, systemPrompt: '' },
+  },
+  {
+    id: 'deepseek-v3',
+    label: 'DeepSeek-V3',
+    desc: 'OpenAI 兼容 · 云端推理',
+    config: { provider: 'openai', model: 'deepseek-chat', temperature: 0.6, timeoutMs: 90_000, systemPrompt: '' },
+  },
+];
+
 // ===== 参考模型管理 =====
 const referenceModels = ref<MoaModelConfig[]>([]);
+const selectedReferencePresets = ref<string[]>([]);
 const showModelModal = ref(false);
 const editingModelIndex = ref<number | null>(null);
 const modelFormRef = ref<FormInst | null>(null);
@@ -107,12 +149,44 @@ const providerOptions = [
   { label: 'OpenClaw Hooks', value: 'openclaw_hooks' },
 ];
 
+// 判断某个参考模型是否匹配预设
+function matchRefPreset(m: MoaModelConfig): string | null {
+  for (const preset of REFERENCE_PRESETS) {
+    if (m.provider === preset.config.provider && m.model === preset.config.model) {
+      return preset.id;
+    }
+  }
+  return null;
+}
+
 // 同步服务器参考模型到本地
 watch(moaConfig, (cfg) => {
-  if (cfg && cfg.referenceModels.length > 0) {
-    referenceModels.value = cfg.referenceModels.map((m) => ({ ...m }));
+  if (cfg) {
+    referenceModels.value = (cfg.referenceModels ?? []).map((m) => ({ ...m }));
+    // 检测哪些预设已被选中
+    selectedReferencePresets.value = (cfg.referenceModels ?? [])
+      .map((m) => matchRefPreset(m))
+      .filter((id): id is string => id !== null);
   }
 }, { immediate: true });
+
+function onRefPresetChange(presetIds: string[]): void {
+  // 构建预设模型集合
+  const presetModels = new Map<string, MoaModelConfig>();
+  for (const p of REFERENCE_PRESETS) {
+    presetModels.set(p.id, { ...p.config });
+  }
+
+  // 保留非预设的自定义模型
+  const customModels = referenceModels.value.filter((m) => matchRefPreset(m) === null);
+
+  // 选中预设 -> 模型列表
+  const selectedModels = presetIds.map((id) => presetModels.get(id)!).filter(Boolean);
+
+  referenceModels.value = [...selectedModels, ...customModels];
+  selectedReferencePresets.value = presetIds;
+  saveReferenceModels();
+}
 
 function openAddModel(): void {
   editingModelIndex.value = null;
@@ -438,37 +512,59 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
         <NCard title="参考模型" size="small">
           <template #header-extra>
             <NButton size="tiny" type="primary" @click="openAddModel">
-              添加模型
+              添加自定义
             </NButton>
           </template>
 
+          <div class="setting-desc" style="margin-bottom: 12px">
+            勾选预设模型快速启用，或点击「添加自定义」手动配置。参考模型从不同视角分析问题，建议 2-4 个。
+          </div>
+
+          <!-- 预设选择 -->
+          <NCheckboxGroup :value="selectedReferencePresets" @update:value="onRefPresetChange">
+            <NGrid :cols="'1 s:2 m:3'" :x-gap="8" :y-gap="4" responsive="screen">
+              <NGi v-for="p in REFERENCE_PRESETS" :key="p.id">
+                <NCheckbox :value="p.id">
+                  <span class="preset-check-label">{{ p.label }}</span>
+                  <span class="preset-check-desc">{{ p.desc }}</span>
+                </NCheckbox>
+              </NGi>
+            </NGrid>
+          </NCheckboxGroup>
+
+          <!-- 已选模型列表 -->
+          <template v-if="referenceModels.length > 0">
+            <NDivider style="margin: 12px 0" />
+            <div class="model-list">
+              <div
+                v-for="(m, idx) in referenceModels"
+                :key="idx"
+                class="model-item"
+              >
+                <div class="model-item-info">
+                  <NTag size="tiny" :type="m.provider === 'ollama' ? 'info' : m.provider === 'openai' ? 'success' : 'default'">
+                    {{ m.provider }}
+                  </NTag>
+                  <span class="model-name">{{ m.model }}</span>
+                  <NTag v-if="matchRefPreset(m)" size="tiny" :bordered="false" type="success">预设</NTag>
+                  <NTag v-else size="tiny" :bordered="false" type="warning">自定义</NTag>
+                  <span class="muted" style="font-size: var(--fs-caption)">
+                    temp={{ m.temperature }} · timeout={{ (m.timeoutMs / 1000).toFixed(0) }}s
+                  </span>
+                </div>
+                <NSpace :size="4">
+                  <NButton size="tiny" quaternary @click="openEditModel(idx)">编辑</NButton>
+                  <NButton size="tiny" quaternary type="error" @click="removeModel(idx)">移除</NButton>
+                </NSpace>
+              </div>
+            </div>
+          </template>
+
           <NEmpty
-            v-if="referenceModels.length === 0"
-            description="暂无参考模型，点击「添加模型」配置"
+            v-else
+            description="暂无参考模型，请勾选预设或添加自定义模型"
             style="padding: 24px 0"
           />
-
-          <div v-else class="model-list">
-            <div
-              v-for="(m, idx) in referenceModels"
-              :key="idx"
-              class="model-item"
-            >
-              <div class="model-item-info">
-                <NTag size="tiny" :type="m.provider === 'ollama' ? 'info' : m.provider === 'openai' ? 'success' : 'default'">
-                  {{ m.provider }}
-                </NTag>
-                <span class="model-name">{{ m.model }}</span>
-                <span class="muted" style="font-size: var(--fs-caption)">
-                  temp={{ m.temperature }} · timeout={{ (m.timeoutMs / 1000).toFixed(0) }}s
-                </span>
-              </div>
-              <NSpace :size="4">
-                <NButton size="tiny" quaternary @click="openEditModel(idx)">编辑</NButton>
-                <NButton size="tiny" quaternary type="error" @click="removeModel(idx)">移除</NButton>
-              </NSpace>
-            </div>
-          </div>
         </NCard>
 
         <!-- ===== 区块 3：聚合模型 ===== -->
@@ -781,5 +877,16 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
   font-weight: 500;
   font-size: var(--fs-body);
   color: var(--color-text-secondary);
+}
+
+.preset-check-label {
+  font-weight: 500;
+  font-size: var(--fs-body);
+}
+
+.preset-check-desc {
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
+  margin-left: 4px;
 }
 </style>
