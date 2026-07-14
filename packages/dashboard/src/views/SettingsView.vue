@@ -107,14 +107,14 @@ const REFERENCE_PRESETS: ReferencePreset[] = [
   {
     id: 'deepseek-v4-flash',
     label: 'DeepSeek-V4 Flash',
-    desc: 'OpenAI 兼容 · 快速推理',
-    config: { provider: 'openai', model: 'deepseek-v4-flash', temperature: 0.7, timeoutMs: 90_000, systemPrompt: '' },
+    desc: 'DeepSeek API · 快速推理',
+    config: { provider: 'deepseek', model: 'deepseek-v4-flash', temperature: 0.7, timeoutMs: 90_000, systemPrompt: '' },
   },
   {
     id: 'deepseek-v4-pro',
     label: 'DeepSeek-V4 Pro',
-    desc: 'OpenAI 兼容 · 深度推理',
-    config: { provider: 'openai', model: 'deepseek-v4-pro', temperature: 0.6, timeoutMs: 90_000, systemPrompt: '' },
+    desc: 'DeepSeek API · 深度推理',
+    config: { provider: 'deepseek', model: 'deepseek-v4-pro', temperature: 0.6, timeoutMs: 90_000, systemPrompt: '' },
   },
   {
     id: 'qwyoth',
@@ -144,6 +144,7 @@ const modelForm = reactive<MoaModelConfig>({
 
 const providerOptions = [
   { label: 'Ollama', value: 'ollama' },
+  { label: 'DeepSeek', value: 'deepseek' },
   { label: 'OpenAI', value: 'openai' },
   { label: '自定义', value: 'custom' },
   { label: 'OpenClaw Hooks', value: 'openclaw_hooks' },
@@ -542,7 +543,7 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
                 class="model-item"
               >
                 <div class="model-item-info">
-                  <NTag size="tiny" :type="m.provider === 'ollama' ? 'info' : m.provider === 'openai' ? 'success' : 'default'">
+                  <NTag size="tiny" :type="m.provider === 'ollama' ? 'info' : m.provider === 'deepseek' ? 'success' : m.provider === 'openai' ? 'warning' : 'default'">
                     {{ m.provider }}
                   </NTag>
                   <span class="model-name">{{ m.model }}</span>
