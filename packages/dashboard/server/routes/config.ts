@@ -28,23 +28,20 @@ function getConfigPath(): string {
   return resolve(homedir(), '.openclaw', 'openclaw.json');
 }
 
-/** 读取 openclaw.json 原始 JSON 对象 */
+/** 读取 openclaw.json 中 lcm-graph-extra 插件配置段 */
 export function readRawConfig(): Record<string, unknown> {
   const path = getConfigPath();
   if (!existsSync(path)) return {};
   try {
     const raw = readFileSync(path, 'utf-8');
     const parsed = JSON.parse(raw);
-    // openclaw.json 可能将插件配置放在 plugins.entries["lcm-graph-extra"].config 下
+    // 始终返回 plugins.entries["lcm-graph-extra"].config，
+    // 避免回退到根级配置导致 moa 等字段被误写到根级。
     const entriesConfig = parsed?.plugins?.entries?.['lcm-graph-extra']?.config;
     if (entriesConfig && typeof entriesConfig === 'object') {
       return entriesConfig as Record<string, unknown>;
     }
-    // 或在顶层
-    if (parsed?.neo4j || parsed?.lcmMonitor || parsed?.compaction) {
-      return parsed as Record<string, unknown>;
-    }
-    return parsed as Record<string, unknown>;
+    return {};
   } catch {
     return {};
   }
