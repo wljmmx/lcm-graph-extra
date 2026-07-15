@@ -52,6 +52,21 @@ export interface MoaRunRecord {
   error?: string;
   /** 执行模式 */
   mode: string;
+  /** 复杂度评分 */
+  complexityScore?: number;
+}
+
+export interface MoaModelBreakdown {
+  model: string;
+  provider: string;
+  runCount: number;
+  successCount: number;
+  failureCount: number;
+  avgLatencyMs: number;
+  p50LatencyMs: number;
+  p95LatencyMs: number;
+  avgTokens: number;
+  totalTokens: number;
 }
 
 export interface MoaPerformanceSummary {
@@ -73,6 +88,44 @@ export interface MoaPerformanceSummary {
   avgTokens: number;
   /** 最近运行记录 */
   recentRuns: MoaRunRecord[];
+  // ===== v2.3.0: 增强指标 =====
+  /** 延迟百分位 */
+  latencyPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  /** 参考模型阶段延迟百分位 */
+  refLatencyPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  /** 聚合模型阶段延迟百分位 */
+  aggLatencyPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  /** Token 效率比（字符/Token，越高越高效） */
+  tokenEfficiency: number;
+  /** 平均响应长度 */
+  avgResponseLen: number;
+  /** 参考模型细粒度指标 */
+  modelBreakdown: MoaModelBreakdown[];
+  /** 错误类型分布 */
+  errorBreakdown: Record<string, number>;
+  /** 复杂度触发分布（分数区间统计） */
+  complexityDistribution: {
+    low: number;    // 0.0-0.4
+    medium: number; // 0.4-0.7
+    high: number;   // 0.7-1.0
+  };
+  /** 降级回退次数（MoA 触发但失败回退到普通流程） */
+  fallbackCount: number;
 }
 
 // ============================================================================
@@ -89,7 +142,8 @@ export function recordMoaRun(
   query: string,
   result: MoaPipelineResult | null,
   error: string | null,
-  config: { mode: string; referenceModels: Array<{ model: string }>; aggregatorModel: { model: string } },
+  config: { mode: string; referenceModels: Array<{ model: string; provider?: string }>; aggregatorModel: { model: string; provider?: string } },
+  complexityScore?: number,
 ): void {
   const record: MoaRunRecord = {
     id: generateId(),
@@ -110,6 +164,7 @@ export function recordMoaRun(
     success: !!result && !error,
     error: error ?? undefined,
     mode: config.mode,
+    complexityScore,
   };
 
   // 环形缓冲区
@@ -123,7 +178,7 @@ export function recordMoaRun(
 }
 
 /**
- * 获取 MoA 性能摘要。
+ * 获取 MoA 性能摘要（含增强指标）。
  */
 export function getMoaPerformance(): MoaPerformanceSummary {
   const successRecords = runRecords.filter((r) => r.success);
@@ -132,6 +187,50 @@ export function getMoaPerformance(): MoaPerformanceSummary {
   const allTimings = successRecords.map((r) => r.totalMs);
   const allRefTimings = successRecords.map((r) => r.refMs);
   const allAggTimings = successRecords.map((r) => r.aggMs);
+
+  // 延迟百分位
+  const latencyP = percentiles(allTimings);
+  const refLatencyP = percentiles(allRefTimings);
+  const aggLatencyP = percentiles(allAggTimings);
+
+  // Token 效率比：总响应字符数 / 总 Token 数
+  const totalResponseLen = successRecords.reduce((sum, r) => sum + r.responseLen, 0);
+  const totalSuccessTokens = successRecords.reduce((sum, r) => sum + r.totalTokens, 0);
+  const tokenEfficiency = totalSuccessTokens > 0
+    ? Math.round((totalResponseLen / totalSuccessTokens) * 100) / 100
+    : 0;
+
+  // 平均响应长度
+  const avgResponseLen = successRecords.length > 0
+    ? Math.round(totalResponseLen / successRecords.length)
+    : 0;
+
+  // 模型细粒度指标
+  const modelBreakdown = buildModelBreakdown();
+
+  // 错误类型分布
+  const errorBreakdown: Record<string, number> = {};
+  for (const r of failedRecords) {
+    const errType = classifyError(r.error);
+    errorBreakdown[errType] = (errorBreakdown[errType] ?? 0) + 1;
+  }
+
+  // 复杂度触发分布
+  const complexityDistribution = {
+    low: 0,
+    medium: 0,
+    high: 0,
+  };
+  for (const r of runRecords) {
+    const score = r.complexityScore;
+    if (score === undefined) continue;
+    if (score < 0.4) complexityDistribution.low++;
+    else if (score < 0.7) complexityDistribution.medium++;
+    else complexityDistribution.high++;
+  }
+
+  // 降级回退次数：MoA 触发但最终没有结果（失败）
+  const fallbackCount = failedRecords.length;
 
   return {
     totalRuns: runRecords.length,
@@ -145,7 +244,85 @@ export function getMoaPerformance(): MoaPerformanceSummary {
       ? Math.round(successRecords.reduce((sum, r) => sum + r.totalTokens, 0) / successRecords.length)
       : 0,
     recentRuns: [...runRecords].reverse().slice(0, 10),
+    latencyPercentiles: { p50: latencyP.p50, p90: latencyP.p90, p95: latencyP.p95, p99: latencyP.p99 },
+    refLatencyPercentiles: { p50: refLatencyP.p50, p90: refLatencyP.p90, p95: refLatencyP.p95, p99: refLatencyP.p99 },
+    aggLatencyPercentiles: { p50: aggLatencyP.p50, p90: aggLatencyP.p90, p95: aggLatencyP.p95, p99: aggLatencyP.p99 },
+    tokenEfficiency,
+    avgResponseLen,
+    modelBreakdown,
+    errorBreakdown,
+    complexityDistribution,
+    fallbackCount,
   };
+}
+
+/**
+ * 构建模型级细粒度指标。
+ */
+function buildModelBreakdown(): MoaModelBreakdown[] {
+  const modelMap = new Map<string, { provider: string; timings: number[]; tokens: number[]; success: boolean[] }>();
+
+  for (const r of runRecords) {
+    // 参考模型
+    for (let i = 0; i < r.refModels.length; i++) {
+      const key = `ref:${r.refModels[i]}`;
+      if (!modelMap.has(key)) {
+        modelMap.set(key, { provider: 'unknown', timings: [], tokens: [], success: [] });
+      }
+      const entry = modelMap.get(key)!;
+      if (r.refTimings[i] !== undefined) entry.timings.push(r.refTimings[i]);
+      if (r.refTokens[i] !== undefined) entry.tokens.push(r.refTokens[i]);
+      entry.success.push(i < r.validRefCount);
+    }
+    // 聚合模型
+    const aggKey = `agg:${r.aggModel}`;
+    if (!modelMap.has(aggKey)) {
+      modelMap.set(aggKey, { provider: 'unknown', timings: [], tokens: [], success: [] });
+    }
+    const aggEntry = modelMap.get(aggKey)!;
+    aggEntry.timings.push(r.aggMs);
+    aggEntry.tokens.push(r.aggTokens);
+    aggEntry.success.push(r.success);
+  }
+
+  const breakdown: MoaModelBreakdown[] = [];
+  for (const [key, data] of modelMap) {
+    const role = key.startsWith('ref:') ? 'ref' : 'agg';
+    const modelName = key.slice(4); // strip "ref:" or "agg:"
+    const p = percentiles(data.timings);
+    const totalToks = data.tokens.reduce((a, b) => a + b, 0);
+    breakdown.push({
+      model: modelName,
+      provider: data.provider,
+      runCount: data.timings.length,
+      successCount: data.success.filter(Boolean).length,
+      failureCount: data.success.filter((s) => !s).length,
+      avgLatencyMs: avg(data.timings),
+      p50LatencyMs: p.p50,
+      p95LatencyMs: p.p95,
+      avgTokens: data.tokens.length > 0 ? Math.round(totalToks / data.tokens.length) : 0,
+      totalTokens: totalToks,
+    });
+  }
+
+  return breakdown.sort((a, b) => b.runCount - a.runCount);
+}
+
+/**
+ * 错误分类：将错误信息归类为简短类型标签。
+ */
+function classifyError(error?: string): string {
+  if (!error) return 'unknown';
+  const lower = error.toLowerCase();
+  if (lower.includes('timeout')) return 'timeout';
+  if (lower.includes('abort') || lower.includes('cancel')) return 'aborted';
+  if (lower.includes('connect') || lower.includes('network') || lower.includes('econnrefused')) return 'connection';
+  if (lower.includes('rate') || lower.includes('limit') || lower.includes('429')) return 'rate_limit';
+  if (lower.includes('auth') || lower.includes('401') || lower.includes('403')) return 'auth_error';
+  if (lower.includes('model') && (lower.includes('not found') || lower.includes('404'))) return 'model_not_found';
+  if (lower.includes('parse') || lower.includes('json') || lower.includes('syntax')) return 'parse_error';
+  if (lower.includes('empty') || lower.includes('no result')) return 'empty_response';
+  return 'other';
 }
 
 // ============================================================================
@@ -182,4 +359,19 @@ function generateId(): string {
 function avg(arr: number[]): number {
   if (arr.length === 0) return 0;
   return Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+}
+
+function percentiles(arr: number[]): { p50: number; p90: number; p95: number; p99: number } {
+  if (arr.length === 0) return { p50: 0, p90: 0, p95: 0, p99: 0 };
+  const sorted = [...arr].sort((a, b) => a - b);
+  const getP = (p: number) => {
+    const idx = Math.ceil((p / 100) * sorted.length) - 1;
+    return sorted[Math.max(0, Math.min(idx, sorted.length - 1))];
+  };
+  return {
+    p50: getP(50),
+    p90: getP(90),
+    p95: getP(95),
+    p99: getP(99),
+  };
 }

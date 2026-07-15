@@ -108,6 +108,8 @@ export interface MoaPipelineContext {
   logger: any;
   /** AbortSignal */
   signal?: AbortSignal;
+  /** 任务复杂度评分（供性能追踪器记录） */
+  complexityScore?: number;
 }
 
 /** LLM 调用结果 */

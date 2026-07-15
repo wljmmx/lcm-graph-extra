@@ -311,7 +311,7 @@ async function runAggregatorModel(
  * @returns 管道结果
  */
 export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipelineResult | null> {
-  const { query, retrievalContext, conversationContext, config, api, logger, signal } = ctx;
+  const { query, retrievalContext, conversationContext, config, api, logger, signal, complexityScore } = ctx;
   const pipelineStart = Date.now();
 
   if (signal?.aborted) {
@@ -346,7 +346,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       mode: config.mode,
       referenceModels: config.referenceModels,
       aggregatorModel: config.aggregatorModel,
-    });
+    }, complexityScore);
     return null;
   }
 
@@ -366,7 +366,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       mode: config.mode,
       referenceModels: config.referenceModels,
       aggregatorModel: config.aggregatorModel,
-    });
+    }, complexityScore);
     return null;
   }
 
@@ -392,7 +392,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       mode: config.mode,
       referenceModels: config.referenceModels,
       aggregatorModel: config.aggregatorModel,
-    });
+    }, complexityScore);
     return null;
   }
 
@@ -423,7 +423,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
     mode: config.mode,
     referenceModels: config.referenceModels,
     aggregatorModel: config.aggregatorModel,
-  });
+  }, complexityScore);
 
   logger?.info?.('[moa] Pipeline completed', {
     totalMs,

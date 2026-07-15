@@ -6,6 +6,7 @@
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
+import { extractFirstUserGoal, cacheGoal, getGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
 import {
@@ -80,6 +81,16 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     const _toolSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
       : typeof params.session_id === 'string' ? params.session_id : '';
     beginToolGuidanceRound(_toolSessionKey, params.messages ?? []);
+
+    // Goal Anchoring: 提取首轮用户目标并缓存，防止长对话注意力漂移
+    // 仅在首轮（无缓存）时提取，后续轮次直接读取缓存
+    if (_toolSessionKey && !getGoal(_toolSessionKey)) {
+      const goal = extractFirstUserGoal(params.messages ?? []);
+      if (goal) {
+        cacheGoal(_toolSessionKey, goal);
+        ctx.logger?.debug?.('[assemble] goal anchored', { goal: goal.slice(0, 80) });
+      }
+    }
 
     // ==================================================================
     // 1. Window Monitor — pressure check + tier determination
@@ -208,7 +219,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             const summaryMsgs = convSummaries.map((s) => ({
               role: 'user', content: s.content, token_count: s.tokenCount,
             }));
-            finalMessages = [...summaryMsgs, ...messages];
+            // Goal Anchoring: 中压压缩时也保留原始目标
+            const goalMsg = getGoal(sessionKey);
+            const goalAnchorMsgs = goalMsg
+              ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
+              : [];
+            finalMessages = [...goalAnchorMsgs, ...summaryMsgs, ...messages];
           }
 
           const hasPendingUncompressed = hasUncompressedMessages(conversationId);
@@ -242,9 +258,16 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                 resolvedCtx.compactTokenBudget * maxSummaryRatio,
               ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-              const recentRawCount = Math.min(messages.length, 4);
+
+              // Goal Anchoring: 压缩时保留原始用户目标，防止任务丢失
+              const goalMsg = getGoal(sessionKey);
+              const goalAnchorMsgs = goalMsg
+                ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
+                : [];
+
+              const recentRawCount = Math.min(messages.length, 8);
               const recentRawMsgs = messages.slice(-recentRawCount);
-              finalMessages = [...trimmedSummaryMsgs, ...recentRawMsgs];
+              finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ...recentRawMsgs];
             } else {
               writeCompactionDebt(
                 conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
@@ -294,9 +317,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           const _summaryMsgs = _existingSummaries.map((s) => ({
             role: 'user', content: s.content, token_count: s.tokenCount,
           }));
-          const _recentCount = Math.min(messages.length, 4);
+          // Goal Anchoring: 摘要注入时也保留原始目标
+          const _goalMsg = getGoal(_sessionKey);
+          const _goalAnchorMsgs = _goalMsg
+            ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
+            : [];
+          const _recentCount = Math.min(messages.length, 8);
           const _recentRawMsgs = messages.slice(-_recentCount);
-          finalMessages = [..._summaryMsgs, ..._recentRawMsgs];
+          finalMessages = [..._goalAnchorMsgs, ..._summaryMsgs, ..._recentRawMsgs];
         }
       }
     }
@@ -464,6 +492,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             api: ctx.api,
             logger: ctx.logger,
             signal,
+            complexityScore: complexity.score,
           });
 
           if (moaResult?.finalResponse) {

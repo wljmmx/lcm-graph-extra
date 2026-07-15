@@ -19,6 +19,7 @@ import { buildKnowledgeGuidance } from './guidance.js';
 // P1-1: 动态 import 提升为静态导入，避免每次 injectContext 的 await import 开销
 import { backgroundTasks } from '../async/task-registry.js';
 import { detectConflicts } from '../merger.js';
+import { getGoal, buildGoalAnchor } from '../plugin/goal-cache.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
 export async function injectContext(
@@ -46,6 +47,16 @@ export async function injectContext(
       ? params.session_id
       : 'default';
   const sd = getSessionDedup(sessionKey);
+
+  // Knowledge Injection Budget: 长对话中减少检索内容注入，防止上下文污染
+  // 消息数 > 20 → 经验注入减半；> 30 → 所有检索注入减半
+  const msgCount = finalMessages.length;
+  const knowledgeBudget = msgCount > 30 ? 0.5 : msgCount > 20 ? 0.7 : 1.0;
+  const budgetedLimits = {
+    qmd: Math.max(1, Math.round(retrievalLimits.qmd * knowledgeBudget)),
+    graph: Math.max(1, Math.round(retrievalLimits.graph * knowledgeBudget)),
+    exp: Math.max(0, Math.round(retrievalLimits.exp * (msgCount > 20 ? 0.5 : knowledgeBudget))),
+  };
 
   const allSessionHashes = new Set<string>();
   for (const roundHashes of sd.window) {
@@ -139,14 +150,14 @@ export async function injectContext(
 
   // Layer 3: Neo4j knowledge graph
   if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
-    const graphBody = graphResults.slice(0, retrievalLimits.graph).map((r: any) => '- ' + (r.content ?? r.id ?? '')).join('\n');
+    const graphBody = graphResults.slice(0, budgetedLimits.graph).map((r: any) => '- ' + (r.content ?? r.id ?? '')).join('\n');
     addSection('## 🔗 知识图谱（历史知识参考）', graphBody, 4);
   }
 
   // Layer 2: qmd search snippet results
   if (qmdResults && Array.isArray(qmdResults) && qmdResults.length > 0) {
     const qmdItems = qmdResults
-      .slice(0, retrievalLimits.qmd)
+      .slice(0, budgetedLimits.qmd)
       // P-CP-3: 增加 content 长度下限过滤，减少无意义碎片（< 20 字符的片段对 LLM 无参考价值）
       .filter((r: any) => (r.score == null || r.score >= 0.3) && String(r.content ?? '').trim().length >= 20)
       .map((r: any, i: number) => {
@@ -169,7 +180,7 @@ export async function injectContext(
   if (Array.isArray(fullDocs) && fullDocs.length > 0) {
     const docBlock = fullDocs
       .filter(Boolean)
-      .slice(0, Math.min(retrievalLimits.qmd, 2))
+      .slice(0, Math.min(budgetedLimits.qmd, 2))
       .map((doc: string) => {
         const docLimit = 800;
         if (doc.length > docLimit) {
@@ -224,11 +235,19 @@ export async function injectContext(
   const removedSections: { label: string; chars: number }[] = [];
 
   {
+    // Goal Anchoring: 注入目标任务提醒，防止长对话注意力漂移
+    const sessionKey = typeof params.sessionKey === 'string'
+      ? params.sessionKey
+      : typeof params.session_id === 'string'
+        ? params.session_id
+        : '';
+    const goalAnchor = buildGoalAnchor(getGoal(sessionKey));
+
     const sdkGuidance = buildMemorySystemPromptAddition({
       availableTools: new Set(availableTools),
       citationsMode: citationsMode as any,
     });
-    let addition = '';
+    let addition = goalAnchor ? goalAnchor + '\n' : '';
     if (sdkGuidance) {
       addition += '\n# Tool Guidance\n' + sdkGuidance;
     }
@@ -279,6 +298,16 @@ export async function injectContext(
       ctx.logger?.debug?.('[wm] priority-trimmed ' + String(trimmed) + ' injected section(s), remaining: ' + sections.map(function(s) { return s.label; }).join(','));
     }
     let rebuilt = '';
+    // Goal Anchoring: 在 token 预算裁剪后也保留目标提醒
+    const sessionKeyForRebuild = typeof params.sessionKey === 'string'
+      ? params.sessionKey
+      : typeof params.session_id === 'string'
+        ? params.session_id
+        : '';
+    const goalAnchorRebuild = buildGoalAnchor(getGoal(sessionKeyForRebuild));
+    if (goalAnchorRebuild) {
+      rebuilt += goalAnchorRebuild + '\n';
+    }
     if (sdkGuidance2) {
       rebuilt += '\n# Tool Guidance\n' + sdkGuidance2;
     }

@@ -99,6 +99,20 @@ export interface MoaRunRecord {
   success: boolean;
   error?: string;
   mode: string;
+  complexityScore?: number;
+}
+
+export interface MoaModelBreakdown {
+  model: string;
+  provider: string;
+  runCount: number;
+  successCount: number;
+  failureCount: number;
+  avgLatencyMs: number;
+  p50LatencyMs: number;
+  p95LatencyMs: number;
+  avgTokens: number;
+  totalTokens: number;
 }
 
 export interface MoaPerformanceData {
@@ -111,6 +125,34 @@ export interface MoaPerformanceData {
   totalTokens: number;
   avgTokens: number;
   recentRuns: MoaRunRecord[];
+  latencyPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  refLatencyPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  aggLatencyPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  tokenEfficiency: number;
+  avgResponseLen: number;
+  modelBreakdown: MoaModelBreakdown[];
+  errorBreakdown: Record<string, number>;
+  complexityDistribution: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  fallbackCount: number;
 }
 
 export interface MoaPerformanceResponse {

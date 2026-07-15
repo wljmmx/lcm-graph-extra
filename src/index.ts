@@ -102,6 +102,8 @@ const debtFileCache = new Map<string, { mtimeMs: number; ratio: number }>();
 import { setMaxDedupRounds, evictStaleDedupPublic } from "./plugin/dedup-cache.js";
 // Smart Tool Guidance — 会话级工具追踪清理
 import { evictStaleToolTrackers } from "./plugin/tool-guidance.js";
+// Goal Anchoring — 会话级目标缓存清理
+import { evictStaleGoalCache } from "./plugin/goal-cache.js";
 
 // Distillation helpers
 import * as distillationModule from "./plugin/distillation.js";
@@ -1466,6 +1468,7 @@ const pluginEntry: any = definePluginEntry({
         if (hbDedupCleanupCounter >= 15) {
           evictStaleDedupPublic();
           evictStaleToolTrackers();
+          evictStaleGoalCache();
           hbDedupCleanupCounter = 0;
         }
 

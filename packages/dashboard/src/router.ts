@@ -15,10 +15,8 @@ const routes: RouteRecordRaw[] = [
   // 旧路由重定向到测试中心对应 tab（向后兼容书签/外链）
   { path: '/benchmark', redirect: { path: '/testing', query: { tab: 'benchmark' } } },
   { path: '/qmd-test', redirect: { path: '/testing', query: { tab: 'qmd-test' } } },
-  // 设置页（MOA 配置 + 模型管理）
+  // 设置页（MOA 配置 + 模型管理 + 能力档次切换）
   { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
-  // MoA 性能监控
-  { path: '/moa-performance', name: 'moa-performance', component: () => import('./views/MoaPerformanceView.vue') },
 ];
 
 export const router = createRouter({

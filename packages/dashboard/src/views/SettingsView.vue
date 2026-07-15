@@ -20,6 +20,7 @@ import {
 } from 'naive-ui';
 import { fetchMoaConfig, updateMoaConfig, fetchMoaStatus } from '../api/moa';
 import type { MoaConfig, MoaModelConfig } from '../api/moa';
+import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
 
 const message = useMessage();
 const queryClient = useQueryClient();
@@ -694,6 +695,9 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
           </template>
         </NCard>
       </NSpace>
+
+      <!-- v1.1.0-5: 能力档次切换（从维护页移入） -->
+      <CapabilityProfileSwitch style="margin-top: 16px" />
     </template>
   </div>
 
