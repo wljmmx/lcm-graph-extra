@@ -23,6 +23,8 @@ import { getGlobalLogger } from './utils/logger.js';
 import { latencyHistograms, businessMetrics } from './health-metrics.js';
 // MCP 工具调用：从 tools.ts 注册表中查询 handler
 import { getRegisteredToolHandler } from './tools.js';
+// MoA 性能追踪
+import { getMoaPerformance } from './moa/perf-tracker.js';
 
 // v1.0.1-1/4: Basic Auth + IP 白名单配置（与 dashboard 共用 DASHBOARD_AUTH）
 interface SnapshotAuthConfig {
@@ -905,6 +907,19 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
               res.writeHead(500, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ status: 'unknown', error: String(err) }));
             });
+          return;
+        }
+
+        // MoA 性能追踪端点
+        if (url === '/internal/moa-performance') {
+          try {
+            const perf = getMoaPerformance();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, data: perf }));
+          } catch (err) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: String(err) }));
+          }
           return;
         }
 
