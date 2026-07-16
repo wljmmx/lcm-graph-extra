@@ -80,6 +80,21 @@ const bucketSizeOptions = [
 const timeRange = ref<TimeRange>('1h');
 const bucketSize = ref<BucketSize>('raw');
 
+// ===== 复杂度趋势：聚合维度 + 时间范围 =====
+type ComplexityAggregation = 'raw' | 'hourly' | 'daily';
+const complexityAggregation = ref<ComplexityAggregation>('raw');
+const complexityTimeRange = ref<TimeRange>('1h');
+const complexityAggOptions = [
+  { label: '实时记录', value: 'raw' as ComplexityAggregation },
+  { label: '按小时', value: 'hourly' as ComplexityAggregation },
+  { label: '按天', value: 'daily' as ComplexityAggregation },
+];
+const complexityTimeRangeOptions = [
+  { label: '最近 1 小时', value: '1h' as TimeRange },
+  { label: '最近 1 天', value: '1d' as TimeRange },
+  { label: '最近 1 周', value: '1w' as TimeRange },
+];
+
 // 根据时间范围决定拉取的数据量（n 条原始点，5min 心跳 = 288/天）
 // 多取 ~10% 余量，前端再按 timestamp 精确过滤
 const historyN = computed(() => {
@@ -539,29 +554,192 @@ const moaErrorItems = computed(() => {
     .sort((a, b) => b[1] - a[1]);
 });
 
-// ===== MoA 复杂度趋势图（每轮对话复杂度评分变化） =====
+// ===== MoA 复杂度趋势图（实时 / 按小时 / 按天 多维度切换） =====
 const moaComplexityTrendOption = computed(() => {
-  const allHistory = moaPerf.value?.allComplexityHistory;
-  const moaHistory = moaPerf.value?.complexityHistory;
-  if (!allHistory || allHistory.length === 0) return {};
+  const agg = complexityAggregation.value;
+  const rangeMs = timeRangeToMs(complexityTimeRange.value);
+  const now = Date.now();
 
-  // 按时间排序，取最近 30 条
-  const sorted = [...allHistory].sort((a, b) => a.timestamp - b.timestamp).slice(-30);
-  const xLabels = sorted.map((r) => {
-    const d = new Date(r.timestamp);
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  });
+  // ── 实时模式：每轮对话的数据点 ──
+  if (agg === 'raw') {
+    const allHistory = moaPerf.value?.allComplexityHistory;
+    const moaHistory = moaPerf.value?.complexityHistory;
+    if (!allHistory || allHistory.length === 0) return {};
 
-  // 全量复杂度折线
+    const sorted = [...allHistory]
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .filter((r) => now - r.timestamp <= rangeMs)
+      .slice(-30);
+
+    if (sorted.length === 0) return {};
+
+    const xLabels = sorted.map((r) => {
+      const d = new Date(r.timestamp);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    });
+
+    const allSeries = {
+      name: '全量复杂度',
+      type: 'line',
+      data: sorted.map((r, i) => [i, r.score]),
+      smooth: true,
+      lineStyle: { color: CHART.primary, width: 2 },
+      itemStyle: { color: CHART.primary },
+      symbol: 'circle',
+      symbolSize: 6,
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        lineStyle: { color: CHART.warning, type: 'dashed' },
+        data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' } }],
+      },
+    };
+
+    const moaTimestamps = new Set((moaHistory ?? []).map((r) => r.timestamp));
+    const moaPoints = sorted
+      .filter((r) => moaTimestamps.has(r.timestamp))
+      .map((r) => [sorted.indexOf(r), r.score]);
+
+    const moaSeries = moaPoints.length > 0 ? {
+      name: 'MoA 触发',
+      type: 'scatter',
+      data: moaPoints,
+      symbolSize: 10,
+      itemStyle: { color: CHART.danger },
+      symbol: 'diamond',
+      z: 10,
+    } : undefined;
+
+    const series = moaSeries ? [allSeries, moaSeries] : [allSeries];
+
+    return {
+      title: undefined,
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: any) => {
+          const items = Array.isArray(params) ? params : [params];
+          const idx = items[0]?.data?.[0];
+          const label = idx !== undefined && idx < xLabels.length ? xLabels[idx] : '';
+          let html = `${label}<br/>`;
+          for (const p of items) {
+            const val = p.data?.[1];
+            html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
+          }
+          return html;
+        },
+      },
+      legend: { data: moaSeries ? ['全量复杂度', 'MoA 触发'] : ['全量复杂度'], bottom: 0 },
+      xAxis: {
+        type: 'category',
+        data: xLabels,
+        axisLabel: { fontSize: 10, rotate: 45 },
+        name: '时间',
+        nameLocation: 'middle',
+        nameGap: 30,
+      },
+      yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
+      series,
+      grid: { left: 50, right: 30, bottom: 55, top: 45 },
+    };
+  }
+
+  // ── 按小时模式 ──
+  if (agg === 'hourly') {
+    const hourly = moaPerf.value?.complexityHourlyBuckets;
+    if (!hourly || hourly.length === 0) return {};
+
+    // 按时间范围过滤：hourly 是最近 24 小时的桶，按 rangeMs 截取
+    const maxHours = Math.ceil(rangeMs / 3600_000);
+    const filtered = hourly.slice(-Math.min(maxHours, hourly.length));
+    if (filtered.length === 0) return {};
+
+    const allSeries = {
+      name: '全量 (小时均)',
+      type: 'line',
+      data: filtered.map((b) => [b.hour, b.avg]),
+      smooth: true,
+      lineStyle: { color: CHART.primary, width: 2 },
+      itemStyle: { color: CHART.primary },
+      symbol: 'circle',
+      symbolSize: 6,
+      areaStyle: { color: 'rgba(32,128,240,0.08)' },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        lineStyle: { color: CHART.warning, type: 'dashed' },
+        data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' } }],
+      },
+    };
+
+    // MoA 触发按小时聚合
+    const moaHistory = moaPerf.value?.complexityHistory;
+    const moaByHour: Map<string, number[]> = new Map();
+    if (moaHistory) {
+      for (const h of moaHistory) {
+        if (now - h.timestamp > rangeMs) continue;
+        const d = new Date(h.timestamp);
+        const key = `${String(d.getHours()).padStart(2, '0')}:00`;
+        if (!moaByHour.has(key)) moaByHour.set(key, []);
+        moaByHour.get(key)!.push(h.score);
+      }
+    }
+    const moaData = filtered.map((b) => {
+      const scores = moaByHour.get(b.hour) ?? [];
+      return [b.hour, scores.length > 0 ? Math.round(scores.reduce((a, c) => a + c, 0) / scores.length * 1000) / 1000 : null];
+    });
+    const hasMoaData = moaData.some((d) => d[1] !== null);
+
+    const moaSeries = hasMoaData ? {
+      name: 'MoA 触发 (小时均)',
+      type: 'line',
+      data: moaData,
+      smooth: true,
+      lineStyle: { color: CHART.danger, width: 2 },
+      itemStyle: { color: CHART.danger },
+      symbol: 'diamond',
+      symbolSize: 8,
+      connectNulls: false,
+    } : undefined;
+
+    const series = moaSeries ? [allSeries, moaSeries] : [allSeries];
+
+    return {
+      title: undefined,
+      tooltip: { trigger: 'axis', formatter: (params: any) => {
+        const items = Array.isArray(params) ? params : [params];
+        let html = `${items[0].axisValue}<br/>`;
+        for (const p of items) {
+          const val = p.data?.[1];
+          html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
+        }
+        return html;
+      }},
+      legend: { data: moaSeries ? ['全量 (小时均)', 'MoA 触发 (小时均)'] : ['全量 (小时均)'], bottom: 0 },
+      xAxis: { type: 'category', data: filtered.map((b) => b.hour), axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
+      series,
+      grid: { left: 50, right: 30, bottom: 45, top: 45 },
+    };
+  }
+
+  // ── 按天模式 ──
+  const daily = moaPerf.value?.complexityDailyBuckets;
+  if (!daily || daily.length === 0) return {};
+
+  const maxDays = Math.ceil(rangeMs / 86_400_000);
+  const filtered = daily.slice(-Math.min(maxDays, daily.length));
+  if (filtered.length === 0) return {};
+
   const allSeries = {
-    name: '全量复杂度',
+    name: '全量 (日均)',
     type: 'line',
-    data: sorted.map((r, i) => [i, r.score]),
+    data: filtered.map((b) => [b.date, b.avg]),
     smooth: true,
     lineStyle: { color: CHART.primary, width: 2 },
     itemStyle: { color: CHART.primary },
     symbol: 'circle',
-    symbolSize: 6,
+    symbolSize: 8,
+    areaStyle: { color: 'rgba(32,128,240,0.08)' },
     markLine: {
       silent: true,
       symbol: 'none',
@@ -570,50 +748,54 @@ const moaComplexityTrendOption = computed(() => {
     },
   };
 
-  // MoA 触发叠加（散点高亮）
-  const moaTimestamps = new Set(
-    (moaHistory ?? []).map((r) => r.timestamp),
-  );
-  const moaSeries = {
-    name: 'MoA 触发',
-    type: 'scatter',
-    data: sorted
-      .filter((r) => moaTimestamps.has(r.timestamp))
-      .map((r) => [sorted.indexOf(r), r.score]),
-    symbolSize: 10,
+  // MoA 触发按天聚合
+  const moaHistory = moaPerf.value?.complexityHistory;
+  const moaByDay: Map<string, number[]> = new Map();
+  if (moaHistory) {
+    for (const h of moaHistory) {
+      if (now - h.timestamp > rangeMs) continue;
+      const d = new Date(h.timestamp);
+      const key = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (!moaByDay.has(key)) moaByDay.set(key, []);
+      moaByDay.get(key)!.push(h.score);
+    }
+  }
+  const moaData = filtered.map((b) => {
+    const scores = moaByDay.get(b.date) ?? [];
+    return [b.date, scores.length > 0 ? Math.round(scores.reduce((a, c) => a + c, 0) / scores.length * 1000) / 1000 : null];
+  });
+  const hasMoaData = moaData.some((d) => d[1] !== null);
+
+  const moaSeries = hasMoaData ? {
+    name: 'MoA 触发 (日均)',
+    type: 'line',
+    data: moaData,
+    smooth: true,
+    lineStyle: { color: CHART.danger, width: 2 },
     itemStyle: { color: CHART.danger },
     symbol: 'diamond',
-    z: 10,
-  };
+    symbolSize: 8,
+    connectNulls: false,
+  } : undefined;
+
+  const series = moaSeries ? [allSeries, moaSeries] : [allSeries];
 
   return {
     title: undefined,
-    tooltip: {
-      trigger: 'axis',
-      formatter: (params: any) => {
-        const items = Array.isArray(params) ? params : [params];
-        const idx = items[0]?.data?.[0];
-        const label = idx !== undefined && idx < xLabels.length ? xLabels[idx] : '';
-        let html = `${label}<br/>`;
-        for (const p of items) {
-          const val = p.data?.[1];
-          html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
-        }
-        return html;
-      },
-    },
-    legend: { data: ['全量复杂度', 'MoA 触发'], bottom: 0 },
-    xAxis: {
-      type: 'category',
-      data: xLabels,
-      axisLabel: { fontSize: 10, rotate: 45 },
-      name: '时间',
-      nameLocation: 'middle',
-      nameGap: 30,
-    },
+    tooltip: { trigger: 'axis', formatter: (params: any) => {
+      const items = Array.isArray(params) ? params : [params];
+      let html = `${items[0].axisValue}<br/>`;
+      for (const p of items) {
+        const val = p.data?.[1];
+        html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
+      }
+      return html;
+    }},
+    legend: { data: moaSeries ? ['全量 (日均)', 'MoA 触发 (日均)'] : ['全量 (日均)'], bottom: 0 },
+    xAxis: { type: 'category', data: filtered.map((b) => b.date), axisLabel: { fontSize: 10 } },
     yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
-    series: [allSeries, moaSeries],
-    grid: { left: 50, right: 30, bottom: 55, top: 45 },
+    series,
+    grid: { left: 50, right: 30, bottom: 45, top: 45 },
   };
 });
 
@@ -1315,7 +1497,28 @@ const moaLatencyPhaseOption = computed(() => {
           <!-- 复杂度趋势图 + 分布图 -->
           <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <NGi>
-              <NCard title="复杂度趋势（每轮对话）" size="small" :bordered="true">
+              <NCard size="small" :bordered="true">
+                <template #header>
+                  <div class="trend-header">
+                    <span>复杂度趋势</span>
+                    <div class="trend-selectors">
+                      <NSelect
+                        v-model:value="complexityAggregation"
+                        :options="complexityAggOptions"
+                        size="tiny"
+                        style="width: 90px"
+                        placeholder="聚合"
+                      />
+                      <NSelect
+                        v-model:value="complexityTimeRange"
+                        :options="complexityTimeRangeOptions"
+                        size="tiny"
+                        style="width: 110px"
+                        placeholder="时间范围"
+                      />
+                    </div>
+                  </div>
+                </template>
                 <EChart :option="moaComplexityTrendOption" height="300px" :skip-theme="true" />
               </NCard>
             </NGi>
@@ -1559,6 +1762,19 @@ const moaLatencyPhaseOption = computed(() => {
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
   opacity: 0.8;
+}
+
+/* 复杂度趋势图头部 */
+.trend-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+.trend-selectors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* ===== MoA 性能样式 ===== */
