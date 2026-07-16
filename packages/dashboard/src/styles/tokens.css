@@ -223,3 +223,49 @@ a:focus-visible {
   white-space: nowrap;
   border: 0;
 }
+
+/* ===== 响应式断点（Mobile-first） ===== */
+/* 平板竖屏：网格/KPI 缩为 2 列 */
+@media (max-width: 1024px) {
+  .responsive-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  .responsive-kpi-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  .responsive-chart-row {
+    flex-direction: column !important;
+  }
+  .responsive-chart-row > * {
+    width: 100% !important;
+  }
+}
+
+/* 手机：单列布局 */
+@media (max-width: 640px) {
+  .responsive-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .responsive-kpi-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .responsive-chart-row {
+    flex-direction: column !important;
+  }
+  .responsive-chart-row > * {
+    width: 100% !important;
+  }
+  .responsive-hide-mobile {
+    display: none !important;
+  }
+  .responsive-full-width {
+    width: 100% !important;
+  }
+}
+
+/* 大屏：KPI 可扩展至 4 列 */
+@media (min-width: 1600px) {
+  .responsive-kpi-grid-wide {
+    grid-template-columns: repeat(4, 1fr) !important;
+  }
+}
