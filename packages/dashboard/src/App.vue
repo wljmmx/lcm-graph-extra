@@ -24,6 +24,8 @@ import {
   NDrawer,
   NDrawerContent,
   NDropdown,
+  NBreadcrumb,
+  NBreadcrumbItem,
   zhCN,
   dateZhCN,
   type MenuOption,
@@ -82,6 +84,17 @@ const activeKey = computed(() => {
   }
   return route.path;
 });
+
+// 面包屑：路由路径 → 可读名称
+const breadcrumbMap: Record<string, string> = {
+  '/': '监控',
+  '/experience': '经验',
+  '/memory': '记忆',
+  '/maintain': '维护',
+  '/testing': '测试中心',
+  '/settings': '设置',
+};
+const breadcrumbLabel = computed(() => breadcrumbMap[route.path] ?? route.path);
 
 // 渲染带 router-link 的菜单 label
 function renderLinkLabel(to: string, label: string): Component {
@@ -153,6 +166,13 @@ const menuOptions = computed<MenuOption[]>(() => [
                 </NButton>
               </NDropdown>
             </NLayoutHeader>
+            <!-- 面包屑导航 -->
+            <div style="padding: 8px 24px 0; border-bottom: 1px solid var(--color-border);">
+              <NBreadcrumb>
+                <NBreadcrumbItem>首页</NBreadcrumbItem>
+                <NBreadcrumbItem>{{ breadcrumbLabel }}</NBreadcrumbItem>
+              </NBreadcrumb>
+            </div>
             <NLayoutContent id="main" role="main" tabindex="-1" style="padding: 24px;">
               <RouterView />
             </NLayoutContent>

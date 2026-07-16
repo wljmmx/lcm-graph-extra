@@ -424,16 +424,6 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
       <NSpace vertical :size="16" style="margin-top: 12px">
         <!-- ===== 区块 1：MOA 总控 ===== -->
         <NCard title="MoA 多模型协作" size="small">
-          <template #header-extra>
-            <NButton
-              size="tiny"
-              type="primary"
-              :loading="configMutation.isPending.value"
-              @click="saveConfig"
-            >
-              保存设置
-            </NButton>
-          </template>
 
           <NGrid :cols="'1 s:1 m:2'" :x-gap="16" :y-gap="12" responsive="screen">
             <!-- 总开关 -->
@@ -703,6 +693,21 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
         </div>
         <CapabilityProfileSwitch />
       </NCard>
+
+      <!-- 保存按钮置底 -->
+      <div class="save-bar">
+        <div class="save-bar-inner">
+          <span class="save-bar-hint" v-if="configMutation.isPending.value">正在保存…</span>
+          <span class="save-bar-hint" v-else>修改后请点击保存</span>
+          <NButton
+            type="primary"
+            :loading="configMutation.isPending.value"
+            @click="saveConfig"
+          >
+            保存设置
+          </NButton>
+        </div>
+      </div>
     </template>
   </div>
 
@@ -898,5 +903,26 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
   font-size: var(--fs-caption);
   color: var(--color-text-tertiary);
   margin-left: 4px;
+}
+
+/* 保存按钮置底栏 */
+.save-bar {
+  position: sticky;
+  bottom: 0;
+  background: var(--color-body);
+  border-top: 1px solid var(--color-border);
+  padding: 12px 0;
+  margin-top: 16px;
+  z-index: 10;
+}
+.save-bar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.save-bar-hint {
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
 }
 </style>

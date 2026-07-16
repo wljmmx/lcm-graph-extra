@@ -50,6 +50,17 @@ import {
 import { formatTime, formatTimeWithSeconds, formatBucketLabel, bucketKeyBySize, timeRangeToMs, timeRangeLabel, bucketSizeLabel, type TimeRange, type BucketSize } from '../utils/format';
 import { fetchMoaPerformance, type MoaPerformanceData } from '../api/moa';
 
+// ===== 图表颜色语义常量 =====
+// 统一语义：蓝=主数据，绿=成功/正向，橙=警告/阈值，红=危险/反向，紫=辅助
+const CHART = {
+  primary: '#2080f0',
+  success: '#18a058',
+  warning: '#f0a020',
+  danger:  '#d03050',
+  info:    '#7c3aed',
+  neutral: '#909399',
+} as const;
+
 // ===== 时序图：时间范围 + 统计粒度（两个独立维度） =====
 // 时间范围：筛选最近 N 时间内的数据（1h/1d/1w/1m）
 // 统计粒度：数据点如何分桶聚合（实时/1min/5min/10min/1h）
@@ -267,6 +278,8 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 0,
       data: historyAsc.value.map((s) => s.pendingMessages),
+      lineStyle: { color: CHART.primary },
+      itemStyle: { color: CHART.primary },
     },
     {
       name: '摘要片段',
@@ -274,6 +287,8 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 0,
       data: historyAsc.value.map((s) => s.summaryFragments),
+      lineStyle: { color: CHART.info },
+      itemStyle: { color: CHART.info },
     },
     {
       name: 'Token 占用比',
@@ -281,6 +296,8 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 1,
       data: historyAsc.value.map((s) => s.maxTokenRatio),
+      lineStyle: { color: CHART.danger },
+      itemStyle: { color: CHART.danger },
     },
   ],
 }));
@@ -301,7 +318,8 @@ const latencyOption = computed(() => ({
       type: 'line',
       smooth: true,
       data: historyAsc.value.map((s) => s.lastAssembleMs),
-      lineStyle: { width: 2 },
+      lineStyle: { width: 2, color: CHART.primary },
+      itemStyle: { color: CHART.primary },
       symbol: 'circle',
       symbolSize: 6,
       z: 10,
@@ -310,16 +328,19 @@ const latencyOption = computed(() => ({
       name: 'L2',
       type: 'bar',
       data: historyAsc.value.map((s) => s.lastL2Ms),
+      itemStyle: { color: CHART.info },
     },
     {
       name: 'L3',
       type: 'bar',
       data: historyAsc.value.map((s) => s.lastL3Ms),
+      itemStyle: { color: CHART.warning },
     },
     {
       name: 'L4',
       type: 'bar',
       data: historyAsc.value.map((s) => s.lastL4Ms),
+      itemStyle: { color: CHART.success },
     },
   ],
 }));
@@ -336,21 +357,27 @@ const tierOption = computed(() => ({
       name: 'Low',
       type: 'line',
       stack: 'tier',
-      areaStyle: {},
+      areaStyle: { color: CHART.success },
+      lineStyle: { color: CHART.success },
+      itemStyle: { color: CHART.success },
       data: historyAsc.value.map((s) => s.tierLow),
     },
     {
       name: 'Medium',
       type: 'line',
       stack: 'tier',
-      areaStyle: {},
+      areaStyle: { color: CHART.warning },
+      lineStyle: { color: CHART.warning },
+      itemStyle: { color: CHART.warning },
       data: historyAsc.value.map((s) => s.tierMedium),
     },
     {
       name: 'High',
       type: 'line',
       stack: 'tier',
-      areaStyle: {},
+      areaStyle: { color: CHART.danger },
+      lineStyle: { color: CHART.danger },
+      itemStyle: { color: CHART.danger },
       data: historyAsc.value.map((s) => s.tierHigh),
     },
   ],
@@ -427,8 +454,8 @@ const betaOption = computed(() => {
     },
     yAxis: { type: 'value' },
     series: [
-      { name: 'alpha', type: 'bar', data: arms.map((a) => a.alpha) },
-      { name: 'beta', type: 'bar', data: arms.map((a) => a.beta) },
+      { name: 'alpha', type: 'bar', data: arms.map((a) => a.alpha), itemStyle: { color: CHART.primary } },
+      { name: 'beta', type: 'bar', data: arms.map((a) => a.beta), itemStyle: { color: CHART.info } },
     ],
   };
 });
@@ -524,8 +551,8 @@ const moaComplexityTrendOption = computed(() => {
     type: 'line',
     data: hourly.map((b) => [b.hour, b.avg]),
     smooth: true,
-    lineStyle: { color: '#2080f0', width: 2 },
-    itemStyle: { color: '#2080f0' },
+    lineStyle: { color: CHART.primary, width: 2 },
+    itemStyle: { color: CHART.primary },
     symbol: 'circle',
     symbolSize: 6,
   };
@@ -548,8 +575,8 @@ const moaComplexityTrendOption = computed(() => {
       return [b.hour, scores.length > 0 ? Math.round(scores.reduce((a, c) => a + c, 0) / scores.length * 1000) / 1000 : null];
     }),
     smooth: true,
-    lineStyle: { color: '#d03050', width: 2 },
-    itemStyle: { color: '#d03050' },
+    lineStyle: { color: CHART.danger, width: 2 },
+    itemStyle: { color: CHART.danger },
     symbol: 'diamond',
     symbolSize: 8,
     connectNulls: false,
@@ -603,14 +630,14 @@ const moaComplexityDistOption = computed(() => {
         name: '全量',
         type: 'bar',
         data: [allDist.low, allDist.medium, allDist.high],
-        itemStyle: { color: '#2080f0' },
+        itemStyle: { color: CHART.primary },
         label: { show: true, position: 'top', formatter: '{c}' },
       },
       {
         name: 'MoA 触发',
         type: 'bar',
         data: moaDist ? [moaDist.low, moaDist.medium, moaDist.high] : [0, 0, 0],
-        itemStyle: { color: '#d03050' },
+        itemStyle: { color: CHART.danger },
         label: { show: true, position: 'top', formatter: '{c}' },
       },
     ],
@@ -641,8 +668,8 @@ const moaLatencyPhaseOption = computed(() => {
     xAxis: { type: 'category', data: data.map((r) => r.queryPreview.slice(0, 16) + (r.queryPreview.length > 16 ? '...' : '')), axisLabel: { fontSize: 10, rotate: 30 } },
     yAxis: { type: 'value', name: '耗时 (ms)' },
     series: [
-      { name: '参考模型', type: 'bar', stack: 'total', data: data.map((r) => r.refMs), itemStyle: { color: '#2080f0' } },
-      { name: '聚合模型', type: 'bar', stack: 'total', data: data.map((r) => r.aggMs), itemStyle: { color: '#18a058' } },
+      { name: '参考模型', type: 'bar', stack: 'total', data: data.map((r) => r.refMs), itemStyle: { color: CHART.primary } },
+      { name: '聚合模型', type: 'bar', stack: 'total', data: data.map((r) => r.aggMs), itemStyle: { color: CHART.success } },
     ],
     grid: { left: 60, right: 30, bottom: 60, top: 45 },
   };
