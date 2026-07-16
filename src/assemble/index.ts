@@ -586,6 +586,27 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       // 记录全量复杂度评分（每轮 assemble 都记录，无论 MoA 是否启用/触发）
       recordAllComplexity(complexity.score);
 
+      // ── 自动分类：未显式指定预设时，根据用户输入自动匹配 ──
+      if (!moaPresetOverride && moaConfig?.enabled) {
+        try {
+          const { classifyTaskType, resolveClassifiedPreset } = await import('../moa/classifier.js');
+          const { getAvailablePresets } = await import('../moa/orchestrator.js');
+          const classification = classifyTaskType(queryText);
+          const availablePresets = getAvailablePresets(moaConfig).map((p: any) => p.name);
+          const autoPreset = resolveClassifiedPreset(classification, availablePresets);
+          if (autoPreset) {
+            moaPresetOverride = autoPreset;
+            ctx.logger?.info?.('[assemble] Auto-classified preset', {
+              preset: autoPreset,
+              confidence: classification.confidence,
+              reasons: classification.reasons,
+            });
+          }
+        } catch {
+          // 分类器加载失败，不影响主流程
+        }
+      }
+
       ctx.logger?.debug?.('[assemble] MoA complexity check', {
         score: complexity.score,
         threshold: moaConfig?.complexityThreshold ?? 0.6,
