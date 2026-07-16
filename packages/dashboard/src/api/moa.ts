@@ -153,6 +153,14 @@ export interface MoaPerformanceData {
     high: number;
   };
   fallbackCount: number;
+  avgComplexityScore: number;
+  complexityPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  complexityHistory: Array<{ timestamp: number; score: number }>;
 }
 
 export interface MoaPerformanceResponse {

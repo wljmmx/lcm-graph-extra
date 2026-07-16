@@ -126,6 +126,17 @@ export interface MoaPerformanceSummary {
   };
   /** 降级回退次数（MoA 触发但失败回退到普通流程） */
   fallbackCount: number;
+  /** 平均复杂度评分 */
+  avgComplexityScore: number;
+  /** 复杂度评分百分位 */
+  complexityPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  /** 最近 N 次复杂度评分历史（用于趋势图） */
+  complexityHistory: Array<{ timestamp: number; score: number }>;
 }
 
 // ============================================================================
@@ -221,13 +232,27 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     medium: 0,
     high: 0,
   };
+  const complexityScores: number[] = [];
   for (const r of runRecords) {
     const score = r.complexityScore;
     if (score === undefined) continue;
+    complexityScores.push(score);
     if (score < 0.4) complexityDistribution.low++;
     else if (score < 0.7) complexityDistribution.medium++;
     else complexityDistribution.high++;
   }
+
+  // 复杂度评分统计
+  const complexityP = percentiles(complexityScores);
+  const avgComplexityScore = complexityScores.length > 0
+    ? Math.round((complexityScores.reduce((a, b) => a + b, 0) / complexityScores.length) * 1000) / 1000
+    : 0;
+
+  // 复杂度历史（最近 20 条带评分的记录，按时间正序）
+  const complexityHistory = runRecords
+    .filter((r) => r.complexityScore !== undefined)
+    .slice(-20)
+    .map((r) => ({ timestamp: r.timestamp, score: r.complexityScore! }));
 
   // 降级回退次数：MoA 触发但最终没有结果（失败）
   const fallbackCount = failedRecords.length;
@@ -253,6 +278,9 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     errorBreakdown,
     complexityDistribution,
     fallbackCount,
+    avgComplexityScore,
+    complexityPercentiles: { p50: complexityP.p50, p90: complexityP.p90, p95: complexityP.p95, p99: complexityP.p99 },
+    complexityHistory,
   };
 }
 

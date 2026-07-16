@@ -292,9 +292,12 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
           avgResponseLen: 0,
           modelBreakdown: [],
           errorBreakdown: {},
-          complexityDistribution: { low: 0, medium: 0, high: 0 },
-          fallbackCount: 0,
-        },
+        complexityDistribution: { low: 0, medium: 0, high: 0 },
+        fallbackCount: 0,
+        avgComplexityScore: 0,
+        complexityPercentiles: { p50: 0, p90: 0, p95: 0, p99: 0 },
+        complexityHistory: [],
+      };},
       };
     } finally {
       clearTimeout(timer);
