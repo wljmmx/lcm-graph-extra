@@ -539,17 +539,24 @@ const moaErrorItems = computed(() => {
     .sort((a, b) => b[1] - a[1]);
 });
 
-// ===== MoA 复杂度趋势图（按小时/天聚合，全量 vs MoA 触发） =====
+// ===== MoA 复杂度趋势图（每轮对话复杂度评分变化） =====
 const moaComplexityTrendOption = computed(() => {
-  const hourly = moaPerf.value?.complexityHourlyBuckets;
+  const allHistory = moaPerf.value?.allComplexityHistory;
   const moaHistory = moaPerf.value?.complexityHistory;
-  if (!hourly || hourly.length === 0) return {};
+  if (!allHistory || allHistory.length === 0) return {};
 
-  // 按小时聚合全量数据
+  // 按时间排序，取最近 30 条
+  const sorted = [...allHistory].sort((a, b) => a.timestamp - b.timestamp).slice(-30);
+  const xLabels = sorted.map((r) => {
+    const d = new Date(r.timestamp);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  });
+
+  // 全量复杂度折线
   const allSeries = {
-    name: '全量 (小时均)',
+    name: '全量复杂度',
     type: 'line',
-    data: hourly.map((b) => [b.hour, b.avg]),
+    data: sorted.map((r, i) => [i, r.score]),
     smooth: true,
     lineStyle: { color: CHART.primary, width: 2 },
     itemStyle: { color: CHART.primary },
@@ -563,47 +570,50 @@ const moaComplexityTrendOption = computed(() => {
     },
   };
 
-  // MoA 触发叠加（按小时桶）
-  const moaByHour: Map<string, number[]> = new Map();
-  if (moaHistory) {
-    for (const h of moaHistory) {
-      const d = new Date(h.timestamp);
-      const key = `${String(d.getHours()).padStart(2, '0')}:00`;
-      if (!moaByHour.has(key)) moaByHour.set(key, []);
-      moaByHour.get(key)!.push(h.score);
-    }
-  }
+  // MoA 触发叠加（散点高亮）
+  const moaTimestamps = new Set(
+    (moaHistory ?? []).map((r) => r.timestamp),
+  );
   const moaSeries = {
-    name: 'MoA 触发 (小时均)',
-    type: 'line',
-    data: hourly.map((b) => {
-      const scores = moaByHour.get(b.hour) ?? [];
-      return [b.hour, scores.length > 0 ? Math.round(scores.reduce((a, c) => a + c, 0) / scores.length * 1000) / 1000 : null];
-    }),
-    smooth: true,
-    lineStyle: { color: CHART.danger, width: 2 },
+    name: 'MoA 触发',
+    type: 'scatter',
+    data: sorted
+      .filter((r) => moaTimestamps.has(r.timestamp))
+      .map((r) => [sorted.indexOf(r), r.score]),
+    symbolSize: 10,
     itemStyle: { color: CHART.danger },
     symbol: 'diamond',
-    symbolSize: 8,
-    connectNulls: false,
+    z: 10,
   };
 
   return {
     title: undefined,
-    tooltip: { trigger: 'axis', formatter: (params: any) => {
-      const items = Array.isArray(params) ? params : [params];
-      let html = `${items[0].axisValue}<br/>`;
-      for (const p of items) {
-        const val = p.data[1];
-        html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
-      }
-      return html;
-    }},
-    legend: { data: ['全量 (小时均)', 'MoA 触发 (小时均)'], bottom: 0 },
-    xAxis: { type: 'category', data: hourly.map((b) => b.hour), axisLabel: { fontSize: 10 } },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const items = Array.isArray(params) ? params : [params];
+        const idx = items[0]?.data?.[0];
+        const label = idx !== undefined && idx < xLabels.length ? xLabels[idx] : '';
+        let html = `${label}<br/>`;
+        for (const p of items) {
+          const val = p.data?.[1];
+          html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
+        }
+        return html;
+      },
+    },
+    legend: { data: ['全量复杂度', 'MoA 触发'], bottom: 0 },
+    xAxis: {
+      type: 'category',
+      data: xLabels,
+      axisLabel: { fontSize: 10, rotate: 45 },
+      name: '时间',
+      nameLocation: 'middle',
+      nameGap: 30,
+    },
     yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
     series: [allSeries, moaSeries],
-    grid: { left: 50, right: 30, bottom: 45, top: 45 },
+    grid: { left: 50, right: 30, bottom: 55, top: 45 },
   };
 });
 
@@ -1305,7 +1315,7 @@ const moaLatencyPhaseOption = computed(() => {
           <!-- 复杂度趋势图 + 分布图 -->
           <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <NGi>
-              <NCard title="复杂度趋势（按小时聚合）" size="small" :bordered="true">
+              <NCard title="复杂度趋势（每轮对话）" size="small" :bordered="true">
                 <EChart :option="moaComplexityTrendOption" height="300px" :skip-theme="true" />
               </NCard>
             </NGi>
