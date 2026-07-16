@@ -510,20 +510,80 @@ const moaErrorItems = computed(() => {
     .sort((a, b) => b[1] - a[1]);
 });
 
-const moaComplexityTotal = computed(() => {
-  if (!moaPerf.value?.complexityDistribution) return 0;
-  const d = moaPerf.value.complexityDistribution;
-  return d.low + d.medium + d.high;
+// ===== MoA 复杂度趋势图 =====
+const moaComplexityTrendOption = computed(() => {
+  const history = moaPerf.value?.complexityHistory;
+  if (!history || history.length === 0) return {};
+  return {
+    title: { text: '复杂度评分趋势', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params;
+        return `时间: ${formatTimeHMS(p.data[0])}<br/>复杂度: ${(p.data[1] as number).toFixed(3)}`;
+      },
+    },
+    xAxis: { type: 'time', name: '时间', axisLabel: { formatter: (v: number) => formatTimeHMS(v) } },
+    yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
+    series: [{
+      name: '复杂度评分',
+      type: 'line',
+      data: history.map((h) => [h.timestamp, h.score]),
+      smooth: true,
+      markLine: { silent: true, data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' }, lineStyle: { color: '#f0a020', type: 'dashed' } }] },
+      markArea: {
+        silent: true,
+        data: [
+          [{ yAxis: 0, itemStyle: { color: 'rgba(24, 160, 88, 0.06)' } }, { yAxis: 0.4 }],
+          [{ yAxis: 0.4, itemStyle: { color: 'rgba(240, 160, 32, 0.06)' } }, { yAxis: 0.7 }],
+          [{ yAxis: 0.7, itemStyle: { color: 'rgba(208, 48, 80, 0.06)' } }, { yAxis: 1 }],
+        ],
+      },
+    }],
+    grid: { left: 50, right: 30, bottom: 40, top: 45 },
+  };
 });
 
-const moaRefPhasePercent = computed(() => {
-  if (!moaPerf.value || moaPerf.value.avgTotalMs === 0) return 0;
-  return Math.round((moaPerf.value.avgRefMs / moaPerf.value.avgTotalMs) * 100);
+// ===== MoA 复杂度分布图 =====
+const moaComplexityDistOption = computed(() => {
+  const dist = moaPerf.value?.complexityDistribution;
+  if (!dist) return {};
+  return {
+    title: { text: '复杂度触发分布', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: { trigger: 'axis' },
+    xAxis: { type: 'category', data: ['低 (0-0.4)', '中 (0.4-0.7)', '高 (0.7-1.0)'], axisLabel: { fontSize: 11 } },
+    yAxis: { type: 'value', name: '运行次数', minInterval: 1 },
+    series: [{
+      name: '运行次数',
+      type: 'bar',
+      data: [
+        { value: dist.low, itemStyle: { color: '#18a058' } },
+        { value: dist.medium, itemStyle: { color: '#f0a020' } },
+        { value: dist.high, itemStyle: { color: '#d03050' } },
+      ],
+      label: { show: true, position: 'top', formatter: '{c}' },
+    }],
+    grid: { left: 50, right: 30, bottom: 40, top: 45 },
+  };
 });
 
-const moaAggPhasePercent = computed(() => {
-  if (!moaPerf.value || moaPerf.value.avgTotalMs === 0) return 0;
-  return Math.round((moaPerf.value.avgAggMs / moaPerf.value.avgTotalMs) * 100);
+// ===== MoA 延迟阶段分解图 =====
+const moaLatencyPhaseOption = computed(() => {
+  const runs = moaPerf.value?.recentRuns;
+  if (!runs || runs.length === 0) return {};
+  const data = [...runs].slice(0, 10).reverse();
+  return {
+    title: { text: '最近 10 次延迟阶段分解', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: { trigger: 'axis', formatter: (params: any) => { let h = params[0].name + '<br/>'; for (const p of params) h += `${p.marker}${p.seriesName}: ${Number(p.value).toFixed(0)}ms<br/>`; return h; } },
+    legend: { data: ['参考模型', '聚合模型'], bottom: 0 },
+    xAxis: { type: 'category', data: data.map((r) => r.queryPreview.slice(0, 16) + (r.queryPreview.length > 16 ? '...' : '')), axisLabel: { fontSize: 10, rotate: 30 } },
+    yAxis: { type: 'value', name: '耗时 (ms)' },
+    series: [
+      { name: '参考模型', type: 'bar', stack: 'total', data: data.map((r) => r.refMs), itemStyle: { color: '#2080f0' } },
+      { name: '聚合模型', type: 'bar', stack: 'total', data: data.map((r) => r.aggMs), itemStyle: { color: '#18a058' } },
+    ],
+    grid: { left: 60, right: 30, bottom: 60, top: 45 },
+  };
 });
 </script>
 
@@ -1094,17 +1154,41 @@ const moaAggPhasePercent = computed(() => {
             <NGi>
               <NCard size="small">
                 <div class="stat-card">
-                  <span class="stat-label">Token 消耗</span>
-                  <span class="stat-value">{{ formatTokens(moaPerf.totalTokens) }}</span>
+                  <span class="stat-label">平均复杂度</span>
+                  <span class="stat-value">{{ moaPerf.avgComplexityScore.toFixed(3) }}</span>
                   <span class="stat-detail">
-                    <span class="muted">平均 {{ formatTokens(moaPerf.avgTokens) }}/次 · 效率 {{ moaPerf.tokenEfficiency }} 字符/Token</span>
+                    <NTag size="tiny" :type="moaPerf.avgComplexityScore >= 0.7 ? 'error' : moaPerf.avgComplexityScore >= 0.4 ? 'warning' : 'info'">
+                      {{ moaPerf.avgComplexityScore >= 0.7 ? '高' : moaPerf.avgComplexityScore >= 0.4 ? '中' : '低' }}
+                    </NTag>
                   </span>
                 </div>
               </NCard>
             </NGi>
           </NGrid>
 
-          <!-- 延迟百分位 + 阶段耗时 -->
+          <!-- 复杂度百分位 -->
+          <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+            <NGi><KpiCard label="复杂度 P50" :value="moaPerf.complexityPercentiles.p50" /></NGi>
+            <NGi><KpiCard label="复杂度 P90" :value="moaPerf.complexityPercentiles.p90" /></NGi>
+            <NGi><KpiCard label="复杂度 P95" :value="moaPerf.complexityPercentiles.p95" /></NGi>
+            <NGi><KpiCard label="复杂度 P99" :value="moaPerf.complexityPercentiles.p99" /></NGi>
+          </NGrid>
+
+          <!-- 复杂度趋势图 + 分布图 -->
+          <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+            <NGi>
+              <NCard size="small" :bordered="true">
+                <EChart :option="moaComplexityTrendOption" height="300px" :skip-theme="true" />
+              </NCard>
+            </NGi>
+            <NGi>
+              <NCard size="small" :bordered="true">
+                <EChart :option="moaComplexityDistOption" height="300px" :skip-theme="true" />
+              </NCard>
+            </NGi>
+          </NGrid>
+
+          <!-- 延迟百分位 + 阶段耗时分解图 -->
           <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <!-- 延迟百分位 -->
             <NGi>
@@ -1145,43 +1229,10 @@ const moaAggPhasePercent = computed(() => {
               </NCard>
             </NGi>
 
-            <!-- 阶段耗时分布 + 复杂度分布 -->
+            <!-- 延迟阶段分解图 -->
             <NGi>
-              <NCard title="阶段耗时 & 复杂度分布" size="small">
-                <template v-if="moaPerf.totalRuns > 0">
-                  <!-- 阶段耗时条 -->
-                  <div class="phase-bars">
-                    <div class="phase-bar-item">
-                      <span class="phase-bar-label">参考模型</span>
-                      <div class="phase-bar-track">
-                        <div class="phase-bar-fill phase-bar-ref" :style="{ width: moaRefPhasePercent + '%' }" />
-                      </div>
-                      <span class="phase-bar-value">{{ formatMs(moaPerf.avgRefMs) }}</span>
-                    </div>
-                    <div class="phase-bar-item">
-                      <span class="phase-bar-label">聚合模型</span>
-                      <div class="phase-bar-track">
-                        <div class="phase-bar-fill phase-bar-agg" :style="{ width: moaAggPhasePercent + '%' }" />
-                      </div>
-                      <span class="phase-bar-value">{{ formatMs(moaPerf.avgAggMs) }}</span>
-                    </div>
-                  </div>
-                  <!-- 复杂度触发分布 -->
-                  <div v-if="moaComplexityTotal > 0" style="margin-top: 16px">
-                    <div class="profile-label">复杂度触发分布</div>
-                    <NSpace :size="8">
-                      <NTag size="small" type="info">低 (0-0.4): {{ moaPerf.complexityDistribution.low }}</NTag>
-                      <NTag size="small" type="warning">中 (0.4-0.7): {{ moaPerf.complexityDistribution.medium }}</NTag>
-                      <NTag size="small" type="error">高 (0.7-1.0): {{ moaPerf.complexityDistribution.high }}</NTag>
-                    </NSpace>
-                  </div>
-                  <!-- 平均响应长度 -->
-                  <div style="margin-top: 12px">
-                    <span class="profile-label">平均响应长度: </span>
-                    <span class="mono">{{ moaPerf.avgResponseLen.toLocaleString() }} 字符</span>
-                  </div>
-                </template>
-                <NEmpty v-else description="暂无数据" style="padding: 12px 0" />
+              <NCard size="small" :bordered="true">
+                <EChart :option="moaLatencyPhaseOption" height="300px" :skip-theme="true" />
               </NCard>
             </NGi>
           </NGrid>
