@@ -237,86 +237,155 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         } else if (tier === 'high') {
           const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
             : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
-          try {
-            let compactTimer: ReturnType<typeof setTimeout> | undefined;
-            const compactTimeoutPromise = new Promise<never>((_, reject) => {
-              compactTimer = setTimeout(() => reject(new Error('Compact timeout')), compactTimeout);
-            });
-            compactTimeoutPromise.catch(() => {});
-            await Promise.race([
-              ctx.losslessClawAdapter.compact({
-                sessionId: _lcSid, sessionKey, sessionFile, force: true,
-                tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
-                compactionTarget: 'threshold',
-              }),
-              compactTimeoutPromise,
-            ]);
-            if (compactTimer) clearTimeout(compactTimer);
-            const freshSummaries = getConversationSummaries(conversationId);
-            if (freshSummaries.length > 0) {
-              const trimmedSummaryMsgs = trimSummariesToBudget(
-                freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+
+          // ── 压缩降级工具函数：用已有摘要 + 最近消息构建注入上下文 ──
+          const buildDegradedContext = (reason: string) => {
+            const existingSummaries = getConversationSummaries(conversationId);
+            const goalMsg = getGoal(sessionKey);
+            const goalAnchorMsgs = goalMsg
+              ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
+              : [];
+            if (existingSummaries.length > 0) {
+              const trimmed = trimSummariesToBudget(
+                existingSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                 resolvedCtx.compactTokenBudget * maxSummaryRatio,
               ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-
-              // Goal Anchoring: 压缩时保留原始用户目标，防止任务丢失
-              const goalMsg = getGoal(sessionKey);
-              const goalAnchorMsgs = goalMsg
-                ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
-                : [];
-
-              const recentRawCount = Math.min(messages.length, 8);
-              const recentRawMsgs = messages.slice(-recentRawCount);
-              finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ...recentRawMsgs];
-
-              // Re-evaluate pressure tier after successful compaction
-              // Compaction may have freed enough context to drop from high → medium/low
-              if (wm) {
-                const postCompactTokens = estimateTokensFromMessages(finalMessages);
-                const postCompactTokenRatio = contextWindow > 0 ? postCompactTokens / contextWindow : 0;
-                const postCompactUncompressed = getUncompressedMessageCount(conversationId);
-                const postCompactActive = postCompactUncompressed >= 0 ? postCompactUncompressed : finalMessages.length;
-
-                const newTier = determinePressureTier(postCompactActive, postCompactTokenRatio, {
-                  dedupRounds: wm.dedupRounds ?? 24,
-                  highPressureThreshold: wm.highPressureThreshold ?? 0.85,
-                  mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
-                });
-
-                if (newTier !== tier) {
-                  ctx.logger?.info?.('[assemble] tier re-evaluated after compaction', {
-                    oldTier: tier,
-                    newTier,
-                    oldTokenRatio: Number(tokenRatio.toFixed(3)),
-                    newTokenRatio: Number(postCompactTokenRatio.toFixed(3)),
-                  });
-                  tier = newTier;
-                  estimatedTokens = postCompactTokens;
-                  tokenRatio = postCompactTokenRatio;
-                  retrievalLimits = getRetrievalLimitsForTier(tier, {
-                    low: resolvedCtx.retrievalLimits,
-                    medium: { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
-                    high: { qmd: 1, graph: 1, exp: 0 },
-                  });
-                  maxContextChars = getMaxContextCharsForTier(tier, {
-                    low: resolvedCtx.maxContextChars.low,
-                    medium: resolvedCtx.maxContextChars.medium,
-                    high: wm?.maxContextChars?.high ?? 1_600,
-                  });
-                }
-              }
-            } else {
-              writeCompactionDebt(
-                conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
-                'high_pressure_no_summary_after_compact',
-              );
+              const recentCount = Math.min(messages.length, 6);
+              return [...goalAnchorMsgs, ...trimmed, ...messages.slice(-recentCount)];
             }
-          } catch (err) {
-            ctx.logger?.warn?.('High pressure compact failed, writing debt', { err: serializeError(err) });
+            // 无摘要时只用最近消息
+            const fallbackCount = Math.min(messages.length, 12);
+            return [...goalAnchorMsgs, ...messages.slice(-fallbackCount)];
+          };
+
+          // ── P0: 输入超限保护 —— 当 raw token 超过 LLM 上下文窗口 90% 时，compact 必然失败 ──
+          const inputOverflowThreshold = Math.floor(contextWindow * 0.90) - resolvedCtx.compactTokenBudget;
+          if (effectiveTokenCount > inputOverflowThreshold && effectiveTokenCount > 0) {
+            ctx.logger?.warn?.('[assemble] compact input overflow — skipping sync compact, using degraded context', {
+              effectiveTokenCount,
+              inputOverflowThreshold,
+              contextWindow,
+              compactTokenBudget: resolvedCtx.compactTokenBudget,
+            });
             writeCompactionDebt(
               conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
-              'high_pressure_compact_failed',
+              'high_pressure_input_overflow_' + effectiveTokenCount + '_gt_' + inputOverflowThreshold,
             );
+            finalMessages = buildDegradedContext('input_overflow');
+            markDegraded('high_pressure_input_overflow');
+
+            // 异步触发 compact 处理未压缩部分（lossless-claw 内部自行分段）
+            const _asyncSid = typeof params.sessionId === 'string' ? params.sessionId
+              : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+            backgroundTasks.register('compact:overflow-retry', ctx.losslessClawAdapter.compact({
+              sessionId: _asyncSid, sessionKey, sessionFile, force: true,
+              tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
+              compactionTarget: 'threshold',
+            }).then(() => {}, () => {}));
+          } else {
+            try {
+              let compactTimer: ReturnType<typeof setTimeout> | undefined;
+              const compactTimeoutPromise = new Promise<never>((_, reject) => {
+                compactTimer = setTimeout(() => reject(new Error('Compact timeout')), compactTimeout);
+              });
+              compactTimeoutPromise.catch(() => {});
+              await Promise.race([
+                ctx.losslessClawAdapter.compact({
+                  sessionId: _lcSid, sessionKey, sessionFile, force: true,
+                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
+                  compactionTarget: 'threshold',
+                }),
+                compactTimeoutPromise,
+              ]);
+              if (compactTimer) clearTimeout(compactTimer);
+              const freshSummaries = getConversationSummaries(conversationId);
+              if (freshSummaries.length > 0) {
+                const trimmedSummaryMsgs = trimSummariesToBudget(
+                  freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+                  resolvedCtx.compactTokenBudget * maxSummaryRatio,
+                ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
+
+                // Goal Anchoring: 压缩时保留原始用户目标，防止任务丢失
+                const goalMsg = getGoal(sessionKey);
+                const goalAnchorMsgs = goalMsg
+                  ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
+                  : [];
+
+                const recentRawCount = Math.min(messages.length, 8);
+                const recentRawMsgs = messages.slice(-recentRawCount);
+                finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ...recentRawMsgs];
+
+                // Re-evaluate pressure tier after successful compaction
+                if (wm) {
+                  const postCompactTokens = estimateTokensFromMessages(finalMessages);
+                  const postCompactTokenRatio = contextWindow > 0 ? postCompactTokens / contextWindow : 0;
+                  const postCompactUncompressed = getUncompressedMessageCount(conversationId);
+                  const postCompactActive = postCompactUncompressed >= 0 ? postCompactUncompressed : finalMessages.length;
+
+                  const newTier = determinePressureTier(postCompactActive, postCompactTokenRatio, {
+                    dedupRounds: wm.dedupRounds ?? 24,
+                    highPressureThreshold: wm.highPressureThreshold ?? 0.85,
+                    mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
+                  });
+
+                  if (newTier !== tier) {
+                    ctx.logger?.info?.('[assemble] tier re-evaluated after compaction', {
+                      oldTier: tier,
+                      newTier,
+                      oldTokenRatio: Number(tokenRatio.toFixed(3)),
+                      newTokenRatio: Number(postCompactTokenRatio.toFixed(3)),
+                    });
+                    tier = newTier;
+                    estimatedTokens = postCompactTokens;
+                    tokenRatio = postCompactTokenRatio;
+                    retrievalLimits = getRetrievalLimitsForTier(tier, {
+                      low: resolvedCtx.retrievalLimits,
+                      medium: { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
+                      high: { qmd: 1, graph: 1, exp: 0 },
+                    });
+                    maxContextChars = getMaxContextCharsForTier(tier, {
+                      low: resolvedCtx.maxContextChars.low,
+                      medium: resolvedCtx.maxContextChars.medium,
+                      high: wm?.maxContextChars?.high ?? 1_600,
+                    });
+                  }
+
+                  // ── P1: 迭代压缩 —— 一次 compact 不够时，异步触发二次压缩 ──
+                  // 当 compact 后 tier 仍为 high 或 medium，说明还有大量未压缩内容
+                  if (newTier === 'high' || newTier === 'medium') {
+                    ctx.logger?.info?.('[assemble] iterative compaction triggered', {
+                      tier: newTier,
+                      tokenRatio: Number(postCompactTokenRatio.toFixed(3)),
+                      uncompressedCount: postCompactUncompressed,
+                    });
+                    const _iterSid = typeof params.sessionId === 'string' ? params.sessionId
+                      : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+                    backgroundTasks.register('compact:iterative-' + newTier, ctx.losslessClawAdapter.compact({
+                      sessionId: _iterSid, sessionKey, sessionFile, force: true,
+                      tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: postCompactTokens,
+                      compactionTarget: 'threshold',
+                    }).then(() => {}, () => {}));
+                  }
+                }
+              } else {
+                writeCompactionDebt(
+                  conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
+                  'high_pressure_no_summary_after_compact',
+                );
+                // 无摘要产出 → 降级注入
+                finalMessages = buildDegradedContext('no_summary');
+                markDegraded('high_pressure_no_summary');
+              }
+            } catch (err) {
+              ctx.logger?.warn?.('High pressure compact failed, using degraded context', { err: serializeError(err) });
+              writeCompactionDebt(
+                conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
+                'high_pressure_compact_failed',
+              );
+              // ── P0: 压缩失败降级 —— 用已有摘要 + 最近消息，而非全量继续 ──
+              finalMessages = buildDegradedContext('compact_failed');
+              markDegraded('high_pressure_compact_failed');
+            }
           }
         } else {
           writeCompactionDebt(
