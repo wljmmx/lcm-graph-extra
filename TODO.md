@@ -129,6 +129,36 @@
 - [ ] WebAssembly性能关键路径优化
 - [ ] 自然语言配置（LLM辅助参数调优）
 
+## 📋 v2.1.14 — 专业可用性审计优化 (2026-07-16)
+
+> 审计报告: [audit/professional-usability-audit-2026-07-16.md](audit/professional-usability-audit-2026-07-16.md)
+> 审计评分: 综合 7.91/10
+> 改进项: 15 项（P1: 5 / P2: 5 / P3: 5）
+
+### 🟡 P1 — 重要改进（建议 1-2 周）
+
+- [ ] **DOC-1**: 补充配置参考手册（所有配置项 + 默认值 + 示例，集中式文档）
+- [ ] **DOC-2**: 补充故障排查指南（常见问题 + 诊断步骤 + 解决方案）
+- [ ] **REF-1**: 拆分 `tools.ts`（2841 行 → 按功能域拆分为 search/maintain/backup/config 等模块）
+- [ ] **UX-1**: Dashboard 响应式适配（移动端/平板可用，Naive UI 内置响应式支持）
+- [ ] **SEC-1**: 添加 API 限流（Dashboard 服务端 `@fastify/rate-limit`，已有基础）
+
+### 🟢 P2 — 增强改进（建议 1 个月）
+
+- [ ] **OBS-1**: 分布式追踪集成（OpenTelemetry SDK，trace ID 贯穿 assemble/retrieval/compact）
+- [ ] **TEST-1**: MoA orchestrator 单元测试（覆盖 runMoaPipeline / resolveActivePreset / 降级路径）
+- [ ] **TEST-2**: 性能基准测试集成 CI（test/bench/ + test/perf/ 接入 GitHub Actions）
+- [ ] **DOC-3**: 架构设计文档 ADR（技术决策记录，4-5 个关键决策）
+- [ ] **SEC-2**: 安全扫描集成（npm audit + CodeQL，CI 自动检查）
+
+### 🔵 P3 — 远期改进（按需推进）
+
+- [ ] **ARCH-1**: MoA 聚合模型工具调用能力（架构变更，需评估与 OpenClaw SDK 兼容性）
+- [ ] **ARCH-2**: Neo4j 可选化（SQLite fallback 模式，降低部署门槛）
+- [ ] **I18N-1**: Dashboard 多语言支持（vue-i18n，中/英）
+- [ ] **DOC-4**: 社区贡献指南（CONTRIBUTING.md + 开发环境搭建 + PR 流程）
+- [ ] **ARCH-3**: 拆分 `lcm-bridge.ts`（761 行 → 按职责拆分为 pressure/messages/summary 模块）
+
 ---
 
 ## 📋 当前进度统计
@@ -141,8 +171,9 @@
 | v1.2.0 | 6 | 1 | 0 | 5 | 17% |
 | **v2.1.12** | **8** | **8** | **0** | **0** | **100%** |
 | **v2.1.13** | **9** | **9** | **0** | **0** | **100%** |
+| **v2.1.14** | **15** | **0** | **0** | **15** | **0%** |
 | v2.0.0 | 6 | 0 | 0 | 6 | 0% |
-| **合计** | **59** | **47** | **0** | **12** | **80%** |
+| **合计** | **74** | **47** | **0** | **27** | **64%** |
 
 ---
 
