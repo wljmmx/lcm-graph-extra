@@ -1113,7 +1113,7 @@ const moaLatencyPhaseOption = computed(() => {
 
         <template v-else-if="moaPerf">
           <!-- KPI 概览行 -->
-          <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+          <NGrid :cols="'1 s:2 m:5'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <NGi>
               <NCard size="small">
                 <div class="stat-card">
@@ -1147,6 +1147,17 @@ const moaLatencyPhaseOption = computed(() => {
                   <span class="stat-value">{{ formatMs(moaPerf.avgTotalMs) }}</span>
                   <span class="stat-detail">
                     <span class="muted">参考: {{ formatMs(moaPerf.avgRefMs) }} / 聚合: {{ formatMs(moaPerf.avgAggMs) }}</span>
+                  </span>
+                </div>
+              </NCard>
+            </NGi>
+            <NGi>
+              <NCard size="small">
+                <div class="stat-card">
+                  <span class="stat-label">Token 消耗</span>
+                  <span class="stat-value">{{ formatTokens(moaPerf.totalTokens) }}</span>
+                  <span class="stat-detail">
+                    <span class="muted">平均 {{ formatTokens(moaPerf.avgTokens) }}/次 · 效率 {{ moaPerf.tokenEfficiency }} 字符/Token</span>
                   </span>
                 </div>
               </NCard>
