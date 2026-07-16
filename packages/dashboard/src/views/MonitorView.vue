@@ -555,6 +555,12 @@ const moaComplexityTrendOption = computed(() => {
     itemStyle: { color: CHART.primary },
     symbol: 'circle',
     symbolSize: 6,
+    markLine: {
+      silent: true,
+      symbol: 'none',
+      lineStyle: { color: CHART.warning, type: 'dashed' },
+      data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' } }],
+    },
   };
 
   // MoA 触发叠加（按小时桶）
@@ -597,7 +603,6 @@ const moaComplexityTrendOption = computed(() => {
     xAxis: { type: 'category', data: hourly.map((b) => b.hour), axisLabel: { fontSize: 10 } },
     yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
     series: [allSeries, moaSeries],
-    markLine: { silent: true, data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' }, lineStyle: { color: '#f0a020', type: 'dashed' } }] },
     grid: { left: 50, right: 30, bottom: 45, top: 45 },
   };
 });
