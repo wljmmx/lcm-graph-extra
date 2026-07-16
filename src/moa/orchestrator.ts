@@ -22,8 +22,114 @@ import {
   type ReferenceModelConfig,
   type AggregatorModelConfig,
   type LlmCallResult,
+  type MoaPreset,
 } from './types.js';
 import { recordMoaRun } from './perf-tracker.js';
+
+// ============================================================================
+// 预设管理
+// ============================================================================
+
+/**
+ * 默认预设列表。
+ * 不同场景使用不同的模型组合与视角配置。
+ */
+const DEFAULT_PRESETS: MoaPreset[] = [
+  {
+    name: 'code-review',
+    description: '代码审查：多角度审查代码质量、安全与性能',
+    mode: 'parallel',
+    referenceModels: [
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.7, timeoutMs: 60_000,
+        systemPrompt: '你是一位代码架构专家。从代码架构、模块划分、设计模式的角度分析问题，关注可维护性、扩展性和模块间耦合。',
+      },
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.6, timeoutMs: 60_000,
+        systemPrompt: '你是一位资深安全审查专家。从潜在风险、边界条件、异常处理、安全漏洞的角度分析问题，关注健壮性和防御性。',
+      },
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.5, timeoutMs: 60_000,
+        systemPrompt: '你是一位性能优化专家。从性能、效率、资源消耗的角度分析问题，关注算法复杂度、内存使用和响应时间。',
+      },
+    ],
+    aggregatorModel: {
+      provider: 'openai', model: 'gpt-4o', temperature: 0.3, timeoutMs: 120_000,
+    },
+  },
+  {
+    name: 'architecture',
+    description: '架构设计：专注系统架构与设计模式',
+    mode: 'parallel',
+    referenceModels: [
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.7, timeoutMs: 60_000,
+        systemPrompt: '你是一位系统架构师。从系统架构、模块划分、接口设计角度分析，关注可扩展性和高可用性。',
+      },
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.6, timeoutMs: 60_000,
+        systemPrompt: '你是一位技术选型专家。从技术栈适配性、生态成熟度、团队能力匹配角度分析，关注可行性和长期维护。',
+      },
+    ],
+    aggregatorModel: {
+      provider: 'openai', model: 'gpt-4o', temperature: 0.3, timeoutMs: 120_000,
+    },
+  },
+  {
+    name: 'security',
+    description: '安全审计：专项安全漏洞分析',
+    mode: 'parallel',
+    referenceModels: [
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.7, timeoutMs: 60_000,
+        systemPrompt: '你是一位安全漏洞分析师。从 OWASP Top 10、CWE 等角度分析，关注注入攻击、认证绕过、数据泄露。',
+      },
+      {
+        provider: 'openai', model: 'gpt-4o', temperature: 0.6, timeoutMs: 60_000,
+        systemPrompt: '你是一位合规审计专家。从 GDPR、SOC2、数据隐私角度分析，关注合规风险和数据处理规范。',
+      },
+    ],
+    aggregatorModel: {
+      provider: 'openai', model: 'gpt-4o', temperature: 0.3, timeoutMs: 120_000,
+    },
+  },
+];
+
+/**
+ * 解析激活预设，返回有效配置。
+ * 如果 activePreset 匹配到预设，使用预设的 referenceModels + aggregatorModel + mode；
+ * 否则回退到 config 根级别的配置。
+ */
+export function resolveActivePreset(config: MoaConfig): {
+  referenceModels: ReferenceModelConfig[];
+  aggregatorModel: AggregatorModelConfig;
+  mode: 'parallel' | 'serial';
+} {
+  const presets = config.presets ?? DEFAULT_PRESETS;
+  const activeName = config.activePreset;
+  if (activeName) {
+    const preset = presets.find((p) => p.name === activeName);
+    if (preset) {
+      return {
+        referenceModels: preset.referenceModels,
+        aggregatorModel: preset.aggregatorModel,
+        mode: preset.mode ?? config.mode,
+      };
+    }
+  }
+  return {
+    referenceModels: config.referenceModels,
+    aggregatorModel: config.aggregatorModel,
+    mode: config.mode,
+  };
+}
+
+/**
+ * 获取所有可用预设（包含默认预设 + 用户自定义预设）。
+ */
+export function getAvailablePresets(config: MoaConfig): MoaPreset[] {
+  return config.presets ?? DEFAULT_PRESETS;
+}
 
 // ============================================================================
 // 模块级缓存：MoA 聚合结果，供 lcmg_moa_reply 工具跨轮次读取
@@ -142,15 +248,23 @@ async function callLlm(
 /**
  * 调用单个参考模型。
  * 参考模型不调用工具、不执行命令，仅输出纯文本分析。
+ *
+ * 成本优化：参考模型输入剥离系统提示词（Hermes 对齐）。
+ * 将角色描述压缩为 1 行前缀拼入用户消息，system prompt 留空，节省 15-20% token。
  */
 async function callReferenceModel(
   query: string,
   refConfig: ReferenceModelConfig,
   signal?: AbortSignal,
 ): Promise<LlmCallResult> {
+  // 从 systemPrompt 提取角色描述（第一句）作为 1 行前缀
+  const rolePrefix = refConfig.systemPrompt?.split('。')[0]?.trim() || refConfig.systemPrompt?.trim() || '';
+  const userMessage = rolePrefix
+    ? `【${rolePrefix}】\n\n${query}`
+    : query;
   return callLlm(
-    refConfig.systemPrompt,
-    query,
+    '',  // 不传 system prompt，节省 token
+    userMessage,
     {
       model: refConfig.model,
       temperature: refConfig.temperature,
@@ -319,11 +433,18 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
     return null;
   }
 
+  // 解析预设：如果设置了 activePreset，使用预设的模型和模式
+  const effective = resolveActivePreset(config);
+  const effectiveRefModels = effective.referenceModels;
+  const effectiveAggModel = effective.aggregatorModel;
+  const effectiveMode = effective.mode;
+
   logger?.info?.('[moa] Starting MoA pipeline', {
-    mode: config.mode,
-    refCount: config.referenceModels.length,
-    aggModel: config.aggregatorModel.model,
+    mode: effectiveMode,
+    refCount: effectiveRefModels.length,
+    aggModel: effectiveAggModel.model,
     queryLen: query.length,
+    activePreset: config.activePreset ?? 'default',
   });
 
   // =========================================================================
@@ -335,17 +456,17 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
   try {
     referenceResults = await runReferenceModels(
       query,
-      config.referenceModels,
-      config.mode,
+      effectiveRefModels,
+      effectiveMode,
       signal,
     );
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logger?.warn?.('[moa] Reference models phase failed', { err: errMsg });
     recordMoaRun(query, null, errMsg, {
-      mode: config.mode,
-      referenceModels: config.referenceModels,
-      aggregatorModel: config.aggregatorModel,
+      mode: effectiveMode,
+      referenceModels: effectiveRefModels,
+      aggregatorModel: effectiveAggModel,
     }, complexityScore);
     return null;
   }
@@ -363,9 +484,9 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
   if (validRefs.length === 0) {
     logger?.warn?.('[moa] All reference models failed, skipping aggregation');
     recordMoaRun(query, null, 'All reference models failed', {
-      mode: config.mode,
-      referenceModels: config.referenceModels,
-      aggregatorModel: config.aggregatorModel,
+      mode: effectiveMode,
+      referenceModels: effectiveRefModels,
+      aggregatorModel: effectiveAggModel,
     }, complexityScore);
     return null;
   }
@@ -381,7 +502,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       query,
       retrievalContext,
       validRefs,
-      config.aggregatorModel,
+      effectiveAggModel,
       conversationContext,
       signal,
     );
@@ -389,9 +510,9 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
     const errMsg = err instanceof Error ? err.message : String(err);
     logger?.warn?.('[moa] Aggregator model failed', { err: errMsg });
     recordMoaRun(query, null, errMsg, {
-      mode: config.mode,
-      referenceModels: config.referenceModels,
-      aggregatorModel: config.aggregatorModel,
+      mode: effectiveMode,
+      referenceModels: effectiveRefModels,
+      aggregatorModel: effectiveAggModel,
     }, complexityScore);
     return null;
   }
@@ -420,9 +541,9 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
 
   // 记录性能数据（供 Dashboard 查询）
   recordMoaRun(query, result, null, {
-    mode: config.mode,
-    referenceModels: config.referenceModels,
-    aggregatorModel: config.aggregatorModel,
+    mode: effectiveMode,
+    referenceModels: effectiveRefModels,
+    aggregatorModel: effectiveAggModel,
   }, complexityScore);
 
   logger?.info?.('[moa] Pipeline completed', {

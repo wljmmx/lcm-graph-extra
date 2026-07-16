@@ -44,6 +44,20 @@ export interface AggregatorModelConfig {
   keepAlive?: string;
 }
 
+/** MoA 预设 */
+export interface MoaPreset {
+  /** 预设名称 */
+  name: string;
+  /** 预设描述 */
+  description?: string;
+  /** 执行模式 */
+  mode?: 'parallel' | 'serial';
+  /** 参考模型列表（2-4 个） */
+  referenceModels: ReferenceModelConfig[];
+  /** 聚合模型配置 */
+  aggregatorModel: AggregatorModelConfig;
+}
+
 /** MoA 完整配置 */
 export interface MoaConfig {
   /** 是否启用 MoA */
@@ -66,6 +80,17 @@ export interface MoaConfig {
    * - high 压力时自动跳过（节省成本）
    */
   enabledTiers: Array<'low' | 'medium' | 'high'>;
+  /**
+   * 预设列表（可选）。
+   * 支持多套预设，不同场景切换不同模型组合。
+   * 如不配置则使用 referenceModels + aggregatorModel 作为默认。
+   */
+  presets?: MoaPreset[];
+  /**
+   * 当前激活的预设名称（可选）。
+   * 为空时使用 referenceModels + aggregatorModel。
+   */
+  activePreset?: string;
 }
 
 /** 任务复杂度评估结果 */

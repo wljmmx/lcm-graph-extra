@@ -518,6 +518,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // ── 复杂度评估（始终执行，与 MoA 启用/失败无关） ──
     let complexityScore = 0;
     let complexityReasons: string[] = [];
+
+    // ── /moa 命令变量（在 try 块外声明，供 MoA pipeline 使用） ──
+    let forceMoa = false;
+    let cleanedQuery = '';
+    let moaPresetOverride: string | undefined;
+
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
       const { computeTaskComplexity } = await import('../moa/complexity.js');
@@ -537,6 +543,36 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         }
         return '';
       })();
+
+      // ── /moa 命令：显式强制触发 MoA（跳过复杂度阈值） ──
+      // 支持 /moa、/moa force、/moa <preset-name>
+      forceMoa = false;
+      cleanedQuery = queryText;
+      moaPresetOverride = undefined;
+      const moaCmdMatch = queryText.match(/^\/moa(?:\s+(\S+))?/i);
+      if (moaCmdMatch) {
+        forceMoa = true;
+        const subCmd = (moaCmdMatch[1] || '').trim().toLowerCase();
+        if (subCmd === 'force' || subCmd === 'status') {
+          // /moa force 或 /moa status — 不切预设
+          cleanedQuery = queryText.replace(/^\/moa\s+\S+\s*/i, '').trim();
+          if (!cleanedQuery) cleanedQuery = queryText;
+        } else if (subCmd && subCmd !== '') {
+          // /moa <preset-name> — 切换到指定预设
+          moaPresetOverride = subCmd;
+          cleanedQuery = queryText.replace(/^\/moa\s+\S+\s*/i, '').trim();
+          if (!cleanedQuery) cleanedQuery = queryText;
+        } else {
+          // /moa — 用当前预设强制触发
+          cleanedQuery = queryText.replace(/^\/moa\s*/i, '').trim();
+          if (!cleanedQuery) cleanedQuery = queryText;
+        }
+        ctx.logger?.info?.('[assemble] /moa command detected, forcing MoA', {
+          preset: moaPresetOverride ?? 'current',
+          originalLen: queryText.length,
+          cleanedLen: cleanedQuery.length,
+        });
+      }
 
       const complexity = computeTaskComplexity(
         queryText,
@@ -572,16 +608,17 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
         const { runMoaPipeline, buildMoaToolInstruction } = await import('../moa/orchestrator.js');
 
-        if (complexityScore >= moaConfig.complexityThreshold) {
+        if (complexityScore >= moaConfig.complexityThreshold || forceMoa) {
           ctx.logger?.info?.('[assemble] MoA triggered', {
             complexity: complexityScore,
-            reasons: complexityReasons,
+            reasons: forceMoa ? ['/moa command'] : complexityReasons,
+            forceMoa,
             mode: moaConfig.mode,
             refCount: moaConfig.referenceModels?.length ?? 0,
           });
 
-          // 提取查询文本
-          const queryText = (() => {
+          // 提取查询文本（/moa 命令时使用清理后的文本）
+          const queryText = forceMoa ? cleanedQuery : (() => {
             const lastMsg = finalMessages[finalMessages.length - 1];
             if (lastMsg?.role === 'user') {
               if (typeof lastMsg.content === 'string') return lastMsg.content;
@@ -628,7 +665,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             query: queryText,
             retrievalContext,
             conversationContext,
-            config: moaConfig,
+            config: moaPresetOverride
+              ? { ...moaConfig, activePreset: moaPresetOverride }
+              : moaConfig,
             api: ctx.api,
             logger: ctx.logger,
             signal,
