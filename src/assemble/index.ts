@@ -120,7 +120,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     _overheadCacheKey = (params as any).sessionKey ?? (params as any).conversationId ?? "default";
     const overheadTokens = getOverhead(_overheadCacheKey);
     const effectiveTokenCount = estimatedTokens + overheadTokens;
-    const tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
+    let tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
     tier = 'low';
     retrievalLimits = resolvedCtx.retrievalLimits;
@@ -268,6 +268,43 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               const recentRawCount = Math.min(messages.length, 8);
               const recentRawMsgs = messages.slice(-recentRawCount);
               finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ...recentRawMsgs];
+
+              // Re-evaluate pressure tier after successful compaction
+              // Compaction may have freed enough context to drop from high → medium/low
+              if (wm) {
+                const postCompactTokens = estimateTokensFromMessages(finalMessages);
+                const postCompactTokenRatio = contextWindow > 0 ? postCompactTokens / contextWindow : 0;
+                const postCompactUncompressed = getUncompressedMessageCount(conversationId);
+                const postCompactActive = postCompactUncompressed >= 0 ? postCompactUncompressed : finalMessages.length;
+
+                const newTier = determinePressureTier(postCompactActive, postCompactTokenRatio, {
+                  dedupRounds: wm.dedupRounds ?? 24,
+                  highPressureThreshold: wm.highPressureThreshold ?? 0.85,
+                  mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
+                });
+
+                if (newTier !== tier) {
+                  ctx.logger?.info?.('[assemble] tier re-evaluated after compaction', {
+                    oldTier: tier,
+                    newTier,
+                    oldTokenRatio: Number(tokenRatio.toFixed(3)),
+                    newTokenRatio: Number(postCompactTokenRatio.toFixed(3)),
+                  });
+                  tier = newTier;
+                  estimatedTokens = postCompactTokens;
+                  tokenRatio = postCompactTokenRatio;
+                  retrievalLimits = getRetrievalLimitsForTier(tier, {
+                    low: resolvedCtx.retrievalLimits,
+                    medium: { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
+                    high: { qmd: 1, graph: 1, exp: 0 },
+                  });
+                  maxContextChars = getMaxContextCharsForTier(tier, {
+                    low: resolvedCtx.maxContextChars.low,
+                    medium: resolvedCtx.maxContextChars.medium,
+                    high: wm?.maxContextChars?.high ?? 1_600,
+                  });
+                }
+              }
             } else {
               writeCompactionDebt(
                 conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
