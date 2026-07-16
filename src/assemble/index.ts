@@ -511,11 +511,15 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // 4.5 MoA (Mixture of Agents) 管道
     // 仅复杂任务 + 启用 tiers 时触发
     // 参考模型并行发散 → 聚合模型收敛裁决 → 结果存入缓存供 lcmg_moa_reply 工具读取
+    //
+    // 注意：复杂度评估和记录在 try 块外执行，确保每轮都记录，不因 MoA 失败而丢失
     // ==================================================================
+
+    // ── 复杂度评估（始终执行，与 MoA 启用/失败无关） ──
+    let complexityScore = 0;
+    let complexityReasons: string[] = [];
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
-
-      // 延迟导入避免循环依赖
       const { computeTaskComplexity } = await import('../moa/complexity.js');
       const { recordAllComplexity } = await import('../moa/perf-tracker.js');
 
@@ -534,27 +538,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         return '';
       })();
 
-      // 构建检索上下文
-      const retrievalContext = (() => {
-        const parts: string[] = [];
-        if (qmdResults?.length) {
-          parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
-        }
-        if (graphResults?.length) {
-          parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
-        }
-        if (expResults?.length) {
-          parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
-        }
-        return parts.join('\n\n');
-      })();
-
       const complexity = computeTaskComplexity(
         queryText,
         finalMessages,
         retrievalOutput.scenario ?? null,
         tier,
       );
+      complexityScore = complexity.score;
+      complexityReasons = complexity.reasons;
 
       // 记录全量复杂度评分（每轮 assemble 都记录，无论 MoA 是否启用/触发）
       recordAllComplexity(complexity.score);
@@ -565,6 +556,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         reasons: complexity.reasons,
         tier,
       });
+    } catch {
+      // 复杂度评估模块加载失败，不影响主流程
+    }
+
+    // ── MoA pipeline 执行（仅启用时） ──
+    try {
+      const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
 
       if (moaConfig?.enabled
           && Array.isArray(moaConfig?.referenceModels)
@@ -574,13 +572,43 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
         const { runMoaPipeline, buildMoaToolInstruction } = await import('../moa/orchestrator.js');
 
-        if (complexity.score >= moaConfig.complexityThreshold) {
+        if (complexityScore >= moaConfig.complexityThreshold) {
           ctx.logger?.info?.('[assemble] MoA triggered', {
-            complexity: complexity.score,
-            reasons: complexity.reasons,
+            complexity: complexityScore,
+            reasons: complexityReasons,
             mode: moaConfig.mode,
             refCount: moaConfig.referenceModels?.length ?? 0,
           });
+
+          // 提取查询文本
+          const queryText = (() => {
+            const lastMsg = finalMessages[finalMessages.length - 1];
+            if (lastMsg?.role === 'user') {
+              if (typeof lastMsg.content === 'string') return lastMsg.content;
+              if (Array.isArray(lastMsg.content)) {
+                return lastMsg.content
+                  .filter((p: any) => p?.type === 'text')
+                  .map((p: any) => p.text)
+                  .join('\n');
+              }
+            }
+            return '';
+          })();
+
+          // 构建检索上下文
+          const retrievalContext = (() => {
+            const parts: string[] = [];
+            if (qmdResults?.length) {
+              parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+            }
+            if (graphResults?.length) {
+              parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+            }
+            if (expResults?.length) {
+              parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
+            }
+            return parts.join('\n\n');
+          })();
 
           // 构建对话上下文（最近 3 轮用户/助手消息，帮助聚合模型理解讨论背景）
           const conversationContext = (() => {
@@ -604,7 +632,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             api: ctx.api,
             logger: ctx.logger,
             signal,
-            complexityScore: complexity.score,
+            complexityScore,
           });
 
           if (moaResult?.finalResponse) {
