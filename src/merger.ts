@@ -206,7 +206,7 @@ export class Merger {
     const seen = new Map<string, RetrievalResult>();
     for (const r of results) {
       // P1-2: 使用 md5 hash 生成 fallback key，避免 slice(0,80) 碰撞
-      const key = r.id || `${r.source}:${createHash('md5').update(r.content).digest('hex')}`;
+      const key = r.id || `${r.source}:${createHash('md5').update(r.content ?? '').digest('hex')}`;
       const existing = seen.get(key);
       if (!existing || r.score > existing.score) {
         seen.set(key, r);
