@@ -499,6 +499,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           tier,
         });
 
+        // 记录全量复杂度评分（无论是否触发 MoA，用于全量分布分析）
+        const { recordAllComplexity } = await import('../moa/perf-tracker.js');
+        recordAllComplexity(complexity.score);
+
         if (complexity.score >= moaConfig.complexityThreshold) {
           ctx.logger?.info?.('[assemble] MoA triggered', {
             complexity: complexity.score,

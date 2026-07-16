@@ -297,6 +297,9 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
           avgComplexityScore: 0,
           complexityPercentiles: { p50: 0, p90: 0, p95: 0, p99: 0 },
           complexityHistory: [],
+          allComplexityDistribution: { low: 0, medium: 0, high: 0 },
+          allComplexityPercentiles: { p50: 0, p90: 0, p95: 0, p99: 0 },
+          allComplexityHistory: [],
         },
       };
     } finally {

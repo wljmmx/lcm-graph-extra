@@ -135,8 +135,24 @@ export interface MoaPerformanceSummary {
     p95: number;
     p99: number;
   };
-  /** 最近 N 次复杂度评分历史（用于趋势图） */
+  /** 最近 N 次复杂度评分历史（MoA 触发，用于趋势图） */
   complexityHistory: Array<{ timestamp: number; score: number }>;
+  // ===== v2.4.0: 全量复杂度（所有 assemble 调用，含未触发 MoA 的） =====
+  /** 全量复杂度分布（所有 assemble） */
+  allComplexityDistribution: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  /** 全量复杂度百分位 */
+  allComplexityPercentiles: {
+    p50: number;
+    p90: number;
+    p95: number;
+    p99: number;
+  };
+  /** 全量复杂度历史（最近 50 条，含时间戳） */
+  allComplexityHistory: Array<{ timestamp: number; score: number }>;
 }
 
 // ============================================================================
@@ -145,6 +161,21 @@ export interface MoaPerformanceSummary {
 
 const MAX_RECORDS = 50;
 const runRecords: MoaRunRecord[] = [];
+
+// ============================================================================
+// 全量复杂度记录器（所有 assemble 调用，含未触发 MoA 的）
+// ============================================================================
+
+const MAX_ALL_COMPLEXITY = 50;
+const allComplexityRecords: Array<{ timestamp: number; score: number }> = [];
+
+/** 记录每次 assemble 的复杂度评分（无论是否触发 MoA） */
+export function recordAllComplexity(score: number): void {
+  allComplexityRecords.push({ timestamp: Date.now(), score });
+  if (allComplexityRecords.length > MAX_ALL_COMPLEXITY) {
+    allComplexityRecords.shift();
+  }
+}
 
 /**
  * 记录一次 MoA 管道执行。
@@ -254,6 +285,21 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     .slice(-20)
     .map((r) => ({ timestamp: r.timestamp, score: r.complexityScore! }));
 
+  // 全量复杂度统计（所有 assemble 调用，含未触发 MoA 的）
+  const allScores = allComplexityRecords.map((r) => r.score);
+  const allComplexityP = percentiles(allScores);
+  const allComplexityDistribution = {
+    low: 0,
+    medium: 0,
+    high: 0,
+  };
+  for (const s of allScores) {
+    if (s < 0.4) allComplexityDistribution.low++;
+    else if (s < 0.7) allComplexityDistribution.medium++;
+    else allComplexityDistribution.high++;
+  }
+  const allComplexityHistory = [...allComplexityRecords].slice(-30);
+
   // 降级回退次数：MoA 触发但最终没有结果（失败）
   const fallbackCount = failedRecords.length;
 
@@ -281,6 +327,9 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     avgComplexityScore,
     complexityPercentiles: { p50: complexityP.p50, p90: complexityP.p90, p95: complexityP.p95, p99: complexityP.p99 },
     complexityHistory,
+    allComplexityDistribution,
+    allComplexityPercentiles: { p50: allComplexityP.p50, p90: allComplexityP.p90, p95: allComplexityP.p95, p99: allComplexityP.p99 },
+    allComplexityHistory,
   };
 }
 

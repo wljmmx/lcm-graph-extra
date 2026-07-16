@@ -161,6 +161,9 @@ export interface MoaPerformanceData {
     p99: number;
   };
   complexityHistory: Array<{ timestamp: number; score: number }>;
+  allComplexityDistribution: { low: number; medium: number; high: number };
+  allComplexityPercentiles: { p50: number; p90: number; p95: number; p99: number };
+  allComplexityHistory: Array<{ timestamp: number; score: number }>;
 }
 
 export interface MoaPerformanceResponse {

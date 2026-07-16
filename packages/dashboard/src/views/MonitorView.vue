@@ -510,60 +510,89 @@ const moaErrorItems = computed(() => {
     .sort((a, b) => b[1] - a[1]);
 });
 
-// ===== MoA 复杂度趋势图 =====
+// ===== MoA 复杂度趋势图（全量 + MoA 触发叠加） =====
 const moaComplexityTrendOption = computed(() => {
-  const history = moaPerf.value?.complexityHistory;
-  if (!history || history.length === 0) return {};
+  const allHistory = moaPerf.value?.allComplexityHistory;
+  const moaHistory = moaPerf.value?.complexityHistory;
+  if (!allHistory || allHistory.length === 0) return {};
+
+  const series: any[] = [{
+    name: '全量复杂度',
+    type: 'scatter',
+    data: allHistory.map((h) => [h.timestamp, h.score]),
+    symbolSize: 6,
+    itemStyle: { color: '#2080f0', opacity: 0.5 },
+  }];
+
+  if (moaHistory && moaHistory.length > 0) {
+    series.push({
+      name: 'MoA 触发',
+      type: 'scatter',
+      data: moaHistory.map((h) => [h.timestamp, h.score]),
+      symbolSize: 10,
+      itemStyle: { color: '#d03050' },
+    });
+  }
+
   return {
-    title: { text: '复杂度评分趋势', left: 'center', textStyle: { fontSize: 13 } },
-    tooltip: {
-      trigger: 'axis',
-      formatter: (params: any) => {
-        const p = Array.isArray(params) ? params[0] : params;
-        return `时间: ${formatTimeHMS(p.data[0])}<br/>复杂度: ${(p.data[1] as number).toFixed(3)}`;
-      },
-    },
+    title: { text: '复杂度评分趋势（全量 vs MoA 触发）', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: { trigger: 'axis', formatter: (params: any) => {
+      const items = Array.isArray(params) ? params : [params];
+      let html = `时间: ${formatTimeHMS(items[0].data[0])}<br/>`;
+      for (const p of items) {
+        html += `${p.marker}${p.seriesName}: ${(p.data[1] as number).toFixed(3)}<br/>`;
+      }
+      return html;
+    }},
+    legend: { data: ['全量复杂度', 'MoA 触发'], bottom: 0 },
     xAxis: { type: 'time', name: '时间', axisLabel: { formatter: (v: number) => formatTimeHMS(v) } },
     yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
-    series: [{
-      name: '复杂度评分',
-      type: 'line',
-      data: history.map((h) => [h.timestamp, h.score]),
-      smooth: true,
-      markLine: { silent: true, data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' }, lineStyle: { color: '#f0a020', type: 'dashed' } }] },
-      markArea: {
-        silent: true,
-        data: [
-          [{ yAxis: 0, itemStyle: { color: 'rgba(24, 160, 88, 0.06)' } }, { yAxis: 0.4 }],
-          [{ yAxis: 0.4, itemStyle: { color: 'rgba(240, 160, 32, 0.06)' } }, { yAxis: 0.7 }],
-          [{ yAxis: 0.7, itemStyle: { color: 'rgba(208, 48, 80, 0.06)' } }, { yAxis: 1 }],
-        ],
-      },
-    }],
-    grid: { left: 50, right: 30, bottom: 40, top: 45 },
+    series,
+    markLine: { silent: true, data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' }, lineStyle: { color: '#f0a020', type: 'dashed' } }] },
+    grid: { left: 50, right: 30, bottom: 45, top: 45 },
   };
 });
 
-// ===== MoA 复杂度分布图 =====
+// ===== MoA 复杂度分布图（全量 vs MoA 触发 分组对比） =====
 const moaComplexityDistOption = computed(() => {
-  const dist = moaPerf.value?.complexityDistribution;
-  if (!dist) return {};
+  const moaDist = moaPerf.value?.complexityDistribution;
+  const allDist = moaPerf.value?.allComplexityDistribution;
+  if (!allDist) return {};
+
+  const allTotal = allDist.low + allDist.medium + allDist.high;
+  const moaTotal = moaDist ? moaDist.low + moaDist.medium + moaDist.high : 0;
+
   return {
-    title: { text: '复杂度触发分布', left: 'center', textStyle: { fontSize: 13 } },
-    tooltip: { trigger: 'axis' },
+    title: { text: '复杂度分布（全量 vs MoA 触发）', left: 'center', textStyle: { fontSize: 13 } },
+    tooltip: { trigger: 'axis', formatter: (params: any) => {
+      let html = '';
+      for (const p of params) {
+        html += `${p.marker}${p.seriesName}: ${p.value}<br/>`;
+      }
+      html += `全量总计: ${allTotal}<br/>`;
+      html += `MoA 触发: ${moaTotal} (${allTotal > 0 ? Math.round(moaTotal / allTotal * 100) : 0}%)`;
+      return html;
+    }},
+    legend: { data: ['全量', 'MoA 触发'], bottom: 0 },
     xAxis: { type: 'category', data: ['低 (0-0.4)', '中 (0.4-0.7)', '高 (0.7-1.0)'], axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', name: '运行次数', minInterval: 1 },
-    series: [{
-      name: '运行次数',
-      type: 'bar',
-      data: [
-        { value: dist.low, itemStyle: { color: '#18a058' } },
-        { value: dist.medium, itemStyle: { color: '#f0a020' } },
-        { value: dist.high, itemStyle: { color: '#d03050' } },
-      ],
-      label: { show: true, position: 'top', formatter: '{c}' },
-    }],
-    grid: { left: 50, right: 30, bottom: 40, top: 45 },
+    yAxis: { type: 'value', name: '次数', minInterval: 1 },
+    series: [
+      {
+        name: '全量',
+        type: 'bar',
+        data: [allDist.low, allDist.medium, allDist.high],
+        itemStyle: { color: '#2080f0' },
+        label: { show: true, position: 'top', formatter: '{c}' },
+      },
+      {
+        name: 'MoA 触发',
+        type: 'bar',
+        data: moaDist ? [moaDist.low, moaDist.medium, moaDist.high] : [0, 0, 0],
+        itemStyle: { color: '#d03050' },
+        label: { show: true, position: 'top', formatter: '{c}' },
+      },
+    ],
+    grid: { left: 50, right: 30, bottom: 60, top: 45 },
   };
 });
 
