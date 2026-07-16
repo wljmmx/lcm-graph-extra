@@ -508,6 +508,6 @@ export function defaultMoaConfig(): MoaConfig {
       timeoutMs: 1_200_000,
       keepAlive: '1h',
     },
-    enabledTiers: ['low'],
+    enabledTiers: ['low', 'medium'],
   };
 }

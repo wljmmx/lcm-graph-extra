@@ -65,7 +65,7 @@ export interface MoaConfig {
    * - 仅在指定 tier 启用 MoA
    * - high 压力时自动跳过（节省成本）
    */
-  enabledTiers: Array<'low' | 'medium'>;
+  enabledTiers: Array<'low' | 'medium' | 'high'>;
 }
 
 /** 任务复杂度评估结果 */

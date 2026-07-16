@@ -90,23 +90,21 @@ export function computeTaskComplexity(
   }
 
   // =========================================================================
-  // 1. 压力层级控制：high 压力时跳过 MoA
+  // 1. 压力层级控制：high 压力时跳过 MoA（资源保护）
   // =========================================================================
   if (tier === 'high') {
     return { score: 0, reasons: ['高压模式跳过 MoA'] };
   }
-  // medium 压力时降低阈值（提高触发门槛）
-  const tierMultiplier = tier === 'medium' ? 0.5 : 1.0;
 
   // =========================================================================
   // 2. 查询长度分析
   // =========================================================================
   const queryLen = (query || '').length;
   if (queryLen > 500) {
-    score += 0.2 * tierMultiplier;
+    score += 0.2;
     reasons.push('长查询(>500字符)');
   } else if (queryLen > 200) {
-    score += 0.1 * tierMultiplier;
+    score += 0.1;
     reasons.push('中长查询(200-500字符)');
   }
 
@@ -115,7 +113,7 @@ export function computeTaskComplexity(
   // =========================================================================
   for (const pattern of MULTI_STEP_KEYWORDS) {
     if (pattern.test(query)) {
-      score += 0.2 * tierMultiplier;
+      score += 0.2;
       reasons.push('多步骤指令');
       break;
     }
@@ -126,7 +124,7 @@ export function computeTaskComplexity(
   // =========================================================================
   for (const pattern of CODE_GEN_VERBS) {
     if (pattern.test(query)) {
-      score += 0.15 * tierMultiplier;
+      score += 0.15;
       reasons.push('代码生成任务');
       break;
     }
@@ -137,7 +135,7 @@ export function computeTaskComplexity(
   // =========================================================================
   for (const pattern of ARCHITECTURE_KEYWORDS) {
     if (pattern.test(query)) {
-      score += 0.2 * tierMultiplier;
+      score += 0.2;
       reasons.push('架构设计/技术选型');
       break;
     }
@@ -148,7 +146,7 @@ export function computeTaskComplexity(
   // =========================================================================
   for (const pattern of CROSS_MODULE_KEYWORDS) {
     if (pattern.test(query)) {
-      score += 0.15 * tierMultiplier;
+      score += 0.15;
       reasons.push('跨模块/多文件操作');
       break;
     }
@@ -158,7 +156,7 @@ export function computeTaskComplexity(
   // 7. 场景标签加权
   // =========================================================================
   if (scenario && COMPLEX_SCENARIOS.has(scenario)) {
-    score += 0.2 * tierMultiplier;
+    score += 0.2;
     reasons.push('复杂场景: ' + scenario);
   }
 
@@ -167,10 +165,10 @@ export function computeTaskComplexity(
   // =========================================================================
   const msgCount = Array.isArray(messages) ? messages.length : 0;
   if (msgCount > 20) {
-    score += 0.15 * tierMultiplier;
+    score += 0.15;
     reasons.push('深度多轮对话(>20条)');
   } else if (msgCount > 10) {
-    score += 0.1 * tierMultiplier;
+    score += 0.1;
     reasons.push('多轮对话(10-20条)');
   }
 
