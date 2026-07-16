@@ -510,44 +510,64 @@ const moaErrorItems = computed(() => {
     .sort((a, b) => b[1] - a[1]);
 });
 
-// ===== MoA 复杂度趋势图（全量 + MoA 触发叠加） =====
+// ===== MoA 复杂度趋势图（按小时/天聚合，全量 vs MoA 触发） =====
 const moaComplexityTrendOption = computed(() => {
-  const allHistory = moaPerf.value?.allComplexityHistory;
+  const hourly = moaPerf.value?.complexityHourlyBuckets;
   const moaHistory = moaPerf.value?.complexityHistory;
-  if (!allHistory || allHistory.length === 0) return {};
+  if (!hourly || hourly.length === 0) return {};
 
-  const series: any[] = [{
-    name: '全量复杂度',
-    type: 'scatter',
-    data: allHistory.map((h) => [h.timestamp, h.score]),
+  // 按小时聚合全量数据
+  const allSeries = {
+    name: '全量 (小时均)',
+    type: 'line',
+    data: hourly.map((b) => [b.hour, b.avg]),
+    smooth: true,
+    lineStyle: { color: '#2080f0', width: 2 },
+    itemStyle: { color: '#2080f0' },
+    symbol: 'circle',
     symbolSize: 6,
-    itemStyle: { color: '#2080f0', opacity: 0.5 },
-  }];
+  };
 
-  if (moaHistory && moaHistory.length > 0) {
-    series.push({
-      name: 'MoA 触发',
-      type: 'scatter',
-      data: moaHistory.map((h) => [h.timestamp, h.score]),
-      symbolSize: 10,
-      itemStyle: { color: '#d03050' },
-    });
+  // MoA 触发叠加（按小时桶）
+  const moaByHour: Map<string, number[]> = new Map();
+  if (moaHistory) {
+    for (const h of moaHistory) {
+      const d = new Date(h.timestamp);
+      const key = `${String(d.getHours()).padStart(2, '0')}:00`;
+      if (!moaByHour.has(key)) moaByHour.set(key, []);
+      moaByHour.get(key)!.push(h.score);
+    }
   }
+  const moaSeries = {
+    name: 'MoA 触发 (小时均)',
+    type: 'line',
+    data: hourly.map((b) => {
+      const scores = moaByHour.get(b.hour) ?? [];
+      return [b.hour, scores.length > 0 ? Math.round(scores.reduce((a, c) => a + c, 0) / scores.length * 1000) / 1000 : null];
+    }),
+    smooth: true,
+    lineStyle: { color: '#d03050', width: 2 },
+    itemStyle: { color: '#d03050' },
+    symbol: 'diamond',
+    symbolSize: 8,
+    connectNulls: false,
+  };
 
   return {
-    title: { text: '复杂度评分趋势（全量 vs MoA 触发）', left: 'center', textStyle: { fontSize: 13 } },
+    title: { text: '复杂度趋势（按小时聚合）', left: 'center', textStyle: { fontSize: 13 } },
     tooltip: { trigger: 'axis', formatter: (params: any) => {
       const items = Array.isArray(params) ? params : [params];
-      let html = `时间: ${formatTimeHMS(items[0].data[0])}<br/>`;
+      let html = `${items[0].axisValue}<br/>`;
       for (const p of items) {
-        html += `${p.marker}${p.seriesName}: ${(p.data[1] as number).toFixed(3)}<br/>`;
+        const val = p.data[1];
+        html += `${p.marker}${p.seriesName}: ${val !== null && val !== undefined ? (val as number).toFixed(3) : '—'}<br/>`;
       }
       return html;
     }},
-    legend: { data: ['全量复杂度', 'MoA 触发'], bottom: 0 },
-    xAxis: { type: 'time', name: '时间', axisLabel: { formatter: (v: number) => formatTimeHMS(v) } },
+    legend: { data: ['全量 (小时均)', 'MoA 触发 (小时均)'], bottom: 0 },
+    xAxis: { type: 'category', data: hourly.map((b) => b.hour), axisLabel: { fontSize: 10 } },
     yAxis: { type: 'value', name: '评分', min: 0, max: 1, axisLabel: { formatter: (v: number) => v.toFixed(1) } },
-    series,
+    series: [allSeries, moaSeries],
     markLine: { silent: true, data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' }, lineStyle: { color: '#f0a020', type: 'dashed' } }] },
     grid: { left: 50, right: 30, bottom: 45, top: 45 },
   };

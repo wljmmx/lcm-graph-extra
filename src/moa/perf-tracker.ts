@@ -153,6 +153,10 @@ export interface MoaPerformanceSummary {
   };
   /** 全量复杂度历史（最近 50 条，含时间戳） */
   allComplexityHistory: Array<{ timestamp: number; score: number }>;
+  /** 按小时聚合的复杂度（最近 24 小时） */
+  complexityHourlyBuckets: Array<{ hour: string; avg: number; count: number; min: number; max: number }>;
+  /** 按天聚合的复杂度（最近 7 天） */
+  complexityDailyBuckets: Array<{ date: string; avg: number; count: number; min: number; max: number }>;
 }
 
 // ============================================================================
@@ -217,6 +221,75 @@ export function recordMoaRun(
 
   // 异步持久化到文件（不阻塞管道）
   persistAsync();
+}
+
+// ============================================================================
+// 时间分桶工具
+// ============================================================================
+
+function buildHourlyBuckets(
+  records: Array<{ timestamp: number; score: number }>,
+  hours: number,
+): Array<{ hour: string; avg: number; count: number; min: number; max: number }> {
+  const now = Date.now();
+  const cutoff = now - hours * 3600_000;
+  const buckets = new Map<string, number[]>();
+
+  for (const r of records) {
+    if (r.timestamp < cutoff) continue;
+    const d = new Date(r.timestamp);
+    const key = `${String(d.getHours()).padStart(2, '0')}:00`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(r.score);
+  }
+
+  const result: Array<{ hour: string; avg: number; count: number; min: number; max: number }> = [];
+  const currentHour = new Date().getHours();
+  for (let i = hours - 1; i >= 0; i--) {
+    const h = (currentHour - i + 24) % 24;
+    const key = `${String(h).padStart(2, '0')}:00`;
+    const scores = buckets.get(key) ?? [];
+    result.push({
+      hour: key,
+      avg: scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 1000) / 1000 : 0,
+      count: scores.length,
+      min: scores.length > 0 ? Math.round(Math.min(...scores) * 1000) / 1000 : 0,
+      max: scores.length > 0 ? Math.round(Math.max(...scores) * 1000) / 1000 : 0,
+    });
+  }
+  return result;
+}
+
+function buildDailyBuckets(
+  records: Array<{ timestamp: number; score: number }>,
+  days: number,
+): Array<{ date: string; avg: number; count: number; min: number; max: number }> {
+  const now = Date.now();
+  const cutoff = now - days * 86_400_000;
+  const buckets = new Map<string, number[]>();
+
+  for (const r of records) {
+    if (r.timestamp < cutoff) continue;
+    const d = new Date(r.timestamp);
+    const key = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(r.score);
+  }
+
+  const result: Array<{ date: string; avg: number; count: number; min: number; max: number }> = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now - i * 86_400_000);
+    const key = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const scores = buckets.get(key) ?? [];
+    result.push({
+      date: key,
+      avg: scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length * 1000) / 1000 : 0,
+      count: scores.length,
+      min: scores.length > 0 ? Math.round(Math.min(...scores) * 1000) / 1000 : 0,
+      max: scores.length > 0 ? Math.round(Math.max(...scores) * 1000) / 1000 : 0,
+    });
+  }
+  return result;
 }
 
 /**
@@ -300,6 +373,12 @@ export function getMoaPerformance(): MoaPerformanceSummary {
   }
   const allComplexityHistory = [...allComplexityRecords].slice(-30);
 
+  // 按小时聚合（最近 24 小时）
+  const complexityHourlyBuckets = buildHourlyBuckets(allComplexityRecords, 24);
+
+  // 按天聚合（最近 7 天）
+  const complexityDailyBuckets = buildDailyBuckets(allComplexityRecords, 7);
+
   // 降级回退次数：MoA 触发但最终没有结果（失败）
   const fallbackCount = failedRecords.length;
 
@@ -330,6 +409,8 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     allComplexityDistribution,
     allComplexityPercentiles: { p50: allComplexityP.p50, p90: allComplexityP.p90, p95: allComplexityP.p95, p99: allComplexityP.p99 },
     allComplexityHistory,
+    complexityHourlyBuckets,
+    complexityDailyBuckets,
   };
 }
 

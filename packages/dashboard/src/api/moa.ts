@@ -164,6 +164,8 @@ export interface MoaPerformanceData {
   allComplexityDistribution: { low: number; medium: number; high: number };
   allComplexityPercentiles: { p50: number; p90: number; p95: number; p99: number };
   allComplexityHistory: Array<{ timestamp: number; score: number }>;
+  complexityHourlyBuckets: Array<{ hour: string; avg: number; count: number; min: number; max: number }>;
+  complexityDailyBuckets: Array<{ date: string; avg: number; count: number; min: number; max: number }>;
 }
 
 export interface MoaPerformanceResponse {

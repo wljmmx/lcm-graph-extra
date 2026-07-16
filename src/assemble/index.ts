@@ -445,63 +445,65 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // ==================================================================
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
+
+      // 延迟导入避免循环依赖
+      const { computeTaskComplexity } = await import('../moa/complexity.js');
+      const { recordAllComplexity } = await import('../moa/perf-tracker.js');
+
+      // 提取查询文本
+      const queryText = (() => {
+        const lastMsg = finalMessages[finalMessages.length - 1];
+        if (lastMsg?.role === 'user') {
+          if (typeof lastMsg.content === 'string') return lastMsg.content;
+          if (Array.isArray(lastMsg.content)) {
+            return lastMsg.content
+              .filter((p: any) => p?.type === 'text')
+              .map((p: any) => p.text)
+              .join('\n');
+          }
+        }
+        return '';
+      })();
+
+      // 构建检索上下文
+      const retrievalContext = (() => {
+        const parts: string[] = [];
+        if (qmdResults?.length) {
+          parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+        }
+        if (graphResults?.length) {
+          parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+        }
+        if (expResults?.length) {
+          parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
+        }
+        return parts.join('\n\n');
+      })();
+
+      const complexity = computeTaskComplexity(
+        queryText,
+        finalMessages,
+        retrievalOutput.scenario ?? null,
+        tier,
+      );
+
+      // 记录全量复杂度评分（每轮 assemble 都记录，无论 MoA 是否启用/触发）
+      recordAllComplexity(complexity.score);
+
+      ctx.logger?.debug?.('[assemble] MoA complexity check', {
+        score: complexity.score,
+        threshold: moaConfig?.complexityThreshold ?? 0.6,
+        reasons: complexity.reasons,
+        tier,
+      });
+
       if (moaConfig?.enabled
           && Array.isArray(moaConfig?.referenceModels)
           && moaConfig.referenceModels.length >= 2
           && moaConfig.referenceModels.length <= 4
           && moaConfig.enabledTiers?.includes(tier)) {
 
-        // 延迟导入避免循环依赖
-        const { computeTaskComplexity } = await import('../moa/complexity.js');
         const { runMoaPipeline, buildMoaToolInstruction } = await import('../moa/orchestrator.js');
-
-        // 提取查询文本
-        const queryText = (() => {
-          const lastMsg = finalMessages[finalMessages.length - 1];
-          if (lastMsg?.role === 'user') {
-            if (typeof lastMsg.content === 'string') return lastMsg.content;
-            if (Array.isArray(lastMsg.content)) {
-              return lastMsg.content
-                .filter((p: any) => p?.type === 'text')
-                .map((p: any) => p.text)
-                .join('\n');
-            }
-          }
-          return '';
-        })();
-
-        // 构建检索上下文
-        const retrievalContext = (() => {
-          const parts: string[] = [];
-          if (qmdResults?.length) {
-            parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
-          }
-          if (graphResults?.length) {
-            parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
-          }
-          if (expResults?.length) {
-            parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
-          }
-          return parts.join('\n\n');
-        })();
-
-        const complexity = computeTaskComplexity(
-          queryText,
-          finalMessages,
-          retrievalOutput.scenario ?? null,
-          tier,
-        );
-
-        ctx.logger?.debug?.('[assemble] MoA complexity check', {
-          score: complexity.score,
-          threshold: moaConfig.complexityThreshold,
-          reasons: complexity.reasons,
-          tier,
-        });
-
-        // 记录全量复杂度评分（无论是否触发 MoA，用于全量分布分析）
-        const { recordAllComplexity } = await import('../moa/perf-tracker.js');
-        recordAllComplexity(complexity.score);
 
         if (complexity.score >= moaConfig.complexityThreshold) {
           ctx.logger?.info?.('[assemble] MoA triggered', {
