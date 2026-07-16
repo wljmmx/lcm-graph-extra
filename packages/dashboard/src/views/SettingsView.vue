@@ -697,7 +697,12 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
       </NSpace>
 
       <!-- v1.1.0-5: 能力档次切换（从维护页移入） -->
-      <CapabilityProfileSwitch style="margin-top: 16px" />
+      <NCard title="能力配置" size="small" style="margin-top: 16px">
+        <div class="setting-desc" style="margin-bottom: 12px">
+          根据硬件资源选择合适的能力档次，影响 MoA 并行度与检索策略。
+        </div>
+        <CapabilityProfileSwitch />
+      </NCard>
     </template>
   </div>
 

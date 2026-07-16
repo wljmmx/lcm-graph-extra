@@ -14,7 +14,7 @@
  *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
  *          agent.error → 警告提示。
  */
-import { computed, ref } from 'vue';
+import { computed, ref, h } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
 import {
   NGrid,
@@ -31,6 +31,8 @@ import {
   NTabPane,
   NSelect,
   NTable,
+  NDivider,
+  NButton,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
 import KpiCard from '../components/KpiCard.vue';
@@ -554,7 +556,7 @@ const moaComplexityTrendOption = computed(() => {
   };
 
   return {
-    title: { text: '复杂度趋势（按小时聚合）', left: 'center', textStyle: { fontSize: 13 } },
+    title: undefined,
     tooltip: { trigger: 'axis', formatter: (params: any) => {
       const items = Array.isArray(params) ? params : [params];
       let html = `${items[0].axisValue}<br/>`;
@@ -583,7 +585,7 @@ const moaComplexityDistOption = computed(() => {
   const moaTotal = moaDist ? moaDist.low + moaDist.medium + moaDist.high : 0;
 
   return {
-    title: { text: '复杂度分布（全量 vs MoA 触发）', left: 'center', textStyle: { fontSize: 13 } },
+    title: undefined,
     tooltip: { trigger: 'axis', formatter: (params: any) => {
       let html = '';
       for (const p of params) {
@@ -616,13 +618,24 @@ const moaComplexityDistOption = computed(() => {
   };
 });
 
-// ===== MoA 延迟阶段分解图 =====
+// ===== MoA 最近运行表格列 =====
+const moaRunsColumns = computed(() => [
+  { title: '时间', key: 'timestamp', width: 80, render: (row: any) => h('span', { class: 'mono' }, formatTimeHMS(row.timestamp)) },
+  { title: '查询', key: 'queryPreview', ellipsis: { tooltip: true }, render: (row: any) => row.queryPreview.slice(0, 50) },
+  { title: '复杂度', key: 'complexityScore', width: 80, render: (row: any) => row.complexityScore !== undefined ? row.complexityScore.toFixed(3) : '—' },
+  { title: '模式', key: 'mode', width: 80, render: (row: any) => h(NTag, { size: 'tiny', type: row.mode === 'parallel' ? 'info' : 'default' }, { default: () => row.mode }) },
+  { title: '状态', key: 'success', width: 70, render: (row: any) => h(NTag, { size: 'tiny', type: row.success ? 'success' : 'error' }, { default: () => row.success ? '成功' : '失败' }) },
+  { title: '总耗时', key: 'totalMs', width: 80, render: (row: any) => h('span', { class: 'mono' }, formatMs(row.totalMs)) },
+  { title: '参考', key: 'refCount', width: 120, render: (row: any) => h('span', { class: 'mono' }, `${row.validRefCount}/${row.refCount} (${formatMs(row.refMs)})`) },
+  { title: '聚合', key: 'aggMs', width: 100, render: (row: any) => h('span', { class: 'mono' }, formatMs(row.aggMs)) },
+  { title: 'Tokens', key: 'totalTokens', width: 80, render: (row: any) => h('span', { class: 'mono' }, formatTokens(row.totalTokens)) },
+]);
 const moaLatencyPhaseOption = computed(() => {
   const runs = moaPerf.value?.recentRuns;
   if (!runs || runs.length === 0) return {};
   const data = [...runs].slice(0, 10).reverse();
   return {
-    title: { text: '最近 10 次延迟阶段分解', left: 'center', textStyle: { fontSize: 13 } },
+    title: undefined,
     tooltip: { trigger: 'axis', formatter: (params: any) => { let h = params[0].name + '<br/>'; for (const p of params) h += `${p.marker}${p.seriesName}: ${Number(p.value).toFixed(0)}ms<br/>`; return h; } },
     legend: { data: ['参考模型', '聚合模型'], bottom: 0 },
     xAxis: { type: 'category', data: data.map((r) => r.queryPreview.slice(0, 16) + (r.queryPreview.length > 16 ? '...' : '')), axisLabel: { fontSize: 10, rotate: 30 } },
@@ -652,10 +665,10 @@ const moaLatencyPhaseOption = computed(() => {
       style="margin-top: 12px"
       aria-label="监控视图分组"
     >
-      <!-- ===== Tab 1: KPI 概览 ===== -->
+      <!-- ===== Tab 1: 总览（KPI + 时序图） ===== -->
       <NTabPane
-        name="kpi"
-        tab="KPI 概览"
+        name="overview"
+        tab="总览"
         display-directive="show"
       >
         <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
@@ -695,7 +708,6 @@ const moaLatencyPhaseOption = computed(() => {
           </NGi>
         </NGrid>
 
-        <!-- E1 修复: 接口报错时显式提示，避免用户误判"无数据" -->
         <NAlert
           v-if="latestIsError"
           type="error"
@@ -732,8 +744,6 @@ const moaLatencyPhaseOption = computed(() => {
         >
           后端 /api/health/history 不可达。
         </NAlert>
-
-        <!-- 首次加载提示 -->
         <NAlert
           v-if="latestLoading && !latestData"
           type="info"
@@ -741,25 +751,10 @@ const moaLatencyPhaseOption = computed(() => {
           title="正在加载最新健康指标…"
           style="margin-top: 12px"
         />
-      </NTabPane>
 
-      <!-- ===== Tab 2: 时序图 ===== -->
-      <NTabPane
-        name="charts"
-        tab="时序图"
-        display-directive="show"
-      >
-        <!-- 错误态穿透（H2 修复）：接口报错时在该 Tab 顶部提示，而非混入"无历史数据" -->
-        <NAlert
-          v-if="historyIsError"
-          type="error"
-          :show-icon="true"
-          title="时序图历史加载失败"
-          style="margin-bottom: 12px"
-        >
-          后端 /api/health/history 不可达。服务恢复后将自动重试（每 60 秒轮询）。
-        </NAlert>
-        <!-- 时间范围 + 统计粒度选择器（两个独立维度） -->
+        <NDivider style="margin: 16px 0" />
+
+        <!-- 时间范围 + 统计粒度 -->
         <div class="granularity-bar">
           <span class="granularity-label">时间范围：</span>
           <NSelect
@@ -780,7 +775,6 @@ const moaLatencyPhaseOption = computed(() => {
           </span>
         </div>
         <NSpace vertical :size="12">
-          <!-- 压力信号（全宽） -->
           <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
             <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
             <div v-else-if="historyLoading" class="chart-loading">
@@ -792,8 +786,6 @@ const moaLatencyPhaseOption = computed(() => {
               style="padding: 24px 0"
             />
           </NCard>
-
-          <!-- 检索延迟 + tier 分布（2 列） -->
           <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
             <NGi>
               <NCard title="检索延迟（Assemble 折线 + L2/L3/L4 独立柱）" size="small">
@@ -823,9 +815,14 @@ const moaLatencyPhaseOption = computed(() => {
             </NGi>
           </NGrid>
         </NSpace>
+        <div style="margin-top: 4px; font-size: var(--fs-caption); color: var(--color-text-muted);">
+          最近更新: {{ historyLastUpdated || '—' }}
+        </div>
       </NTabPane>
 
-      <!-- ===== Tab 3: 状态面板 ===== -->
+      
+
+      
       <NTabPane
         name="panels"
         tab="状态面板"
@@ -1150,7 +1147,7 @@ const moaLatencyPhaseOption = computed(() => {
       </NGrid>
       </NTabPane>
 
-      <!-- ===== Tab 4: MoA 性能 ===== -->
+      <!-- ===== Tab 3: MoA 性能 ===== -->
       <NTabPane
         name="moa"
         tab="MoA 性能"
@@ -1162,87 +1159,126 @@ const moaLatencyPhaseOption = computed(() => {
 
         <template v-else-if="moaPerf">
           <!-- KPI 概览行 -->
-          <NGrid :cols="'1 s:2 m:5'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+          <NGrid :cols="'1 s:2 m:3'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <NGi>
-              <NCard size="small">
-                <div class="stat-card">
-                  <span class="stat-label">总运行次数</span>
-                  <span class="stat-value">{{ moaPerf.totalRuns }}</span>
-                  <span class="stat-detail">
+              <KpiCard label="总运行次数" :value="moaPerf.totalRuns" :threshold="0">
+                <template #detail>
+                  <NSpace :size="4">
                     <NTag size="tiny" type="success">{{ moaPerf.successRuns }} 成功</NTag>
                     <NTag v-if="moaPerf.failedRuns > 0" size="tiny" type="error">{{ moaPerf.failedRuns }} 失败</NTag>
                     <NTag v-if="moaPerf.fallbackCount > 0" size="tiny" type="warning">{{ moaPerf.fallbackCount }} 回退</NTag>
-                  </span>
-                </div>
-              </NCard>
+                  </NSpace>
+                </template>
+              </KpiCard>
             </NGi>
             <NGi>
-              <NCard size="small">
-                <div class="stat-card">
-                  <span class="stat-label">成功率</span>
-                  <span class="stat-value">
-                    {{ moaPerf.totalRuns > 0 ? moaSuccessRate.toFixed(0) : '-' }}%
-                  </span>
-                  <span class="stat-detail">
-                    <NTag size="tiny" :type="moaSuccessRateType">{{ moaSuccessRate >= 90 ? '健康' : moaSuccessRate >= 70 ? '注意' : '告警' }}</NTag>
-                  </span>
-                </div>
-              </NCard>
+              <KpiCard
+                label="成功率"
+                :value="moaPerf.totalRuns > 0 ? moaSuccessRate : 0"
+                unit="%"
+                :threshold="90"
+              >
+                <template #detail>
+                  <NTag size="tiny" :type="moaSuccessRateType">{{ moaSuccessRate >= 90 ? '健康' : moaSuccessRate >= 70 ? '注意' : '告警' }}</NTag>
+                </template>
+              </KpiCard>
             </NGi>
             <NGi>
-              <NCard size="small">
-                <div class="stat-card">
-                  <span class="stat-label">平均耗时</span>
-                  <span class="stat-value">{{ formatMs(moaPerf.avgTotalMs) }}</span>
-                  <span class="stat-detail">
-                    <span class="muted">参考: {{ formatMs(moaPerf.avgRefMs) }} / 聚合: {{ formatMs(moaPerf.avgAggMs) }}</span>
-                  </span>
-                </div>
-              </NCard>
+              <KpiCard
+                label="平均耗时"
+                :value="Math.round(moaPerf.avgTotalMs / 1000)"
+                unit="s"
+                :threshold="120"
+              >
+                <template #detail>
+                  <span class="muted">参考 {{ formatMs(moaPerf.avgRefMs) }} / 聚合 {{ formatMs(moaPerf.avgAggMs) }}</span>
+                </template>
+              </KpiCard>
+            </NGi>
+          </NGrid>
+          <NGrid :cols="'1 s:2 m:3'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+            <NGi>
+              <KpiCard
+                label="Token 消耗"
+                :value="moaPerf.totalTokens"
+              >
+                <template #detail>
+                  <span class="muted">平均 {{ formatTokens(moaPerf.avgTokens) }}/次 · 效率 {{ moaPerf.tokenEfficiency }} 字符/Token</span>
+                </template>
+              </KpiCard>
             </NGi>
             <NGi>
-              <NCard size="small">
-                <div class="stat-card">
-                  <span class="stat-label">Token 消耗</span>
-                  <span class="stat-value">{{ formatTokens(moaPerf.totalTokens) }}</span>
-                  <span class="stat-detail">
-                    <span class="muted">平均 {{ formatTokens(moaPerf.avgTokens) }}/次 · 效率 {{ moaPerf.tokenEfficiency }} 字符/Token</span>
-                  </span>
-                </div>
-              </NCard>
+              <KpiCard
+                label="平均复杂度"
+                :value="moaPerf.avgComplexityScore"
+                :threshold="0.6"
+              >
+                <template #detail>
+                  <NTag size="tiny" :type="moaPerf.avgComplexityScore >= 0.7 ? 'error' : moaPerf.avgComplexityScore >= 0.4 ? 'warning' : 'info'">
+                    {{ moaPerf.avgComplexityScore >= 0.7 ? '高' : moaPerf.avgComplexityScore >= 0.4 ? '中' : '低' }}
+                  </NTag>
+                </template>
+              </KpiCard>
             </NGi>
             <NGi>
-              <NCard size="small">
-                <div class="stat-card">
-                  <span class="stat-label">平均复杂度</span>
-                  <span class="stat-value">{{ moaPerf.avgComplexityScore.toFixed(3) }}</span>
-                  <span class="stat-detail">
-                    <NTag size="tiny" :type="moaPerf.avgComplexityScore >= 0.7 ? 'error' : moaPerf.avgComplexityScore >= 0.4 ? 'warning' : 'info'">
-                      {{ moaPerf.avgComplexityScore >= 0.7 ? '高' : moaPerf.avgComplexityScore >= 0.4 ? '中' : '低' }}
-                    </NTag>
-                  </span>
-                </div>
-              </NCard>
+              <KpiCard
+                label="平均响应"
+                :value="moaPerf.avgResponseLen"
+                unit="字符"
+              />
             </NGi>
           </NGrid>
 
-          <!-- 复杂度百分位 -->
-          <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
-            <NGi><KpiCard label="复杂度 P50" :value="moaPerf.complexityPercentiles.p50" /></NGi>
-            <NGi><KpiCard label="复杂度 P90" :value="moaPerf.complexityPercentiles.p90" /></NGi>
-            <NGi><KpiCard label="复杂度 P95" :value="moaPerf.complexityPercentiles.p95" /></NGi>
-            <NGi><KpiCard label="复杂度 P99" :value="moaPerf.complexityPercentiles.p99" /></NGi>
-          </NGrid>
+          <!-- 复杂度百分位：全量 + MoA 触发 双行 -->
+          <NCard title="复杂度百分位" size="small" style="margin-bottom: 16px">
+            <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="6" responsive="screen">
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">全量 P50</span>
+                <div class="mono" style="font-weight: 600">{{ moaPerf.allComplexityPercentiles.p50.toFixed(3) }}</div>
+              </NGi>
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">全量 P90</span>
+                <div class="mono" style="font-weight: 600">{{ moaPerf.allComplexityPercentiles.p90.toFixed(3) }}</div>
+              </NGi>
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">全量 P95</span>
+                <div class="mono" style="font-weight: 600">{{ moaPerf.allComplexityPercentiles.p95.toFixed(3) }}</div>
+              </NGi>
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">全量 P99</span>
+                <div class="mono" style="font-weight: 600">{{ moaPerf.allComplexityPercentiles.p99.toFixed(3) }}</div>
+              </NGi>
+            </NGrid>
+            <NDivider style="margin: 8px 0" />
+            <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="6" responsive="screen">
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">MoA P50</span>
+                <div class="mono" style="font-weight: 600; color: var(--color-danger)">{{ moaPerf.complexityPercentiles.p50.toFixed(3) }}</div>
+              </NGi>
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">MoA P90</span>
+                <div class="mono" style="font-weight: 600; color: var(--color-danger)">{{ moaPerf.complexityPercentiles.p90.toFixed(3) }}</div>
+              </NGi>
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">MoA P95</span>
+                <div class="mono" style="font-weight: 600; color: var(--color-danger)">{{ moaPerf.complexityPercentiles.p95.toFixed(3) }}</div>
+              </NGi>
+              <NGi>
+                <span class="muted" style="font-size: var(--fs-caption)">MoA P99</span>
+                <div class="mono" style="font-weight: 600; color: var(--color-danger)">{{ moaPerf.complexityPercentiles.p99.toFixed(3) }}</div>
+              </NGi>
+            </NGrid>
+          </NCard>
 
           <!-- 复杂度趋势图 + 分布图 -->
           <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <NGi>
-              <NCard size="small" :bordered="true">
+              <NCard title="复杂度趋势（按小时聚合）" size="small" :bordered="true">
                 <EChart :option="moaComplexityTrendOption" height="300px" :skip-theme="true" />
               </NCard>
             </NGi>
             <NGi>
-              <NCard size="small" :bordered="true">
+              <NCard title="复杂度分布（全量 vs MoA 触发）" size="small" :bordered="true">
                 <EChart :option="moaComplexityDistOption" height="300px" :skip-theme="true" />
               </NCard>
             </NGi>
@@ -1291,7 +1327,7 @@ const moaLatencyPhaseOption = computed(() => {
 
             <!-- 延迟阶段分解图 -->
             <NGi>
-              <NCard size="small" :bordered="true">
+              <NCard title="最近 10 次延迟阶段分解" size="small" :bordered="true">
                 <EChart :option="moaLatencyPhaseOption" height="300px" :skip-theme="true" />
               </NCard>
             </NGi>
@@ -1360,52 +1396,31 @@ const moaLatencyPhaseOption = computed(() => {
 
           <!-- 最近运行记录 -->
           <NCard title="最近运行记录" size="small">
-            <NEmpty v-if="moaPerf.recentRuns.length === 0" description="暂无 MoA 运行记录" style="padding: 24px 0" />
-            <div v-else class="run-table">
-              <div class="run-table-header">
-                <span class="col-time">时间</span>
-                <span class="col-query">查询</span>
-                <span class="col-mode">模式</span>
-                <span class="col-status">状态</span>
-                <span class="col-total">总耗时</span>
-                <span class="col-ref">参考</span>
-                <span class="col-agg">聚合</span>
-                <span class="col-tokens">Tokens</span>
-              </div>
-              <div
-                v-for="run in moaPerf.recentRuns"
-                :key="run.id"
-                class="run-row"
-                :class="{ 'run-failed': !run.success }"
-              >
-                <span class="col-time">{{ formatTimeHMS(run.timestamp) }}</span>
-                <span class="col-query" :title="run.queryPreview">{{ run.queryPreview.slice(0, 40) }}</span>
-                <span class="col-mode">
-                  <NTag size="tiny" :bordered="false" :type="run.mode === 'parallel' ? 'info' : 'default'">
-                    {{ run.mode }}
-                  </NTag>
-                </span>
-                <span class="col-status">
-                  <NTag size="tiny" :type="run.success ? 'success' : 'error'">
-                    {{ run.success ? '成功' : '失败' }}
-                  </NTag>
-                </span>
-                <span class="col-total num">{{ formatMs(run.totalMs) }}</span>
-                <span class="col-ref num">
-                  {{ run.validRefCount }}/{{ run.refCount }}
-                  <span class="muted">({{ formatMs(run.refMs) }})</span>
-                </span>
-                <span class="col-agg num">
-                  <span class="muted">{{ run.aggModel }}</span>
-                  {{ formatMs(run.aggMs) }}
-                </span>
-                <span class="col-tokens num">{{ formatTokens(run.totalTokens) }}</span>
-              </div>
-            </div>
+            <template v-if="moaPerf.recentRuns.length === 0">
+              <NEmpty description="暂无 MoA 运行记录" style="padding: 24px 0">
+                <template #extra>
+                  <NButton size="small" @click="() => $router.push('/settings')">前往设置启用 MoA</NButton>
+                </template>
+              </NEmpty>
+            </template>
+            <NTable
+              v-else
+              :data="moaPerf.recentRuns"
+              :columns="moaRunsColumns"
+              :bordered="false"
+              :single-line="false"
+              size="small"
+              :max-height="400"
+              striped
+            />
           </NCard>
         </template>
 
-        <NEmpty v-else description="暂无 MoA 性能数据" style="padding: 24px 0" />
+        <NEmpty v-else description="暂无 MoA 性能数据" style="padding: 24px 0">
+          <template #extra>
+            <NButton size="small" @click="() => $router.push('/settings')">前往设置启用 MoA</NButton>
+          </template>
+        </NEmpty>
       </NTabPane>
     </NTabs>
   </div>

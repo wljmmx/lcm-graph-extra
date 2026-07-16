@@ -159,6 +159,11 @@ const displayValue = computed(() => {
       </template>
       阈值：{{ threshold }}{{ unit ?? '' }}{{ overThreshold ? '（已超限）' : '' }}
     </NTooltip>
+
+    <!-- detail slot：可插入额外底部信息（如标签、提示文字） -->
+    <div v-if="$slots.detail" style="margin-top: var(--space-xs)">
+      <slot name="detail" />
+    </div>
   </NCard>
 </template>
 
