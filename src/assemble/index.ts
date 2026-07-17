@@ -618,6 +618,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     // ── MoA pipeline 执行（仅启用时） ──
+    // v2.3.0: 拆分同步参考层 + 异步聚合层，避免对话超时
+    // Phase 1: runMoaRefsSync（同步，带时间预算）
+    // Phase 2: dispatchMoaAggregator（异步后台执行）
+    // 结果通过 lcmg_moa_reply 工具在当前轮或下一轮返回
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
 
@@ -627,86 +631,106 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           && moaConfig.referenceModels.length <= 4
           && moaConfig.enabledTiers?.includes(tier)) {
 
-        const { runMoaPipeline, buildMoaToolInstruction } = await import('../moa/orchestrator.js');
+        const { runMoaRefsSync, dispatchMoaAggregator, buildMoaToolInstruction, peekMoaResultCache } = await import('../moa/orchestrator.js');
 
-        if (complexityScore >= moaConfig.complexityThreshold || forceMoa) {
-          ctx.logger?.info?.('[assemble] MoA triggered', {
-            complexity: complexityScore,
-            reasons: forceMoa ? ['/moa command'] : complexityReasons,
-            forceMoa,
-            mode: moaConfig.mode,
-            refCount: moaConfig.referenceModels?.length ?? 0,
-          });
+        // 检查是否有上一轮异步聚合的缓存结果
+        const cachedResult = peekMoaResultCache();
 
-          // 提取查询文本（/moa 命令时使用清理后的文本）
-          const queryText = forceMoa ? cleanedQuery : (() => {
-            const lastMsg = finalMessages[finalMessages.length - 1];
-            if (lastMsg?.role === 'user') {
-              if (typeof lastMsg.content === 'string') return lastMsg.content;
-              if (Array.isArray(lastMsg.content)) {
-                return lastMsg.content
-                  .filter((p: any) => p?.type === 'text')
-                  .map((p: any) => p.text)
-                  .join('\n');
-              }
-            }
-            return '';
-          })();
-
-          // 构建检索上下文
-          const retrievalContext = (() => {
-            const parts: string[] = [];
-            if (qmdResults?.length) {
-              parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
-            }
-            if (graphResults?.length) {
-              parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
-            }
-            if (expResults?.length) {
-              parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
-            }
-            return parts.join('\n\n');
-          })();
-
-          // 构建对话上下文（最近 3 轮用户/助手消息，帮助聚合模型理解讨论背景）
-          const conversationContext = (() => {
-            const recent = finalMessages.slice(-6); // 最近 3 轮（用户 + 助手）
-            return recent
-              .filter((m: any) => m?.role === 'user' || m?.role === 'assistant')
-              .map((m: any) => {
-                const content = typeof m.content === 'string' ? m.content
-                  : Array.isArray(m.content) ? m.content.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join(' ') : '';
-                const preview = content.slice(0, 300);
-                return `[${m.role}] ${preview}`;
-              })
-              .join('\n');
-          })();
-
-          const moaResult = await runMoaPipeline({
-            query: queryText,
-            retrievalContext,
-            conversationContext,
-            config: moaPresetOverride
-              ? { ...moaConfig, activePreset: moaPresetOverride }
-              : moaConfig,
-            api: ctx.api,
-            logger: ctx.logger,
-            signal,
-            complexityScore,
-          });
-
-          if (moaResult?.finalResponse) {
-            // 注入 MoA 工具调用指令
+        if (complexityScore >= moaConfig.complexityThreshold || forceMoa || cachedResult) {
+          if (cachedResult) {
+            // 上一轮的聚合结果已就绪，直接注入工具指令让主模型获取
+            ctx.logger?.info?.('[assemble] MoA cached result available from previous round');
             systemPromptAddition = buildMoaToolInstruction() + '\n\n' + systemPromptAddition;
-
-            ctx.logger?.info?.('[assemble] MoA pipeline completed', {
-              totalMs: moaResult.totalMs,
-              estimatedTokens: moaResult.estimatedTokens,
-              responseLen: moaResult.finalResponse.length,
-              refCount: moaResult.referenceOutputs.length,
-            });
           } else {
-            ctx.logger?.warn?.('[assemble] MoA pipeline returned no result, falling back to normal flow');
+            ctx.logger?.info?.('[assemble] MoA triggered (async split)', {
+              complexity: complexityScore,
+              reasons: forceMoa ? ['/moa command'] : complexityReasons,
+              forceMoa,
+              mode: moaConfig.mode,
+              refCount: moaConfig.referenceModels?.length ?? 0,
+              syncBudgetMs: moaConfig.syncBudgetMs ?? 240_000,
+            });
+
+            // 提取查询文本（/moa 命令时使用清理后的文本）
+            const queryText = forceMoa ? cleanedQuery : (() => {
+              const lastMsg = finalMessages[finalMessages.length - 1];
+              if (lastMsg?.role === 'user') {
+                if (typeof lastMsg.content === 'string') return lastMsg.content;
+                if (Array.isArray(lastMsg.content)) {
+                  return lastMsg.content
+                    .filter((p: any) => p?.type === 'text')
+                    .map((p: any) => p.text)
+                    .join('\n');
+                }
+              }
+              return '';
+            })();
+
+            // 构建检索上下文
+            const retrievalContext = (() => {
+              const parts: string[] = [];
+              if (qmdResults?.length) {
+                parts.push('## 知识库检索 (L2 qmd)\n' + qmdResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+              }
+              if (graphResults?.length) {
+                parts.push('## 知识图谱检索 (L3 Neo4j)\n' + graphResults.slice(0, 3).map((r: any) => r?.text || r?.content || '').filter(Boolean).join('\n---\n'));
+              }
+              if (expResults?.length) {
+                parts.push('## 经验检索 (L4 Experience)\n' + expResults.slice(0, 2).map((r: any) => r?.summary || r?.title || '').filter(Boolean).join('\n'));
+              }
+              return parts.join('\n\n');
+            })();
+
+            // 构建对话上下文（最近 3 轮用户/助手消息，帮助聚合模型理解讨论背景）
+            const conversationContext = (() => {
+              const recent = finalMessages.slice(-6);
+              return recent
+                .filter((m: any) => m?.role === 'user' || m?.role === 'assistant')
+                .map((m: any) => {
+                  const content = typeof m.content === 'string' ? m.content
+                    : Array.isArray(m.content) ? m.content.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join(' ') : '';
+                  const preview = content.slice(0, 300);
+                  return `[${m.role}] ${preview}`;
+                })
+                .join('\n');
+            })();
+
+            // 获取 sessionKey
+            const moaSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+              : typeof params.session_id === 'string' ? params.session_id
+              : `moa-${Date.now()}`;
+
+            // Phase 1: 同步执行参考模型层（带时间预算）
+            const refsResult = await runMoaRefsSync({
+              query: queryText,
+              retrievalContext,
+              conversationContext,
+              config: moaPresetOverride
+                ? { ...moaConfig, activePreset: moaPresetOverride }
+                : moaConfig,
+              api: ctx.api,
+              logger: ctx.logger,
+              signal,
+              complexityScore,
+            }, moaSessionKey, moaConfig.syncBudgetMs ?? 240_000);
+
+            if (refsResult.completed) {
+              // Phase 2: 异步调度聚合模型层
+              dispatchMoaAggregator(moaSessionKey, ctx.logger, signal);
+
+              // 注入 MoA 工具调用指令（主模型会尝试调用 lcmg_moa_reply）
+              // 如果聚合已完成 → 直接返回结果
+              // 如果聚合未完成 → 返回 pending 状态，提示用户稍后继续
+              systemPromptAddition = buildMoaToolInstruction() + '\n\n' + systemPromptAddition;
+
+              ctx.logger?.info?.('[assemble] MoA refs completed, aggregator dispatched async', {
+                sessionKey: moaSessionKey,
+              });
+            } else {
+              ctx.logger?.warn?.('[assemble] MoA refs sync failed, falling back to normal flow', {
+                error: refsResult.error,
+              });
+            }
           }
         }
       }

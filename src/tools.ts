@@ -1961,6 +1961,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   // v2.2.0: MoA (Mixture of Agents) 预计算回复透传工具。
   // 参考模型层（并行发散）+ 聚合模型层（收敛裁决）的结果通过此工具返回。
   // 主模型调用此工具后，工具结果直接作为最终回复返回用户。
+  // v2.3.0: 支持 pending 状态——聚合模型异步执行时返回 pending 提示。
   // ===================================================================
   api.registerTool({
     name: "lcmg_moa_reply",
@@ -1968,7 +1969,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     description: "Get the pre-computed MoA (Mixture of Agents) response. "
       + "This tool returns the result synthesized by multiple reference models "
       + "and an aggregator model. Call this when instructed to get the MoA response. "
-      + "The tool result is the final response and should be returned to the user as-is.",
+      + "The tool result is the final response and should be returned to the user as-is. "
+      + "If aggregation is still in progress, returns a pending status.",
     parameters: {
       type: "object",
       properties: {},
@@ -1979,18 +1981,26 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
       // 延迟导入避免循环依赖
-      const { getMoaResultCache } = await import('./moa/orchestrator.js');
+      const { getMoaResultCache, isMoaAggregatorPending } = await import('./moa/orchestrator.js');
       const result = getMoaResultCache();
-      if (!result) {
+      if (result) {
         return {
-          content: [{ type: "text" as const, text: "No MoA result available. The MoA pipeline may not have been triggered for this request, or the pre-computed response has already been consumed." }],
-          details: { ok: false, error: 'no_moa_result' },
+          content: [{ type: "text" as const, text: result }],
+          details: { ok: true },
+        };
+      }
+      // 聚合模型仍在后台执行
+      if (isMoaAggregatorPending()) {
+        return {
+          content: [{ type: "text" as const, text: "MoA aggregation is still in progress. The reference models have completed their analysis, and the aggregator model is synthesizing the final response. Please ask the user to continue the conversation in a moment to receive the complete multi-model analysis." }],
+          details: { ok: false, status: 'pending', error: 'moa_aggregation_pending' },
           isError: true,
         };
       }
       return {
-        content: [{ type: "text" as const, text: result }],
-        details: { ok: true },
+        content: [{ type: "text" as const, text: "No MoA result available. The MoA pipeline may not have been triggered for this request, or the pre-computed response has already been consumed." }],
+        details: { ok: false, error: 'no_moa_result' },
+        isError: true,
       };
     },
   });

@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import { withKeepAliveIfOllama, ensureOllamaV1Path } from '../utils/url.js';
 import { llmTimeout } from '../config/defaults.js';
+import { backgroundTasks } from '../async/task-registry.js';
 import {
   type MoaConfig,
   type MoaPipelineResult,
@@ -137,9 +138,13 @@ export function getAvailablePresets(config: MoaConfig): MoaPreset[] {
 
 let moaResultCache: string | null = null;
 
+/** 聚合模型是否正在后台执行 */
+let moaAggregatorPending = false;
+
 /** 存入 MoA 结果缓存（一次性写入） */
 export function setMoaResultCache(result: string): void {
   moaResultCache = result;
+  moaAggregatorPending = false;
 }
 
 /** 读取并清空 MoA 结果缓存（一次性消费） */
@@ -148,6 +153,50 @@ export function getMoaResultCache(): string | null {
   moaResultCache = null;
   return result;
 }
+
+/** 查看 MoA 结果缓存（不消费） */
+export function peekMoaResultCache(): string | null {
+  return moaResultCache;
+}
+
+/** 查询聚合模型是否正在后台执行 */
+export function isMoaAggregatorPending(): boolean {
+  return moaAggregatorPending;
+}
+
+// ============================================================================
+// 会话级参考模型输出缓存（MoA 异步聚合用）
+// ============================================================================
+
+/** 参考模型输出缓存条目 */
+interface MoaRefCacheEntry {
+  /** 参考模型各输出 */
+  referenceOutputs: string[];
+  /** 各参考模型 token 消耗 */
+  refTokens: number[];
+  /** 各参考模型耗时 */
+  refTimings: number[];
+  /** 各参考模型名称 */
+  refModels: string[];
+  /** 查询文本 */
+  query: string;
+  /** 检索上下文 */
+  retrievalContext: string;
+  /** 对话上下文 */
+  conversationContext: string;
+  /** 聚合模型配置 */
+  aggregatorModel: AggregatorModelConfig;
+  /** 执行模式 */
+  mode: 'parallel' | 'serial';
+  /** 复杂度评分 */
+  complexityScore?: number;
+  /** 创建时间 */
+  createdAt: number;
+}
+
+const moaRefCache = new Map<string, MoaRefCacheEntry>();
+const MOA_REF_CACHE_MAX = 100;
+const MOA_REF_CACHE_TTL_MS = 10 * 60 * 1000; // 10min
 
 // ============================================================================
 // LLM 调用基础设施
@@ -575,10 +624,270 @@ The MoA system has pre-computed a response using multiple reference models and a
 
 **Instructions:**
 1. Call the \`lcmg_moa_reply\` tool to retrieve the pre-computed response.
-2. **Verify relevance**: Check that the MoA response actually addresses the user's question.
-3. If the MoA response is relevant and on-topic, use it as your primary answer (you may lightly polish formatting).
-4. If the MoA response is clearly about the wrong topic or doesn't address the user's question, **ignore it** and answer the user's question yourself based on the conversation context.
-5. Do NOT mention "MoA" or "aggregator" in your response to the user.`;
+2. If the tool returns a "pending" status (aggregation still in progress), inform the user: "MoA aggregation is still in progress. Please continue the conversation in a moment to receive the complete multi-model analysis." Do NOT fabricate or guess the MoA result.
+3. **Verify relevance**: If the MoA response is available, check that it actually addresses the user's question.
+4. If the MoA response is relevant and on-topic, use it as your primary answer (you may lightly polish formatting).
+5. If the MoA response is clearly about the wrong topic or doesn't address the user's question, **ignore it** and answer the user's question yourself based on the conversation context.
+6. Do NOT mention "MoA" or "aggregator" in your response to the user.`;
+}
+
+// ============================================================================
+// MoA 异步管道（v2.3.0: 拆分同步参考层 + 异步聚合层，避免对话超时）
+// ============================================================================
+
+/** 同步参考模型阶段结果 */
+export interface MoaRefsSyncResult {
+  /** 参考模型是否全部完成 */
+  completed: boolean;
+  /** 会话 key（用于后续异步聚合关联） */
+  sessionKey: string;
+  /** 错误信息（completed=false 时） */
+  error?: string;
+}
+
+/**
+ * 同步执行参考模型层（带时间预算）。
+ *
+ * Phase 1/2: 参考模型发散分析。
+ * 在 syncBudgetMs 预算内同步执行，超时则降级。
+ * 完成后将参考输出存入会话级缓存，供异步聚合阶段使用。
+ *
+ * @param ctx 管道上下文
+ * @param sessionKey 会话标识（用于关联异步聚合结果）
+ * @param syncBudgetMs 同步预算（ms），默认 240,000（4分钟）
+ */
+export async function runMoaRefsSync(
+  ctx: MoaPipelineContext,
+  sessionKey: string,
+  syncBudgetMs: number = 240_000,
+): Promise<MoaRefsSyncResult> {
+  const { query, config, logger, signal } = ctx;
+
+  if (signal?.aborted) {
+    return { completed: false, sessionKey, error: 'aborted before start' };
+  }
+
+  const effective = resolveActivePreset(config);
+  const effectiveRefModels = effective.referenceModels;
+  const effectiveAggModel = effective.aggregatorModel;
+  const effectiveMode = effective.mode;
+
+  logger?.info?.('[moa] Phase 1: Reference models (sync)', {
+    mode: effectiveMode,
+    refCount: effectiveRefModels.length,
+    budgetMs: syncBudgetMs,
+  });
+
+  // 用 Promise.race 实现时间预算
+  const refStart = Date.now();
+  let referenceResults: LlmCallResult[];
+
+  try {
+    const budgetPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('MoA sync budget exceeded')), syncBudgetMs);
+    });
+    // 预吞 reject 避免 unhandledRejection
+    budgetPromise.catch(() => {});
+
+    referenceResults = await Promise.race([
+      runReferenceModels(query, effectiveRefModels, effectiveMode, signal),
+      budgetPromise,
+    ]);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger?.warn?.('[moa] Reference models sync phase failed', { err: errMsg });
+    recordMoaRun(query, null, errMsg, {
+      mode: effectiveMode,
+      referenceModels: effectiveRefModels,
+      aggregatorModel: effectiveAggModel,
+    }, ctx.complexityScore);
+    return { completed: false, sessionKey, error: errMsg };
+  }
+
+  const refMs = Date.now() - refStart;
+
+  // 过滤失败的参考模型
+  const validRefs = referenceResults.filter((r) => !r.text.startsWith('[Reference model error:'));
+  if (validRefs.length === 0) {
+    logger?.warn?.('[moa] All reference models failed');
+    recordMoaRun(query, null, 'All reference models failed', {
+      mode: effectiveMode,
+      referenceModels: effectiveRefModels,
+      aggregatorModel: effectiveAggModel,
+    }, ctx.complexityScore);
+    return { completed: false, sessionKey, error: 'All reference models failed' };
+  }
+
+  logger?.debug?.('[moa] Reference models sync completed', {
+    count: referenceResults.length,
+    validCount: validRefs.length,
+    ms: refMs,
+  });
+
+  // 存入会话级缓存
+  if (moaRefCache.size >= MOA_REF_CACHE_MAX) {
+    const oldest = moaRefCache.keys().next().value;
+    if (oldest !== undefined) moaRefCache.delete(oldest);
+  }
+  // TTL 清理
+  const now = Date.now();
+  for (const [key, entry] of moaRefCache) {
+    if (now - entry.createdAt > MOA_REF_CACHE_TTL_MS) {
+      moaRefCache.delete(key);
+    }
+  }
+
+  moaRefCache.set(sessionKey, {
+    referenceOutputs: validRefs.map((r) => r.text),
+    refTokens: referenceResults.map((r) => r.tokensUsed),
+    refTimings: referenceResults.map((r) => r.ms),
+    refModels: referenceResults.map((r) => r.model),
+    query,
+    retrievalContext: ctx.retrievalContext,
+    conversationContext: ctx.conversationContext,
+    aggregatorModel: effectiveAggModel,
+    mode: effectiveMode,
+    complexityScore: ctx.complexityScore,
+    createdAt: now,
+  });
+
+  return { completed: true, sessionKey };
+}
+
+/**
+ * 异步调度聚合模型层。
+ *
+ * Phase 2/2: 聚合模型收敛裁决。
+ * 从会话级缓存读取参考模型输出，在后台执行聚合模型调用。
+ * 完成后将结果存入 moaResultCache，供下一轮 lcmg_moa_reply 消费。
+ *
+ * @param sessionKey 会话标识（与 runMoaRefsSync 中的 sessionKey 一致）
+ * @param logger 日志器
+ * @param signal AbortSignal（可选）
+ */
+export function dispatchMoaAggregator(
+  sessionKey: string,
+  logger: any,
+  signal?: AbortSignal,
+): void {
+  const entry = moaRefCache.get(sessionKey);
+  if (!entry) {
+    logger?.warn?.('[moa] No ref cache entry for session, skipping aggregator', { sessionKey });
+    return;
+  }
+
+  moaAggregatorPending = true;
+
+  logger?.info?.('[moa] Phase 2: Aggregator (async dispatch)', {
+    sessionKey,
+    refCount: entry.referenceOutputs.length,
+    aggModel: entry.aggregatorModel.model,
+  });
+
+  backgroundTasks.register('moa:aggregator', (async () => {
+    if (signal?.aborted) {
+      logger?.debug?.('[moa] Aggregator aborted before start');
+      moaAggregatorPending = false;
+      return;
+    }
+
+    const aggStart = Date.now();
+    let aggregatorResult: LlmCallResult;
+
+    try {
+      // 构建聚合提示词
+      const refSections = entry.referenceOutputs
+        .map((output, i) => `### 参考模型 ${i + 1} 分析\n${output}`)
+        .join('\n\n');
+
+      const convSection = entry.conversationContext
+        ? `## 对话上下文（帮助理解用户意图）\n${entry.conversationContext}\n\n`
+        : '';
+
+      const aggregatorPrompt = `${convSection}## 原始用户问题
+${entry.query}
+
+## 知识库检索结果（参考）
+${entry.retrievalContext || '(无相关知识库结果)'}
+
+## 参考模型分析（来自 ${entry.referenceOutputs.length} 个独立模型）
+${refSections}
+
+## 聚合要求
+你是一个聚合模型，负责综合以上参考意见，生成最终回复。
+
+**重要：必须严格针对用户问题回答，不要引入与问题无关的话题。**
+
+1. **锚定用户问题**：始终以用户问题为核心，不要偏离到其他话题
+2. **批判性评估**：审视以上参考意见，识别矛盾、遗漏和潜在错误
+3. **去重合并**：合并相似观点，避免重复
+4. **综合优化**：综合形成结构化、准确、完整的最终回复
+5. **避免幻觉**：不确定的内容需明确标注，优先使用知识库检索结果中的事实
+6. **工具调用**：如有需要，可直接调用工具获取额外信息
+7. **输出格式**：直接输出最终答案，不需要标注"综合意见"或"聚合结果"等前缀
+
+请现在生成最终回复：`;
+
+      aggregatorResult = await callLlm(
+        '',
+        aggregatorPrompt,
+        {
+          model: entry.aggregatorModel.model,
+          temperature: entry.aggregatorModel.temperature,
+          apiKey: entry.aggregatorModel.apiKey,
+          baseURL: entry.aggregatorModel.baseURL,
+          keepAlive: entry.aggregatorModel.keepAlive,
+        },
+        entry.aggregatorModel.timeoutMs,
+        signal,
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger?.warn?.('[moa] Aggregator async failed', { err: errMsg, sessionKey });
+      moaAggregatorPending = false;
+      recordMoaRun(entry.query, null, errMsg, {
+        mode: entry.mode,
+        referenceModels: [], // 参考模型详情在 ref cache 中
+        aggregatorModel: entry.aggregatorModel,
+      }, entry.complexityScore);
+      moaRefCache.delete(sessionKey);
+      return;
+    }
+
+    const aggMs = Date.now() - aggStart;
+
+    // 存入缓存（供 lcmg_moa_reply 工具读取）
+    setMoaResultCache(aggregatorResult.text);
+
+    // 记录性能数据
+    const totalTokens = entry.refTokens.reduce((sum, t) => sum + t, 0) + aggregatorResult.tokensUsed;
+    const totalMs = entry.refTimings.reduce((sum, t) => sum + t, 0) + aggMs;
+
+    const result: MoaPipelineResult = {
+      referenceOutputs: entry.referenceOutputs,
+      finalResponse: aggregatorResult.text,
+      estimatedTokens: totalTokens,
+      totalMs,
+      referenceTimings: entry.refTimings,
+      aggregatorTiming: aggMs,
+    };
+
+    recordMoaRun(entry.query, result, null, {
+      mode: entry.mode,
+      referenceModels: [], // 参考模型详情在 ref cache 中
+      aggregatorModel: entry.aggregatorModel,
+    }, entry.complexityScore);
+
+    logger?.info?.('[moa] Aggregator async completed', {
+      sessionKey,
+      aggMs,
+      totalTokens,
+      responseLen: aggregatorResult.text.length,
+    });
+
+    // 清理 ref cache
+    moaRefCache.delete(sessionKey);
+  })());
 }
 
 // ============================================================================

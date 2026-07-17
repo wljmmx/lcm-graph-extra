@@ -81,6 +81,13 @@ export interface MoaConfig {
    */
   enabledTiers: Array<'low' | 'medium' | 'high'>;
   /**
+   * 同步阶段时间预算（ms）。
+   * 参考模型层在此预算内同步执行，超过预算则降级到正常流程。
+   * 聚合模型层始终异步执行，不受此预算限制。
+   * 默认 240,000ms（4 分钟），为对话 5 分钟超时留 1 分钟缓冲。
+   */
+  syncBudgetMs?: number;
+  /**
    * 预设列表（可选）。
    * 支持多套预设，不同场景切换不同模型组合。
    * 如不配置则使用 referenceModels + aggregatorModel 作为默认。

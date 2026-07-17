@@ -181,6 +181,7 @@ export const PluginConfigSchema = Type.Object({
       Type.Union([Type.Literal('low'), Type.Literal('medium')]),
       { default: ['low'] },
     ),
+    syncBudgetMs: Type.Optional(Type.Number({ default: 240_000, minimum: 30_000 })),
   })),
 
   embedding: Type.Optional(Type.Object({
