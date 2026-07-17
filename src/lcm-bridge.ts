@@ -166,6 +166,28 @@ export function getConversationId(sessionKey?: string, sessionId?: string): numb
 }
 
 /**
+ * 失效 conversation_id 缓存。
+ *
+ * 在 /new 等会话重置场景下调用，确保下次 getConversationId 重新查库，
+ * 而不是返回旧会话的 conversation_id（可能导致 uncomp 统计错误、压力等级偏高）。
+ *
+ * @param sessionKey 会话 key（可选，不传则清空全部缓存）
+ * @param sessionId 会话 ID（可选）
+ */
+export function invalidateConvIdCache(sessionKey?: string, sessionId?: string): void {
+  if (!sessionKey && !sessionId) {
+    _convIdCache.clear();
+    return;
+  }
+  if (sessionKey) {
+    _convIdCache.delete(`sk:${sessionKey}`);
+  }
+  if (sessionId) {
+    _convIdCache.delete(`si:${sessionId}`);
+  }
+}
+
+/**
  * 查询指定会话的消息数和总 token
  */
 export function getMessageStats(conversationId: number): { count: number; totalTokens: number } {

@@ -58,3 +58,8 @@ export function setOverhead(sessionKey: string, tokens: number): void {
   }
   touchOverhead(sessionKey);
 }
+
+/** 清除指定会话的 overhead 缓存（/new 等会话重置场景） */
+export function clearOverheadCache(sessionKey: string): void {
+  _sessionOverheadCache.delete(sessionKey);
+}

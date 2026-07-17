@@ -16,6 +16,7 @@ import {
   getRetrievalLimitsForTier,
   getMaxContextCharsForTier,
   getConversationId,
+  invalidateConvIdCache,
   writeCompactionDebt,
   estimateTokensFromMessages,
   estimateTokensFromText,
@@ -128,12 +129,35 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     if (tokenBudget != null && typeof tokenBudget === 'number') {
       maxContextChars = Math.min(maxContextChars, Math.floor(tokenBudget * 4));
     }
-    const _wmConvId = getConversationId(typeof params.sessionKey === "string" ? params.sessionKey : (typeof params.session_id === "string" ? params.session_id : ""));
+    const _wmConvId = getConversationId(
+      typeof params.sessionKey === "string" ? params.sessionKey : "",
+      typeof params.session_id === "string" ? params.session_id : "",
+    );
     let uncompressedMsgs = -1;
     let needsCompact = false;
 
     if (wm) {
       uncompressedMsgs = _wmConvId != null ? getUncompressedMessageCount(_wmConvId) : -1;
+
+      // 安全检查：如果 DB 报告的 uncompressed 远大于当前消息数，
+      // 可能是 _convIdCache 返回了旧会话的 conversation_id。
+      // 失效缓存后重查，确保新会话不被误判为高压。
+      if (uncompressedMsgs > msgCount + 10 && msgCount <= 3) {
+        const _sk = typeof params.sessionKey === "string" ? params.sessionKey : "";
+        const _sid = typeof params.session_id === "string" ? params.session_id : "";
+        if (_sk || _sid) {
+          invalidateConvIdCache(_sk, _sid);
+          const _freshConvId = getConversationId(_sk, _sid);
+          if (_freshConvId != null && _freshConvId !== _wmConvId) {
+            uncompressedMsgs = getUncompressedMessageCount(_freshConvId);
+            ctx.logger?.warn?.('[assemble] detected stale convId cache, invalidated and re-queried', {
+              oldConvId: _wmConvId, newConvId: _freshConvId,
+              oldUncomp: uncompressedMsgs, msgCount,
+            });
+          }
+        }
+      }
+
       const activeMsgCount = uncompressedMsgs >= 0 ? uncompressedMsgs : msgCount;
       tier = determinePressureTier(activeMsgCount, tokenRatio, {
         dedupRounds: wm.dedupRounds ?? 24,

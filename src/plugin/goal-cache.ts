@@ -108,3 +108,8 @@ export function evictStaleGoalCache(): void {
     }
   }
 }
+
+/** 清除指定会话的目标缓存（/new 等会话重置场景） */
+export function clearGoalCache(sessionKey: string): void {
+  goalCache.delete(sessionKey);
+}

@@ -32,6 +32,7 @@ import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
 
 import {
   getConversationId,
+  invalidateConvIdCache,
   writeCompactionDebt,
   estimateTokensFromText,
 } from "./lcm-bridge.js";
@@ -344,6 +345,42 @@ const pluginEntry: any = definePluginEntry({
         } catch (err: any) {
           return { bootstrapped: false, reason: 'bootstrap_error: ' + (err?.message ?? String(err)) };
         } finally {
+          // 会话重置（/new 等）：清除旧会话的所有缓存，防止 uncomp、压力等级等
+          // 使用上一轮会话的陈旧数据。bootstrap 在新会话启动时由 SDK 主动调用。
+          try {
+            const sid = typeof params.sessionId === 'string' ? params.sessionId : String(params.sessionId);
+            const sk = params.sessionKey ?? sid;
+
+            // 1. 失效 conversation_id 缓存（10min TTL，不主动清除会导致 uncomp 统计错误）
+            invalidateConvIdCache(sk, sid);
+
+            // 2. 清除会话级缓存（overhead / dedup / goal / tool-guidance）
+            try {
+              const { clearOverheadCache } = await import("./plugin/overhead-cache.js");
+              clearOverheadCache(sk);
+            } catch { /* non-fatal */ }
+            try {
+              const { clearSessionDedup } = await import("./plugin/dedup-cache.js");
+              clearSessionDedup(sk);
+            } catch { /* non-fatal */ }
+            try {
+              const { clearGoalCache } = await import("./plugin/goal-cache.js");
+              clearGoalCache(sk);
+            } catch { /* non-fatal */ }
+            try {
+              const { clearSessionToolTracker } = await import("./plugin/tool-guidance.js");
+              clearSessionToolTracker(sk);
+            } catch { /* non-fatal */ }
+
+            // 3. 清除 MoA 缓存（防止上一轮 MoA 结果被误用）
+            try {
+              const { getMoaResultCache } = await import("./moa/orchestrator.js");
+              getMoaResultCache(); // 读取并清空
+            } catch { /* non-fatal */ }
+
+            logger?.info?.("[bootstrap] session caches invalidated for new session", { sessionKey: sk });
+          } catch { /* non-fatal */ }
+
           // H-6: 会话启动时预加载高频经验（非阻塞，失败静默）
           try {
             const sid = typeof params.sessionId === 'string' ? params.sessionId : String(params.sessionId);

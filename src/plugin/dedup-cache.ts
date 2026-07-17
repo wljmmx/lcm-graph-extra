@@ -65,3 +65,8 @@ export function getSessionDedup(sessionKey: string) {
 export function evictStaleDedupPublic(): void {
   evictStaleDedup();
 }
+
+/** 清除指定会话的 dedup 缓存（/new 等会话重置场景） */
+export function clearSessionDedup(sessionKey: string): void {
+  sessionDedupCache.delete(sessionKey);
+}

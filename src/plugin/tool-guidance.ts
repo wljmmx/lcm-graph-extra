@@ -567,3 +567,8 @@ export function evictStaleToolTrackers(): void {
     }
   }
 }
+
+/** 清除指定会话的工具追踪缓存（/new 等会话重置场景） */
+export function clearSessionToolTracker(sessionKey: string): void {
+  trackerCache.delete(sessionKey);
+}
