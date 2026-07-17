@@ -179,6 +179,9 @@ export function recordAllComplexity(score: number): void {
   if (allComplexityRecords.length > MAX_ALL_COMPLEXITY) {
     allComplexityRecords.shift();
   }
+  // 持久化全量复杂度数据，确保进程重启后不丢失
+  // 使用节流避免高频写入：每 5 秒最多写一次
+  persistThrottled();
 }
 
 /**
@@ -488,6 +491,16 @@ function classifyError(error?: string): string {
 // ============================================================================
 
 const PERF_FILE = join(homedir(), '.openclaw', 'moa-perf.json');
+
+let lastPersistTime = 0;
+const PERSIST_THROTTLE_MS = 5_000;
+
+function persistThrottled(): void {
+  const now = Date.now();
+  if (now - lastPersistTime < PERSIST_THROTTLE_MS) return;
+  lastPersistTime = now;
+  persistAsync();
+}
 
 function persistAsync(): void {
   // 使用 setImmediate 确保不阻塞当前管道

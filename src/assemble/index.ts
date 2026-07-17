@@ -607,11 +607,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         }
       }
 
-      ctx.logger?.debug?.('[assemble] MoA complexity check', {
+      ctx.logger?.info?.('[assemble] MoA complexity check', {
         score: complexity.score,
         threshold: moaConfig?.complexityThreshold ?? 0.6,
         reasons: complexity.reasons,
         tier,
+        triggerMoA: complexity.score >= (moaConfig?.complexityThreshold ?? 0.6),
       });
     } catch {
       // 复杂度评估模块加载失败，不影响主流程
