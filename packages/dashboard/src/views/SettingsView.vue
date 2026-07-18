@@ -334,6 +334,8 @@ watch(moaConfig, (cfg) => {
 }, { immediate: true });
 
 function onAggregatorPresetChange(presetId: string): void {
+  // FIX: 先更新 selectedAggregatorPreset，确保 NSelect 显示值和 v-if 模板同步生效
+  selectedAggregatorPreset.value = presetId;
   if (presetId === 'custom') {
     showAggregatorAdvanced.value = true;
     return;

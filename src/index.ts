@@ -558,6 +558,7 @@ const pluginEntry: any = definePluginEntry({
             // ── 分段压缩：渐进式 budget 循环 ──
             // 依次尝试每个 budget，直到某个 budget 成功通过 precheck 并完成压缩。
             // 非超限场景下 _progressiveBudgets = [_compactBudget]，退化为单次调用。
+            let _succeededBudget = 0; // 记录成功时的 budget，用于判断是否需要 follow-up 迭代压缩
             for (const _tryBudget of _progressiveBudgets) {
               if (adapterCompacted) break; // 已成功，跳出循环
 
@@ -612,6 +613,7 @@ const pluginEntry: any = definePluginEntry({
                   sessionFile: _extra.sessionFile,
                 };
                 if (adapterCompacted) {
+                  _succeededBudget = _tryBudget;
                   logger?.info?.('[compact] segmented compaction succeeded', {
                     budget: _tryBudget,
                     attempt: _progressiveBudgets.indexOf(_tryBudget) + 1,
@@ -639,6 +641,25 @@ const pluginEntry: any = definePluginEntry({
                 budgetsTried: _progressiveBudgets,
                 currentTokenCount: _currentTokens,
               });
+            }
+
+            // ── 迭代压缩：分段压缩成功但用了降级 budget 时，异步触发正常参数 follow-up ──
+            // 目的：用正常 budget + threshold 模式再做一轮压缩，确保上下文充分精简。
+            // compactionTarget 每次调用独立，不会残留 'budget' 模式到后续调用。
+            if (_isInputOverflow && adapterCompacted && _succeededBudget < _compactBudget) {
+              logger?.info?.('[compact] iterative follow-up compaction triggered (budget restored to normal)', {
+                succeededBudget: _succeededBudget,
+                normalBudget: _compactBudget,
+              });
+              _losslessClawAdapter.compact({
+                ...params,
+                tokenBudget: _compactBudget,
+                compactionTarget: (params as any).compactionTarget ?? 'threshold',
+              }).then((_followUp: any) => {
+                if (_followUp.ok && _followUp.compacted) {
+                  logger?.info?.('[compact] iterative follow-up compaction succeeded');
+                }
+              }, () => {});
             }
           } else {
             logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");
