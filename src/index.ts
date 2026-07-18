@@ -516,6 +516,36 @@ const pluginEntry: any = definePluginEntry({
           
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
 
+          // ── 输入超限保护：防止 compact 调用时 prompt 超出 LLM 上下文窗口 ──
+          // 与 assemble 路径的 input overflow protection 保持一致。
+          // 当 currentTokenCount 超过 contextWindow * 0.90 时，compact 必然失败，
+          // 跳过 DAG compact 调用，直接返回 degraded 结果。
+          const _currentTokens = (params as any).currentTokenCount ?? 0;
+          const _cfg = (api as any).pluginConfig ?? (api as any).config ?? {};
+          const _lcmMonitor = _cfg?.lcmMonitor ?? {};
+          const _contextWindow = (_lcmMonitor as any)?.contextWindow ?? 262_144;
+          const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? 114_688;
+          const _overflowThreshold = Math.floor(_contextWindow * 0.90) - _compactBudget;
+          const _isInputOverflow = _currentTokens > _overflowThreshold && _currentTokens > 0;
+
+          if (_isInputOverflow) {
+            logger?.warn?.('[compact] input overflow — skipping DAG compact, context too large for LLM precheck', {
+              currentTokenCount: _currentTokens,
+              overflowThreshold: _overflowThreshold,
+              contextWindow: _contextWindow,
+              compactTokenBudget: _compactBudget,
+            });
+            return {
+              ok: false,
+              compacted: false,
+              reason: 'input overflow: ' + _currentTokens + ' tokens exceeds safe threshold ' + _overflowThreshold,
+              result: {
+                tokensBefore: _currentTokens,
+                tokensAfter: _currentTokens,
+              },
+            };
+          }
+
           // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---
           let summaryContent: string | undefined;
           let adapterCompacted = false;
