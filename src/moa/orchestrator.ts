@@ -106,7 +106,7 @@ export function resolveActivePreset(config: MoaConfig): {
   aggregatorModel: AggregatorModelConfig;
   mode: 'parallel' | 'serial';
 } {
-  const presets = config.presets ?? DEFAULT_PRESETS;
+  const presets = getAvailablePresets(config);
   const activeName = config.activePreset;
   if (activeName) {
     const preset = presets.find((p) => p.name === activeName);
@@ -129,7 +129,14 @@ export function resolveActivePreset(config: MoaConfig): {
  * 获取所有可用预设（包含默认预设 + 用户自定义预设）。
  */
 export function getAvailablePresets(config: MoaConfig): MoaPreset[] {
-  return config.presets ?? DEFAULT_PRESETS;
+  const customPresets = config.presets ?? [];
+  const customNames = new Set(customPresets.map((p) => p.name));
+  // 合并内置预设 + 自定义预设，同名时自定义覆盖内置
+  const merged = [
+    ...DEFAULT_PRESETS.filter((p) => !customNames.has(p.name)),
+    ...customPresets,
+  ];
+  return merged;
 }
 
 // ============================================================================
