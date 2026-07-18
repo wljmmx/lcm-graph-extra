@@ -298,14 +298,31 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             finalMessages = buildDegradedContext('input_overflow');
             markDegraded('high_pressure_input_overflow');
 
-            // 异步触发 compact 处理未压缩部分（lossless-claw 内部自行分段）
+            // 异步触发分段压缩：用渐进式 budget 多次尝试，而非单次调用（单次用相同参数必然再次 overflow）
             const _asyncSid = typeof params.sessionId === 'string' ? params.sessionId
               : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
-            backgroundTasks.register('compact:overflow-retry', ctx.losslessClawAdapter.compact({
-              sessionId: _asyncSid, sessionKey, sessionFile, force: true,
-              tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
-              compactionTarget: 'threshold',
-            }).then(() => {}, () => {}));
+            const _overflowBudgets = [
+              resolvedCtx.compactTokenBudget,
+              Math.floor(resolvedCtx.compactTokenBudget * 0.50),
+              Math.floor(resolvedCtx.compactTokenBudget * 0.25),
+              Math.floor(resolvedCtx.compactTokenBudget * 0.10),
+            ];
+            backgroundTasks.register('compact:overflow-retry', (async () => {
+              for (const _budget of _overflowBudgets) {
+                try {
+                  const _r = await ctx.losslessClawAdapter.compact({
+                    sessionId: _asyncSid, sessionKey, sessionFile, force: true,
+                    tokenBudget: _budget, currentTokenCount: effectiveTokenCount,
+                    compactionTarget: 'budget',
+                  });
+                  if (_r.ok && _r.compacted) {
+                    ctx.logger?.info?.('[assemble] overflow retry compact succeeded', { budget: _budget });
+                    return;
+                  }
+                } catch { /* continue to next budget */ }
+              }
+              ctx.logger?.warn?.('[assemble] overflow retry: all budgets exhausted');
+            })().then(() => {}, () => {}));
           } else {
             try {
               let compactTimer: ReturnType<typeof setTimeout> | undefined;

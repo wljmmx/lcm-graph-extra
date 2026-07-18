@@ -516,10 +516,10 @@ const pluginEntry: any = definePluginEntry({
           
           const _adapterConnected = !!(_losslessClawAdapter?.connected);
 
-          // ── 输入超限保护：防止 compact 调用时 prompt 超出 LLM 上下文窗口 ──
-          // 与 assemble 路径的 input overflow protection 保持一致。
-          // 当 currentTokenCount 超过 contextWindow * 0.90 时，compact 必然失败，
-          // 跳过 DAG compact 调用，直接返回 degraded 结果。
+          // ── 输入超限分段压缩：渐进式 token budget 降级策略 ──
+          // 当输入超过 LLM 上下文窗口安全阈值时，不直接跳过，而是用越来越小的
+          // tokenBudget 多次尝试 compact，让引擎以更激进的方式压缩上下文。
+          // 渐进式 budget：100% → 50% → 25% → 10%，任一 budget 成功即停止。
           const _currentTokens = (params as any).currentTokenCount ?? 0;
           const _cfg = (api as any).pluginConfig ?? (api as any).config ?? {};
           const _lcmMonitor = _cfg?.lcmMonitor ?? {};
@@ -528,22 +528,24 @@ const pluginEntry: any = definePluginEntry({
           const _overflowThreshold = Math.floor(_contextWindow * 0.90) - _compactBudget;
           const _isInputOverflow = _currentTokens > _overflowThreshold && _currentTokens > 0;
 
+          // 渐进式 budget 列表：从默认 budget 依次降级到 50% → 25% → 10%
+          // 每一轮用更小的 budget 告诉引擎更激进地压缩，直到某一个 budget 能通过 precheck
+          const _progressiveBudgets: number[] = _isInputOverflow
+            ? [
+                _compactBudget,
+                Math.floor(_compactBudget * 0.50),
+                Math.floor(_compactBudget * 0.25),
+                Math.floor(_compactBudget * 0.10),
+              ]
+            : [_compactBudget];
+
           if (_isInputOverflow) {
-            logger?.warn?.('[compact] input overflow — skipping DAG compact, context too large for LLM precheck', {
+            logger?.warn?.('[compact] input overflow — triggering segmented (progressive-budget) compaction', {
               currentTokenCount: _currentTokens,
               overflowThreshold: _overflowThreshold,
               contextWindow: _contextWindow,
-              compactTokenBudget: _compactBudget,
+              progressiveBudgets: _progressiveBudgets,
             });
-            return {
-              ok: false,
-              compacted: false,
-              reason: 'input overflow: ' + _currentTokens + ' tokens exceeds safe threshold ' + _overflowThreshold,
-              result: {
-                tokensBefore: _currentTokens,
-                tokensAfter: _currentTokens,
-              },
-            };
           }
 
           // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---
@@ -553,53 +555,90 @@ const pluginEntry: any = definePluginEntry({
           // 供成功 return 时透传给 SDK CompactResult.result。声明在 if 块外避免 scope 问题。
           let compactResultExtra: { firstKeptEntryId?: string; sessionId?: string; sessionFile?: string } = {};
           if (_adapterConnected) {
-            // P0-3b H-4 + SEC-10 M-16: 捕获 timer/abort listener handle，finally 中清理，
-            // 避免高压超时后定时器与 abort listener 泄漏；并对未决的 timeout/abort promise 预吞 reject。
-            let compactTimer: ReturnType<typeof setTimeout> | undefined;
-            const compactTimeoutPromise = new Promise<never>((_, reject) => {
-              compactTimer = setTimeout(() => reject(new Error('compact: 300s timeout reached')), 300_000);
-            });
-            compactTimeoutPromise.catch(() => {});
-            let abortListener: (() => void) | null = null;
-            const abortOnCompact = signal ? new Promise<never>((_, reject) => {
-              if (signal.aborted) reject(new Error('compaction aborted'));
-              else {
-                abortListener = () => reject(new Error('compaction aborted'));
-                signal.addEventListener('abort', abortListener, { once: true });
+            // ── 分段压缩：渐进式 budget 循环 ──
+            // 依次尝试每个 budget，直到某个 budget 成功通过 precheck 并完成压缩。
+            // 非超限场景下 _progressiveBudgets = [_compactBudget]，退化为单次调用。
+            for (const _tryBudget of _progressiveBudgets) {
+              if (adapterCompacted) break; // 已成功，跳出循环
+
+              const _isRetry = _tryBudget !== _progressiveBudgets[0];
+              if (_isRetry) {
+                logger?.info?.('[compact] retrying with reduced budget', {
+                  budget: _tryBudget,
+                  originalBudget: _compactBudget,
+                  ratio: Number((_tryBudget / _compactBudget).toFixed(2)),
+                });
               }
-            }) : null;
-            if (abortOnCompact) abortOnCompact.catch(() => {});
-            try {
-              const compactResult: any = await Promise.race([
-                _losslessClawAdapter.compact(params),
-                compactTimeoutPromise,
-                ...(abortOnCompact ? [abortOnCompact] : []),
-              ]);
-              // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
-              summaryContent = compactResult?.result?.summary || compactResult?.summary;
-              // Preserve adapter's actionTaken/compacted flag for accurate success detection
-              // ActionTaken may be false even if summary was created (no DAG reduction needed)
-              // Use createdSummaryId as the authoritative indicator of compaction success
-              adapterCompacted = !!compactResult?.createdSummaryId || compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
-              // 透传 lossless-claw 返回的 SDK CompactResult.result 可选字段
-              const _extra = compactResult?.result ?? {};
-              compactResultExtra = {
-                firstKeptEntryId: _extra.firstKeptEntryId,
-                sessionId: _extra.sessionId,
-                sessionFile: _extra.sessionFile,
-              };
-            } catch (ceErr) {
-              const msg = String(ceErr);
-              if (msg.includes('aborted')) {
-                logger?.warn?.("compact: DAG compaction aborted by host", { err: serializeError(ceErr) });
-              } else if (msg.includes('timeout')) {
-                logger?.warn?.("compact: DAG compaction timed out after 300s", { err: serializeError(ceErr) });
-              } else {
-                logger?.warn?.("compact: background DAG compaction failed", { err: serializeError(ceErr) });
+
+              // P0-3b H-4 + SEC-10 M-16: 捕获 timer/abort listener handle，finally 中清理，
+              // 避免高压超时后定时器与 abort listener 泄漏；并对未决的 timeout/abort promise 预吞 reject。
+              let compactTimer: ReturnType<typeof setTimeout> | undefined;
+              const compactTimeoutPromise = new Promise<never>((_, reject) => {
+                compactTimer = setTimeout(() => reject(new Error('compact: 300s timeout reached')), 300_000);
+              });
+              compactTimeoutPromise.catch(() => {});
+              let abortListener: (() => void) | null = null;
+              const abortOnCompact = signal ? new Promise<never>((_, reject) => {
+                if (signal.aborted) reject(new Error('compaction aborted'));
+                else {
+                  abortListener = () => reject(new Error('compaction aborted'));
+                  signal.addEventListener('abort', abortListener, { once: true });
+                }
+              }) : null;
+              if (abortOnCompact) abortOnCompact.catch(() => {});
+              try {
+                // 超限时使用 compactionTarget: 'budget' 让引擎以 budget 模式压缩（更激进），
+                // 同时传入降级后的 tokenBudget
+                const compactResult: any = await Promise.race([
+                  _losslessClawAdapter.compact({
+                    ...params,
+                    tokenBudget: _tryBudget,
+                    compactionTarget: _isInputOverflow ? 'budget' : ((params as any).compactionTarget ?? 'threshold'),
+                  }),
+                  compactTimeoutPromise,
+                  ...(abortOnCompact ? [abortOnCompact] : []),
+                ]);
+                // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
+                summaryContent = compactResult?.result?.summary || compactResult?.summary;
+                // Preserve adapter's actionTaken/compacted flag for accurate success detection
+                // ActionTaken may be false even if summary was created (no DAG reduction needed)
+                // Use createdSummaryId as the authoritative indicator of compaction success
+                adapterCompacted = !!compactResult?.createdSummaryId || compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
+                // 透传 lossless-claw 返回的 SDK CompactResult.result 可选字段
+                const _extra = compactResult?.result ?? {};
+                compactResultExtra = {
+                  firstKeptEntryId: _extra.firstKeptEntryId,
+                  sessionId: _extra.sessionId,
+                  sessionFile: _extra.sessionFile,
+                };
+                if (adapterCompacted) {
+                  logger?.info?.('[compact] segmented compaction succeeded', {
+                    budget: _tryBudget,
+                    attempt: _progressiveBudgets.indexOf(_tryBudget) + 1,
+                    totalAttempts: _progressiveBudgets.length,
+                  });
+                }
+              } catch (ceErr) {
+                const msg = String(ceErr);
+                if (msg.includes('aborted')) {
+                  logger?.warn?.("compact: DAG compaction aborted by host", { err: serializeError(ceErr) });
+                  break; // abort 时不再重试后续 budget
+                } else if (msg.includes('timeout')) {
+                  logger?.warn?.("compact: DAG compaction timed out after 300s", { err: serializeError(ceErr), budget: _tryBudget });
+                } else {
+                  logger?.warn?.("compact: background DAG compaction failed", { err: serializeError(ceErr), budget: _tryBudget });
+                }
+              } finally {
+                if (compactTimer !== undefined) clearTimeout(compactTimer);
+                if (abortListener && signal) { try { signal.removeEventListener('abort', abortListener); } catch {} }
               }
-            } finally {
-              if (compactTimer !== undefined) clearTimeout(compactTimer);
-              if (abortListener && signal) { try { signal.removeEventListener('abort', abortListener); } catch {} }
+            }
+
+            if (_isInputOverflow && !adapterCompacted) {
+              logger?.warn?.('[compact] all progressive budgets exhausted, compaction failed', {
+                budgetsTried: _progressiveBudgets,
+                currentTokenCount: _currentTokens,
+              });
             }
           } else {
             logger?.debug?.("[lcm-graph-extra] LosslessClawAdapter not connected, skipping DAG compact");
