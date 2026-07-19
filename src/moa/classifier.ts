@@ -14,6 +14,8 @@ export interface ClassificationResult {
   confidence: number;
   /** 匹配理由 */
   reasons: string[];
+  /** 针对该领域的 system prompt 补充上下文（注入参考模型，不覆盖模型选择） */
+  context: string;
 }
 
 /**
@@ -80,6 +82,13 @@ const CLASSIFICATION_RULES: Array<{
   },
 ];
 
+/** 各领域分类上下文 —— 注入参考模型 user message 头部，帮助聚焦分析方向 */
+const DOMAIN_CONTEXTS: Record<TaskCategory, string> = {
+  security: '【安全审计模式】请从以下角度重点分析：OWASP Top 10 漏洞、认证授权缺陷、数据泄露风险、加密与密钥管理、注入攻击面、合规性（GDPR/SOC2）。',
+  architecture: '【架构设计模式】请从以下角度重点分析：系统架构合理性、模块划分与解耦、技术选型适配性、可扩展性与高可用性、接口设计规范、数据模型与存储方案。',
+  'code-review': '【代码审查模式】请从以下角度重点分析：代码质量与可读性、设计模式与架构合理性、潜在bug与边界条件、性能瓶颈与资源消耗、安全漏洞与异常处理、测试覆盖与可维护性。',
+};
+
 /**
  * 根据查询文本和上下文自动分类任务类型。
  *
@@ -118,7 +127,7 @@ export function classifyTaskType(
 
   // 分数太低或没有匹配 → 无法分类
   if (topResult.score < 1.0) {
-    return { preset: null, confidence: 0, reasons: [] };
+    return { preset: null, confidence: 0, reasons: [], context: '' };
   }
 
   // 计算置信度：最高分与第二高分的差距
@@ -132,6 +141,7 @@ export function classifyTaskType(
     preset: topCategory,
     confidence: Math.round(confidence * 100) / 100,
     reasons: [...new Set(topResult.matches)].slice(0, 5),
+    context: DOMAIN_CONTEXTS[topCategory],
   };
 }
 

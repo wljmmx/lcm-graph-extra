@@ -142,6 +142,8 @@ export interface MoaPipelineContext {
   signal?: AbortSignal;
   /** 任务复杂度评分（供性能追踪器记录） */
   complexityScore?: number;
+  /** 自动分类后的领域上下文补充说明（注入各参考模型 system prompt，不覆盖模型选择） */
+  classificationContext?: string;
 }
 
 /** LLM 调用结果 */

@@ -627,20 +627,22 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       // 记录全量复杂度评分（每轮 assemble 都记录，无论 MoA 是否启用/触发）
       recordAllComplexity(complexity.score);
 
-      // ── 自动分类：未显式指定预设时，根据用户输入自动匹配 ──
+      // ── 自动分类：根据用户输入确定任务领域，生成分类上下文补充到参考模型 prompt ──
+      // 注意：自动分类不覆盖模型选择，仅补充领域上下文帮助参考模型聚焦分析方向
+      let classificationContext = '';
       if (!moaPresetOverride && moaConfig?.enabled) {
         try {
-          const { classifyTaskType, resolveClassifiedPreset } = await import('../moa/classifier.js');
+          const { classifyTaskType } = await import('../moa/classifier.js');
           const classification = classifyTaskType(queryText);
-          const availablePresets = (moaConfig.presets ?? []).map((p: any) => p.name);
-          const autoPreset = resolveClassifiedPreset(classification, availablePresets);
-          if (autoPreset) {
-            moaPresetOverride = autoPreset;
-            ctx.logger?.info?.('[assemble] Auto-classified preset', {
-              preset: autoPreset,
-              confidence: classification.confidence,
-              reasons: classification.reasons,
-            });
+          if (classification.preset && classification.confidence >= 0.5) {
+            classificationContext = classification.context ?? '';
+            if (classificationContext) {
+              ctx.logger?.info?.('[assemble] Auto-classified task domain, context injected', {
+                preset: classification.preset,
+                confidence: classification.confidence,
+                reasons: classification.reasons,
+              });
+            }
           }
         } catch {
           // 分类器加载失败，不影响主流程
@@ -746,13 +748,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               query: queryText,
               retrievalContext,
               conversationContext,
-              config: moaPresetOverride
-                ? { ...moaConfig, activePreset: moaPresetOverride }
-                : moaConfig,
+              config: moaConfig,
               api: ctx.api,
               logger: ctx.logger,
               signal,
               complexityScore,
+              classificationContext,
             }, moaSessionKey, moaConfig.syncBudgetMs ?? 240_000);
 
             if (refsResult.completed) {

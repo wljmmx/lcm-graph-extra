@@ -311,6 +311,7 @@ async function callLlm(
 async function callReferenceModel(
   query: string,
   refConfig: ReferenceModelConfig,
+  classificationContext?: string,
   signal?: AbortSignal,
 ): Promise<LlmCallResult> {
   // 从 systemPrompt 提取角色描述（第一句）作为 1 行前缀
@@ -318,9 +319,13 @@ async function callReferenceModel(
   const userMessage = rolePrefix
     ? `【${rolePrefix}】\n\n${query}`
     : query;
+  // 自动分类器补充的领域上下文，拼入 user message 头部，帮助参考模型聚焦分析方向
+  const finalUserMessage = classificationContext
+    ? `${classificationContext}\n\n---\n\n${userMessage}`
+    : userMessage;
   return callLlm(
     '',  // 不传 system prompt，节省 token
-    userMessage,
+    finalUserMessage,
     {
       model: refConfig.model,
       temperature: refConfig.temperature,
@@ -346,12 +351,13 @@ async function runReferenceModels(
   query: string,
   refConfigs: ReferenceModelConfig[],
   mode: 'parallel' | 'serial',
+  classificationContext?: string,
   signal?: AbortSignal,
 ): Promise<LlmCallResult[]> {
   if (mode === 'parallel') {
     // 云端部署：不同模型并行调用
     return Promise.all(
-      refConfigs.map((cfg) => callReferenceModel(query, cfg, signal))
+      refConfigs.map((cfg) => callReferenceModel(query, cfg, classificationContext, signal))
     );
   }
 
@@ -360,7 +366,7 @@ async function runReferenceModels(
   for (const cfg of refConfigs) {
     if (signal?.aborted) break;
     try {
-      const result = await callReferenceModel(query, cfg, signal);
+      const result = await callReferenceModel(query, cfg, classificationContext, signal);
       results.push(result);
     } catch (err) {
       // 单个参考模型失败不影响其他模型
@@ -514,6 +520,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       query,
       effectiveRefModels,
       effectiveMode,
+      ctx.classificationContext,
       signal,
     );
   } catch (err) {
@@ -697,7 +704,7 @@ export async function runMoaRefsSync(
     budgetPromise.catch(() => {});
 
     referenceResults = await Promise.race([
-      runReferenceModels(query, effectiveRefModels, effectiveMode, signal),
+      runReferenceModels(query, effectiveRefModels, effectiveMode, ctx.classificationContext, signal),
       budgetPromise,
     ]);
   } catch (err) {
