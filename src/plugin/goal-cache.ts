@@ -2,12 +2,15 @@
  * 会话级目标缓存（Goal Anchoring）。
  *
  * 解决长对话中 LLM 注意力漂移问题：
- * - 提取首轮用户消息作为"目标任务"
+ * - 跟踪最新用户意图作为"目标任务"
  * - 每轮 assemble 将目标注入 system prompt，提醒 LLM 不要偏离
  * - 压缩/摘要时保留原始目标，防止丢失
+ * - 复用 context-inference 的 extractFreeTags 做相似度计算
  *
  * 缓存策略：LRU + TTL，与 tool-guidance 的 trackerCache 保持一致。
  */
+
+import { extractFreeTags } from '../context-inference.js';
 
 /** 目标缓存条目 */
 interface GoalEntry {
@@ -156,9 +159,14 @@ export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean 
   ];
   if (FOLLOWUP_PATTERNS.some((p) => p.test(trimmed))) return false;
 
-  // 3. 文本相似度检查
-  const similarity = computeWordSimilarity(trimmed, currentGoal);
-  if (similarity > 0.65) return false; // 高度重叠，同一话题
+  // 3. 文本相似度检查（复用 context-inference 的 extractFreeTags 做 Jaccard 相似度）
+  const tagsNew = new Set(extractFreeTags(trimmed));
+  const tagsOld = new Set(extractFreeTags(currentGoal));
+  if (tagsNew.size > 0 && tagsOld.size > 0) {
+    const intersection = new Set([...tagsNew].filter((t) => tagsOld.has(t)));
+    const similarity = intersection.size / Math.min(tagsNew.size, tagsOld.size);
+    if (similarity > 0.6) return false; // 高度重叠，同一话题
+  }
 
   // 4. 新问题信号：疑问词或问号
   const hasQuestionMark = /[?？]/.test(trimmed);
@@ -170,22 +178,6 @@ export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean 
 
   // 6. 默认：不更新
   return false;
-}
-
-/**
- * 简单词级别相似度（基于重叠词比例）。
- * 用于快速判断两条消息是否属于同一话题。
- */
-function computeWordSimilarity(a: string, b: string): number {
-  const tokenize = (s: string) =>
-    s.toLowerCase()
-      .split(/[\s,，。.！!？?：:；;、\n]+/)
-      .filter((w) => w.length > 1);
-  const wordsA = new Set(tokenize(a));
-  const wordsB = new Set(tokenize(b));
-  if (wordsA.size === 0 || wordsB.size === 0) return 0;
-  const intersection = new Set([...wordsA].filter((w) => wordsB.has(w)));
-  return intersection.size / Math.min(wordsA.size, wordsB.size);
 }
 
 /**
