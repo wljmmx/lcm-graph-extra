@@ -115,6 +115,80 @@ export function getGoal(sessionKey: string): string {
 }
 
 /**
+ * 判断新消息是否应该更新目标缓存。
+ *
+ * 设计原则：用户可能是简短续问（"继续"、"具体说说"），这些是对同一问题的
+ * 延续而非新问题，不应更新目标。只有明确的新问题场景才覆盖缓存。
+ *
+ * 多因子判定：
+ * 1. 极短消息（< 12 字）→ 续问，不更新
+ * 2. 续问句式匹配（"继续"、"还有呢"、"展开讲讲" 等）→ 不更新
+ * 3. 文本相似度 > 0.65 → 同一话题，不更新
+ * 4. 含疑问词或问号 → 倾向新问题，更新
+ * 5. 消息 > 50 字 → 倾向新问题，更新
+ * 6. 默认：不更新
+ */
+export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean {
+  if (!newGoal) return false;
+  if (!currentGoal) return true; // 无现有目标，首次缓存
+
+  const trimmed = newGoal.trim();
+
+  // 1. 极短消息基本是续问
+  if (trimmed.length < 12) return false;
+
+  // 2. 续问句式匹配
+  const FOLLOWUP_PATTERNS = [
+    /^(好的?|ok|可以|行|嗯+|对|是[的]?|没错|正确|了解了?|明白了?)([。.！!]?)$/i,
+    /^(继续|接着|然后|还有|下一步|go\s*on|next)([。.！!]?)$/i,
+    /^(具体|详细|展开)(说说|讲讲|解释|说明|介绍|描述)[。.！!]?/,
+    /^(能|可以|能否|可否)(详细|具体|再)?(说说|讲讲|解释|说明|介绍|描述)/,
+    /^(为什么|怎么会|为啥|为何)[。.！!]?/,
+    /^(没(有|啥|什么)|不懂|不(太|是|怎么)明白|不清楚|没看懂|没理解)[。.！!]?/,
+    /^(再|多|补充)(说|讲|来|给)?(一些|一点|几个|些|点)[。.！!]?/,
+    /^(例子|举例|比如|example|示例|演示)[。.！!]?/i,
+    /^(翻译|translate|总结|summarize|概括|归纳|提炼)[。.！!]?/i,
+    /^(然后呢|之后呢|还有呢|接下来呢|还有吗|还有别的吗)[。.！!]?/,
+    /^(什么意思|怎么说|怎样的|什么样的)[。.！!]?/,
+    /^(帮我)?(优化|改进|改善|修改|调整|重构)[一下]?(这个|代码|上面|之前)/,
+    /^(这个|上面|前面|之前|刚才)(的|说的)?[。.！!]?/,
+    /^(请|麻烦|帮我)?(再|重新)?(说|解释|描述|说明|讲)[一遍|一下|一次]/,
+  ];
+  if (FOLLOWUP_PATTERNS.some((p) => p.test(trimmed))) return false;
+
+  // 3. 文本相似度检查
+  const similarity = computeWordSimilarity(trimmed, currentGoal);
+  if (similarity > 0.65) return false; // 高度重叠，同一话题
+
+  // 4. 新问题信号：疑问词或问号
+  const hasQuestionMark = /[?？]/.test(trimmed);
+  const hasInterrogative = /(怎么|如何|什么|哪些|哪个|谁|为什么|是否|能不能|可不可以|可以吗|有没有|存在|怎样|何时|多久|几次|几个|多大|多少)/.test(trimmed);
+  if (hasQuestionMark || hasInterrogative) return true;
+
+  // 5. 长度阈值：较长消息大概率是新问题
+  if (trimmed.length > 50) return true;
+
+  // 6. 默认：不更新
+  return false;
+}
+
+/**
+ * 简单词级别相似度（基于重叠词比例）。
+ * 用于快速判断两条消息是否属于同一话题。
+ */
+function computeWordSimilarity(a: string, b: string): number {
+  const tokenize = (s: string) =>
+    s.toLowerCase()
+      .split(/[\s,，。.！!？?：:；;、\n]+/)
+      .filter((w) => w.length > 1);
+  const wordsA = new Set(tokenize(a));
+  const wordsB = new Set(tokenize(b));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  const intersection = new Set([...wordsA].filter((w) => wordsB.has(w)));
+  return intersection.size / Math.min(wordsA.size, wordsB.size);
+}
+
+/**
  * 构建目标锚定提示词。
  * 注入到 system prompt 顶部，提醒 LLM 不要偏离原始任务。
  */

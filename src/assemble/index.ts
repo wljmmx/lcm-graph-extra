@@ -6,7 +6,7 @@
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
-import { extractLatestUserGoal, cacheGoal, getGoal } from '../plugin/goal-cache.js';
+import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
 import {
@@ -84,11 +84,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     beginToolGuidanceRound(_toolSessionKey, params.messages ?? []);
 
     // Goal Anchoring: 跟踪最新用户意图，防止长对话注意力漂移
-    // 每轮有新的用户消息时更新缓存，始终以最新用户问题为目标
+    // 仅明确新问题时更新缓存，续问（"继续"、"具体说说"）不覆盖目标
     if (_toolSessionKey) {
       const latestGoal = extractLatestUserGoal(params.messages ?? []);
       const currentGoal = getGoal(_toolSessionKey);
-      if (latestGoal && latestGoal !== currentGoal) {
+      if (latestGoal && shouldUpdateGoal(latestGoal, currentGoal)) {
         cacheGoal(_toolSessionKey, latestGoal);
         ctx.logger?.debug?.('[assemble] goal updated', { goal: latestGoal.slice(0, 80) });
       }
