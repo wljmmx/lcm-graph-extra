@@ -47,6 +47,30 @@ export function extractFirstUserGoal(messages: any[]): string {
 }
 
 /**
+ * 从消息列表中提取最后一轮用户消息。
+ * 用于跟踪最新用户意图，在 Goal Anchoring 中更新缓存。
+ * 返回截断后的文本，空字符串表示未找到。
+ */
+export function extractLatestUserGoal(messages: any[]): string {
+  if (!Array.isArray(messages) || messages.length === 0) return '';
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== 'user') continue;
+    const content = typeof msg.content === 'string' ? msg.content
+      : Array.isArray(msg.content)
+        ? msg.content.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join(' ')
+        : '';
+    if (content.trim()) {
+      return content.length > GOAL_MAX_LENGTH
+        ? content.slice(0, GOAL_MAX_LENGTH) + '…'
+        : content;
+    }
+  }
+  return '';
+}
+
+/**
  * 缓存会话目标。
  * 调用时机：首轮 assemble 时（round 1）。
  */
