@@ -16,6 +16,8 @@ import { extractFreeTags } from '../context-inference.js';
 interface GoalEntry {
   /** 用户原始目标（截断到 300 字符，防止过长） */
   goal: string;
+  /** 目标的关键词标签（缓存，避免每次 shouldUpdateGoal 重复提取） */
+  freeTags: string[];
   /** 首轮消息时间戳 */
   createdAt: number;
   /** 最后访问时间（用于 TTL 淘汰） */
@@ -87,7 +89,12 @@ export function cacheGoal(sessionKey: string, goal: string): void {
   }
 
   const now = Date.now();
-  goalCache.set(sessionKey, { goal, createdAt: now, lastAccess: now });
+  goalCache.set(sessionKey, {
+    goal,
+    freeTags: extractFreeTags(goal),
+    createdAt: now,
+    lastAccess: now,
+  });
 
   // TTL 清理
   for (const [key, entry] of goalCache) {
@@ -120,31 +127,45 @@ export function getGoal(sessionKey: string): string {
 /**
  * 判断新消息是否应该更新目标缓存。
  *
- * 设计原则：保守优先（宁可不更新，不误更新），但避免低层检查屏蔽高层信号。
- * 判定顺序按"信号强度"排列，强信号优先：
+ * 设计原则：信号评分模型，多因子独立打分后阈值判定。
+ * 每个信号独立贡献分数，不互相阻塞，避免顺序短路模型的硬阈值缺陷。
  *
- * 1. 空消息 / 无缓存 → 直接返回
- * 2. 引用前文检测（"这个"、"上面"、"之前"）→ 续问，不更新
- * 3. 续问句式匹配（"继续"、"具体说说" 等）→ 不更新
- * 4. 疑问词 + 非极短（≥6 字）→ 新问题，更新
- * 5. 关键词零重叠 + 非极短（≥12 字）→ 明确话题切换，更新
- * 6. 关键词高重叠（>0.6）→ 同一话题，不更新
- * 7. 长消息 + 低重叠（>50 字 + <0.4）→ 倾向新话题，更新
- * 8. 默认 → 不更新
+ * 负面信号（续问特征）:
+ *   - 极短消息(<5字)        → -3
+ *   - 引用前文               → -2
+ *   - 续问句式匹配           → -3
+ *   - 关键词高重叠(>0.6)    → -2
+ *
+ * 正面信号（新问题特征）:
+ *   - 疑问词/问号 + ≥6字    → +3
+ *   - 关键词零重叠           → +2
+ *   - 关键词低重叠(<0.4)     → +1
+ *   - 长消息(>50字)          → +1
+ *   - 消息≥12字             → +1
+ *
+ * 判定: 分 > 0 → 更新，分 ≤ 0 → 不更新
+ *
+ * @param newGoal 最新用户消息
+ * @param sessionKey 会话标识，用于获取缓存的 freeTags
  */
-export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean {
+export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
   if (!newGoal) return false;
-  if (!currentGoal) return true; // 无现有目标，首次缓存
+
+  const entry = goalCache.get(sessionKey);
+  if (!entry) return true; // 无现有目标，首次缓存
 
   const trimmed = newGoal.trim();
+  let score = 0;
 
-  // 1. 极短消息（< 5 字）→ 确认/回复，不更新
-  if (trimmed.length < 5) return false;
+  // ── 负面信号 ──
 
-  // 2. 引用前文 → 续问，不更新
-  if (/^(这个|上面|前面|之前|刚才|刚刚)(的|说的|那个|提到)?[。.！!]?/.test(trimmed)) return false;
+  // 极短消息（< 5 字）→ 确认/回复
+  if (trimmed.length < 5) score -= 3;
 
-  // 3. 续问句式匹配
+  // 引用前文 → 续问
+  if (/^(这个|上面|前面|之前|刚才|刚刚)(的|说的|那个|提到)?[。.！!]?/.test(trimmed)) score -= 2;
+
+  // 续问句式匹配
   const FOLLOWUP_PATTERNS = [
     /^(好的?|ok|可以|行|嗯+|对|是[的]?|没错|正确|了解了?|明白了?)([。.！!]?)$/i,
     /^(继续|接着|然后|还有|下一步|go\s*on|next)([。.！!]?)$/i,
@@ -160,34 +181,40 @@ export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean 
     /^(帮我)?(优化|改进|改善|修改|调整|重构)[一下]?(这个|代码|上面|之前)/,
     /^(请|麻烦|帮我)?(再|重新)?(说|解释|描述|说明|讲)[一遍|一下|一次]/,
   ];
-  if (FOLLOWUP_PATTERNS.some((p) => p.test(trimmed))) return false;
+  if (FOLLOWUP_PATTERNS.some((p) => p.test(trimmed))) score -= 3;
 
-  // 预计算关键词标签（后续步骤复用）
-  const tagsNew = new Set(extractFreeTags(trimmed));
-  const tagsOld = new Set(extractFreeTags(currentGoal));
-  const intersection = new Set([...tagsNew].filter((t) => tagsOld.has(t)));
-  const similarity = (tagsNew.size > 0 && tagsOld.size > 0)
-    ? intersection.size / Math.min(tagsNew.size, tagsOld.size)
+  // ── 关键词相似度（使用缓存的 freeTags，避免重复提取）──
+  const tagsNew = extractFreeTags(trimmed);
+  const tagsOld = new Set(entry.freeTags);
+  const intersection = new Set(tagsNew.filter((t) => tagsOld.has(t)));
+  const similarity = (tagsNew.length > 0 && entry.freeTags.length > 0)
+    ? intersection.size / Math.min(tagsNew.length, entry.freeTags.length)
     : 0;
-  const hasZeroOverlap = tagsNew.size > 0 && tagsOld.size > 0 && intersection.size === 0;
+  const hasZeroOverlap = tagsNew.length > 0 && entry.freeTags.length > 0 && intersection.size === 0;
 
-  // 4. 疑问词/问号 + 非极短（≥6 字）→ 新问题
-  //    注意：此检查在长度检查之前，避免短疑问句被截杀
+  if (similarity > 0.6) score -= 2;  // 高重叠 → 同一话题
+
+  // ── 正面信号 ──
+
+  // 疑问词/问号 + 非极短（≥6 字）
   const hasQuestionMark = /[?？]/.test(trimmed);
   const hasInterrogative = /(怎么|如何|什么|哪些|哪个|谁|为什么|是否|能不能|可不可以|可以吗|有没有|怎样|何时|多久|多大|多少)/.test(trimmed);
-  if ((hasQuestionMark || hasInterrogative) && trimmed.length >= 6) return true;
+  if ((hasQuestionMark || hasInterrogative) && trimmed.length >= 6) score += 3;
 
-  // 5. 关键词零重叠 + 非极短（≥12 字）→ 明确话题切换
-  if (hasZeroOverlap && trimmed.length >= 12) return true;
+  // 关键词零重叠 → 明确话题切换
+  if (hasZeroOverlap) score += 2;
 
-  // 6. 关键词高重叠 → 同一话题，不更新
-  if (similarity > 0.6) return false;
+  // 关键词低重叠 → 弱话题切换信号
+  if (similarity < 0.4 && similarity > 0) score += 1;
 
-  // 7. 长消息 + 低重叠（需要同时满足：长消息可能只是详细追问，低重叠才有话题切换信号）
-  if (trimmed.length > 50 && similarity < 0.4) return true;
+  // 长消息 → 弱新问题信号
+  if (trimmed.length > 50) score += 1;
 
-  // 8. 默认：不更新（保守策略）
-  return false;
+  // 非极短消息 → 弱信号
+  if (trimmed.length >= 12) score += 1;
+
+  // ── 判定 ──
+  return score > 0;
 }
 
 /**

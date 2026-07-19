@@ -84,11 +84,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     beginToolGuidanceRound(_toolSessionKey, params.messages ?? []);
 
     // Goal Anchoring: 跟踪最新用户意图，防止长对话注意力漂移
-    // 仅明确新问题时更新缓存，续问（"继续"、"具体说说"）不覆盖目标
+    // 评分模型判定：仅明确新问题时更新缓存，续问不覆盖目标
     if (_toolSessionKey) {
       const latestGoal = extractLatestUserGoal(params.messages ?? []);
-      const currentGoal = getGoal(_toolSessionKey);
-      if (latestGoal && shouldUpdateGoal(latestGoal, currentGoal)) {
+      if (latestGoal && shouldUpdateGoal(latestGoal, _toolSessionKey)) {
         cacheGoal(_toolSessionKey, latestGoal);
         ctx.logger?.debug?.('[assemble] goal updated', { goal: latestGoal.slice(0, 80) });
       }
