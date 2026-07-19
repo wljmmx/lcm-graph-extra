@@ -679,20 +679,22 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         // 检查是否有上一轮异步聚合的缓存结果
         const cachedResult = peekMoaResultCache();
 
-        if (complexityScore >= moaConfig.complexityThreshold || forceMoa || cachedResult) {
-          if (cachedResult) {
-            // 上一轮的聚合结果已就绪，直接注入工具指令让主模型获取
-            ctx.logger?.info?.('[assemble] MoA cached result available from previous round');
-            systemPromptAddition = buildMoaToolInstruction() + '\n\n' + systemPromptAddition;
-          } else {
-            ctx.logger?.info?.('[assemble] MoA triggered (async split)', {
-              complexity: complexityScore,
-              reasons: forceMoa ? ['/moa command'] : complexityReasons,
-              forceMoa,
-              mode: moaConfig.mode,
-              refCount: moaConfig.referenceModels?.length ?? 0,
-              syncBudgetMs: moaConfig.syncBudgetMs ?? 240_000,
-            });
+        // 注入上一轮的缓存结果（如果有）—— 与当前轮 MoA 独立，互不阻塞
+        if (cachedResult) {
+          ctx.logger?.info?.('[assemble] MoA cached result available from previous round');
+          systemPromptAddition = buildMoaToolInstruction() + '\n\n' + systemPromptAddition;
+        }
+
+        // 当前轮触发 MoA（复杂度达标或 /moa 命令强制）
+        if (complexityScore >= moaConfig.complexityThreshold || forceMoa) {
+          ctx.logger?.info?.('[assemble] MoA triggered (async split)', {
+            complexity: complexityScore,
+            reasons: forceMoa ? ['/moa command'] : complexityReasons,
+            forceMoa,
+            mode: moaConfig.mode,
+            refCount: moaConfig.referenceModels?.length ?? 0,
+            syncBudgetMs: moaConfig.syncBudgetMs ?? 240_000,
+          });
 
             // 提取查询文本（/moa 命令时使用清理后的文本）
             const queryText = forceMoa ? cleanedQuery : (() => {
