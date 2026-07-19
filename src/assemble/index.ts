@@ -631,9 +631,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       if (!moaPresetOverride && moaConfig?.enabled) {
         try {
           const { classifyTaskType, resolveClassifiedPreset } = await import('../moa/classifier.js');
-          const { getAvailablePresets } = await import('../moa/orchestrator.js');
           const classification = classifyTaskType(queryText);
-          const availablePresets = getAvailablePresets(moaConfig).map((p: any) => p.name);
+          const availablePresets = (moaConfig.presets ?? []).map((p: any) => p.name);
           const autoPreset = resolveClassifiedPreset(classification, availablePresets);
           if (autoPreset) {
             moaPresetOverride = autoPreset;
