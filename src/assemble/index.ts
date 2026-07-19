@@ -564,6 +564,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     let forceMoa = false;
     let cleanedQuery = '';
     let moaPresetOverride: string | undefined;
+    let classificationContext = '';
 
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
@@ -629,7 +630,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
       // ── 自动分类：根据用户输入确定任务领域，生成分类上下文补充到参考模型 prompt ──
       // 注意：自动分类不覆盖模型选择，仅补充领域上下文帮助参考模型聚焦分析方向
-      let classificationContext = '';
+      classificationContext = '';
       if (!moaPresetOverride && moaConfig?.enabled) {
         try {
           const { classifyTaskType } = await import('../moa/classifier.js');
@@ -777,7 +778,6 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             }
           }
         }
-      }
     } catch (moaErr) {
       // MoA 失败不影响主流程，降级到正常推理
       ctx.logger?.warn?.('[assemble] MoA pipeline failed, falling back to normal flow', {

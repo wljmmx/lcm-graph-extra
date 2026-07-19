@@ -13,12 +13,13 @@ import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { exportMarkdownToPdf, exportMarkdownToFile } from './utils/pdf-export.js';
 import { getGlobalLogger } from './utils/logger.js';
+import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { registerSearchTool } from './tools/search.js';
 import { registerDiagnoseTool } from './tools/diagnose.js';
 
 import {
   // state management
-  setPluginNeo4jConfig, setSharedQmdClient,
+  setPluginNeo4jConfig, getPluginNeo4jConfig, setSharedQmdClient,
   // shared utilities
   acquireQmdClient, validateBackupPath, escapeFts5Query, parseTimeRange,
   generateExperienceSummary, openDb, closeSharedDb, getQmdBaseUrl, LCM_DB,
