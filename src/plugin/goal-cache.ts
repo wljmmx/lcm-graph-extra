@@ -120,16 +120,17 @@ export function getGoal(sessionKey: string): string {
 /**
  * 判断新消息是否应该更新目标缓存。
  *
- * 设计原则：用户可能是简短续问（"继续"、"具体说说"），这些是对同一问题的
- * 延续而非新问题，不应更新目标。只有明确的新问题场景才覆盖缓存。
+ * 设计原则：保守优先（宁可不更新，不误更新），但避免低层检查屏蔽高层信号。
+ * 判定顺序按"信号强度"排列，强信号优先：
  *
- * 多因子判定：
- * 1. 极短消息（< 12 字）→ 续问，不更新
- * 2. 续问句式匹配（"继续"、"还有呢"、"展开讲讲" 等）→ 不更新
- * 3. 文本相似度 > 0.65 → 同一话题，不更新
- * 4. 含疑问词或问号 → 倾向新问题，更新
- * 5. 消息 > 50 字 → 倾向新问题，更新
- * 6. 默认：不更新
+ * 1. 空消息 / 无缓存 → 直接返回
+ * 2. 引用前文检测（"这个"、"上面"、"之前"）→ 续问，不更新
+ * 3. 续问句式匹配（"继续"、"具体说说" 等）→ 不更新
+ * 4. 疑问词 + 非极短（≥6 字）→ 新问题，更新
+ * 5. 关键词零重叠 + 非极短（≥12 字）→ 明确话题切换，更新
+ * 6. 关键词高重叠（>0.6）→ 同一话题，不更新
+ * 7. 长消息 + 低重叠（>50 字 + <0.4）→ 倾向新话题，更新
+ * 8. 默认 → 不更新
  */
 export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean {
   if (!newGoal) return false;
@@ -137,10 +138,13 @@ export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean 
 
   const trimmed = newGoal.trim();
 
-  // 1. 极短消息基本是续问
-  if (trimmed.length < 12) return false;
+  // 1. 极短消息（< 5 字）→ 确认/回复，不更新
+  if (trimmed.length < 5) return false;
 
-  // 2. 续问句式匹配
+  // 2. 引用前文 → 续问，不更新
+  if (/^(这个|上面|前面|之前|刚才|刚刚)(的|说的|那个|提到)?[。.！!]?/.test(trimmed)) return false;
+
+  // 3. 续问句式匹配
   const FOLLOWUP_PATTERNS = [
     /^(好的?|ok|可以|行|嗯+|对|是[的]?|没错|正确|了解了?|明白了?)([。.！!]?)$/i,
     /^(继续|接着|然后|还有|下一步|go\s*on|next)([。.！!]?)$/i,
@@ -154,29 +158,35 @@ export function shouldUpdateGoal(newGoal: string, currentGoal: string): boolean 
     /^(然后呢|之后呢|还有呢|接下来呢|还有吗|还有别的吗)[。.！!]?/,
     /^(什么意思|怎么说|怎样的|什么样的)[。.！!]?/,
     /^(帮我)?(优化|改进|改善|修改|调整|重构)[一下]?(这个|代码|上面|之前)/,
-    /^(这个|上面|前面|之前|刚才)(的|说的)?[。.！!]?/,
     /^(请|麻烦|帮我)?(再|重新)?(说|解释|描述|说明|讲)[一遍|一下|一次]/,
   ];
   if (FOLLOWUP_PATTERNS.some((p) => p.test(trimmed))) return false;
 
-  // 3. 文本相似度检查（复用 context-inference 的 extractFreeTags 做 Jaccard 相似度）
+  // 预计算关键词标签（后续步骤复用）
   const tagsNew = new Set(extractFreeTags(trimmed));
   const tagsOld = new Set(extractFreeTags(currentGoal));
-  if (tagsNew.size > 0 && tagsOld.size > 0) {
-    const intersection = new Set([...tagsNew].filter((t) => tagsOld.has(t)));
-    const similarity = intersection.size / Math.min(tagsNew.size, tagsOld.size);
-    if (similarity > 0.6) return false; // 高度重叠，同一话题
-  }
+  const intersection = new Set([...tagsNew].filter((t) => tagsOld.has(t)));
+  const similarity = (tagsNew.size > 0 && tagsOld.size > 0)
+    ? intersection.size / Math.min(tagsNew.size, tagsOld.size)
+    : 0;
+  const hasZeroOverlap = tagsNew.size > 0 && tagsOld.size > 0 && intersection.size === 0;
 
-  // 4. 新问题信号：疑问词或问号
+  // 4. 疑问词/问号 + 非极短（≥6 字）→ 新问题
+  //    注意：此检查在长度检查之前，避免短疑问句被截杀
   const hasQuestionMark = /[?？]/.test(trimmed);
-  const hasInterrogative = /(怎么|如何|什么|哪些|哪个|谁|为什么|是否|能不能|可不可以|可以吗|有没有|存在|怎样|何时|多久|几次|几个|多大|多少)/.test(trimmed);
-  if (hasQuestionMark || hasInterrogative) return true;
+  const hasInterrogative = /(怎么|如何|什么|哪些|哪个|谁|为什么|是否|能不能|可不可以|可以吗|有没有|怎样|何时|多久|多大|多少)/.test(trimmed);
+  if ((hasQuestionMark || hasInterrogative) && trimmed.length >= 6) return true;
 
-  // 5. 长度阈值：较长消息大概率是新问题
-  if (trimmed.length > 50) return true;
+  // 5. 关键词零重叠 + 非极短（≥12 字）→ 明确话题切换
+  if (hasZeroOverlap && trimmed.length >= 12) return true;
 
-  // 6. 默认：不更新
+  // 6. 关键词高重叠 → 同一话题，不更新
+  if (similarity > 0.6) return false;
+
+  // 7. 长消息 + 低重叠（需要同时满足：长消息可能只是详细追问，低重叠才有话题切换信号）
+  if (trimmed.length > 50 && similarity < 0.4) return true;
+
+  // 8. 默认：不更新（保守策略）
   return false;
 }
 
