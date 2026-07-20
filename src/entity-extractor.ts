@@ -100,8 +100,9 @@ function extractEntityName(r: RetrievalResult): string {
     if (trimmed.length > 3) return trimmed;
   }
 
-  // Last resort: use result id
-  return `entity_${r.id.slice(0, 8)}`;
+  // Last resort: use result id (with fallback for undefined)
+  const id = typeof r.id === 'string' && r.id.length > 0 ? r.id : `unknown_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return `entity_${id.slice(0, 8)}`;
 }
 
 /**

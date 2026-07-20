@@ -20,6 +20,7 @@ import { serializeError } from '../utils/logger.js';
 // P0-6: 热路径 healthMetrics 静态导入
 import { healthMetrics } from '../health-metrics.js';
 import type { AssembleContext, RetrievalOutput } from './types.js';
+import type { RetrievalResult } from '../types.js';
 
 /** P2-1: L2/L4 检索结果缓存 TTL（与 L3 searchWithCache 5min 一致） */
 const QUERY_CACHE_TTL_MS = 300 * 1000;
@@ -33,6 +34,18 @@ function hashKey(s: string): string {
     h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   }
   return (h >>> 0).toString(36);
+}
+
+/** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */
+function toRetrievalResult(r: any): RetrievalResult {
+  return {
+    id: typeof r.docid === 'string' && r.docid ? r.docid : `qmd_${Math.random().toString(36).slice(2, 10)}`,
+    content: `File: ${r.file ?? '?'}:${r.line ?? 0}\nTitle: ${r.title ?? ''}\n${r.snippet ?? ''}`,
+    source: 'qmd' as const,
+    type: 'raw' as const,
+    score: typeof r.score === 'number' ? r.score : 0,
+    metadata: { file: r.file, line: r.line, docid: r.docid, title: r.title },
+  };
 }
 
 export async function performRetrieval(
@@ -260,7 +273,10 @@ export async function performRetrieval(
     // S1-1: Merger for entity-level cross-engine dedup
     try {
       if (ctx.merger && Array.isArray(rawQmd) && Array.isArray(rawGraph)) {
-        let merged = ctx.merger.merge(rawQmd, rawGraph);
+        // 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult 再传给 Merger
+        // Merger 期望 RetrievalResult[] 有 id/content/source/type/score/metadata 字段
+        const qmdRetrieval = rawQmd.map(toRetrievalResult);
+        let merged = ctx.merger.merge(qmdRetrieval, rawGraph);
 
         // P0-1: LLM Rerank 异步化 — 当前轮使用 Merger 默认排序，LLM 结果写入 session 缓存供下一轮使用
         // 原 await ctx.merger.llmRerank 同步阻塞 3s 超时，改为 fire-and-forget
