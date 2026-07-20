@@ -10,7 +10,7 @@ export function registerDiagnoseTool(api: any): void {
   api.registerTool({
     name: "lcmg_diagnose",
     label: "系统诊断",
-    description: "Full system diagnostics: checks Neo4j connectivity + node/rel counts, lossless-claw DB size, QMD MCP health, and all circuit breaker states. Returns structured JSON with per-subsystem status (healthy/degraded/down). Use when troubleshooting memory or recall issues.",
+    description: "System diagnostics: Neo4j, lossless-claw DB, QMD MCP health, circuit breaker states. Returns per-subsystem status.",
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {

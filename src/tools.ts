@@ -56,15 +56,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_experience_report",
     label: "经验报告",
-    description: "Retrieve past troubleshooting experiences from Neo4j knowledge graph. Finds EVENT nodes with SOLVED_BY relationships (fix patterns, lessons learned). format=text (default), json (structured array), markdown, summary (LLM natural language summary), markdown-file (落盘到 ~/.openclaw/reports/), pdf-file (先存 md，需 pandoc 转 PDF). default limit=20. tag filters by community label. S-8': supports from/to time range filtering (ISO 8601 or natural language like '7d', '24h')." +
-      "Searches for EVENT nodes with SOLVED_BY relationships and formats as a report.",
+    description: "Retrieve past troubleshooting experiences. Supports time range, tag, and type filtering. Output formats: text, json, markdown, summary, markdown-file, pdf-file.",
     parameters: Type.Object({
-      format: Type.Optional(Type.String({ description: 'Output: "text", "json", "markdown", "summary", "markdown-file", "pdf-file"', default: "text" })),
-      limit: Type.Optional(Type.Number({ description: "Max experiences (default 20)", minimum: 1, maximum: 100 })),
-      tag: Type.Optional(Type.String({ description: "Filter by community tag" })),
-      from: Type.Optional(Type.String({ description: "S-8': Start time (ISO 8601 or relative like '7d', '24h', '2024-01-01')" })),
-      to: Type.Optional(Type.String({ description: "S-8': End time (ISO 8601 or relative, default now)" })),
-      type: Type.Optional(Type.String({ description: "S-8': Filter by experience type (lesson|failure|correction|fix|best_practice)" })),
+      format: Type.Optional(Type.String({ description: 'Output format: text, json, markdown, summary, markdown-file, pdf-file', default: "text" })),
+      limit: Type.Optional(Type.Number({ description: "Max results (default 20)", minimum: 1, maximum: 100 })),
+      tag: Type.Optional(Type.String({ description: "Filter by tag" })),
+      from: Type.Optional(Type.String({ description: "Start time (ISO 8601 or relative like '7d', '24h')" })),
+      to: Type.Optional(Type.String({ description: "End time (ISO 8601 or relative, default now)" })),
+      type: Type.Optional(Type.String({ description: "Experience type: lesson|failure|correction|fix|best_practice" })),
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
@@ -669,8 +668,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_pin",
     label: "节点置顶",
-    description: "Pin/unpin a Neo4j knowledge graph node. Pinned nodes are excluded from TTL-based memory decay and will never be auto-deleted. Use when a piece of knowledge should never be forgotten. " +
-      "Use when a piece of knowledge should never be forgotten.",
+    description: "Pin/unpin a knowledge graph node. Pinned nodes are excluded from TTL cleanup and auto-deletion.",
     parameters: Type.Object({
       id: Type.String({ description: "Node ID to pin" }),
       unpin: Type.Optional(Type.Boolean({ description: "Set true to unpin instead of pin (default false)" })),
@@ -704,8 +702,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_forget",
     label: "主动遗忘",
-    description: "Actively forget/supersede a knowledge graph node or experience. mode=soft: reduce relevanceScore/pagerank (node stays searchable but deprioritized). mode=hard: mark node as 'superseded' (excluded from search results, retained for audit). " +
-      "G-10: Use when a piece of knowledge is outdated or incorrect and should be deprioritized or removed from active recall.",
+    description: "Forget or deprecate a knowledge graph node. mode=soft: reduce weight (still searchable). mode=hard: mark superseded (excluded from search).",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "Node ID to forget" })),
       query: Type.Optional(Type.String({ description: "Query to find nodes to forget (if id not provided)" })),
@@ -1132,8 +1129,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_qmd_status",
     label: "QMD 状态",
-    description: "Query QMD MCP service health: returns index stats (document count, vector dim), collection metadata, and service uptime. " +
-      "Calls the 'status' tool on QMD's MCP server.",
+    description: "Query QMD MCP service health: index stats, collection metadata, and uptime.",
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
@@ -1173,8 +1169,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_get_document",
     label: "文档获取",
-    description: "Fetch a single document from QMD document index. Accepts absolute file path or QMD docid. Returns full content with fuzzy matching suggestions when exact path is not found. " +
-      "Returns full document content with fuzzy matching suggestions when exact path is not found.",
+    description: "Fetch a document from QMD index by file path or docid. Returns full content with fuzzy matching.",
     parameters: Type.Object({
       file: Type.String({ description: "File path or docid to retrieve" }),
     }),
@@ -1208,8 +1203,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_batch_get",
     label: "批量获取",
-    description: "Batch fetch documents from QMD index. Input formats: glob patterns (e.g. **/memory/*.md), comma-separated paths, or docid list. Max 50 docs per call. Returns array of {path, content, size}. " +
-      "Returns multiple documents' content.",
+    description: "Batch fetch documents from QMD index by glob pattern, comma-separated paths, or docid list. Max 50 docs.",
     parameters: Type.Object({
       pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
     }),
@@ -1696,7 +1690,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_compact",
     label: "上下文压缩",
-    description: "手动触发指定会话的 compact。无 conversationId 时触发最紧急的债务。用于手动控制上下文压缩。",
+    description: "Trigger context compaction for a session. Without conversationId, processes the most urgent debt.",
     parameters: Type.Object({
       conversationId: Type.Optional(Type.Number({
         description: "目标会话 ID，省略则处理最紧急债务",
@@ -1967,11 +1961,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_moa_reply",
     label: "MoA 聚合回复",
-    description: "Get the pre-computed MoA (Mixture of Agents) response. "
-      + "This tool returns the result synthesized by multiple reference models "
-      + "and an aggregator model. Call this when instructed to get the MoA response. "
-      + "The tool result is the final response and should be returned to the user as-is. "
-      + "If aggregation is still in progress, returns a pending status.",
+    description: "Get the pre-computed MoA (Mixture of Agents) response synthesized by multiple models. Returns pending status if aggregation is in progress.",
     parameters: {
       type: "object",
       properties: {},

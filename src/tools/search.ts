@@ -12,8 +12,7 @@ export function registerSearchTool(api: any): void {
   api.registerTool({
     name: "lcmg_search",
     label: "联合检索",
-    description: "Unified search across all three memory backends: (1) lossless-claw FTS5 (conversation messages), (2) QMD BM25/vector (code/docs retrieval), (3) Neo4j knowledge graph (entities/relationships). Returns merged, deduplicated results with source-tagged entries. " +
-      "Returns merged & deduplicated results across all three memory stores.",
+    description: "Unified search across conversation messages, code/docs, and knowledge graph. Returns merged deduplicated results.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)", minimum: 1, maximum: 30 })),
