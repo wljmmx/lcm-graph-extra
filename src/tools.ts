@@ -1874,7 +1874,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     description: "更新 lcm-graph-extra 运行时配置（写入 ~/.openclaw/openclaw.json）。仅允许白名单内的性能/行为参数，禁止修改安全相关字段。path 用点分路径如 'lcmMonitor.contextWindow'，value 为新值。部分字段需重启插件进程生效。",
     parameters: Type.Object({
       path: Type.String({ description: "点分路径，如 'maxTokens'、'lcmMonitor.contextWindow'、'compaction.triggerThreshold'、'experience.enabled'" }),
-      value: Type.Any({ description: "新值（类型需匹配字段：number/boolean/string）" }),
+      value: Type.Union([Type.String(), Type.Number(), Type.Boolean()], { description: "新值（number/boolean/string）" }),
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
