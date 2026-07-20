@@ -135,6 +135,9 @@ const pluginEntry: any = definePluginEntry({
     let _retrievalGateway: any = null;
     let _lastEmbedHealth: boolean = true;
     let _modelRegistry: Record<string, number> | undefined;
+    // 从 assemble 中捕获活跃模型 ID，供 compact 回查模型上下文窗口
+    let _activeModelId: string | undefined;
+    let _activeModelContextWindow: number | undefined;
     // Dashboard 快照服务停止函数（register 时启动，dispose 时调用）；null 表示未启动
     let snapshotServerStop: (() => Promise<void>) | null = null;
     // Snapshot server handle（heartbeat 中检查状态 + 重试启动）
@@ -437,6 +440,23 @@ const pluginEntry: any = definePluginEntry({
        * Assemble — optimized: instances reused, L2/L3/L4 fully parallelized.
        */
       async assemble(params: any) {
+        // 捕获活跃模型 ID，供 compact 回查模型实际上下文窗口
+        const modelId = typeof params.model === "string" ? params.model : "";
+        if (modelId && _modelRegistry) {
+          _activeModelId = modelId;
+          let modelCtx = _modelRegistry[modelId];
+          // 短 ID 回退：匹配 "provider/shortId" 中任意以 shortId 结尾的 key
+          if (modelCtx === undefined) {
+            const shortId = modelId.includes("/") ? modelId.split("/").pop() : modelId;
+            for (const [key, val] of Object.entries(_modelRegistry)) {
+              if (key.endsWith(shortId!)) {
+                modelCtx = val;
+                break;
+              }
+            }
+          }
+          _activeModelContextWindow = modelCtx;
+        }
         // R-1: 委托给 src/assemble/index.ts
         const ctx: AssembleContext = {
           api,
@@ -523,7 +543,9 @@ const pluginEntry: any = definePluginEntry({
           const _currentTokens = (params as any).currentTokenCount ?? 0;
           const _cfg = (api as any).pluginConfig ?? (api as any).config ?? {};
           const _lcmMonitor = _cfg?.lcmMonitor ?? {};
-          const _contextWindow = (_lcmMonitor as any)?.contextWindow ?? 262_144;
+          // 优先级: 模型实际上下文窗口 > 用户配置 lcmMonitor.contextWindow > 默认 262144
+          // 与 assemble 中 resolveContextProfile 的 ctxWindow 解析逻辑一致
+          const _contextWindow = _activeModelContextWindow ?? (_lcmMonitor as any)?.contextWindow ?? 262_144;
           const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? 114_688;
           const _overflowThreshold = Math.floor(_contextWindow * 0.90) - _compactBudget;
           const _isInputOverflow = _currentTokens > _overflowThreshold && _currentTokens > 0;
@@ -894,6 +916,8 @@ const pluginEntry: any = definePluginEntry({
         lastRetrievalQuery = '';
         _lastEmbedHealth = true;
         _modelRegistry = undefined;
+        _activeModelId = undefined;
+        _activeModelContextWindow = undefined;
         tracker = null;
         snapshotHandle = null;
         snapshotConfig = null;
