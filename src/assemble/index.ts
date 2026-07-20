@@ -5,6 +5,7 @@
  */
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
+import { detectScenario, buildToolPolicy } from '../tools/tool-scenarios.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
 import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
@@ -843,6 +844,24 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         if (smartGuidance && systemPromptAddition.length > 0) {
           systemPromptAddition += '\n\n' + smartGuidance;
         }
+      }
+    }
+
+    // CE Tool Policy: 场景感知工具过滤（subtractive）
+    // 根据对话上下文决定当前场景下哪些工具适用、哪些不适用
+    if (availableTools.length > 0 && tier !== 'high') {
+      try {
+        const scenario = detectScenario({
+          messages: finalMessages,
+          tier,
+          availableTools,
+        });
+        const toolPolicy = buildToolPolicy(scenario);
+        if (toolPolicy) {
+          systemPromptAddition += '\n\n' + toolPolicy;
+        }
+      } catch (err) {
+        // 工具策略注入失败不阻塞 assemble
       }
     }
   } catch (err) {
