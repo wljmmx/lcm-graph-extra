@@ -257,6 +257,8 @@ export const SCENARIO_LABELS: Record<string, string> = {
 
 /**
  * 场景 → 引导文本（CE 注入到 systemPromptAddition，帮助模型选择正确的搜索关键词）
+ *
+ * @deprecated 使用 buildModeAwareGuidance() 替代，支持 code/tools/directory 三种模式
  */
 export const SCENARIO_GUIDANCE: Record<string, string> = {
   troubleshooting: "当前场景为故障排查。建议优先使用经验检索和诊断相关工具，搜索关键词可尝试 'diagnose'、'experience'、'status'、'breaker'。",
@@ -266,6 +268,219 @@ export const SCENARIO_GUIDANCE: Record<string, string> = {
   casual_conversation: "当前为日常对话场景。优先基于已有上下文直接回答，仅在必要时使用经验检索或文档工具。",
   high_pressure: "⚠️ 上下文接近容量上限。请仅使用最必要的工具（经验检索、上下文压缩），避免不必要的工具调用。",
 };
+
+// ===================================================================
+// 工具搜索模式检测（SDK toolSearch mode）
+// ===================================================================
+
+/**
+ * SDK toolSearch 的三种模式。
+ * - code: 模型仅看到 tool_search_code，通过编写 JS 代码调用工具
+ * - tools: 模型看到 tool_search / tool_describe / tool_call，三步发现工具
+ * - directory: 同 tools，但 SDK 预 hydrate 评分最高的 N 个工具
+ * - legacy: 未启用 toolSearch，所有工具直接可见
+ */
+export type ToolSearchMode = "code" | "tools" | "directory" | "legacy";
+
+/** 各模式下的控制工具名称 */
+const MODE_CONTROL_TOOLS: Record<string, string[]> = {
+  code: ["tool_search_code"],
+  tools: ["tool_search", "tool_describe", "tool_call"],
+  directory: ["tool_search", "tool_describe", "tool_call"],
+  legacy: [],
+};
+
+/**
+ * 根据 availableTools 中出现的控制工具推断当前 toolSearch 模式。
+ * 无法区分 tools 和 directory（控制工具相同），默认返回 "tools"。
+ */
+export function detectToolSearchMode(availableTools: string[]): ToolSearchMode {
+  const toolSet = new Set(availableTools);
+  if (toolSet.has("tool_search_code")) return "code";
+  if (toolSet.has("tool_search")) return "tools"; // 也可能是 directory，但从 CE 视角无法区分
+  return "legacy";
+}
+
+// ===================================================================
+// 各场景下的工具速查表（用于 code 模式）
+// ===================================================================
+
+/** 工具名 → 函数签名速查（code 模式注入，模型用此编写 tool_search_code 调用） */
+const TOOL_CODE_REFERENCE: Record<string, string> = {
+  lcmg_experience_report: "lcmg_experience_report({format?, tags?, limit?, from?, to?})",
+  lcmg_search: "lcmg_search({query, engine?, limit?})",
+  lcmg_diagnose: "lcmg_diagnose({})",
+  lcmg_get_document: "lcmg_get_document({path?})",
+  lcmg_batch_get: "lcmg_batch_get({paths, glob?})",
+  lcmg_qmd_status: "lcmg_qmd_status({})",
+  lcmg_pin: "lcmg_pin({node_ids, reason?})",
+  lcmg_forget: "lcmg_forget({node_ids, mode?})",
+  lcmg_compact: "lcmg_compact({})",
+  lcmg_maintain: "lcmg_maintain({})",
+  lcmg_distill: "lcmg_distill({})",
+  lcmg_distill_retry: "lcmg_distill_retry({})",
+  lcmg_backfill: "lcmg_backfill({from, to?})",
+  lcmg_backup: "lcmg_backup({})",
+  lcmg_restore: "lcmg_restore({path})",
+  lcmg_import: "lcmg_import({source, type})",
+  lcmg_sync: "lcmg_sync({})",
+  lcmg_reset_breaker: "lcmg_reset_breaker({subsystem})",
+  lcmg_config_get: "lcmg_config_get({key?})",
+  lcmg_config_set: "lcmg_config_set({key, value})",
+  lcmg_moa_reply: "lcmg_moa_reply({})",
+};
+
+// ===================================================================
+// 模式感知的场景引导
+// ===================================================================
+
+interface ModeAwareGuidance {
+  /** 模式标签（中文） */
+  modeLabel: string;
+  /** 引导文本 */
+  guidance: string;
+}
+
+/**
+ * 根据 toolSearch 模式和对话场景，生成自适应引导文本。
+ *
+ * 三种模式的核心差异：
+ * ┌───────────┬──────────────────────────────────────────────────────┐
+ * │ code      │ 模型写 JS 代码调用工具。CE 提供工具名+函数签名速查表  │
+ * │           │ 让模型直接编写正确的调用代码，避免搜索开销。           │
+ * ├───────────┼──────────────────────────────────────────────────────┤
+ * │ tools     │ 模型三步发现工具。CE 提供搜索关键词和优先级建议，     │
+ * │           │ 帮助模型用最少的搜索次数找到正确的工具。              │
+ * ├───────────┼──────────────────────────────────────────────────────┤
+ * │ directory │ 同 tools，但 SDK 已预加载场景相关工具。              │
+ * │           │ CE 提示已加载工具可直接使用，减少重复搜索。           │
+ * ├───────────┼──────────────────────────────────────────────────────┤
+ * │ legacy    │ 所有工具直接可见。CE 提供场景相关的工具选择建议。     │
+ * └───────────┴──────────────────────────────────────────────────────┘
+ */
+export function buildModeAwareGuidance(
+  mode: ToolSearchMode,
+  scenario: ConversationScenario,
+  availableTools: string[],
+): ModeAwareGuidance | null {
+  const label = SCENARIO_LABELS[scenario] ?? scenario;
+  const toolNames = SCENARIO_TOOL_NAMES[scenario] ?? [];
+
+  switch (mode) {
+    case "code":
+      return buildCodeModeGuidance(label, toolNames);
+    case "tools":
+      return buildToolsModeGuidance(label, scenario, toolNames);
+    case "directory":
+      return buildDirectoryModeGuidance(label, scenario, toolNames, availableTools);
+    case "legacy":
+      return buildLegacyModeGuidance(label, scenario, toolNames);
+    default:
+      return null;
+  }
+}
+
+/** code 模式：注入工具函数速查表 */
+function buildCodeModeGuidance(
+  label: string,
+  toolNames: string[],
+): ModeAwareGuidance {
+  const refs = toolNames
+    .filter((n) => TOOL_CODE_REFERENCE[n])
+    .map((n) => `  ${TOOL_CODE_REFERENCE[n]}`)
+    .join("\n");
+
+  const guidance = refs
+    ? `当前环境使用 tool_search_code 编写 JS 代码调用工具。\n场景相关工具函数速查:\n${refs}\n其他工具可通过 tool_search_code 搜索发现。`
+    : `当前环境使用 tool_search_code 编写 JS 代码调用工具。请通过 tool_search_code 搜索当前场景所需工具。`;
+
+  return { modeLabel: "code", guidance };
+}
+
+/** tools 模式：提供搜索关键词和优先级 */
+function buildToolsModeGuidance(
+  _label: string,
+  scenario: ConversationScenario,
+  toolNames: string[],
+): ModeAwareGuidance {
+  const keywords = getScenarioKeywords(scenario, toolNames);
+  const priority = getScenarioPriority(scenario, toolNames.slice(0, 4));
+
+  const guidance = `当前环境通过 tool_search 查找工具 → tool_describe 获取详情 → tool_call 执行调用。\n${keywords}\n${priority}`;
+
+  return { modeLabel: "tools", guidance };
+}
+
+/** directory 模式：提示已预加载工具，减少重复搜索 */
+function buildDirectoryModeGuidance(
+  _label: string,
+  scenario: ConversationScenario,
+  toolNames: string[],
+  availableTools: string[],
+): ModeAwareGuidance {
+  // 检测哪些场景工具已预加载（在 availableTools 中）
+  const hydrated = toolNames.filter((n) => availableTools.includes(n));
+  const notHydrated = toolNames.filter((n) => !availableTools.includes(n) && TOOL_CODE_REFERENCE[n]);
+
+  const lines: string[] = [];
+  lines.push("SDK 已预加载当前场景最相关的工具，可直接调用。");
+
+  if (hydrated.length > 0) {
+    lines.push(`已就绪: ${hydrated.slice(0, 6).join(", ")}`);
+  }
+  if (notHydrated.length > 0) {
+    const keywords = getScenarioKeywords(scenario, notHydrated);
+    lines.push(`如需其他工具，使用 tool_search 查找。${keywords}`);
+  }
+
+  return { modeLabel: "directory", guidance: lines.join("\n") };
+}
+
+/** legacy 模式：直接列出工具建议 */
+function buildLegacyModeGuidance(
+  _label: string,
+  scenario: ConversationScenario,
+  toolNames: string[],
+): ModeAwareGuidance {
+  if (scenario === "casual_conversation") {
+    return {
+      modeLabel: "legacy",
+      guidance: "当前为日常对话场景。优先基于已有上下文直接回答，仅在必要时使用工具。",
+    };
+  }
+  if (scenario === "high_pressure") {
+    return {
+      modeLabel: "legacy",
+      guidance: "⚠️ 上下文接近容量上限。请仅使用最必要的工具（经验检索、上下文压缩），避免不必要的工具调用。",
+    };
+  }
+
+  const top = toolNames.slice(0, 6).join(", ");
+  return {
+    modeLabel: "legacy",
+    guidance: `当前场景下建议优先使用: ${top}。`,
+  };
+}
+
+/** 生成场景搜索关键词 */
+function getScenarioKeywords(scenario: ConversationScenario, toolNames: string[]): string {
+  const keywordMap: Record<string, string> = {
+    troubleshooting: "diagnose, experience, status, breaker, search, config, sync",
+    document_lookup: "document, search, batch, get, experience, pin",
+    knowledge_management: "pin, forget, distill, search, experience, backfill",
+    maintenance: "maintain, backup, restore, sync, config, breaker, import",
+    casual_conversation: "experience, search, document, moa",
+    high_pressure: "experience, compact",
+  };
+  const kw = keywordMap[scenario] ?? "";
+  return `建议搜索关键词: '${kw}'`;
+}
+
+/** 生成场景工具优先级 */
+function getScenarioPriority(scenario: ConversationScenario, topTools: string[]): string {
+  if (topTools.length === 0) return "";
+  return `优先查找和执行顺序: ${topTools.join(" → ")}`;
+}
 
 // ===================================================================
 // 场景识别

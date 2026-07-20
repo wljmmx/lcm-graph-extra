@@ -5,7 +5,7 @@
  */
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
-import { detectScenario, SCENARIO_GUIDANCE, SCENARIO_LABELS } from '../tools/tool-catalog.js';
+import { detectScenario, SCENARIO_LABELS, detectToolSearchMode, buildModeAwareGuidance } from '../tools/tool-catalog.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
 import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
@@ -848,7 +848,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     // CE Scene Guidance: 场景感知引导（配合 SDK toolSearch 机制）
-    // 不控制工具列表（SDK toolSearch 负责），仅注入场景引导帮助模型选择正确的搜索关键词。
+    // 根据 toolSearch 模式（code/tools/directory/legacy）自适应生成引导文本。
+    // 不控制工具列表（SDK toolSearch 负责），仅注入场景引导帮助模型正确使用工具。
     // 高压力模式下跳过，节省上下文。
     if (tier !== 'high') {
       try {
@@ -857,10 +858,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           tier,
           availableTools,
         });
-        const guidance = SCENARIO_GUIDANCE[scenario];
-        if (guidance) {
+        const mode = detectToolSearchMode(availableTools);
+        const result = buildModeAwareGuidance(mode, scenario, availableTools);
+        if (result) {
           const label = SCENARIO_LABELS[scenario] ?? scenario;
-          systemPromptAddition += `\n\n[CE] 场景: ${label}\n${guidance}`;
+          systemPromptAddition += `\n\n[CE] 场景: ${label} | 模式: ${result.modeLabel}\n${result.guidance}`;
         }
       } catch (err) {
         // 场景引导注入失败不阻塞 assemble
