@@ -405,7 +405,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         },
       };
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 3. lcmg_restore — 从备份 JSON 恢复到三处
@@ -563,7 +563,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         },
       };
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 4. lcmg_import — 历史数据导入到 Neo4j（无 LLM 提取时可运行降级模式）
@@ -654,7 +654,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         },
       };
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 5. lcmg_diagnose — 系统诊断 → src/tools/diagnose.ts
@@ -1125,7 +1125,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         },
       };
     },
-  });
+  }, { optional: true });
   // ===================================================================
   // 9. lcmg_qmd_status — QMD index health and collection info
   // ===================================================================
@@ -1165,7 +1165,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 10. lcmg_get_document — Retrieve a document by path or docid
@@ -1200,7 +1200,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 11. lcmg_batch_get — Batch retrieve documents by glob pattern
@@ -1236,7 +1236,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  });
+  }, { optional: true });
 
 
 
@@ -1325,7 +1325,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text" as const, text: "Maintenance failed: " + msg }], details: { ok: false, error: "Maintenance failed: " + msg }, isError: true };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 13. lcmg_distill —— 手动触发经验蒸馏（PENDING → DISTILLED）
@@ -1500,7 +1500,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 13.5 lcmg_distill_retry — 重置 FAILED 经验回 PENDING，允许重新蒸馏
@@ -1585,7 +1585,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 13.6 lcmg_backfill — 回溯已有对话记录提取经验
@@ -1688,7 +1688,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 14. lcmg_compact —— 手动触发指定会话的 compact
@@ -1801,7 +1801,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 16. lcmg_config_get —— 查看运行时配置（脱敏）
@@ -1868,7 +1868,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 17. lcmg_config_set —— 更新配置字段（白名单）
@@ -1955,7 +1955,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 19. lcmg_moa_reply —— MoA 聚合回复透传

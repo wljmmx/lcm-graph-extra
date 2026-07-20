@@ -288,9 +288,9 @@ export interface DashboardToolContext {
 // ── Audit wrapper factory ──
 
 export function createAuditWrapper(originalRegisterTool: any) {
-  return (toolDef: any) => {
+  return (toolDef: any, opts?: any) => {
     if (!toolDef || !toolDef.name || typeof toolDef.execute !== 'function') {
-      return originalRegisterTool(toolDef);
+      return originalRegisterTool(toolDef, opts);
     }
     const toolName: string = toolDef.name;
     const originalExecute = toolDef.execute;
@@ -331,6 +331,6 @@ export function createAuditWrapper(originalRegisterTool: any) {
       return result;
     };
     registerToolHandler(toolName, toolDef.execute);
-    return originalRegisterTool(toolDef);
+    return originalRegisterTool(toolDef, opts);
   };
 }
