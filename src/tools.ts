@@ -279,7 +279,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         await closeNeo4j(driver, session);
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 2. lcmg_backup — 导出全量数据到 JSON
@@ -694,7 +694,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text" as const, text: `❌ Pin error: ${e.message}` }], details: { ok: false, error: `❌ Pin error: ${e.message}` }, isError: true };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 7.5 lcmg_forget — G-10: 主动遗忘命令（与 lcmg_pin 反向）
@@ -838,7 +838,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text" as const, text: `❌ Forget error: ${e.message}` }], details: { ok: false, error: `❌ Forget error: ${e.message}` }, isError: true };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 8. lcmg_sync — 三端数据同步修复
@@ -1161,7 +1161,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 10. lcmg_get_document — Retrieve a document by path or docid
@@ -1195,7 +1195,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 11. lcmg_batch_get — Batch retrieve documents by glob pattern
@@ -1230,7 +1230,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  });
+  }, { optional: true });
 
 
 
@@ -1739,7 +1739,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         };
       }
     },
-  });
+  }, { optional: true });
 
   // ===================================================================
   // 15. lcmg_reset_breaker —— 重置指定子系统的熔断器状态
@@ -1994,7 +1994,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         isError: true,
       };
     },
-  });
+  }, { optional: true });
 }
 
 // ---------------------------------------------------------------------------

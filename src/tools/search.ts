@@ -125,5 +125,5 @@ export function registerSearchTool(api: any): void {
       if (results.length === 1) results.push("(no results found)");
       return { content: [{ type: "text" as const, text: results.join("\n") }], details: { ok: true } };
     },
-  });
+  }, { optional: true });
 }

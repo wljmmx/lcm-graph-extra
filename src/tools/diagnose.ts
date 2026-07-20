@@ -160,5 +160,5 @@ export function registerDiagnoseTool(api: any): void {
         details: { ok: true, metrics: { pass, warnings: warns, failures: fails, status: fails === 0 ? 'OK' : 'DEGRADED' } },
       };
     },
-  });
+  }, { optional: true });
 }

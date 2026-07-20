@@ -5,7 +5,7 @@
  */
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
-import { detectScenario, buildToolPolicy } from '../tools/tool-scenarios.js';
+import { detectScenario, SCENARIO_GUIDANCE, SCENARIO_LABELS } from '../tools/tool-catalog.js';
 import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
 import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
@@ -847,21 +847,23 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       }
     }
 
-    // CE Tool Policy: 场景感知工具过滤（subtractive）
-    // 根据对话上下文决定当前场景下哪些工具适用、哪些不适用
-    if (availableTools.length > 0 && tier !== 'high') {
+    // CE Scene Guidance: 场景感知引导（配合 SDK toolSearch 机制）
+    // 不控制工具列表（SDK toolSearch 负责），仅注入场景引导帮助模型选择正确的搜索关键词。
+    // 高压力模式下跳过，节省上下文。
+    if (tier !== 'high') {
       try {
         const scenario = detectScenario({
           messages: finalMessages,
           tier,
           availableTools,
         });
-        const toolPolicy = buildToolPolicy(scenario);
-        if (toolPolicy) {
-          systemPromptAddition += '\n\n' + toolPolicy;
+        const guidance = SCENARIO_GUIDANCE[scenario];
+        if (guidance) {
+          const label = SCENARIO_LABELS[scenario] ?? scenario;
+          systemPromptAddition += `\n\n[CE] 场景: ${label}\n${guidance}`;
         }
       } catch (err) {
-        // 工具策略注入失败不阻塞 assemble
+        // 场景引导注入失败不阻塞 assemble
       }
     }
   } catch (err) {
