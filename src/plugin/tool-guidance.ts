@@ -14,15 +14,13 @@
 /** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
 export function extractAvailableTools(params: any): string[] {
   const tools = params.availableTools;
-  // P2-14: 修复拼写错误 lcmg_batch_get_documents → lcmg_batch_get，
-  // 并补全遗漏的 lcmg_diagnose（与 SELF_REGISTERED_TOOLS 保持一致）。
-  // 2026-07: 进一步补全遗漏的 lcmg_forget/distill/compact/reset_breaker/config_get/config_set，
-  // 与 openclaw.plugin.json contracts.tools 完全对齐（18 个工具）。
+  // 完整 21 个工具列表，与 openclaw.plugin.json contracts.tools 完全对齐
   if (!tools) return [
     "lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import",
     "lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get",
-    "lcmg_maintain","lcmg_diagnose","lcmg_forget","lcmg_distill","lcmg_compact",
-    "lcmg_reset_breaker","lcmg_config_get","lcmg_config_set","lcmg_moa_reply",
+    "lcmg_maintain","lcmg_diagnose","lcmg_forget","lcmg_distill","lcmg_distill_retry",
+    "lcmg_backfill","lcmg_compact","lcmg_reset_breaker",
+    "lcmg_config_get","lcmg_config_set","lcmg_moa_reply",
   ];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
@@ -36,7 +34,8 @@ export const SELF_REGISTERED_TOOLS = new Set([
   "lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get",
   "lcmg_maintain", "lcmg_diagnose",
   "lcmg_backup", "lcmg_restore", "lcmg_sync",
-  "lcmg_forget", "lcmg_distill", "lcmg_compact", "lcmg_reset_breaker",
+  "lcmg_forget", "lcmg_distill", "lcmg_distill_retry",
+  "lcmg_backfill", "lcmg_compact", "lcmg_reset_breaker",
   "lcmg_config_get", "lcmg_config_set",
   "lcmg_moa_reply",
 ]);
@@ -44,8 +43,18 @@ export const SELF_REGISTERED_TOOLS = new Set([
 /** Tool category to tool name mapping. */
 export const TOOL_CATEGORIES_SELF: Record<string, Set<string>> = {
   graph: new Set(["lcmg_search"]),
-  experience: new Set(["lcmg_experience_report"]),
+  experience: new Set(["lcmg_experience_report", "lcmg_moa_reply"]),
   qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
+  maintenance: new Set([
+    "lcmg_maintain", "lcmg_diagnose", "lcmg_compact",
+    "lcmg_distill", "lcmg_distill_retry", "lcmg_backfill",
+    "lcmg_reset_breaker",
+  ]),
+  lifecycle: new Set([
+    "lcmg_backup", "lcmg_restore", "lcmg_import", "lcmg_sync",
+  ]),
+  knowledge: new Set(["lcmg_pin", "lcmg_forget"]),
+  config: new Set(["lcmg_config_get", "lcmg_config_set"]),
 };
 
 /** Check if a category tool is self-registered (independent of Tool Search). */
@@ -57,14 +66,16 @@ export function hasSelfCategory(category: string): boolean {
 
 /** Exact tool name sets per category — derived from contracts.tools. */
 export const TOOL_CATEGORIES: Record<string, ReadonlySet<string>> = {
-  graph: new Set(["lcmg_search", "lcmg_pin", "lcmg_import"]),
-  experience: new Set(["lcmg_experience_report"]),
+  graph: new Set(["lcmg_search"]),
+  experience: new Set(["lcmg_experience_report", "lcmg_moa_reply"]),
   qmd: new Set(["lcmg_qmd_status", "lcmg_get_document", "lcmg_batch_get"]),
   maintenance: new Set([
-    "lcmg_maintain", "lcmg_diagnose", "lcmg_forget",
-    "lcmg_distill", "lcmg_compact", "lcmg_reset_breaker",
+    "lcmg_maintain", "lcmg_diagnose", "lcmg_compact",
+    "lcmg_distill", "lcmg_distill_retry", "lcmg_backfill",
+    "lcmg_reset_breaker",
   ]),
-  lifecycle: new Set(["lcmg_backup", "lcmg_restore", "lcmg_sync"]),
+  lifecycle: new Set(["lcmg_backup", "lcmg_restore", "lcmg_import", "lcmg_sync"]),
+  knowledge: new Set(["lcmg_pin", "lcmg_forget"]),
   config: new Set(["lcmg_config_get", "lcmg_config_set"]),
 };
 
@@ -98,6 +109,7 @@ export function buildToolGuidance(availableTools: string[]): string {
     qmd: { label: "记忆文件", desc: "QMD 文档管理" },
     maintenance: { label: "系统维护", desc: "健康检查与修复" },
     lifecycle: { label: "生命周期", desc: "备份/恢复/同步" },
+    knowledge: { label: "知识管理", desc: "节点置顶与遗忘" },
     config: { label: "系统配置", desc: "读取/修改配置" },
   };
 
@@ -137,10 +149,13 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   'lcmg_experience_report': '查看经验总结报告',
   'lcmg_forget': '删除指定记忆',
   'lcmg_distill': '蒸馏经验',
+  'lcmg_distill_retry': '重试失败的蒸馏任务',
+  'lcmg_backfill': '从历史对话补录经验',
   'lcmg_compact': '压缩上下文',
   'lcmg_reset_breaker': '重置熔断器',
   'lcmg_config_get': '读取配置',
   'lcmg_config_set': '修改配置',
+  'lcmg_moa_reply': 'MoA 多模型聚合回复',
 };
 
 /** 工具类别中文标签 —— 用于 low 层级分组展示 */
@@ -150,6 +165,7 @@ const ADAPTIVE_CATEGORY_LABELS: Record<string, string> = {
   qmd: '记忆文件',
   maintenance: '系统维护',
   lifecycle: '生命周期',
+  knowledge: '知识管理',
   config: '系统配置',
 };
 
