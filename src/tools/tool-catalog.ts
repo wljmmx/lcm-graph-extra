@@ -282,14 +282,6 @@ export const SCENARIO_GUIDANCE: Record<string, string> = {
  */
 export type ToolSearchMode = "code" | "tools" | "directory" | "legacy";
 
-/** 各模式下的控制工具名称 */
-const MODE_CONTROL_TOOLS: Record<string, string[]> = {
-  code: ["tool_search_code"],
-  tools: ["tool_search", "tool_describe", "tool_call"],
-  directory: ["tool_search", "tool_describe", "tool_call"],
-  legacy: [],
-};
-
 /**
  * 根据 availableTools 中出现的控制工具推断当前 toolSearch 模式。
  * 无法区分 tools 和 directory（控制工具相同），默认返回 "tools"。
@@ -331,7 +323,120 @@ const TOOL_CODE_REFERENCE: Record<string, string> = {
 };
 
 // ===================================================================
-// 模式感知的场景引导
+// 全量工具命名空间分类
+// ===================================================================
+
+/**
+ * 工具命名空间元信息。
+ * CE 通过命名空间前缀对所有工具（包括非 LCM 工具）进行分类和引导。
+ */
+interface ToolNamespaceInfo {
+  /** 命名空间前缀 */
+  prefix: string;
+  /** 中文标签 */
+  label: string;
+  /** 简要说明（模型可见） */
+  description: string;
+  /** 典型场景 */
+  scenarios: string[];
+}
+
+/** 已知命名空间（按前缀匹配） */
+const KNOWN_NAMESPACES: ToolNamespaceInfo[] = [
+  { prefix: "lcmg_", label: "LCM 知识引擎", description: "知识图谱、经验管理、文档检索、系统诊断", scenarios: ["troubleshooting", "document_lookup", "knowledge_management", "maintenance"] },
+  { prefix: "memory_", label: "记忆系统", description: "对话记忆、长期记忆存储与检索", scenarios: ["knowledge_management", "casual_conversation"] },
+  { prefix: "drive_", label: "云存储", description: "文件上传、下载、管理", scenarios: ["document_lookup", "maintenance"] },
+  { prefix: "browser_", label: "浏览器", description: "网页浏览、截图、自动化", scenarios: ["troubleshooting", "document_lookup"] },
+  { prefix: "canvas_", label: "画布", description: "可视化创作、图表绘制", scenarios: ["casual_conversation", "document_lookup"] },
+  { prefix: "xai_", label: "xAI", description: "AI 模型推理与解释", scenarios: ["troubleshooting", "casual_conversation"] },
+  { prefix: "file_", label: "文件传输", description: "文件收发、格式转换", scenarios: ["document_lookup", "maintenance"] },
+  { prefix: "wiki_", label: "Wiki", description: "知识库文档管理", scenarios: ["document_lookup", "knowledge_management"] },
+  { prefix: "workboard_", label: "工作台", description: "任务管理、看板协作", scenarios: ["casual_conversation", "maintenance"] },
+  { prefix: "codex_", label: "Codex", description: "代码审查、监督执行", scenarios: ["troubleshooting", "maintenance"] },
+];
+
+/** 系统控制工具（非命名空间工具） */
+const SYSTEM_TOOL_PREFIXES = ["tool_", "task_", "agent_"];
+
+/** 分类结果 */
+interface ToolClassification {
+  /** 命名空间 → 工具名列表 */
+  byNamespace: Map<string, { info: ToolNamespaceInfo; tools: string[] }>;
+  /** 系统工具 */
+  systemTools: string[];
+  /** 未识别工具 */
+  unrecognized: string[];
+  /** 全量工具总数 */
+  total: number;
+  /** 命名空间数量 */
+  namespaceCount: number;
+}
+
+/**
+ * 对全量 availableTools 进行命名空间分类。
+ * 过滤掉 SDK 控制工具（tool_search 等），保留业务工具。
+ */
+export function classifyAllTools(availableTools: string[]): ToolClassification {
+  const byNamespace = new Map<string, { info: ToolNamespaceInfo; tools: string[] }>();
+  const systemTools: string[] = [];
+  const unrecognized: string[] = [];
+  const controlToolSet = new Set([
+    "tool_search_code", "tool_search", "tool_describe", "tool_call",
+  ]);
+
+  for (const name of availableTools) {
+    // 跳过 SDK 控制工具
+    if (controlToolSet.has(name)) continue;
+
+    // 系统工具
+    if (SYSTEM_TOOL_PREFIXES.some((p) => name.startsWith(p))) {
+      systemTools.push(name);
+      continue;
+    }
+
+    // 命名空间匹配
+    const ns = KNOWN_NAMESPACES.find((n) => name.startsWith(n.prefix));
+    if (ns) {
+      const entry = byNamespace.get(ns.prefix);
+      if (entry) {
+        entry.tools.push(name);
+      } else {
+        byNamespace.set(ns.prefix, { info: ns, tools: [name] });
+      }
+    } else {
+      unrecognized.push(name);
+    }
+  }
+
+  return {
+    byNamespace,
+    systemTools,
+    unrecognized,
+    total: availableTools.length - controlToolSet.size,
+    namespaceCount: byNamespace.size + (systemTools.length > 0 ? 1 : 0) + (unrecognized.length > 0 ? 1 : 0),
+  };
+}
+
+/**
+ * 生成 Layer 1: 全量工具分类概览（极简，~50-100 tokens）
+ */
+function buildToolOverview(classification: ToolClassification): string {
+  const parts: string[] = [];
+
+  for (const [, { info, tools }] of classification.byNamespace) {
+    if (tools.length > 0) {
+      parts.push(`${info.label}(${tools.length})`);
+    }
+  }
+  if (classification.systemTools.length > 0) {
+    parts.push(`系统(${classification.systemTools.length})`);
+  }
+
+  return parts.length > 0 ? `工具分类: ${parts.join(" ")}` : "";
+}
+
+// ===================================================================
+// 模式感知的场景引导（v2：全量工具覆盖）
 // ===================================================================
 
 interface ModeAwareGuidance {
@@ -344,7 +449,12 @@ interface ModeAwareGuidance {
 /**
  * 根据 toolSearch 模式和对话场景，生成自适应引导文本。
  *
- * 三种模式的核心差异：
+ * 三层引导结构：
+ *   Layer 1: 全量工具分类概览（所有命名空间，模型认知对齐）
+ *   Layer 2: 场景相关工具建议（LCM 详细 + 非 LCM 按类别）
+ *   Layer 3: 搜索/调用细节（仅 LCM 工具，CE 深度掌握）
+ *
+ * 四种模式的核心差异：
  * ┌───────────┬──────────────────────────────────────────────────────┐
  * │ code      │ 模型写 JS 代码调用工具。CE 提供工具名+函数签名速查表  │
  * │           │ 让模型直接编写正确的调用代码，避免搜索开销。           │
@@ -364,102 +474,169 @@ export function buildModeAwareGuidance(
   availableTools: string[],
 ): ModeAwareGuidance | null {
   const label = SCENARIO_LABELS[scenario] ?? scenario;
-  const toolNames = SCENARIO_TOOL_NAMES[scenario] ?? [];
+  const classification = classifyAllTools(availableTools);
+  const lcmToolNames = SCENARIO_TOOL_NAMES[scenario] ?? [];
+  // 当前场景下相关的非 LCM 命名空间
+  const relevantNamespaces = KNOWN_NAMESPACES.filter(
+    (ns) => ns.prefix !== "lcmg_" && ns.scenarios.includes(scenario),
+  );
 
   switch (mode) {
     case "code":
-      return buildCodeModeGuidance(label, toolNames);
+      return buildCodeModeGuidanceV2(label, lcmToolNames, classification, relevantNamespaces);
     case "tools":
-      return buildToolsModeGuidance(label, scenario, toolNames);
+      return buildToolsModeGuidanceV2(label, scenario, lcmToolNames, classification, relevantNamespaces);
     case "directory":
-      return buildDirectoryModeGuidance(label, scenario, toolNames, availableTools);
+      return buildDirectoryModeGuidanceV2(label, scenario, lcmToolNames, availableTools, classification, relevantNamespaces);
     case "legacy":
-      return buildLegacyModeGuidance(label, scenario, toolNames);
+      return buildLegacyModeGuidanceV2(label, scenario, lcmToolNames, classification, relevantNamespaces);
     default:
       return null;
   }
 }
 
-/** code 模式：注入工具函数速查表 */
-function buildCodeModeGuidance(
-  label: string,
-  toolNames: string[],
+/** code 模式：注入工具函数速查表 + 全量工具概览 */
+function buildCodeModeGuidanceV2(
+  _label: string,
+  lcmToolNames: string[],
+  classification: ToolClassification,
+  relevantNamespaces: ToolNamespaceInfo[],
 ): ModeAwareGuidance {
-  const refs = toolNames
+  const lines: string[] = [];
+
+  // Layer 1: 全量工具概览
+  lines.push(buildToolOverview(classification));
+
+  // Layer 2: 非 LCM 相关工具提示
+  const nonLcmHints = buildNonLcmHints(classification, relevantNamespaces);
+  if (nonLcmHints) lines.push(nonLcmHints);
+
+  // Layer 3: LCM 工具速查表
+  const refs = lcmToolNames
     .filter((n) => TOOL_CODE_REFERENCE[n])
     .map((n) => `  ${TOOL_CODE_REFERENCE[n]}`)
     .join("\n");
 
-  const guidance = refs
-    ? `当前环境使用 tool_search_code 编写 JS 代码调用工具。\n场景相关工具函数速查:\n${refs}\n其他工具可通过 tool_search_code 搜索发现。`
-    : `当前环境使用 tool_search_code 编写 JS 代码调用工具。请通过 tool_search_code 搜索当前场景所需工具。`;
+  if (refs) {
+    lines.push(`当前环境使用 tool_search_code 编写 JS 代码调用工具。\nLCM 工具速查:\n${refs}`);
+  } else {
+    lines.push("当前环境使用 tool_search_code 编写 JS 代码调用工具。");
+  }
+  lines.push("其他工具可通过 tool_search_code 搜索发现。");
 
-  return { modeLabel: "code", guidance };
+  return { modeLabel: "code", guidance: lines.join("\n") };
 }
 
-/** tools 模式：提供搜索关键词和优先级 */
-function buildToolsModeGuidance(
+/** tools 模式：搜索关键词 + 优先级 + 全量工具概览 */
+function buildToolsModeGuidanceV2(
   _label: string,
   scenario: ConversationScenario,
-  toolNames: string[],
+  lcmToolNames: string[],
+  classification: ToolClassification,
+  relevantNamespaces: ToolNamespaceInfo[],
 ): ModeAwareGuidance {
-  const keywords = getScenarioKeywords(scenario, toolNames);
-  const priority = getScenarioPriority(scenario, toolNames.slice(0, 4));
-
-  const guidance = `当前环境通过 tool_search 查找工具 → tool_describe 获取详情 → tool_call 执行调用。\n${keywords}\n${priority}`;
-
-  return { modeLabel: "tools", guidance };
-}
-
-/** directory 模式：提示已预加载工具，减少重复搜索 */
-function buildDirectoryModeGuidance(
-  _label: string,
-  scenario: ConversationScenario,
-  toolNames: string[],
-  availableTools: string[],
-): ModeAwareGuidance {
-  // 检测哪些场景工具已预加载（在 availableTools 中）
-  const hydrated = toolNames.filter((n) => availableTools.includes(n));
-  const notHydrated = toolNames.filter((n) => !availableTools.includes(n) && TOOL_CODE_REFERENCE[n]);
-
   const lines: string[] = [];
-  lines.push("SDK 已预加载当前场景最相关的工具，可直接调用。");
+
+  // Layer 1: 全量工具概览
+  lines.push(buildToolOverview(classification));
+
+  // Layer 2: 非 LCM 相关工具提示
+  const nonLcmHints = buildNonLcmHints(classification, relevantNamespaces);
+  if (nonLcmHints) lines.push(nonLcmHints);
+
+  // Layer 3: LCM 搜索指引
+  const keywords = getScenarioKeywords(scenario, lcmToolNames);
+  const priority = getScenarioPriority(scenario, lcmToolNames.slice(0, 4));
+  lines.push(`通过 tool_search 查找工具 → tool_describe 获取详情 → tool_call 执行调用。`);
+  lines.push(keywords);
+  if (priority) lines.push(priority);
+
+  return { modeLabel: "tools", guidance: lines.join("\n") };
+}
+
+/** directory 模式：已就绪工具 + 补充搜索 + 全量工具概览 */
+function buildDirectoryModeGuidanceV2(
+  _label: string,
+  scenario: ConversationScenario,
+  lcmToolNames: string[],
+  availableTools: string[],
+  classification: ToolClassification,
+  relevantNamespaces: ToolNamespaceInfo[],
+): ModeAwareGuidance {
+  const lines: string[] = [];
+
+  // Layer 1: 全量工具概览
+  lines.push(buildToolOverview(classification));
+
+  // Layer 2: 非 LCM 相关工具提示
+  const nonLcmHints = buildNonLcmHints(classification, relevantNamespaces);
+  if (nonLcmHints) lines.push(nonLcmHints);
+
+  // Layer 3: LCM 已就绪 / 补充搜索
+  const hydrated = lcmToolNames.filter((n) => availableTools.includes(n));
+  const notHydrated = lcmToolNames.filter((n) => !availableTools.includes(n) && TOOL_CODE_REFERENCE[n]);
 
   if (hydrated.length > 0) {
-    lines.push(`已就绪: ${hydrated.slice(0, 6).join(", ")}`);
+    lines.push(`SDK 已预加载: ${hydrated.slice(0, 6).join(", ")}`);
   }
   if (notHydrated.length > 0) {
     const keywords = getScenarioKeywords(scenario, notHydrated);
-    lines.push(`如需其他工具，使用 tool_search 查找。${keywords}`);
+    lines.push(`如需其他 LCM 工具，使用 tool_search 查找。${keywords}`);
   }
 
   return { modeLabel: "directory", guidance: lines.join("\n") };
 }
 
-/** legacy 模式：直接列出工具建议 */
-function buildLegacyModeGuidance(
+/** legacy 模式：全量工具概览 + 场景工具建议 */
+function buildLegacyModeGuidanceV2(
   _label: string,
   scenario: ConversationScenario,
-  toolNames: string[],
+  lcmToolNames: string[],
+  classification: ToolClassification,
+  relevantNamespaces: ToolNamespaceInfo[],
 ): ModeAwareGuidance {
+  const lines: string[] = [];
+
+  // Layer 1: 全量工具概览
+  lines.push(buildToolOverview(classification));
+
+  // high_pressure / casual 场景特殊处理
   if (scenario === "casual_conversation") {
-    return {
-      modeLabel: "legacy",
-      guidance: "当前为日常对话场景。优先基于已有上下文直接回答，仅在必要时使用工具。",
-    };
+    lines.push("优先基于已有上下文直接回答，仅在必要时使用工具。");
+    return { modeLabel: "legacy", guidance: lines.join("\n") };
   }
   if (scenario === "high_pressure") {
-    return {
-      modeLabel: "legacy",
-      guidance: "⚠️ 上下文接近容量上限。请仅使用最必要的工具（经验检索、上下文压缩），避免不必要的工具调用。",
-    };
+    lines.push("⚠️ 上下文接近容量上限。仅使用最必要的工具，避免不必要的工具调用。");
+    return { modeLabel: "legacy", guidance: lines.join("\n") };
   }
 
-  const top = toolNames.slice(0, 6).join(", ");
-  return {
-    modeLabel: "legacy",
-    guidance: `当前场景下建议优先使用: ${top}。`,
-  };
+  // Layer 2: 非 LCM 相关工具提示
+  const nonLcmHints = buildNonLcmHints(classification, relevantNamespaces);
+  if (nonLcmHints) lines.push(nonLcmHints);
+
+  // Layer 3: LCM 工具建议
+  const top = lcmToolNames.slice(0, 6).join(", ");
+  lines.push(`LCM 工具建议: ${top}。`);
+
+  return { modeLabel: "legacy", guidance: lines.join("\n") };
+}
+
+/**
+ * 生成非 LCM 命名空间提示（按场景相关性）。
+ * 例如故障排查场景: "也可能需要: 浏览器(2), Codex(1)"
+ */
+function buildNonLcmHints(
+  classification: ToolClassification,
+  relevantNamespaces: ToolNamespaceInfo[],
+): string {
+  const hints: string[] = [];
+  for (const ns of relevantNamespaces) {
+    const entry = classification.byNamespace.get(ns.prefix);
+    if (entry && entry.tools.length > 0) {
+      hints.push(`${ns.label}(${entry.tools.length})`);
+    }
+  }
+  return hints.length > 0 ? `也可能需要: ${hints.join(" ")}` : "";
 }
 
 /** 生成场景搜索关键词 */
