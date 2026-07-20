@@ -1165,7 +1165,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  }, { optional: true });
+  });
 
   // ===================================================================
   // 10. lcmg_get_document — Retrieve a document by path or docid
@@ -1200,7 +1200,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  }, { optional: true });
+  });
 
   // ===================================================================
   // 11. lcmg_batch_get — Batch retrieve documents by glob pattern
@@ -1236,7 +1236,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (qmd && qmdOwned) { try { qmd.dispose(); } catch {} }
       }
     },
-  }, { optional: true });
+  });
 
 
 
