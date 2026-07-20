@@ -551,6 +551,8 @@ const pluginEntry: any = definePluginEntry({
           // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---
           let summaryContent: string | undefined;
           let adapterCompacted = false;
+          // 追踪 adapter 是否成功执行（即使未触发压缩），用于区分"已评估无需压缩"和"真正失败"
+          let adapterOk = false;
           // 保存 lossless-claw compact 返回的额外字段（firstKeptEntryId/sessionId/sessionFile），
           // 供成功 return 时透传给 SDK CompactResult.result。声明在 if 块外避免 scope 问题。
           let compactResultExtra: { firstKeptEntryId?: string; sessionId?: string; sessionFile?: string } = {};
@@ -588,23 +590,29 @@ const pluginEntry: any = definePluginEntry({
               }) : null;
               if (abortOnCompact) abortOnCompact.catch(() => {});
               try {
-                // 超限时使用 compactionTarget: 'budget' 让引擎以 budget 模式压缩（更激进），
-                // 同时传入降级后的 tokenBudget
+                // 非超限场景：使用 _contextWindow 作为 tokenBudget，确保 lossless-claw
+                // 的 threshold 计算基于模型上下文窗口而非 compact budget。
+                // 超限场景：使用降级后的 _tryBudget 作为 budget 模式的目标。
+                const effectiveTokenBudget = _isInputOverflow
+                  ? _tryBudget
+                  : _contextWindow;
                 const compactResult: any = await Promise.race([
                   _losslessClawAdapter.compact({
                     ...params,
-                    tokenBudget: _tryBudget,
+                    tokenBudget: effectiveTokenBudget,
                     compactionTarget: _isInputOverflow ? 'budget' : ((params as any).compactionTarget ?? 'threshold'),
                   }),
                   compactTimeoutPromise,
                   ...(abortOnCompact ? [abortOnCompact] : []),
                 ]);
                 // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
-                summaryContent = compactResult?.result?.summary || compactResult?.summary;
+                summaryContent = compactResult?.summary || compactResult?.result?.summary;
+                // Track adapter-level success: true even if compaction was evaluated but not needed
+                adapterOk = compactResult?.ok !== false;
                 // Preserve adapter's actionTaken/compacted flag for accurate success detection
                 // ActionTaken may be false even if summary was created (no DAG reduction needed)
-                // Use createdSummaryId as the authoritative indicator of compaction success
-                adapterCompacted = !!compactResult?.createdSummaryId || compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
+                // Use summaryId as the authoritative indicator of compaction success
+                adapterCompacted = !!compactResult?.summaryId || compactResult?.result?.actionTaken === true || compactResult?.compacted === true;
                 // 透传 lossless-claw 返回的 SDK CompactResult.result 可选字段
                 const _extra = compactResult?.result ?? {};
                 compactResultExtra = {
@@ -729,12 +737,17 @@ const pluginEntry: any = definePluginEntry({
           const tokensBefore = params.currentTokenCount ?? 0;
           // Check adapter's actionTaken OR summary content (race condition: DB write may lag)
           const compacted = !!summaryContent || adapterCompacted;
-          // FIX: if not compacted, return ok: false so SDK retries instead of considering it done
+          // If adapter ran successfully but no compaction was needed (e.g., below threshold),
+          // return ok: true so the SDK doesn't retry unnecessarily.
+          // If adapter genuinely failed, return ok: false so the SDK can retry.
           if (!compacted) {
+            const reason = adapterOk
+              ? 'compaction evaluated — context below threshold, no compaction needed'
+              : 'DAG compaction did not produce a summary — session tokens unchanged, will retry';
             return {
-              ok: false,
+              ok: adapterOk,
               compacted: false,
-              reason: 'DAG compaction did not produce a summary — session tokens unchanged, will retry',
+              reason,
               result: {
                 tokensBefore,
                 tokensAfter: tokensBefore,
