@@ -264,23 +264,60 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
 
           // ── 压缩降级工具函数：用已有摘要 + 最近消息构建注入上下文 ──
-          const buildDegradedContext = (reason: string) => {
+          // aggressiveLevel:
+          //   0 (默认) — 摘要 + 6 条最近消息, 摘要预算 = maxSummaryRatio
+          //   1        — 摘要 + 3 条最近消息, 摘要预算减半
+          //   2        — 丢弃摘要, 仅保留 8 条最近消息
+          //   3        — 丢弃摘要, 仅保留 4 条最近消息
+          const buildDegradedContext = (reason: string, aggressiveLevel: number = 0) => {
             const existingSummaries = getConversationSummaries(conversationId);
             const goalMsg = getGoal(sessionKey);
             const goalAnchorMsgs = goalMsg
               ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
               : [];
+
+            // Level 2+: 丢弃摘要，仅保留最近消息
+            if (aggressiveLevel >= 2) {
+              const keepCount = aggressiveLevel === 2 ? 8 : 4;
+              const recentCount = Math.min(messages.length, keepCount);
+              return [...goalAnchorMsgs, ...messages.slice(-recentCount)];
+            }
+
             if (existingSummaries.length > 0) {
+              const summaryBudgetRatio = aggressiveLevel === 1
+                ? maxSummaryRatio * 0.50
+                : maxSummaryRatio;
               const trimmed = trimSummariesToBudget(
                 existingSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
-                resolvedCtx.compactTokenBudget * maxSummaryRatio,
+                resolvedCtx.compactTokenBudget * summaryBudgetRatio,
               ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-              const recentCount = Math.min(messages.length, 6);
+              const recentCount = Math.min(messages.length, aggressiveLevel === 1 ? 3 : 6);
               return [...goalAnchorMsgs, ...trimmed, ...messages.slice(-recentCount)];
             }
             // 无摘要时只用最近消息
-            const fallbackCount = Math.min(messages.length, 12);
+            const fallbackCount = Math.min(messages.length, aggressiveLevel === 1 ? 8 : 12);
             return [...goalAnchorMsgs, ...messages.slice(-fallbackCount)];
+          };
+
+          // ── 级联降级校验：裁剪后估算 token，若仍超安全阈值则逐级升级 ──
+          // 安全阈值取 contextWindow * 0.70，预留 30% 给下轮增量 + 系统注入
+          // 同时以 65536 为上限，防止 contextWindow 配置过高导致阈值失效
+          const safeThreshold = Math.floor(Math.min(contextWindow, 65536) * 0.70);
+          const applyCascadingDegradation = (baseReason: string): any[] => {
+            let result = buildDegradedContext(baseReason, 0);
+            for (let level = 0; level < 4; level++) {
+              const est = estimateTokensFromMessages(result);
+              if (est <= safeThreshold || est <= 0 || level === 3) break;
+              ctx.logger?.warn?.(`[assemble] degraded context exceeds safe threshold, escalating to level ${level + 1}`, {
+                reason: baseReason,
+                estimate: est,
+                safeThreshold,
+                fromLevel: level,
+                toLevel: level + 1,
+              });
+              result = buildDegradedContext(baseReason, level + 1);
+            }
+            return result;
           };
 
           // ── P0: 输入超限保护 —— 当 raw token 超过 LLM 上下文窗口 90% 时，compact 必然失败 ──
@@ -296,7 +333,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
               'high_pressure_input_overflow_' + effectiveTokenCount + '_gt_' + inputOverflowThreshold,
             );
-            finalMessages = buildDegradedContext('input_overflow');
+            finalMessages = applyCascadingDegradation('input_overflow');
             markDegraded('high_pressure_input_overflow');
 
             // 异步触发分段压缩：用渐进式 budget 多次尝试，而非单次调用（单次用相同参数必然再次 overflow）
@@ -415,7 +452,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                   'high_pressure_no_summary_after_compact',
                 );
                 // 无摘要产出 → 降级注入
-                finalMessages = buildDegradedContext('no_summary');
+                finalMessages = applyCascadingDegradation('no_summary');
                 markDegraded('high_pressure_no_summary');
               }
             } catch (err) {
@@ -425,7 +462,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 'high_pressure_compact_failed',
               );
               // ── P0: 压缩失败降级 —— 用已有摘要 + 最近消息，而非全量继续 ──
-              finalMessages = buildDegradedContext('compact_failed');
+              finalMessages = applyCascadingDegradation('compact_failed');
               markDegraded('high_pressure_compact_failed');
             }
           }
