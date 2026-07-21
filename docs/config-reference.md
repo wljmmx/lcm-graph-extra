@@ -453,6 +453,8 @@
 
 ### 10.3 Dashboard 快照
 
+插件 snapshot server（端口 7423）由 OpenClaw host 加载插件时自动启动，无需手动运行。通过 `openclaw.json` 配置控制开关/端口/绑定地址。
+
 ```json
 {
   "dashboardSnapshot": {
@@ -467,7 +469,29 @@
 |--------|------|--------|------|
 | `dashboardSnapshot.enabled` | `boolean` | `true` | 快照服务开关 |
 | `dashboardSnapshot.host` | `string` | `"127.0.0.1"` | 绑定地址 |
-| `dashboardSnapshot.port` | `number` | `7423` | 绑定端口 |
+| `dashboardSnapshot.port` | `number` | `7423` | 绑定端口（1-65535） |
+
+**Snapshot Server 环境变量**（运行时行为控制，不覆盖上述配置项）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DASHBOARD_AUTH` | 无 | Basic Auth `user:pass`，与 dashboard 后端共用凭据；`/internal/health` 豁免 |
+| `SNAPSHOT_ALLOWED_IPS` | `127.0.0.1,::1,::ffff:127.0.0.1` | IP 白名单（逗号分隔） |
+| `SNAPSHOT_RATE_LIMIT_MAX` | `60` | 限流上限（每窗口请求数） |
+| `SNAPSHOT_RATE_LIMIT_WINDOW` | `60` | 限流窗口（秒） |
+| `SNAPSHOT_SHUTDOWN_TOKEN` | 无 | `POST /internal/shutdown` 鉴权 token |
+
+**Dashboard 后端环境变量**（独立进程，见 [快速上手](./quick-start.md#43-生产模式安全配置) 步骤 4.3）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `NODE_ENV` | - | `production` 启用静态资源 serve + 生产模式安全检查 |
+| `DASHBOARD_PORT` | `7421` | dashboard 后端端口 |
+| `DASHBOARD_HOST` | `127.0.0.1` | 绑定地址（开放外网设为 `0.0.0.0`） |
+| `DASHBOARD_RATE_LIMIT_MAX` | `100` | 限流上限 |
+| `DASHBOARD_RATE_LIMIT_WINDOW` | `60` | 限流窗口（秒） |
+| `PLUGIN_SNAPSHOT_URL` | `http://127.0.0.1:7423` | dashboard 后端访问插件 snapshot 的地址 |
+| `REQUIRE_DASHBOARD_AUTH` | 无 | `true` 时未配置 `DASHBOARD_AUTH` 拒绝启动 |
 
 ---
 
@@ -490,10 +514,22 @@
 | `LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS` | 同步 compact 超时 | `300000` |
 | `LCMG_COMPACT_TIMEOUT_MS` | compact 操作超时 | `300000` |
 | `LCMG_DISTILL_CONCURRENCY` | 蒸馏并发数 | `3` |
-| `DASHBOARD_AUTH` | Dashboard Basic Auth (`user:password`) | 无 |
+| `DASHBOARD_AUTH` | Dashboard Basic Auth（后端 + snapshot 共用） | 无 |
+| `DASHBOARD_PORT` | dashboard 后端端口 | `7421` |
+| `DASHBOARD_HOST` | dashboard 后端绑定地址 | `127.0.0.1` |
+| `DASHBOARD_RATE_LIMIT_MAX` | dashboard 后端限流上限 | `100` |
+| `DASHBOARD_RATE_LIMIT_WINDOW` | dashboard 后端限流窗口（秒） | `60` |
+| `PLUGIN_SNAPSHOT_URL` | dashboard 访问插件 snapshot 的地址 | `http://127.0.0.1:7423` |
+| `REQUIRE_DASHBOARD_AUTH` | 严格模式：未配置 `DASHBOARD_AUTH` 拒绝启动 | 无 |
+| `SNAPSHOT_ALLOWED_IPS` | snapshot server IP 白名单 | `127.0.0.1,::1,::ffff:127.0.0.1` |
+| `SNAPSHOT_RATE_LIMIT_MAX` | snapshot server 限流上限 | `60` |
+| `SNAPSHOT_RATE_LIMIT_WINDOW` | snapshot server 限流窗口（秒） | `60` |
+| `SNAPSHOT_SHUTDOWN_TOKEN` | `/internal/shutdown` 鉴权 token | 无 |
 | `NEO4J_URI` | Neo4j 连接 URI | - |
 | `NEO4J_USER` | Neo4j 用户名 | - |
 | `NEO4J_PASSWORD` | Neo4j 密码 | - |
+
+> **注意**：snapshot server 端口由 `openclaw.json` 的 `dashboardSnapshot.port` 配置控制，**不**受环境变量影响。
 
 ---
 

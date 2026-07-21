@@ -17,12 +17,14 @@ kill <PID>
 ```
 
 或修改端口：
-```bash
-# 插件 snapshot
-export DASHBOARD_SNAPSHOT_PORT=7424
 
-# dashboard 后端
+```bash
+# dashboard 后端（环境变量）
 export DASHBOARD_PORT=7425
+
+# 插件 snapshot server（openclaw.json 配置，非环境变量）
+# 编辑 ~/.openclaw/openclaw.json：
+# { "plugins": { "lcm-graph-extra": { "config": { "dashboardSnapshot": { "port": 7424 } } } } }
 ```
 
 ### Q2: Neo4j 连接失败
