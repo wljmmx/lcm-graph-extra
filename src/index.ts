@@ -667,10 +667,32 @@ const pluginEntry: any = definePluginEntry({
             }
 
             if (_isInputOverflow && !adapterCompacted) {
-              logger?.warn?.('[compact] all progressive budgets exhausted, compaction failed', {
+              logger?.warn?.('[compact] all progressive budgets exhausted, recording debt and degrading', {
                 budgetsTried: _progressiveBudgets,
                 currentTokenCount: _currentTokens,
+                currentThreshold: _overflowThreshold,
               });
+
+              // 记录负债：debt-manager 后续异步重试
+              const _sessionKey = typeof params.sessionKey === 'string'
+                ? params.sessionKey
+                : (typeof params.session_id === 'string' ? params.session_id : undefined);
+              const _sessionId = params.sessionId != null
+                ? String(params.sessionId)
+                : (params.session_id != null ? String(params.session_id) : undefined);
+              const _convId = getConversationId(_sessionKey, _sessionId);
+              if (_convId != null) {
+                writeCompactionDebt(
+                  _convId,
+                  _compactBudget,
+                  _currentTokens,
+                  'compact_budgets_exhausted_' + _currentTokens + '_gt_' + _overflowThreshold,
+                );
+              }
+
+              // 标记 adapter 已尽力：让 SDK 继续调用 assemble()，
+              // assemble() 中有 buildDegradedContext 降级逻辑
+              adapterOk = true;
             }
 
             // ── 迭代压缩：分段压缩成功但用了降级 budget 时，异步触发正常参数 follow-up ──
