@@ -72,7 +72,7 @@ npm run dev          # 同时启动后端 :7421（tsx watch）+ 前端 :7422（v
 
 ### 4.2 生产模式
 
-生产模式下后端用 `@fastify/static` 直接 serve `dist-client` 静态资源，无需 Vite。
+生产模式下后端用 `@fastify/static` 直接 serve `dist-client` 静态资源，无需 Vite。后端 TypeScript 由 `tsc` 编译为 `dist-server/`（配置见 `packages/dashboard/tsconfig.server.json`）。
 
 ```bash
 # 1. 构建主插件（生成 dist/）
@@ -80,7 +80,7 @@ npm run build
 
 # 2. 构建 dashboard 前端 + 后端
 cd packages/dashboard
-npm run build          # vite build + tsc --noEmit
+npm run build          # vite build（→ dist-client/）+ tsc 编译后端（→ dist-server/）
 
 # 3. 启动（必须设置 NODE_ENV=production）
 cd ../..
@@ -88,6 +88,10 @@ NODE_ENV=production node packages/dashboard/dist-server/index.js
 ```
 
 启动后访问 http://127.0.0.1:7421 即可看到 dashboard。
+
+> **构建产物说明**：
+> - `dist-client/`：Vite 构建的前端静态资源（HTML/JS/CSS），生产模式由 Fastify `@fastify/static` serve
+> - `dist-server/`：tsc 编译的后端 JavaScript（含 `index.js` 入口 + `lib/` + `routes/`），生产模式直接 `node` 运行
 
 ### 4.3 生产模式安全配置
 

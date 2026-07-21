@@ -17,10 +17,10 @@ RUN npm ci --ignore-scripts
 # 复制源码
 COPY . .
 
-# 构建主插件
+# 构建主插件（tsup → dist/）
 RUN npm run build
 
-# 构建 dashboard 前端
+# 构建 dashboard：vite build → dist-client/ + tsc 编译后端 → dist-server/
 RUN cd packages/dashboard && npm run build
 
 

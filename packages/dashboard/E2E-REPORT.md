@@ -228,8 +228,8 @@ npm run dev                    # concurrently 启动 server (7421) + client (742
 
 ```bash
 cd /workspace/packages/dashboard
-npm run build                  # 构建前端到 dist-client/
-npm start                      # 启动后端，serve 静态资源
+npm run build                  # vite build → dist-client/ + tsc 编译后端 → dist-server/
+npm start                      # node dist-server/index.js（需 NODE_ENV=production）
 ```
 
 访问 http://127.0.0.1:7421

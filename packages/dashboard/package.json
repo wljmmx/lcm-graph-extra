@@ -8,8 +8,10 @@
     "dev": "concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
-    "build": "vite build && tsc -p tsconfig.json --noEmit",
-    "start": "tsx server/index.ts",
+    "build": "vite build && tsc -p tsconfig.json --noEmit && npm run build:server",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "node dist-server/index.js",
+    "start:dev": "tsx server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
