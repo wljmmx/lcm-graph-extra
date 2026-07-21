@@ -20,7 +20,7 @@ COPY . .
 # 构建主插件（tsup → dist/）
 RUN npm run build
 
-# 构建 dashboard：vite build → dist-client/ + tsc 编译后端 → dist-server/
+# 构建 dashboard：vite build → dist-client/ + tsup 打包后端 → dist-server/index.js
 RUN cd packages/dashboard && npm run build
 
 
@@ -41,9 +41,8 @@ COPY --from=builder /workspace/package.json ./package.json
 COPY --from=builder /workspace/package-lock.json* ./package-lock.json*
 COPY --from=builder /workspace/openclaw.plugin.json ./openclaw.plugin.json
 COPY --from=builder /workspace/packages/dashboard/dist-client ./packages/dashboard/dist-client
-COPY --from=builder /workspace/packages/dashboard/package.json ./packages/dashboard/package.json
-COPY --from=builder /workspace/packages/dashboard/server ./packages/dashboard/server
 COPY --from=builder /workspace/packages/dashboard/dist-server ./packages/dashboard/dist-server
+COPY --from=builder /workspace/packages/dashboard/package.json ./packages/dashboard/package.json
 
 # 安装运行时依赖（仅 production deps）
 RUN npm ci --omit=dev --ignore-scripts

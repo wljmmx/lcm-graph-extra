@@ -72,7 +72,22 @@ npm run dev          # 同时启动后端 :7421（tsx watch）+ 前端 :7422（v
 
 ### 4.2 生产模式
 
-生产模式下后端用 `@fastify/static` 直接 serve `dist-client` 静态资源，无需 Vite。后端 TypeScript 由 `tsc` 编译为 `dist-server/`（配置见 `packages/dashboard/tsconfig.server.json`）。
+生产模式下后端用 `@fastify/static` 直接 serve `dist-client` 静态资源，无需 Vite。后端 TypeScript 由 **tsup 打包**为单文件 ESM bundle（配置见 [tsup.config.ts](file:///workspace/packages/dashboard/tsup.config.ts)）。
+
+**构建脚本说明**（详见 [package.json](file:///workspace/packages/dashboard/package.json#L7-L17)）：
+
+| 脚本 | 作用 | 产物 |
+|------|------|------|
+| `npm run build` | 完整构建（前端 + 后端） | `dist-client/` + `dist-server/` |
+| `npm run build:client` | 仅构建前端（Vite） | `dist-client/` |
+| `npm run build:server` | 仅打包后端（tsup） | `dist-server/index.js`（单文件 ESM bundle） |
+| `npm run typecheck` | 类型检查（不产出，独立于 build） | 无 |
+| `npm start` | 启动生产后端 | `node dist-server/index.js` |
+
+**关键设计**：
+1. `build` 脚本是 `vite build && npm run build:server`，**不包含** `tsc --noEmit` 类型检查，避免前端类型错误阻塞后端打包导致 `dist-server/` 不产出
+2. 后端用 **tsup 打包**（非 tsc 编译），将 `server/index.ts` 及所有相对 import 打包为单文件 ESM bundle，解决 `tsc` 编译后 import 无 `.js` 扩展名导致 Node ESM 无法加载的问题
+3. `import.meta.url` 在 ESM bundle 中正常保留（用于 `__dirname`、`createRequire`）
 
 ```bash
 # 1. 构建主插件（生成 dist/）
@@ -80,9 +95,12 @@ npm run build
 
 # 2. 构建 dashboard 前端 + 后端
 cd packages/dashboard
-npm run build          # vite build（→ dist-client/）+ tsc 编译后端（→ dist-server/）
+npm run build          # vite build（→ dist-client/）+ tsup 打包后端（→ dist-server/index.js）
 
-# 3. 启动（必须设置 NODE_ENV=production）
+# 3. 验证 dist-server 产物（可选但推荐）
+ls dist-server/index.js  # 必须存在（单文件 ESM bundle，约 170KB）
+
+# 4. 启动（必须设置 NODE_ENV=production）
 cd ../..
 NODE_ENV=production node packages/dashboard/dist-server/index.js
 ```
@@ -91,7 +109,9 @@ NODE_ENV=production node packages/dashboard/dist-server/index.js
 
 > **构建产物说明**：
 > - `dist-client/`：Vite 构建的前端静态资源（HTML/JS/CSS），生产模式由 Fastify `@fastify/static` serve
-> - `dist-server/`：tsc 编译的后端 JavaScript（含 `index.js` 入口 + `lib/` + `routes/`），生产模式直接 `node` 运行
+> - `dist-server/index.js`：tsup 打包的后端单文件 ESM bundle（含所有 server 代码，node_modules 依赖保持外部 import），生产模式直接 `node` 运行
+> - **后端打包配置**：`packages/dashboard/tsup.config.ts`（`entry: server/index.ts`，`format: esm`，`external: [/^[^./]/`）
+> - **类型检查**：CI 的 `Typecheck dashboard` 步骤独立运行 `npm run typecheck`，不阻塞 build
 
 ### 4.3 生产模式安全配置
 

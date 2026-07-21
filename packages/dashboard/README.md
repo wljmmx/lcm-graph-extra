@@ -32,7 +32,7 @@ npm run dev        # concurrently 启动后端(7421) + 前端(7422)
 ### 生产模式
 
 ```bash
-npm run build      # vite build → dist-client/ + tsc 编译后端 → dist-server/
+npm run build      # vite build → dist-client/ + tsup 打包后端 → dist-server/index.js
 npm start          # node dist-server/index.js（需 NODE_ENV=production）
 ```
 

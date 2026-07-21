@@ -97,6 +97,16 @@ jobs:
         working-directory: packages/dashboard
         run: npm run build
 
+      - name: Verify dist-server exists
+        working-directory: packages/dashboard
+        run: |
+          if [ ! -f dist-server/index.js ]; then
+            echo "ERROR: dist-server/index.js not found"
+            exit 1
+          fi
+          echo "dist-server/index.js exists"
+          ls -la dist-server/
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -104,6 +114,7 @@ jobs:
           path: |
             dist/
             packages/dashboard/dist-client/
+            packages/dashboard/dist-server/
           retention-days: 7
 
   security-scan:
