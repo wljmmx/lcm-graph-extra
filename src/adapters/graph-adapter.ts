@@ -390,6 +390,11 @@ export class GraphAdapter {
     // mod.searchNodes(this.driver, ...) 会把 null 传给 gm-pro，
     // gm-pro 内部 driver.session() 抛 "Cannot read properties of null (reading 'session')"
     if (!this.mod || !this.driver) return [];
+    // P3-9 GMR-3: 捕获到局部常量，跨 await 保持非空收窄。
+    // 防止 dispose() → close() 在 await 期间将 this.mod / this.driver 置 null，
+    // 导致 "Cannot read properties of null (reading 'searchNodes')" 崩溃。
+    const mod = this.mod;
+    const driver = this.driver;
     const rl = limit ?? this.config.searchLimit;
     try {
       let nodes: any[] = [];
@@ -407,7 +412,7 @@ export class GraphAdapter {
 
       // Fallback to simple searchNodes if no results
       if (nodes.length === 0) {
-        nodes = await this.mod.searchNodes(this.driver, query, rl);
+        nodes = await mod.searchNodes(driver, query, rl);
       }
       // G-10: 过滤被主动遗忘（hard mode）标记为 superseded 的节点。
       // searchNodes / Recaller 来自外部 graph-memory-pro 模块，无法注入 WHERE 条件，
