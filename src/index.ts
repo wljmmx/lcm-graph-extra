@@ -667,7 +667,7 @@ const pluginEntry: any = definePluginEntry({
             }
 
             if (_isInputOverflow && !adapterCompacted) {
-              logger?.warn?.('[compact] all progressive budgets exhausted, recording debt and degrading', {
+              logger?.warn?.('[compact] all progressive budgets exhausted, recording debt and using degraded summary', {
                 budgetsTried: _progressiveBudgets,
                 currentTokenCount: _currentTokens,
                 currentThreshold: _overflowThreshold,
@@ -690,9 +690,15 @@ const pluginEntry: any = definePluginEntry({
                 );
               }
 
-              // 标记 adapter 已尽力：让 SDK 继续调用 assemble()，
-              // assemble() 中有 buildDegradedContext 降级逻辑
+              // 构造降级摘要 + 标记 compacted=true：
+              // SDK 需要 compacted=true 才会继续调用 assemble()，
+              // assemble() 中有 buildDegradedContext 做真正的上下文裁剪。
+              // 仅设置 adapterOk=true 不够 —— SDK recovery 收到 compacted=false
+              // 会无限重试直到耗尽，最终报 Auto-compaction failed。
+              adapterCompacted = true;
               adapterOk = true;
+              summaryContent = '[DEGRADED] Progressive compaction budgets exhausted. '
+                + 'Context will be trimmed by assemble(). Debt recorded for async retry.';
             }
 
             // ── 迭代压缩：分段压缩成功但用了降级 budget 时，异步触发正常参数 follow-up ──
@@ -782,7 +788,8 @@ const pluginEntry: any = definePluginEntry({
           // Check adapter's actionTaken OR summary content (race condition: DB write may lag)
           const compacted = !!summaryContent || adapterCompacted;
           // If adapter ran successfully but no compaction was needed (e.g., below threshold),
-          // return ok: true so the SDK doesn't retry unnecessarily.
+          // return compacted: true to prevent the SDK's auto-compaction recovery from
+          // retrying in a loop (recovery treats compacted:false as "failed, retry").
           // If adapter genuinely failed, return ok: false so the SDK can retry.
           if (!compacted) {
             const reason = adapterOk
@@ -790,7 +797,7 @@ const pluginEntry: any = definePluginEntry({
               : 'DAG compaction did not produce a summary — session tokens unchanged, will retry';
             return {
               ok: adapterOk,
-              compacted: false,
+              compacted: adapterOk,
               reason,
               result: {
                 tokensBefore,
