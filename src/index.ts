@@ -36,6 +36,7 @@ import {
   writeCompactionDebt,
   estimateTokensFromText,
   estimateTokensFromMessages,
+  getUncompressedMessageCount,
 } from "./lcm-bridge.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
 
@@ -563,6 +564,27 @@ const pluginEntry: any = definePluginEntry({
               ]
             : [_compactBudget];
 
+          // 检查本地 DB 中未压缩消息数量：若已积累超过 dedupRounds 条，
+          // 强制 lossless-claw 执行压缩，避免 threshold 模式因 token 数不高而跳过。
+          const _compactSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+            : (typeof params.session_id === 'string' ? params.session_id : '');
+          const _compactSessionId = params.sessionId != null
+            ? String(params.sessionId)
+            : (params.session_id != null ? String(params.session_id) : undefined);
+          const _compactConvId = (_compactSessionKey || _compactSessionId)
+            ? getConversationId(_compactSessionKey, _compactSessionId)
+            : null;
+          const _uncompressedCount = _compactConvId != null ? getUncompressedMessageCount(_compactConvId) : -1;
+          const _dedupRounds = (_lcmMonitor as any)?.dedupRounds ?? 24;
+          const _forceCompact = _uncompressedCount > _dedupRounds;
+          if (_forceCompact) {
+            logger?.info?.('[compact] uncompressed messages exceeded dedupRounds, forcing compaction', {
+              uncompressedCount: _uncompressedCount,
+              dedupRounds: _dedupRounds,
+              conversationId: _compactConvId,
+            });
+          }
+
           if (_isInputOverflow) {
             logger?.warn?.('[compact] input overflow — triggering segmented (progressive-budget) compaction', {
               currentTokenCount: _currentTokens,
@@ -636,6 +658,7 @@ const pluginEntry: any = definePluginEntry({
                   _losslessClawAdapter.compact({
                     ...params,
                     tokenBudget: effectiveTokenBudget,
+                    force: _forceCompact || params.force === true,
                     compactionTarget: _isInputOverflow ? 'budget' : ((params as any).compactionTarget ?? 'threshold'),
                   }),
                   compactTimeoutPromise,
@@ -726,6 +749,7 @@ const pluginEntry: any = definePluginEntry({
               _losslessClawAdapter.compact({
                 ...params,
                 tokenBudget: _compactBudget,
+                force: _forceCompact || params.force === true,
                 compactionTarget: (params as any).compactionTarget ?? 'threshold',
               }).then((_followUp: any) => {
                 if (_followUp.ok && _followUp.compacted) {
@@ -809,6 +833,13 @@ const pluginEntry: any = definePluginEntry({
             const reason = adapterOk
               ? 'compaction evaluated — context below threshold, no compaction needed'
               : 'DAG compaction did not produce a summary — session tokens unchanged, will retry';
+            logger?.info?.('[compact] no compaction produced', {
+              adapterOk,
+              uncompressedCount: _uncompressedCount,
+              forceCompact: _forceCompact,
+              tokensBefore,
+              reason,
+            });
             return {
               ok: adapterOk,
               compacted: adapterOk,
@@ -823,6 +854,16 @@ const pluginEntry: any = definePluginEntry({
           // - firstKeptEntryId: 压缩后保留的第一条消息 ID（lossless-claw 提供）
           // - sessionId/sessionFile: runtime 轮换 transcripts 时的新会话标识
           // 从 compactResultExtra 透传，缺失时回退到 params 原值
+          const tokensAfter = compacted && summaryContent
+            ? estimateTokensFromText(summaryContent)
+            : tokensBefore;
+          logger?.info?.('[compact] compaction finished', {
+            adapterCompacted,
+            hasSummary: !!summaryContent,
+            tokensBefore,
+            tokensAfter,
+            uncompressedCount: _uncompressedCount,
+          });
           return {
             ok: true,
             compacted,
@@ -830,9 +871,7 @@ const pluginEntry: any = definePluginEntry({
             result: {
               tokensBefore,
               // After compaction, the summary replaces the original messages
-              tokensAfter: compacted && summaryContent
-                ? estimateTokensFromText(summaryContent)
-                : tokensBefore,
+              tokensAfter,
               summary: summaryContent,
               firstKeptEntryId: compactResultExtra.firstKeptEntryId,
               sessionId: compactResultExtra.sessionId ?? params.sessionId,
