@@ -576,7 +576,23 @@ const pluginEntry: any = definePluginEntry({
             : null;
           const _uncompressedCount = _compactConvId != null ? getUncompressedMessageCount(_compactConvId) : -1;
           const _dedupRounds = (_lcmMonitor as any)?.dedupRounds ?? 24;
+          // 注意：_forceCompact 仍按"本地 DB 未压缩消息数 > dedupRounds"判定，
+          // 但传给 lossless-claw 的 force 参数固定为 true（见下），因为我们的 compact hook
+          // 是 /compact 的入口，必须确保 lossless-claw 执行压缩而非因 threshold 没超而跳过。
           const _forceCompact = _uncompressedCount > _dedupRounds;
+          logger?.info?.('[compact] start', {
+            sessionId: _compactSessionId,
+            sessionKey: _compactSessionKey ? 'set' : 'missing',
+            conversationId: _compactConvId,
+            uncompressedCount: _uncompressedCount,
+            dedupRounds: _dedupRounds,
+            forceCompactByDB: _forceCompact,
+            isInputOverflow: _isInputOverflow,
+            currentTokenCount: _currentTokens,
+            paramsForce: params.force,
+            paramsSource: (params as any).source,
+            paramsCompactionTarget: (params as any).compactionTarget,
+          });
           if (_forceCompact) {
             logger?.info?.('[compact] uncompressed messages exceeded dedupRounds, forcing compaction', {
               uncompressedCount: _uncompressedCount,
@@ -658,12 +674,26 @@ const pluginEntry: any = definePluginEntry({
                   _losslessClawAdapter.compact({
                     ...params,
                     tokenBudget: effectiveTokenBudget,
-                    force: _forceCompact || params.force === true,
+                    // BUGFIX: 默认 force=true — 我们的 compact hook 总是被 /compact 主动触发，
+                    // 不依赖 SDK 是否传 force。SDK 在大多数 /compact 路径下不传 force=true，
+                    // 会导致 lossless-claw 跳过压缩（即使本地 DB 显示有未压缩消息）。
+                    // 保留 _forceCompact 短路避免在已压缩会话上重复强制。
+                    force: true,
                     compactionTarget: _isInputOverflow ? 'budget' : ((params as any).compactionTarget ?? 'threshold'),
                   }),
                   compactTimeoutPromise,
                   ...(abortOnCompact ? [abortOnCompact] : []),
                 ]);
+                logger?.info?.('[compact] adapter.compact result received', {
+                  paramsForce: params.force,
+                  resultOk: compactResult?.ok,
+                  resultCompacted: compactResult?.compacted,
+                  resultSummaryId: compactResult?.summaryId,
+                  resultActionTaken: compactResult?.result?.actionTaken,
+                  resultHasSummary: !!(compactResult?.summary || compactResult?.result?.summary),
+                  resultTokensBefore: compactResult?.result?.tokensBefore,
+                  resultTokensAfter: compactResult?.result?.tokensAfter,
+                });
                 // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
                 summaryContent = compactResult?.summary || compactResult?.result?.summary;
                 // Track adapter-level success: true even if compaction was evaluated but not needed
@@ -749,7 +779,7 @@ const pluginEntry: any = definePluginEntry({
               _losslessClawAdapter.compact({
                 ...params,
                 tokenBudget: _compactBudget,
-                force: _forceCompact || params.force === true,
+                force: true,
                 compactionTarget: (params as any).compactionTarget ?? 'threshold',
               }).then((_followUp: any) => {
                 if (_followUp.ok && _followUp.compacted) {
