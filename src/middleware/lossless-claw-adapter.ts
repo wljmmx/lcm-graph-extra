@@ -129,6 +129,7 @@ interface LosslessClawEngine {
  * Used when we access the engine via shared-init rather than factory registry. */
 class MemorySupplementCtxEngine implements LosslessClawEngine {
   constructor(private inner: any) {}
+  get info() { return this.inner.info; }
   async bootstrap(params: any): Promise<any> {
     return this.inner.bootstrap?.(params) ?? {};
   }
@@ -143,6 +144,18 @@ class MemorySupplementCtxEngine implements LosslessClawEngine {
   }
   async afterTurn(params: any): Promise<void> {
     await this.inner.afterTurn?.(params);
+  }
+  async assemble(params: any): Promise<any> {
+    return this.inner.assemble?.(params) ?? { messages: params.messages ?? [], estimatedTokens: 0 };
+  }
+  async maintain(params: any): Promise<any> {
+    return this.inner.maintain?.(params) ?? { changed: false, bytesFreed: 0, rewrittenEntries: 0 };
+  }
+  getConversationStore(): any {
+    return this.inner.getConversationStore?.();
+  }
+  getSummaryStore(): any {
+    return this.inner.getSummaryStore?.();
   }
   async dispose(): Promise<void> {
     this.inner.dispose?.();
@@ -414,7 +427,7 @@ export class LosslessClawAdapter {
           sessionId: params.sessionId != null ? String(params.sessionId) : undefined,
           sessionKey: params.sessionKey,
         });
-        if (existing && existing.bootstrapped_at) {
+        if (existing && existing.bootstrappedAt) {
           // Already bootstrapped, no-op
           return { bootstrapped: true, importedMessages: 0 };
         }
@@ -536,20 +549,36 @@ export class LosslessClawAdapter {
       // 但 SDK 仍需要 summary 来更新上下文。此时获取已有摘要返回给 SDK。
       if (actionTaken) {
         try {
-          const convStore = this.engine.getConversationStore?.();
-          if (convStore) {
-            const summaries = await convStore.listSummaries?.(params.sessionId, 1);
-            if (summaries?.length > 0) {
-              summaryContent = summaries[0].content;
-              this.logger?.info?.('[lossless-claw-adapter] summary fetched', {
-                createdNewSummary: !!createdSummaryId,
-                summaryLength: summaryContent?.length ?? 0,
-                summaryPreview: summaryContent?.substring(0, 100),
-              });
+          // Use the correct DAG API: SummaryStore.getContextItems + getSummary
+          // (NOT convStore.listSummaries which does not exist on ConversationStore)
+          const summaryStore = this.engine.getSummaryStore?.();
+          if (summaryStore && typeof summaryStore.getContextItems === 'function') {
+            const convStore = this.engine.getConversationStore?.();
+            const conversation = await convStore?.getConversationForSession?.({ sessionId: params.sessionId });
+            if (conversation) {
+              const contextItems = await summaryStore.getContextItems(conversation.conversationId);
+              const summaryItems = (contextItems ?? [])
+                .filter((item: any) => item.itemType === 'summary' && item.summaryId)
+                .slice(-1);
+              for (const item of summaryItems) {
+                if (typeof summaryStore.getSummary === 'function') {
+                  const s = await summaryStore.getSummary(item.summaryId);
+                  if (s) {
+                    summaryContent = s.content;
+                    break;
+                  }
+                }
+              }
             }
           }
+          if (summaryContent) {
+            this.logger?.info?.('[lossless-claw-adapter] summary fetched', {
+              createdNewSummary: !!createdSummaryId,
+              summaryLength: summaryContent?.length ?? 0,
+              summaryPreview: summaryContent?.substring(0, 100),
+            });
+          }
         } catch (e) {
-          // Fallback: use summary ID as indicator
           this.logger?.debug?.("[lossless-claw-adapter] summary content fetch failed, using summary ID as indicator", { err: e instanceof Error ? e.message : String(e) });
         }
       }
