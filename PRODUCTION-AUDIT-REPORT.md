@@ -1,7 +1,7 @@
 # LCM Graph Extra 生产就绪审计报告
 
-> 审计日期：2026-07-05
-> 审计版本：v2.1.10
+> 审计日期：2026-07-05（后续更新：2026-07-07 / 2026-07-22）
+> 审计版本：v2.1.11
 > 审计范围：P0 / P1 / P2 全部功能项
 > 审计结论：✅ 全部功能已补齐，可生产使用
 
@@ -585,3 +585,37 @@ ECharts 与 DataTable 暗色模式修复（`echartsDarkThemeColors` + `echartsDa
 
 *报告生成时间：2026-07-05（后续加固附录：2026-07-07）*
 *审计工具：内部自动化审计 + 人工复核*
+
+---
+
+## 十一、lossless-claw 适配器 API 审计 (2026-07-22)
+
+> 本节记录 v2.1.11 对 lossless-claw 适配器的跨源码审计修复。
+
+### 审计方法
+
+对照 [lossless-claw 源码](https://github.com/Martian-Engineering/lossless-claw)（`/tmp/lossless-claw/src/`），逐一验证适配器 `LosslessClawAdapter` 中所有 Engine / ConversationStore / SummaryStore 方法调用。
+
+### 发现的问题
+
+| # | 问题 | 文件:行 | 类型 | 影响 |
+|---|------|---------|------|------|
+| 1 | `getSummaries()` 调用不存在的 `convStore.listSummaries()` | `lossless-claw-adapter.ts:671` | 幽灵方法 | `getSummaries` 永远返回 `[]`，assemble 找不到 summary，LLM 收到未压缩上下文 |
+| 2 | `compact()` 同样调用不存在的 `convStore.listSummaries()` | `lossless-claw-adapter.ts:541` | 幽灵方法 | compact 返回的 `summary` 永远为空 |
+| 3 | `bootstrapped_at` → `bootstrappedAt` | `lossless-claw-adapter.ts:417` | 字段名错误 | `ensureBootstrapped` 永远认为未 bootstrap，每次重复执行 |
+| 4 | `MemorySupplementCtxEngine` 缺失方法代理 | `lossless-claw-adapter.ts:130` | 方法遗漏 | shared-init 路径下 store 方法不可用 |
+| 5 | `AssembleContext.losslessClawAdapter` 类型为 `any` | `assemble/types.ts:14` | 类型缺失 | TS 无法推断 `getSummaries` 返回类型 |
+
+### 修复方案
+
+- **问题 1/2**: 改用正确的 API 链：`getSummaryStore().getContextItems(conversationId)` + `getSummary(summaryId)`，替代不存在的 `convStore.listSummaries()`
+- **问题 3**: `bootstrapped_at` → `bootstrappedAt`（源码 `toConversationRecord` 返回驼峰对象）
+- **问题 4**: 补全 `getConversationStore` / `getSummaryStore` / `assemble` / `maintain` / `info` 代理
+- **问题 5**: 导入 `LosslessClawAdapter` 类型，替换 `any`
+
+### 验证
+
+- `npm run typecheck` — 通过
+- `npm run lint` — 通过（0 errors）
+- `npm run test` — 810 tests 全部通过
+- `npm run build` — 成功

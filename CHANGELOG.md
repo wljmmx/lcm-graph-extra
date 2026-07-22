@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **P2-9**: LLM 超时集中化到 `DEFAULTS.llm`（`rerankTimeoutMs=3000` / `judgeTimeoutMs=10000` / `validateTimeoutMs=8000` / `summarizeTimeoutMs=20000` / `embedTimeoutMs=30000` / `graphLlmTimeoutMs=30000`），原 6 处散落硬编码（1.5s~30s 跨 20 倍）统一引用
 - **P1-8**: `lcm` 熔断器文档化为死注册（生产无 `withCircuitBreaker("lcm", ...)` 调用点），保留类型定义以兼容 DB schema（`cb_lcm_ok/cb_lcm_fails`）与 dashboard `reset_breaker` 工具
 
+### Fixed (2026-07-22 — lossless-claw 适配器 API 审计)
+
+通过对照 lossless-claw 源码 (`Martian-Engineering/lossless-claw`) 逐一审计，修复 5 个问题：
+
+- **适配器 `getSummaries()` 幽灵方法调用**: 原调用 `convStore.listSummaries()`（ConversationStore 不存在此方法，永远返回 `[]`），改用 `getSummaryStore().getContextItems(conversationId)` + `getSummary()`。此 bug 导致 compact 生成的 summary 永远无法被 assemble 获取，LLM 始终收到未压缩的完整上下文。
+- **适配器 `compact()` 同样幽灵方法**: `compact()` 内获取 summary 也使用了不存在的 `convStore.listSummaries()`，改用相同正确 API。
+- **`ensureBootstrapped()` 字段名错误**: `existing.bootstrapped_at`（snake_case）→ `existing.bootstrappedAt`（camelCase），源码 `toConversationRecord` 返回驼峰对象。此前 `bootstrapped_at` 永远为 `undefined`，导致每次都要重新 bootstrap。
+- **`MemorySupplementCtxEngine` 缺失方法代理**: 补全 `getConversationStore` / `getSummaryStore` / `assemble` / `maintain` / `info` 代理方法，shared-init 路径下这些方法不可用。
+- **`AssembleContext` 类型修复**: `losslessClawAdapter` 从 `any` 改为 `LosslessClawAdapter`，修复 TypeScript 无法推断 `getSummaries` 返回类型的问题。
+
+影响文件：
+- `src/middleware/lossless-claw-adapter.ts` — adapter API 修复
+- `src/assemble/types.ts` — 类型系统修复
+
 ## [2.1.10] - 2026-07-05
 
 ### Added
