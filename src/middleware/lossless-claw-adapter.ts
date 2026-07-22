@@ -27,6 +27,7 @@ import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
+import { estimateTokensFromText } from '../lcm-bridge.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -660,6 +661,31 @@ export class LosslessClawAdapter {
       return null;
     }
     return this.engine.getSummaryStore?.();
+  }
+
+  async getSummaries(sessionId: string, limit: number = 1): Promise<Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null }>> {
+    if (!this._connected || !this.engine) {
+      return [];
+    }
+    try {
+      const convStore = this.engine.getConversationStore?.();
+      if (!convStore || typeof convStore.listSummaries !== 'function') {
+        return [];
+      }
+      const summaries = await convStore.listSummaries(sessionId, limit);
+      if (!Array.isArray(summaries)) {
+        return [];
+      }
+      return summaries.map((s: any) => ({
+        summaryId: s.id ?? s.summaryId ?? '',
+        content: s.content ?? '',
+        tokenCount: s.tokenCount ?? s.tokens ?? estimateTokensFromText(s.content ?? '') ?? 0,
+        earliestAt: s.earliestAt ?? s.timestamp ?? null,
+      }));
+    } catch (e) {
+      this.logger?.debug?.('[lossless-claw-adapter] getSummaries failed', { err: e instanceof Error ? e.message : String(e), sessionId });
+      return [];
+    }
   }
 
   // ── 销毁 ──

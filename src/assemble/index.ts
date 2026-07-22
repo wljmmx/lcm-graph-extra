@@ -226,7 +226,15 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         const maxSummaryRatio = (wm as any)?.maxSummaryTokenRatio ?? 0.45;
         const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
 
-        const convSummaries = getConversationSummaries(conversationId);
+        // 从 lossless-claw adapter 获取摘要（替代本地 SQLite DB）
+        // lossless-claw 的 DAG 是单一真相源，本地 DB 的 summaries 表从未被写入
+        const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
+          : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+        const _losslessSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
+        // 回退：如果 lossless-claw 未返回摘要，尝试本地 DB（兼容旧数据）
+        const convSummaries = _losslessSummaries.length > 0
+          ? _losslessSummaries
+          : getConversationSummaries(conversationId);
         const hasExistingSummary = convSummaries.length > 0;
         const rawCount = messages.length;
         const dedupLimit = (wm as any)?.dedupRounds ?? 24;
@@ -270,7 +278,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           //   2        — 丢弃摘要, 仅保留 8 条最近消息
           //   3        — 丢弃摘要, 仅保留 4 条最近消息
           const buildDegradedContext = (reason: string, aggressiveLevel: number = 0) => {
-            const existingSummaries = getConversationSummaries(conversationId);
+            const existingSummaries = convSummaries;
             const goalMsg = getGoal(sessionKey);
             const goalAnchorMsgs = goalMsg
               ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
@@ -377,7 +385,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 compactTimeoutPromise,
               ]);
               if (compactTimer) clearTimeout(compactTimer);
-              const freshSummaries = getConversationSummaries(conversationId);
+              const freshSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
               if (freshSummaries.length > 0) {
                 const trimmedSummaryMsgs = trimSummariesToBudget(
                   freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
@@ -497,7 +505,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         : typeof params.session_id === 'string' ? params.session_id : '';
       const _convId = getConversationId(_sessionKey);
       if (_convId != null) {
-        const _existingSummaries = getConversationSummaries(_convId);
+        const _lcSid2 = typeof params.sessionId === 'string' ? params.sessionId
+          : (typeof params.session_id === 'string' ? params.session_id : String(_convId));
+        const _existingSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid2, 10);
         if (_existingSummaries.length > 0) {
           const _summaryMsgs = _existingSummaries.map((s) => ({
             role: 'user', content: s.content, token_count: s.tokenCount,
