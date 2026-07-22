@@ -1017,7 +1017,7 @@ const pluginEntry: any = definePluginEntry({
             const _sessionKey = typeof params.sessionKey === "string" ? params.sessionKey
               : typeof params.session_id === "string" ? params.session_id : undefined;
             const _sessionFile = typeof params.sessionFile === "string" ? params.sessionFile : undefined;
-            await Promise.race([
+            const _hookResult = await Promise.race([
               onCompaction({
                 config: api.config,
                 logger: logger,
@@ -1037,6 +1037,23 @@ const pluginEntry: any = definePluginEntry({
               hookTimeoutPromise,
               ...(abortOnHook ? [abortOnHook] : []),
             ]);
+            // 如果 onCompaction 返回成功（且之前的 DAG compact 失败），用它的结果更新
+            // compactResult 和 adapterCompacted，确保 SDK 收到正确的压缩结果。
+            if (_hookResult && _hookResult.ok && _hookResult.compacted) {
+              logger?.info?.('[compact] onCompaction hook succeeded, updating compactResult', {
+                hookTokensBefore: _hookResult.result?.tokensBefore,
+                hookTokensAfter: _hookResult.result?.tokensAfter,
+              });
+              compactResult = {
+                ok: _hookResult.ok,
+                compacted: _hookResult.compacted,
+                summary: _hookResult.summary,
+                result: _hookResult.result,
+              };
+              adapterCompacted = true;
+              adapterOk = true;
+              summaryContent = _hookResult.summary ?? summaryContent;
+            }
           } catch (hookErr) {
             const msg = String(hookErr);
             if (msg.includes('aborted')) {

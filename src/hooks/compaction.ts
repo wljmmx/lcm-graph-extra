@@ -167,8 +167,13 @@ function validateCompactionQuality(
  *   3. 压缩后提取关键实体 → 写入 Neo4j
  *   4. 记录压缩元数据
  */
-export async function onCompaction(instance: PluginInstance): Promise<void> {
+export async function onCompaction(instance: PluginInstance): Promise<{ ok: boolean; compacted: boolean; summary?: string; result?: { tokensBefore?: number; tokensAfter?: number; actionTaken?: boolean; firstKeptEntryId?: string; sessionId?: string; sessionFile?: string } }> {
   const logger = instance.logger;
+
+  // 声明在函数级别，供最终 return 使用
+  let didCompact = false;
+  let compactResult: any = null;
+  let resultData: any = {};
 
   // --- compaction config (fallback to lcmMonitor) ---------------------
   const rawCompConfig = instance.config.compaction;
@@ -183,13 +188,13 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
 
   if (compConfig?.enabled === false) {
     logger?.debug?.('compaction: disabled by config, skipping');
-    return;
+    return { ok: false, compacted: false };
   }
 
   const memoryDir = instance.context.memoryDir;
   if (!memoryDir) {
     logger?.warn?.('compaction: no memoryDir in context, cannot proceed');
-    return;
+    return { ok: false, compacted: false };
   }
 
   // --- step 1 — backup memory files before compaction --------------------
@@ -230,10 +235,10 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
 
       if (!sessionId || !sessionFile) {
         logger?.warn?.('compaction: missing sessionId or sessionFile in context, skipping');
-        return;
+        return { ok: false, compacted: false };
       }
 
-      const compactResult = await adapter.compact({
+      const _compactResult = await adapter.compact({
         sessionId,
         sessionKey,
         sessionFile,
@@ -246,8 +251,9 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
         },
       });
       // CompactionResult 结构: { ok, compacted, reason, summaryId, summary, result: { actionTaken, tokensBefore, tokensAfter, condensed, createdSummaryId, summary }, exhausted }
-      const didCompact = compactResult.compacted === true;
-      const resultData = compactResult.result ?? {};
+      compactResult = _compactResult;
+      didCompact = compactResult.compacted === true;
+      resultData = compactResult.result ?? {};
 
       if (didCompact) {
         logger?.info?.("compaction: lossless-claw DAG compact completed", {
@@ -344,6 +350,20 @@ export async function onCompaction(instance: PluginInstance): Promise<void> {
   } catch (err) {
     logger?.warn?.(`compaction: failed to write marker: ${err}`);
   }
+
+  return {
+    ok: didCompact,
+    compacted: didCompact,
+    summary: compactResult?.summary ?? compactResult?.result?.summary,
+    result: {
+      tokensBefore: resultData.tokensBefore,
+      tokensAfter: resultData.tokensAfter,
+      actionTaken: resultData.actionTaken,
+      firstKeptEntryId: resultData.firstKeptEntryId,
+      sessionId: resultData.sessionId,
+      sessionFile: resultData.sessionFile,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
