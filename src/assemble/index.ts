@@ -510,8 +510,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       });
       const _convId = getConversationId(_sessionKey);
       if (_convId != null) {
-        const _lcSid2 = typeof params.sessionId === 'string' ? params.sessionId
-          : (typeof params.session_id === 'string' ? params.session_id : String(_convId));
+        // BUGFIX: 使用与 compact 方法一致的 sessionId 转换逻辑（始终 String()），
+        // 避免 SDK 传 number 类型时 typeof === 'string' 检查失败导致 fallthrough
+        // 到 getConversationId 返回的本地 DB ID，与 DAG 中存储的 session_id 不匹配，
+        // 进而 getConversationForSession 返回 null → getSummaries 永远返回空数组。
+        const _lcSid2 = params.sessionId != null ? String(params.sessionId)
+          : (params.session_id != null ? String(params.session_id) : String(_convId));
         const _existingSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid2, 10);
         ctx.logger?.info?.('[assemble:low-tier] getSummaries result', {
           lcSid2: _lcSid2,
@@ -580,6 +584,29 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             if (_trimmed) {
               markDegraded('low_tier_cascading_trim');
             }
+          }
+        } else {
+          // BUGFIX: 当 DAG 中无 summary 但消息数较多时（如 DAG 已压缩但无 summary、
+          // 或 sessionId 类型不匹配导致 getSummaries 返回空），不能原样发送全部消息。
+          // 否则 SDK 会因为上下文过大触发 auto-compaction → 死循环 → "could not recover"。
+          // 降级策略：保留最近消息 + 目标锚定，丢弃旧消息防止上下文溢出。
+          const _msgCountForFallback = messages.length;
+          if (_msgCountForFallback > 20) {
+            const _goalMsg = getGoal(_sessionKey);
+            const _goalAnchorMsgs = _goalMsg
+              ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
+              : [];
+            const _fallbackKeep = Math.min(_msgCountForFallback, 8);
+            finalMessages = [..._goalAnchorMsgs, ...messages.slice(-_fallbackKeep)];
+            markDegraded('low_tier_no_summary_fallback');
+            ctx.logger?.warn?.('[assemble:low-tier] no summaries available, applying message trimming fallback', {
+              originalMsgCount: _msgCountForFallback,
+              keptMsgCount: _fallbackKeep,
+              goalAnchorCount: _goalAnchorMsgs.length,
+              finalMsgCount: finalMessages.length,
+              lcSessionId: _lcSid2,
+              convId: _convId,
+            });
           }
         }
       }
