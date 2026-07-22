@@ -197,8 +197,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           : '';
         const preCompactConversationId = getConversationId(preCompactSessionKey);
         if (preCompactConversationId != null) {
-          const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
-            : (typeof params.session_id === 'string' ? params.session_id : String(preCompactConversationId));
+          const _lcSid = params.sessionId != null ? String(params.sessionId)
+            : (params.session_id != null ? String(params.session_id) : String(preCompactConversationId));
           backgroundTasks.register('compact:pre-emptive', ctx.losslessClawAdapter.compact({
             sessionId: _lcSid,
             sessionKey: preCompactSessionKey,
@@ -228,8 +228,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
         // 从 lossless-claw adapter 获取摘要（替代本地 SQLite DB）
         // lossless-claw 的 DAG 是单一真相源，本地 DB 的 summaries 表从未被写入
-        const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
-          : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+        const _lcSid = params.sessionId != null ? String(params.sessionId)
+          : (params.session_id != null ? String(params.session_id) : String(conversationId));
         const _losslessSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
         // 回退：如果 lossless-claw 未返回摘要，尝试本地 DB（兼容旧数据）
         const convSummaries = _losslessSummaries.length > 0
@@ -240,8 +240,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         const dedupLimit = (wm as any)?.dedupRounds ?? 24;
 
         if (tier === 'medium') {
-          const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
-            : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+          const _lcSid = params.sessionId != null ? String(params.sessionId)
+            : (params.session_id != null ? String(params.session_id) : String(conversationId));
           backgroundTasks.register('compact:medium-tier', ctx.losslessClawAdapter.compact({
             sessionId: _lcSid, sessionKey, sessionFile, force: true,
             tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
@@ -268,8 +268,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             );
           }
         } else if (tier === 'high') {
-          const _lcSid = typeof params.sessionId === 'string' ? params.sessionId
-            : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+          const _lcSid = params.sessionId != null ? String(params.sessionId)
+            : (params.session_id != null ? String(params.session_id) : String(conversationId));
 
           // ── 压缩降级工具函数：用已有摘要 + 最近消息构建注入上下文 ──
           // aggressiveLevel:
@@ -345,8 +345,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             markDegraded('high_pressure_input_overflow');
 
             // 异步触发分段压缩：用渐进式 budget 多次尝试，而非单次调用（单次用相同参数必然再次 overflow）
-            const _asyncSid = typeof params.sessionId === 'string' ? params.sessionId
-              : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+            const _asyncSid = params.sessionId != null ? String(params.sessionId)
+              : (params.session_id != null ? String(params.session_id) : String(conversationId));
             const _overflowBudgets = [
               resolvedCtx.compactTokenBudget,
               Math.floor(resolvedCtx.compactTokenBudget * 0.50),
@@ -445,8 +445,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                       tokenRatio: Number(postCompactTokenRatio.toFixed(3)),
                       uncompressedCount: postCompactUncompressed,
                     });
-                    const _iterSid = typeof params.sessionId === 'string' ? params.sessionId
-                      : (typeof params.session_id === 'string' ? params.session_id : String(conversationId));
+                    const _iterSid = params.sessionId != null ? String(params.sessionId)
+                      : (params.session_id != null ? String(params.session_id) : String(conversationId));
                     backgroundTasks.register('compact:iterative-' + newTier, ctx.losslessClawAdapter.compact({
                       sessionId: _iterSid, sessionKey, sessionFile, force: true,
                       tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: postCompactTokens,
@@ -480,8 +480,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             'proactive_' + tier + '_pressure',
           );
           backgroundTasks.register('compact:low-tier', ctx.losslessClawAdapter.compact({
-            sessionId: typeof params.sessionId === 'string' ? params.sessionId
-              : (typeof params.session_id === 'string' ? params.session_id : String(conversationId)),
+            sessionId: params.sessionId != null ? String(params.sessionId)
+              : (params.session_id != null ? String(params.session_id) : String(conversationId)),
             sessionKey, sessionFile, force: true,
             tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
             compactionTarget: 'threshold',

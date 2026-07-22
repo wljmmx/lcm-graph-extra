@@ -408,10 +408,9 @@ const pluginEntry: any = definePluginEntry({
           if (!_losslessClawAdapter?.bootstrap) {
             return { bootstrapped: false, reason: 'adapter_not_connected' };
           }
-          // SDK 注入的 sessionId 必须是字符串（防御性 String 化）
-          const sid = typeof params.sessionId === 'string'
-            ? params.sessionId
-            : String(params.sessionId);
+          // SDK 注入的 sessionId 可能是 number 类型（如 conversationId），
+          // 用 != null 检查替代 typeof === 'string'，确保 number 类型正确转换
+          const sid = params.sessionId != null ? String(params.sessionId) : '';
           // BUGFIX: 不再传 messages: [] 覆盖 lossless-claw 的 sessionFile 读取路径。
           // 原来传空数组导致 DAG 只有当前轮的 14K 消息，而 sessionFile 里的 58K 历史
           // 没有被导入，compact 永远只能压缩最近 14K。
@@ -445,7 +444,7 @@ const pluginEntry: any = definePluginEntry({
           // 会话重置（/new 等）：清除旧会话的所有缓存，防止 uncomp、压力等级等
           // 使用上一轮会话的陈旧数据。bootstrap 在新会话启动时由 SDK 主动调用。
           try {
-            const sid = typeof params.sessionId === 'string' ? params.sessionId : String(params.sessionId);
+            const sid = params.sessionId != null ? String(params.sessionId) : '';
             const sk = params.sessionKey ?? sid;
 
             // 1. 失效 conversation_id 缓存（10min TTL，不主动清除会导致 uncomp 统计错误）
@@ -480,7 +479,7 @@ const pluginEntry: any = definePluginEntry({
 
           // H-6: 会话启动时预加载高频经验（非阻塞，失败静默）
           try {
-            const sid = typeof params.sessionId === 'string' ? params.sessionId : String(params.sessionId);
+            const sid = params.sessionId != null ? String(params.sessionId) : '';
             const sk = params.sessionKey ?? sid;
             if (sessionWarmupCache.size >= WARMUP_CACHE_MAX) {
               const firstKey = sessionWarmupCache.keys().next().value;
