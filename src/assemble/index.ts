@@ -510,6 +510,49 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           const _recentCount = Math.min(messages.length, 8);
           const _recentRawMsgs = messages.slice(-_recentCount);
           finalMessages = [..._goalAnchorMsgs, ..._summaryMsgs, ..._recentRawMsgs];
+
+          // ── 低压力路径裁剪后校验 ──
+          // SDK precheck 会追加 system prompt + tools 等大量额外开销（可达 60-90K tokens），
+          // 仅看消息 token 不足以判断是否会溢出。当消息 token 超安全阈值时，
+          // 级联降级：丢弃摘要 → 减少最近消息数，确保总 prompt 不超模型窗口。
+          const _fullEstimate = estimateTokensFromMessages(finalMessages);
+          const _safeThreshold = Math.floor(contextWindow * 0.25);
+          if (_fullEstimate > _safeThreshold || msgCount > 50) {
+            ctx.logger?.warn?.('[assemble] low-tier context exceeds safe threshold, applying cascading trim', {
+              fullEstimate: _fullEstimate,
+              safeThreshold: _safeThreshold,
+              msgCount,
+              contextWindow,
+              summaryCount: _existingSummaries.length,
+            });
+
+            // 级联降级：丢弃摘要，仅保留最近消息
+            const _cascadeLevels = [8, 4, 2];
+            let _trimmed = false;
+            for (const _keepCount of _cascadeLevels) {
+              const _recentMsgs = messages.slice(-Math.min(messages.length, _keepCount));
+              const _testMessages = [..._goalAnchorMsgs, ..._recentMsgs];
+              const _testEstimate = estimateTokensFromMessages(_testMessages);
+              if (_testEstimate <= _safeThreshold || _keepCount === _cascadeLevels[_cascadeLevels.length - 1]) {
+                finalMessages = _testMessages;
+                _trimmed = true;
+                ctx.logger?.info?.('[assemble] low-tier cascading trim applied', {
+                  keepCount: _keepCount,
+                  estimate: _testEstimate,
+                  safeThreshold: _safeThreshold,
+                });
+                break;
+              }
+              ctx.logger?.warn?.('[assemble] low-tier cascading trim: still too large, reducing further', {
+                keepCount: _keepCount,
+                estimate: _testEstimate,
+                safeThreshold: _safeThreshold,
+              });
+            }
+            if (_trimmed) {
+              markDegraded('low_tier_cascading_trim');
+            }
+          }
         }
       }
     }
