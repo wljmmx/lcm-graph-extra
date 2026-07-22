@@ -35,7 +35,9 @@ import {
   invalidateConvIdCache,
   writeCompactionDebt,
   estimateTokensFromText,
+  estimateTokensFromMessages,
 } from "./lcm-bridge.js";
+import { updateSdkOverhead } from "./plugin/overhead-cache.js";
 
 // ---------------------------------------------------------------------------
 // S-9': 关键词提取（轻量版）—— 实现已抽出到 src/plugin/keywords.ts
@@ -568,6 +570,18 @@ const pluginEntry: any = definePluginEntry({
               contextWindow: _contextWindow,
               progressiveBudgets: _progressiveBudgets,
             });
+
+            // 利用 SDK 传入的 currentTokenCount 反推 SDK overhead 并缓存
+            // _currentTokens 是 SDK precheck 计算的实际 prompt token 数，
+            // 包含 system prompt + tool catalog + 消息等所有内容。
+            // assemble 下轮会用 getSdkOverhead() 读取此值来动态计算 safeThreshold。
+            const _sk = typeof params.sessionKey === 'string' ? params.sessionKey
+              : (typeof params.session_id === 'string' ? params.session_id : '');
+            if (_sk && _currentTokens > 0) {
+              const _msgTokens = estimateTokensFromMessages(params.messages ?? []);
+              // additionTokens 未知，传 0；updateSdkOverhead 会保守估算
+              updateSdkOverhead(_sk, _currentTokens, _msgTokens, 0);
+            }
           }
 
           // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---

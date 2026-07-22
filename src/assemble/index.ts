@@ -6,7 +6,7 @@
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
 import { detectScenario, SCENARIO_LABELS, detectToolSearchMode, buildModeAwareGuidance } from '../tools/tool-catalog.js';
-import { getOverhead, setOverhead } from '../plugin/overhead-cache.js';
+import { getOverhead, setOverhead, getSdkOverhead, updateSdkOverhead } from '../plugin/overhead-cache.js';
 import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
@@ -26,7 +26,7 @@ import {
   getUncompressedMessageCount,
   trimSummariesToBudget,
 } from '../lcm-bridge.js';
-import { resolveContextProfile, SDK_OVERHEAD_TOKENS } from '../config.js';
+import { resolveContextProfile } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import { performRetrieval } from './retrieval.js';
@@ -300,9 +300,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           };
 
           // ── 级联降级校验：裁剪后估算 token，若仍超安全阈值则逐级升级 ──
-          // 安全阈值 = contextWindow - SDK_OVERHEAD_TOKENS（SDK 注入但 assemble 不可见的开销）
-          // 再预留 30% 给下轮增量 + reserveTokens
-          const safeThreshold = Math.floor((contextWindow - SDK_OVERHEAD_TOKENS) * 0.70);
+          // 安全阈值 = contextWindow - SDK overhead（动态获取，SDK 注入但 assemble 不可见的开销）
+          // 预留 30% 给下轮增量 + reserveTokens
+          const safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.70);
           const applyCascadingDegradation = (baseReason: string): any[] => {
             let result = buildDegradedContext(baseReason, 0);
             for (let level = 0; level < 4; level++) {
@@ -516,7 +516,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // 仅看消息 token 不足以判断是否会溢出。当消息 token 超安全阈值时，
           // 级联降级：丢弃摘要 → 减少最近消息数，确保总 prompt 不超模型窗口。
           const _fullEstimate = estimateTokensFromMessages(finalMessages);
-          const _safeThreshold = Math.floor((contextWindow - SDK_OVERHEAD_TOKENS) * 0.25);
+          const _safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.25);
           if (_fullEstimate > _safeThreshold || msgCount > 50) {
             ctx.logger?.warn?.('[assemble] low-tier context exceeds safe threshold, applying cascading trim', {
               fullEstimate: _fullEstimate,
@@ -908,7 +908,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // Smart Tool Guidance: 仅当上下文有足够余量时才注入
     // SDK 的 compact prompt surface 已占用 ~55K tok，额外注入会加剧溢出风险
     const _msgTokens = estimateTokensFromMessages(finalMessages);
-    const _hasBudgetForGuidance = _msgTokens < (contextWindow - SDK_OVERHEAD_TOKENS) * 0.50;
+    const _hasBudgetForGuidance = _msgTokens < (contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.50;
 
     if (_hasBudgetForGuidance && typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
         && availableTools.length > 0) {
@@ -967,6 +967,22 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       additionTokens = estimateTokensFromText(systemPromptAddition);
     }
     setOverhead(_overheadCacheKey, additionTokens);
+
+    // 反推 SDK overhead 并缓存，供下一轮 safeThreshold 计算使用
+    // 优先级：SDK 传入 > reserveTokens 反推 > 跳过（使用默认值/历史值）
+    const _contextUsage = (params as any).contextUsage
+      ?? (params as any).promptTokens
+      ?? (params as any).estimatedPromptTokens;
+    if (_contextUsage != null && typeof _contextUsage === 'number' && _contextUsage > 0) {
+      updateSdkOverhead(_overheadCacheKey, _contextUsage, messageTokens, additionTokens);
+    } else if (contextWindow > 0) {
+      // 备用方案：SDK 未传 contextUsage 时，用 contextWindow 减去 reserveTokens
+      // 反推 SDK 可用预算 = contextWindow - reserveTokens，
+      // 如果 assemble 输出（消息+addition）仍远小于 SDK 报的 overflow 值，
+      // 说明 SDK 有大量隐含开销。用 conservative 估算：
+      // SDK overhead ≈ contextWindow * 0.45（根据实测 ~58K/131K ≈ 44%）
+      // 此值仅为首轮使用，后续轮次会被 updateSdkOverhead 覆盖
+    }
 
     {
       const totalEst = messageTokens + additionTokens;
