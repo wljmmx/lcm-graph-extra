@@ -151,6 +151,54 @@ const pluginEntry: any = definePluginEntry({
     // Session-isolated dedup & overhead caches 已抽出到
     // src/plugin/dedup-cache.ts 与 src/plugin/overhead-cache.ts
 
+    /**
+     * 读取 OpenClaw session JSONL 文件，提取历史消息。
+     * 每行一个 JSON 对象，过滤出有 role + content 的消息条目。
+     */
+    async function readSessionFileMessages(sessionFile: string): Promise<any[]> {
+      const { createReadStream } = await import('node:fs');
+      const { createInterface } = await import('node:readline');
+      const messages: any[] = [];
+      try {
+        const stream = createReadStream(sessionFile, { encoding: 'utf-8' });
+        const rl = createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const line of rl) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const record = JSON.parse(trimmed);
+            if (record && typeof record === 'object' && !Array.isArray(record)) {
+              // OpenClaw transcript 格式支持:
+              // 1. { role, content } — 最常见
+              // 2. { role, text } — 某些内部格式用 text 代替 content
+              // 3. { type: 'message', role, content } — 带 type 标记
+              // 4. { type: 'user'|'assistant', content|text } — 旧格式
+              let role: string | undefined = record.role;
+              let content: unknown = record.content ?? record.text;
+              if (!role && (record.type === 'user' || record.type === 'assistant' || record.type === 'system')) {
+                role = record.type;
+                content = record.content ?? record.text;
+              }
+              if (typeof role === 'string' && content != null) {
+                // 过滤掉没有实际内容的空消息
+                const hasContent = typeof content === 'string'
+                  ? content.trim().length > 0
+                  : Array.isArray(content)
+                    ? content.some((c: any) => typeof c === 'string' ? c.trim().length > 0 : (c?.text ?? '').trim().length > 0)
+                    : String(content).trim().length > 0;
+                if (hasContent) {
+                  messages.push({ ...record, role, content });
+                }
+              }
+            }
+          } catch { /* 忽略解析失败的行 */ }
+        }
+      } catch (err) {
+        logger?.warn?.('[readSessionFileMessages] failed', { sessionFile, err: serializeError(err) });
+      }
+      return messages;
+    }
+
     async function ensureInitialized() {
       if (initialized) return;
       if (initPromise) return initPromise;
@@ -628,8 +676,8 @@ const pluginEntry: any = definePluginEntry({
           const _forceCompact = _uncompressedCount > _dedupRounds;
 
           // BUGFIX: backfill — 对已存在但 DAG 不全的会话（之前 bootstrap 传 messages:[] 的会话），
-          // 在 compact 触发时主动重新调用 lossless-claw bootstrap，让它从 sessionFile 读全历史。
-          // 这样不需要用户 /new 重启会话就能补齐 DAG。
+          // lossless-claw 因 bootstrapped 标记拒绝重新导入，我们直接读取 sessionFile
+          // 并调用 ingestBatch 把历史消息注入 DAG，使 compact 能看到完整上下文。
           if (_adapterConnected && typeof (params as any).sessionFile === 'string' && (params as any).sessionFile) {
             try {
               const _backfill = await _losslessClawAdapter.bootstrap({
@@ -637,12 +685,35 @@ const pluginEntry: any = definePluginEntry({
                 sessionKey: _compactSessionKey || undefined,
                 sessionFile: (params as any).sessionFile,
               });
+              const _backfillReason = (_backfill as any)?.reason ?? '';
+              const _backfillImported = (_backfill as any)?.importedMessages ?? 0;
               logger?.info?.('[compact] backfill bootstrap result', {
                 sessionFile: (params as any).sessionFile,
                 bootstrapped: (_backfill as any)?.bootstrapped,
-                importedMessages: (_backfill as any)?.importedMessages,
-                reason: (_backfill as any)?.reason,
+                importedMessages: _backfillImported,
+                reason: _backfillReason,
               });
+              // 若 lossless-claw 拒绝重新 bootstrap（already bootstrapped），我们手动读文件注入
+              if (_backfillReason.includes('already bootstrapped') || _backfillImported === 0) {
+                const _fileMsgs = await readSessionFileMessages((params as any).sessionFile);
+                if (_fileMsgs.length > 0) {
+                  logger?.info?.('[compact] injecting sessionFile messages via ingestBatch', {
+                    count: _fileMsgs.length,
+                    sessionFile: (params as any).sessionFile,
+                  });
+                  const _ingestResult = await _losslessClawAdapter.ingestBatch({
+                    sessionId: _compactSessionId ?? '',
+                    sessionKey: _compactSessionKey || undefined,
+                    messages: _fileMsgs,
+                  });
+                  logger?.info?.('[compact] ingestBatch result', {
+                    ingestedCount: (_ingestResult as any)?.ingestedCount,
+                    expectedCount: _fileMsgs.length,
+                  });
+                } else {
+                  logger?.warn?.('[compact] sessionFile parsed 0 messages', { sessionFile: (params as any).sessionFile });
+                }
+              }
             } catch (bfErr) {
               logger?.warn?.('[compact] backfill bootstrap failed (non-fatal)', { err: serializeError(bfErr) });
             }
