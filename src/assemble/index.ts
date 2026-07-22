@@ -503,11 +503,22 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     if (finalMessages === messages && ctx.losslessClawAdapter?.connected) {
       const _sessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
         : typeof params.session_id === 'string' ? params.session_id : '';
+      ctx.logger?.info?.('[assemble:low-tier] entering low-tier summary path', {
+        sessionKey: _sessionKey,
+        adapterConnected: ctx.losslessClawAdapter?.connected,
+        finalMessagesIdentity: finalMessages === messages,
+      });
       const _convId = getConversationId(_sessionKey);
       if (_convId != null) {
         const _lcSid2 = typeof params.sessionId === 'string' ? params.sessionId
           : (typeof params.session_id === 'string' ? params.session_id : String(_convId));
         const _existingSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid2, 10);
+        ctx.logger?.info?.('[assemble:low-tier] getSummaries result', {
+          lcSid2: _lcSid2,
+          convId: _convId,
+          summaryCount: _existingSummaries.length,
+          hasSummaries: _existingSummaries.length > 0,
+        });
         if (_existingSummaries.length > 0) {
           const _summaryMsgs = _existingSummaries.map((s) => ({
             role: 'user', content: s.content, token_count: s.tokenCount,
@@ -520,6 +531,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           const _recentCount = Math.min(messages.length, 8);
           const _recentRawMsgs = messages.slice(-_recentCount);
           finalMessages = [..._goalAnchorMsgs, ..._summaryMsgs, ..._recentRawMsgs];
+          ctx.logger?.info?.('[assemble:low-tier] messages replaced with summary', {
+            originalMsgCount: messages.length,
+            keptMsgCount: _recentRawMsgs.length,
+            summaryCount: _summaryMsgs.length,
+            goalAnchorCount: _goalAnchorMsgs.length,
+            finalMsgCount: finalMessages.length,
+          });
 
           // ── 低压力路径裁剪后校验 ──
           // SDK precheck 会追加 system prompt + tools 等大量额外开销（可达 60-90K tokens），
@@ -565,6 +583,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           }
         }
       }
+    } else {
+      ctx.logger?.info?.('[assemble:low-tier] skipped — conditions not met', {
+        finalMessagesSameObject: finalMessages === messages,
+        adapterConnected: ctx.losslessClawAdapter?.connected,
+        hasAdapter: !!ctx.losslessClawAdapter,
+      });
     }
 
     // ==================================================================
