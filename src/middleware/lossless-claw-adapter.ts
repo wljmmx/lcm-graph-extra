@@ -27,7 +27,6 @@ import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
-import { estimateTokensFromText } from '../lcm-bridge.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -668,20 +667,48 @@ export class LosslessClawAdapter {
       return [];
     }
     try {
+      // Step 1: Resolve sessionId → conversationId via ConversationStore
       const convStore = this.engine.getConversationStore?.();
-      if (!convStore || typeof convStore.listSummaries !== 'function') {
+      if (!convStore || typeof convStore.getConversationForSession !== 'function') {
         return [];
       }
-      const summaries = await convStore.listSummaries(sessionId, limit);
-      if (!Array.isArray(summaries)) {
+      const conversation = await convStore.getConversationForSession({ sessionId });
+      if (!conversation) {
         return [];
       }
-      return summaries.map((s: any) => ({
-        summaryId: s.id ?? s.summaryId ?? '',
-        content: s.content ?? '',
-        tokenCount: s.tokenCount ?? s.tokens ?? estimateTokensFromText(s.content ?? '') ?? 0,
-        earliestAt: s.earliestAt ?? s.timestamp ?? null,
-      }));
+
+      // Step 2: Get context items from SummaryStore (the correct DAG API)
+      // Previous code called convStore.listSummaries() which does NOT exist on
+      // ConversationStore — it always returned []. The correct API is
+      // SummaryStore.getContextItems(conversationId).
+      const summaryStore = this.engine.getSummaryStore?.();
+      if (!summaryStore || typeof summaryStore.getContextItems !== 'function') {
+        return [];
+      }
+      const contextItems = await summaryStore.getContextItems(conversation.conversationId);
+
+      // Step 3: Filter for summary items, get newest ones (highest ordinal last)
+      const summaryItems = (contextItems ?? [])
+        .filter((item: any) => item.itemType === 'summary' && item.summaryId)
+        .slice(-limit);
+
+      // Step 4: Fetch summary content for each summary item
+      const result: Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null }> = [];
+      for (const item of summaryItems) {
+        if (typeof summaryStore.getSummary !== 'function') continue;
+        const summary = await summaryStore.getSummary(item.summaryId);
+        if (summary) {
+          result.push({
+            summaryId: summary.summaryId ?? '',
+            content: summary.content ?? '',
+            tokenCount: summary.tokenCount ?? 0,
+            earliestAt: summary.earliestAt instanceof Date
+              ? summary.earliestAt.toISOString()
+              : (summary.earliestAt ?? null),
+          });
+        }
+      }
+      return result;
     } catch (e) {
       this.logger?.debug?.('[lossless-claw-adapter] getSummaries failed', { err: e instanceof Error ? e.message : String(e), sessionId });
       return [];
