@@ -186,7 +186,12 @@ const pluginEntry: any = definePluginEntry({
             if (record && typeof record === 'object' && !Array.isArray(record)) {
               let role: string | undefined = record.role;
               let content: unknown = record.content ?? record.text;
-              if (!role && (record.type === 'user' || record.type === 'assistant' || record.type === 'system')) {
+              // OpenClaw transcript 实际格式: {type, message:{role, content}}
+              // role 和 content 在 message 字段内部，不在顶层
+              if (record.type === 'message' && record.message && typeof record.message === 'object') {
+                role = record.message.role;
+                content = record.message.content ?? record.message.text;
+              } else if (!role && (record.type === 'user' || record.type === 'assistant' || record.type === 'system')) {
                 role = record.type;
                 content = record.content ?? record.text;
               }
