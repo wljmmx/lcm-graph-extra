@@ -327,6 +327,7 @@ const pluginEntry: any = definePluginEntry({
         sessionId: string;
         sessionKey?: string;
         sessionFile: string;
+        messages?: any[];        // SDK 可能注入的当前消息（用于增量 bootstrap）
         runtimeSettings?: unknown;
       }): Promise<{ bootstrapped: boolean; importedMessages?: number; reason?: string }> {
         try {
@@ -337,11 +338,26 @@ const pluginEntry: any = definePluginEntry({
           const sid = typeof params.sessionId === 'string'
             ? params.sessionId
             : String(params.sessionId);
-          const result = await _losslessClawAdapter.bootstrap({
+          // BUGFIX: 不再传 messages: [] 覆盖 lossless-claw 的 sessionFile 读取路径。
+          // 原来传空数组导致 DAG 只有当前轮的 14K 消息，而 sessionFile 里的 58K 历史
+          // 没有被导入，compact 永远只能压缩最近 14K。
+          // 现在：不传 messages，让 lossless-claw 走 sessionFile 路径读取完整历史。
+          // 如果 SDK 注入了 messages（增量 bootstrap），则透传。
+          const bootstrapParams: any = {
             sessionId: sid,
             sessionKey: params.sessionKey,
             sessionFile: params.sessionFile,
-            messages: [],
+          };
+          if (Array.isArray(params.messages) && params.messages.length > 0) {
+            bootstrapParams.messages = params.messages;
+          }
+          const result = await _losslessClawAdapter.bootstrap(bootstrapParams);
+          logger?.info?.('[bootstrap] lossless-claw bootstrap result', {
+            sessionId: sid,
+            sessionFile: params.sessionFile,
+            bootstrapped: (result as any)?.bootstrapped,
+            importedMessages: (result as any)?.importedMessages,
+            reason: (result as any)?.reason,
           });
           return {
             bootstrapped: !!(result as any)?.bootstrapped,
@@ -349,6 +365,7 @@ const pluginEntry: any = definePluginEntry({
             reason: (result as any)?.reason,
           };
         } catch (err: any) {
+          logger?.warn?.('[bootstrap] failed', { err: err?.message ?? String(err) });
           return { bootstrapped: false, reason: 'bootstrap_error: ' + (err?.message ?? String(err)) };
         } finally {
           // 会话重置（/new 等）：清除旧会话的所有缓存，防止 uncomp、压力等级等
@@ -609,6 +626,28 @@ const pluginEntry: any = definePluginEntry({
           // 但传给 lossless-claw 的 force 参数固定为 true（见下），因为我们的 compact hook
           // 是 /compact 的入口，必须确保 lossless-claw 执行压缩而非因 threshold 没超而跳过。
           const _forceCompact = _uncompressedCount > _dedupRounds;
+
+          // BUGFIX: backfill — 对已存在但 DAG 不全的会话（之前 bootstrap 传 messages:[] 的会话），
+          // 在 compact 触发时主动重新调用 lossless-claw bootstrap，让它从 sessionFile 读全历史。
+          // 这样不需要用户 /new 重启会话就能补齐 DAG。
+          if (_adapterConnected && typeof (params as any).sessionFile === 'string' && (params as any).sessionFile) {
+            try {
+              const _backfill = await _losslessClawAdapter.bootstrap({
+                sessionId: _compactSessionId ?? '',
+                sessionKey: _compactSessionKey || undefined,
+                sessionFile: (params as any).sessionFile,
+              });
+              logger?.info?.('[compact] backfill bootstrap result', {
+                sessionFile: (params as any).sessionFile,
+                bootstrapped: (_backfill as any)?.bootstrapped,
+                importedMessages: (_backfill as any)?.importedMessages,
+                reason: (_backfill as any)?.reason,
+              });
+            } catch (bfErr) {
+              logger?.warn?.('[compact] backfill bootstrap failed (non-fatal)', { err: serializeError(bfErr) });
+            }
+          }
+
           logger?.info?.('[compact] start', {
             sessionId: _compactSessionId,
             sessionKey: _compactSessionKey ? 'set' : 'missing',
