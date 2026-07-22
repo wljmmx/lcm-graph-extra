@@ -26,7 +26,7 @@ import {
   getUncompressedMessageCount,
   trimSummariesToBudget,
 } from '../lcm-bridge.js';
-import { resolveContextProfile } from '../config.js';
+import { resolveContextProfile, SDK_OVERHEAD_TOKENS } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import { performRetrieval } from './retrieval.js';
@@ -300,9 +300,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           };
 
           // ── 级联降级校验：裁剪后估算 token，若仍超安全阈值则逐级升级 ──
-          // 安全阈值取 contextWindow * 0.70，预留 30% 给下轮增量 + 系统注入
-          // 同时以 65536 为上限，防止 contextWindow 配置过高导致阈值失效
-          const safeThreshold = Math.floor(Math.min(contextWindow, 65536) * 0.70);
+          // 安全阈值 = contextWindow - SDK_OVERHEAD_TOKENS（SDK 注入但 assemble 不可见的开销）
+          // 再预留 30% 给下轮增量 + reserveTokens
+          const safeThreshold = Math.floor((contextWindow - SDK_OVERHEAD_TOKENS) * 0.70);
           const applyCascadingDegradation = (baseReason: string): any[] => {
             let result = buildDegradedContext(baseReason, 0);
             for (let level = 0; level < 4; level++) {
@@ -516,7 +516,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // 仅看消息 token 不足以判断是否会溢出。当消息 token 超安全阈值时，
           // 级联降级：丢弃摘要 → 减少最近消息数，确保总 prompt 不超模型窗口。
           const _fullEstimate = estimateTokensFromMessages(finalMessages);
-          const _safeThreshold = Math.floor(contextWindow * 0.25);
+          const _safeThreshold = Math.floor((contextWindow - SDK_OVERHEAD_TOKENS) * 0.25);
           if (_fullEstimate > _safeThreshold || msgCount > 50) {
             ctx.logger?.warn?.('[assemble] low-tier context exceeds safe threshold, applying cascading trim', {
               fullEstimate: _fullEstimate,
@@ -905,7 +905,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       }
     }
 
-    if (typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
+    // Smart Tool Guidance: 仅当上下文有足够余量时才注入
+    // SDK 的 compact prompt surface 已占用 ~55K tok，额外注入会加剧溢出风险
+    const _msgTokens = estimateTokensFromMessages(finalMessages);
+    const _hasBudgetForGuidance = _msgTokens < (contextWindow - SDK_OVERHEAD_TOKENS) * 0.50;
+
+    if (_hasBudgetForGuidance && typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
         && availableTools.length > 0) {
       const smartGuidance = buildSmartToolGuidance(
         tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey,
@@ -916,7 +921,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     // Smart Tool Guidance: 通用模型（非 ollama）也使用场景驱动工具注入
-    if (typeof modelFullId !== 'string' || (!modelFullId.startsWith('ollama/') && !modelFullId.startsWith('ollama-256k/'))) {
+    if (_hasBudgetForGuidance && (typeof modelFullId !== 'string' || (!modelFullId.startsWith('ollama/') && !modelFullId.startsWith('ollama-256k/')))) {
       if (availableTools.length > 0) {
         const smartGuidance = buildSmartToolGuidance(
           tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey,
@@ -928,10 +933,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     // CE Scene Guidance: 场景感知引导（配合 SDK toolSearch 机制）
-    // 根据 toolSearch 模式（code/tools/directory/legacy）自适应生成引导文本。
-    // 不控制工具列表（SDK toolSearch 负责），仅注入场景引导帮助模型正确使用工具。
-    // 高压力模式下跳过，节省上下文。
-    if (tier !== 'high') {
+    // 仅当上下文有足够余量 + 非高压力时才注入
+    if (tier !== 'high' && _hasBudgetForGuidance) {
       try {
         const scenario = detectScenario({
           messages: finalMessages,

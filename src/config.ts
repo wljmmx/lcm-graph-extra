@@ -293,6 +293,20 @@ export function defaultMaxContextChars(scale: number): ContextCharLimits {
 
 export const COMPACT_RATIO = 0.44;
 
+/**
+ * SDK untracked overhead 预估值（tokens）。
+ *
+ * SDK 注入但不算在 assemble 估算中的开销，包括：
+ *   - system prompt 核心文本（~7.5K tok）
+ *   - compact prompt surface / tool catalog（~50-58K tok）
+ *   - workspace 文件注入（~3K tok）
+ *   - skills 列表（~2K tok）
+ *
+ * 实测值：20 条消息时 untracked ≈ 58K tok，
+ * 占 131K 窗口的 ~44%。随工具数/技能数浮动，取保守下限。
+ */
+export const SDK_OVERHEAD_TOKENS = 55_000;
+
 export function resolveContextProfile(
   providerModelCtx?: number,
   wm?: WindowMonitorConfig,
