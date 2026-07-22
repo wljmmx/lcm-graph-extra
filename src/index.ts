@@ -800,6 +800,8 @@ const pluginEntry: any = definePluginEntry({
           let adapterCompacted = false;
           // 追踪 adapter 是否成功执行（即使未触发压缩），用于区分"已评估无需压缩"和"真正失败"
           let adapterOk = false;
+          // 保存 lossless-claw compact 返回的完整结果，供循环外的返回逻辑使用
+          let compactResult: any = null;
           // 保存 lossless-claw compact 返回的额外字段（firstKeptEntryId/sessionId/sessionFile），
           // 供成功 return 时透传给 SDK CompactResult.result。声明在 if 块外避免 scope 问题。
           let compactResultExtra: { firstKeptEntryId?: string; sessionId?: string; sessionFile?: string } = {};
@@ -843,7 +845,7 @@ const pluginEntry: any = definePluginEntry({
                 const effectiveTokenBudget = _isInputOverflow
                   ? _tryBudget
                   : _contextWindow;
-                const compactResult: any = await Promise.race([
+                compactResult = await Promise.race([
                   _losslessClawAdapter.compact({
                     ...params,
                     // BUGFIX: 主动 /compact 触发时必须用比当前会话 token 数更小的 budget，
@@ -1036,27 +1038,38 @@ const pluginEntry: any = definePluginEntry({
             if (hookAbortListener && signal) { try { signal.removeEventListener('abort', hookAbortListener); } catch {} }
           }
 
-          const tokensBefore = params.currentTokenCount ?? 0;
-          // Check adapter's actionTaken OR summary content (race condition: DB write may lag)
-          const compacted = !!summaryContent || adapterCompacted;
+          // 优先使用 lossless-claw 返回的真实 token 数，回退到 params.currentTokenCount
+          const _lcTokensBefore = compactResult?.result?.tokensBefore ?? 0;
+          const _lcTokensAfter = compactResult?.result?.tokensAfter ?? 0;
+          const tokensBefore = _lcTokensBefore > 0 ? _lcTokensBefore : (params.currentTokenCount ?? 0);
+          const tokensAfter = _lcTokensAfter > 0 ? _lcTokensAfter : tokensBefore;
+          // 压缩成功判定：lossless-claw 报告 compacted=true，或 tokensBefore > tokensAfter（实际压缩）
+          const compacted = adapterCompacted || (tokensBefore > tokensAfter);
+          // adapterOk 判定：lossless-claw 返回 ok=true，或实际发生了压缩，或 adapter 正常运行过
+          const _adapterOk = compactResult?.ok !== false;
+          const ok = _adapterOk || compacted;
           // If adapter ran successfully but no compaction was needed (e.g., below threshold),
           // return compacted: true to prevent the SDK's auto-compaction recovery from
           // retrying in a loop (recovery treats compacted:false as "failed, retry").
           // If adapter genuinely failed, return ok: false so the SDK can retry.
           if (!compacted) {
-            const reason = adapterOk
+            const reason = ok
               ? 'compaction evaluated — context below threshold, no compaction needed'
               : 'DAG compaction did not produce a summary — session tokens unchanged, will retry';
             logger?.info?.('[compact] no compaction produced', {
-              adapterOk,
+              ok,
+              adapterOk: _adapterOk,
+              adapterCompacted,
+              lcTokensBefore: _lcTokensBefore,
+              lcTokensAfter: _lcTokensAfter,
               uncompressedCount: _uncompressedCount,
               forceCompact: _forceCompact,
               tokensBefore,
               reason,
             });
             return {
-              ok: adapterOk,
-              compacted: adapterOk,
+              ok,
+              compacted: ok,
               reason,
               result: {
                 tokensBefore,
@@ -1068,9 +1081,6 @@ const pluginEntry: any = definePluginEntry({
           // - firstKeptEntryId: 压缩后保留的第一条消息 ID（lossless-claw 提供）
           // - sessionId/sessionFile: runtime 轮换 transcripts 时的新会话标识
           // 从 compactResultExtra 透传，缺失时回退到 params 原值
-          const tokensAfter = compacted && summaryContent
-            ? estimateTokensFromText(summaryContent)
-            : tokensBefore;
           logger?.info?.('[compact] compaction finished', {
             adapterCompacted,
             hasSummary: !!summaryContent,
