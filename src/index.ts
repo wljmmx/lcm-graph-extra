@@ -155,6 +155,105 @@ const pluginEntry: any = definePluginEntry({
      * 读取 OpenClaw session JSONL 文件，提取历史消息。
      * 每行一个 JSON 对象，过滤出有 role + content 的消息条目。
      */
+    /**
+     * 将 DAG 压缩结果写回 session transcript 文件。
+     * 在 firstKeptEntryId 之后的消息保留，之前的消息用 summary 替换。
+     * 这确保了 /status 的 transcript log 读取能反映压缩后的真实状态。
+     */
+    async function writeCompactedSessionFile(
+      sessionFile: string,
+      summary: string,
+      firstKeptEntryId: string | undefined,
+    ): Promise<{ written: boolean; keptLines: number; error?: string }> {
+      const { readFile, writeFile, rename } = await import('node:fs/promises');
+      const { existsSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const { randomBytes } = await import('node:crypto');
+      try {
+        if (!existsSync(sessionFile)) {
+          return { written: false, keptLines: 0, error: 'session file not found' };
+        }
+        const content = await readFile(sessionFile, 'utf-8');
+        const lines = content.split('\n');
+        const parsedLines: Array<{ raw: string; parsed: any }> = [];
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            parsedLines.push({ raw: line, parsed: JSON.parse(trimmed) });
+          } catch {
+            // Keep unparseable lines as-is
+            parsedLines.push({ raw: line, parsed: null });
+          }
+        }
+
+        // 找到 firstKeptEntryId 的位置
+        let cutoffIndex = -1;
+        if (firstKeptEntryId) {
+          for (let i = 0; i < parsedLines.length; i++) {
+            if (parsedLines[i].parsed?.id === firstKeptEntryId) {
+              cutoffIndex = i;
+              break;
+            }
+          }
+        }
+
+        // 如果没找到 firstKeptEntryId，回退策略：保留最后 20 条消息
+        if (cutoffIndex < 0) {
+          logger?.warn?.('[writeCompactedSessionFile] firstKeptEntryId not found in session file, using fallback: keep last 20 messages', {
+            firstKeptEntryId,
+            totalLines: parsedLines.length,
+          });
+          // 从后往前找，保留最后 20 条有 id 的消息
+          let keptCount = 0;
+          for (let i = parsedLines.length - 1; i >= 0; i--) {
+            if (parsedLines[i].parsed?.id) {
+              keptCount++;
+              if (keptCount >= 20) {
+                cutoffIndex = i;
+                break;
+              }
+            }
+          }
+          if (cutoffIndex < 0) cutoffIndex = Math.max(0, parsedLines.length - 20);
+        }
+
+        // 构建新内容：summary 行 + 保留的行
+        const summaryEntry = JSON.stringify({
+          type: 'message',
+          id: `compaction-summary-${Date.now()}`,
+          message: {
+            role: 'system',
+            content: summary || 'Previous conversation has been summarized.',
+          },
+        });
+
+        const keptLines = parsedLines.slice(cutoffIndex);
+        const newContent = summaryEntry + '\n' + keptLines.map((l) => l.raw).join('\n') + '\n';
+
+        // 写入临时文件，然后 rename（原子操作）
+        const tmpFile = join(tmpdir(), `lcmg-compaction-${randomBytes(8).toString('hex')}.jsonl`);
+        await writeFile(tmpFile, newContent, 'utf-8');
+        await rename(tmpFile, sessionFile);
+
+        logger?.info?.('[writeCompactedSessionFile] session file rewritten', {
+          sessionFile,
+          originalLines: parsedLines.length,
+          keptLines: keptLines.length,
+          cutoffIndex,
+          firstKeptEntryId,
+          summaryLength: summary?.length ?? 0,
+        });
+
+        return { written: true, keptLines: keptLines.length };
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger?.warn?.('[writeCompactedSessionFile] failed', { sessionFile, error: errMsg });
+        return { written: false, keptLines: 0, error: errMsg };
+      }
+    }
+
     async function readSessionFileMessages(sessionFile: string): Promise<any[]> {
       const { createReadStream, existsSync } = await import('node:fs');
       const { createInterface } = await import('node:readline');
@@ -1180,6 +1279,30 @@ const pluginEntry: any = definePluginEntry({
             estimatedSessionTokens: _estimatedSessionTokens,
             uncompressedCount: _uncompressedCount,
           });
+
+          // ── 将 DAG 压缩结果写回 session transcript 文件 ──
+          // 核心修复：DAG 压缩只修改了 DAG 内部状态，session transcript 文件未更新。
+          // SDK 的 buildStatusMessage 会从 transcript log 读取 usage 并覆盖 sessionStore 的 totalTokens，
+          // 导致 /status 显示压缩前的旧值（41K）而非压缩后的值（8.5K）。
+          // 同时 LLM 下一轮请求也会从 transcript 读取原始消息（41K）而非压缩后的 summary。
+          // 通过重写 session file，将旧消息替换为 summary，确保 transcript 反映真实压缩状态。
+          const _sessionFile = typeof (params as any).sessionFile === 'string' ? (params as any).sessionFile : '';
+          if (compacted && summaryContent && _sessionFile) {
+            const _firstKeptId = compactResultExtra?.firstKeptEntryId;
+            const _writeResult = await writeCompactedSessionFile(
+              _sessionFile,
+              summaryContent,
+              _firstKeptId,
+            );
+            logger?.info?.('[compact] session file rewrite result', {
+              sessionFile: _sessionFile,
+              written: _writeResult.written,
+              keptLines: _writeResult.keptLines,
+              firstKeptEntryId: _firstKeptId,
+              error: _writeResult.error,
+            });
+          }
+
           return {
             ok: true,
             compacted,
