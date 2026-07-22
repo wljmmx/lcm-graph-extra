@@ -861,6 +861,15 @@ const pluginEntry: any = definePluginEntry({
                 compactResult = await Promise.race([
                   _losslessClawAdapter.compact({
                     ...params,
+                    // BUGFIX: 不传 SDK 的 llm（context-engine bound LLM），
+                    // 否则 lossless-claw 会使用它调用 LLM 并携带 runtimeModelOverride，
+                    // OpenClaw SDK 会检查 agent 级 config 的 llm.allowModelOverride，
+                    // 而 agent config 通常未配置此项，导致 "Plugin LLM completion
+                    // cannot override the target model" 错误。
+                    // 去掉 llm 后 lossless-claw 回退到 api.runtime.llm.complete
+                    // （plugin-wide LLM），其 plugins.entries.lossless-claw.llm.allowModelOverride
+                    // 配置已生效，模型覆盖可正常工作。
+                    llm: undefined,
                     // BUGFIX: 主动 /compact 触发时必须用比当前会话 token 数更小的 budget，
                     // 否则 lossless-claw 会以 threshold 模式算出 50%×ctxWindow=131072，
                     // 当会话只有 14040 token 时直接返回 "already under target" 拒绝压缩。
