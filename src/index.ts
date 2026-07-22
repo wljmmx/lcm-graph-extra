@@ -673,19 +673,29 @@ const pluginEntry: any = definePluginEntry({
                 const compactResult: any = await Promise.race([
                   _losslessClawAdapter.compact({
                     ...params,
-                    tokenBudget: effectiveTokenBudget,
+                    // BUGFIX: 主动 /compact 触发时必须用比当前会话 token 数更小的 budget，
+                    // 否则 lossless-claw 会以 threshold 模式算出 50%×ctxWindow=131072，
+                    // 当会话只有 14040 token 时直接返回 "already under target" 拒绝压缩。
+                    // 策略：非超限 + force=true 时，使用 _compactBudget（默认 114688）作为 budget，
+                    // 保证 lossless-claw 走 budget 模式按目标 token 数压缩。
+                    tokenBudget: _isInputOverflow
+                      ? _tryBudget
+                      : (params.force === true ? _compactBudget : _contextWindow),
                     // BUGFIX: 默认 force=true — 我们的 compact hook 总是被 /compact 主动触发，
-                    // 不依赖 SDK 是否传 force。SDK 在大多数 /compact 路径下不传 force=true，
-                    // 会导致 lossless-claw 跳过压缩（即使本地 DB 显示有未压缩消息）。
-                    // 保留 _forceCompact 短路避免在已压缩会话上重复强制。
+                    // 不依赖 SDK 是否传 force。
                     force: true,
-                    compactionTarget: _isInputOverflow ? 'budget' : ((params as any).compactionTarget ?? 'threshold'),
+                    compactionTarget: _isInputOverflow ? 'budget' : 'budget',
                   }),
                   compactTimeoutPromise,
                   ...(abortOnCompact ? [abortOnCompact] : []),
                 ]);
                 logger?.info?.('[compact] adapter.compact result received', {
                   paramsForce: params.force,
+                  paramsTokenBudget: (params as any).tokenBudget,
+                  usedTokenBudget: _isInputOverflow
+                    ? _tryBudget
+                    : (params.force === true ? _compactBudget : _contextWindow),
+                  usedCompactionTarget: _isInputOverflow ? 'budget' : 'budget',
                   resultOk: compactResult?.ok,
                   resultCompacted: compactResult?.compacted,
                   resultSummaryId: compactResult?.summaryId,
@@ -693,6 +703,7 @@ const pluginEntry: any = definePluginEntry({
                   resultHasSummary: !!(compactResult?.summary || compactResult?.result?.summary),
                   resultTokensBefore: compactResult?.result?.tokensBefore,
                   resultTokensAfter: compactResult?.result?.tokensAfter,
+                  resultReason: compactResult?.reason,
                 });
                 // Extract summary from adapter result: prefer result.summary (SDK format), fallback to summaryId
                 summaryContent = compactResult?.summary || compactResult?.result?.summary;
@@ -780,7 +791,7 @@ const pluginEntry: any = definePluginEntry({
                 ...params,
                 tokenBudget: _compactBudget,
                 force: true,
-                compactionTarget: (params as any).compactionTarget ?? 'threshold',
+                compactionTarget: 'budget',
               }).then((_followUp: any) => {
                 if (_followUp.ok && _followUp.compacted) {
                   logger?.info?.('[compact] iterative follow-up compaction succeeded');
