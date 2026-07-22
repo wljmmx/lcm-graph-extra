@@ -1,4 +1,5 @@
 import type { PressureTier } from '../lcm-bridge.js';
+import type { LosslessClawAdapter } from '../middleware/lossless-claw-adapter.js';
 
 /**
  * AssembleContext — 依赖注入接口，传递 assemble 需要的所有闭包单例。
@@ -10,7 +11,7 @@ export interface AssembleContext {
   graphAdapter: any;
   expStore: any;
   merger: any;
-  losslessClawAdapter: any;
+  losslessClawAdapter: LosslessClawAdapter;
   retrievalGateway: any;
   cascadeManager: any;
   modelRegistry: Record<string, number> | undefined;
