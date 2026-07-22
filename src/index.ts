@@ -156,23 +156,34 @@ const pluginEntry: any = definePluginEntry({
      * 每行一个 JSON 对象，过滤出有 role + content 的消息条目。
      */
     async function readSessionFileMessages(sessionFile: string): Promise<any[]> {
-      const { createReadStream } = await import('node:fs');
+      const { createReadStream, existsSync } = await import('node:fs');
       const { createInterface } = await import('node:readline');
       const messages: any[] = [];
       try {
+        if (!existsSync(sessionFile)) {
+          logger?.warn?.('[readSessionFileMessages] file not found', { sessionFile });
+          return messages;
+        }
         const stream = createReadStream(sessionFile, { encoding: 'utf-8' });
         const rl = createInterface({ input: stream, crlfDelay: Infinity });
+        let lineCount = 0;
+        let parseErrorCount = 0;
+        let matchedCount = 0;
+        let skippedEmptyCount = 0;
+        let sampleLines: string[] = [];
         for await (const line of rl) {
+          lineCount++;
           const trimmed = line.trim();
-          if (!trimmed) continue;
+          if (!trimmed) {
+            skippedEmptyCount++;
+            continue;
+          }
+          if (lineCount <= 5) {
+            sampleLines.push(trimmed.substring(0, 200));
+          }
           try {
             const record = JSON.parse(trimmed);
             if (record && typeof record === 'object' && !Array.isArray(record)) {
-              // OpenClaw transcript 格式支持:
-              // 1. { role, content } — 最常见
-              // 2. { role, text } — 某些内部格式用 text 代替 content
-              // 3. { type: 'message', role, content } — 带 type 标记
-              // 4. { type: 'user'|'assistant', content|text } — 旧格式
               let role: string | undefined = record.role;
               let content: unknown = record.content ?? record.text;
               if (!role && (record.type === 'user' || record.type === 'assistant' || record.type === 'system')) {
@@ -180,19 +191,29 @@ const pluginEntry: any = definePluginEntry({
                 content = record.content ?? record.text;
               }
               if (typeof role === 'string' && content != null) {
-                // 过滤掉没有实际内容的空消息
                 const hasContent = typeof content === 'string'
                   ? content.trim().length > 0
                   : Array.isArray(content)
                     ? content.some((c: any) => typeof c === 'string' ? c.trim().length > 0 : (c?.text ?? '').trim().length > 0)
                     : String(content).trim().length > 0;
                 if (hasContent) {
+                  matchedCount++;
                   messages.push({ ...record, role, content });
                 }
               }
             }
-          } catch { /* 忽略解析失败的行 */ }
+          } catch {
+            parseErrorCount++;
+          }
         }
+        logger?.info?.('[readSessionFileMessages] parse stats', {
+          sessionFile,
+          lineCount,
+          skippedEmptyCount,
+          parseErrorCount,
+          matchedCount,
+          sampleLines: sampleLines.length > 0 ? sampleLines : undefined,
+        });
       } catch (err) {
         logger?.warn?.('[readSessionFileMessages] failed', { sessionFile, err: serializeError(err) });
       }
