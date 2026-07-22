@@ -546,10 +546,39 @@ const pluginEntry: any = definePluginEntry({
           const _currentTokens = (params as any).currentTokenCount ?? 0;
           const _cfg = (api as any).pluginConfig ?? (api as any).config ?? {};
           const _lcmMonitor = _cfg?.lcmMonitor ?? {};
-          // 优先级: 模型实际上下文窗口 > 用户配置 lcmMonitor.contextWindow > 默认 262144
-          // 与 assemble 中 resolveContextProfile 的 ctxWindow 解析逻辑一致
-          const _contextWindow = _activeModelContextWindow ?? (_lcmMonitor as any)?.contextWindow ?? 262_144;
-          const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? 114_688;
+
+          // 上下文窗口解析（按优先级）：
+          //   1) params.contextWindow（SDK 直接传入）
+          //   2) params.model → _modelRegistry（直接查表 + 短 ID 后缀回退）
+          //   3) _activeModelContextWindow（assemble 上次捕获）
+          //   4) lcmMonitor.contextWindow（用户配置）
+          //   5) 默认 131072（更接近主流模型实际窗口；旧默认 262144 过高导致 budget 算大）
+          const _paramsCtxWindow = (params as any).contextWindow;
+          const _paramsModelId = typeof params.model === 'string' ? params.model : '';
+          let _ctxFromModel: number | undefined;
+          if (_paramsModelId && _modelRegistry) {
+            _ctxFromModel = _modelRegistry[_paramsModelId];
+            if (_ctxFromModel === undefined) {
+              const shortId = _paramsModelId.includes('/') ? _paramsModelId.split('/').pop() : _paramsModelId;
+              for (const [key, val] of Object.entries(_modelRegistry)) {
+                if (key.endsWith(shortId!)) {
+                  _ctxFromModel = val;
+                  break;
+                }
+              }
+            }
+          }
+          const _contextWindow = _paramsCtxWindow
+            ?? _ctxFromModel
+            ?? _activeModelContextWindow
+            ?? (_lcmMonitor as any)?.contextWindow
+            ?? 131_072;
+          const _ctxSource = _paramsCtxWindow ? 'params.contextWindow'
+            : _ctxFromModel ? 'params.model→registry'
+            : _activeModelContextWindow ? 'activeModelContextWindow (from last assemble)'
+            : (_lcmMonitor as any)?.contextWindow ? 'lcmMonitor.contextWindow'
+            : 'default(131072)';
+          const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? Math.floor(_contextWindow * 0.44);
           const _overflowThreshold = Math.floor(_contextWindow * 0.90) - _compactBudget;
           const _isInputOverflow = _currentTokens > _overflowThreshold && _currentTokens > 0;
 
@@ -590,8 +619,16 @@ const pluginEntry: any = definePluginEntry({
             isInputOverflow: _isInputOverflow,
             currentTokenCount: _currentTokens,
             paramsForce: params.force,
+            paramsModel: _paramsModelId,
+            paramsContextWindow: _paramsCtxWindow,
+            contextWindow: _contextWindow,
+            contextWindowSource: _ctxSource,
+            compactBudget: _compactBudget,
+            overflowThreshold: _overflowThreshold,
             paramsSource: (params as any).source,
             paramsCompactionTarget: (params as any).compactionTarget,
+            activeModelContextWindow: _activeModelContextWindow,
+            modelRegistryKeys: _modelRegistry ? Object.keys(_modelRegistry).length : 0,
           });
           if (_forceCompact) {
             logger?.info?.('[compact] uncompressed messages exceeded dedupRounds, forcing compaction', {
