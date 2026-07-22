@@ -640,11 +640,20 @@ const pluginEntry: any = definePluginEntry({
 
           // 上下文窗口解析（按优先级）：
           //   1) params.contextWindow（SDK 直接传入）
-          //   2) params.model → _modelRegistry（直接查表 + 短 ID 后缀回退）
-          //   3) _activeModelContextWindow（assemble 上次捕获）
-          //   4) lcmMonitor.contextWindow（用户配置）
-          //   5) 默认 131072（更接近主流模型实际窗口；旧默认 262144 过高导致 budget 算大）
+          //   2) params.tokenBudget（SDK 在 threshold 模式下传入 = 上下文窗口）
+          //   3) params.model → _modelRegistry（直接查表 + 短 ID 后缀回退）
+          //   4) _activeModelContextWindow（assemble 上次捕获）
+          //   5) lcmMonitor.contextWindow（用户配置）
+          //   6) 默认 131072（更接近主流模型实际窗口；旧默认 262144 过高导致 budget 算大）
           const _paramsCtxWindow = (params as any).contextWindow;
+          // SDK 在 threshold 模式下，tokenBudget = 模型上下文窗口
+          const _paramsTokenBudget = typeof (params as any).tokenBudget === 'number'
+            ? (params as any).tokenBudget
+            : undefined;
+          const _paramsCompactionTarget = (params as any).compactionTarget;
+          const _ctxFromTokenBudget = (_paramsTokenBudget && _paramsCompactionTarget === 'threshold')
+            ? _paramsTokenBudget
+            : undefined;
           const _paramsModelId = typeof params.model === 'string' ? params.model : '';
           let _ctxFromModel: number | undefined;
           if (_paramsModelId && _modelRegistry) {
@@ -660,11 +669,13 @@ const pluginEntry: any = definePluginEntry({
             }
           }
           const _contextWindow = _paramsCtxWindow
+            ?? _ctxFromTokenBudget
             ?? _ctxFromModel
             ?? _activeModelContextWindow
             ?? (_lcmMonitor as any)?.contextWindow
             ?? 131_072;
           const _ctxSource = _paramsCtxWindow ? 'params.contextWindow'
+            : _ctxFromTokenBudget ? 'params.tokenBudget(threshold)'
             : _ctxFromModel ? 'params.model→registry'
             : _activeModelContextWindow ? 'activeModelContextWindow (from last assemble)'
             : (_lcmMonitor as any)?.contextWindow ? 'lcmMonitor.contextWindow'
@@ -704,6 +715,8 @@ const pluginEntry: any = definePluginEntry({
           // BUGFIX: backfill — 对已存在但 DAG 不全的会话（之前 bootstrap 传 messages:[] 的会话），
           // lossless-claw 因 bootstrapped 标记拒绝重新导入，我们直接读取 sessionFile
           // 并调用 ingestBatch 把历史消息注入 DAG，使 compact 能看到完整上下文。
+          // 同时保存 sessionFile 消息供后续 token 估算使用（SDK 不传 currentTokenCount 时）。
+          let _sessionFileMsgs: any[] = [];
           if (_adapterConnected && typeof (params as any).sessionFile === 'string' && (params as any).sessionFile) {
             try {
               const _backfill = await _losslessClawAdapter.bootstrap({
@@ -721,20 +734,20 @@ const pluginEntry: any = definePluginEntry({
               });
               // 若 lossless-claw 拒绝重新 bootstrap（already bootstrapped），我们手动读文件注入
               if (_backfillReason.includes('already bootstrapped') || _backfillImported === 0) {
-                const _fileMsgs = await readSessionFileMessages((params as any).sessionFile);
-                if (_fileMsgs.length > 0) {
+                _sessionFileMsgs = await readSessionFileMessages((params as any).sessionFile);
+                if (_sessionFileMsgs.length > 0) {
                   logger?.info?.('[compact] injecting sessionFile messages via ingestBatch', {
-                    count: _fileMsgs.length,
+                    count: _sessionFileMsgs.length,
                     sessionFile: (params as any).sessionFile,
                   });
                   const _ingestResult = await _losslessClawAdapter.ingestBatch({
                     sessionId: _compactSessionId ?? '',
                     sessionKey: _compactSessionKey || undefined,
-                    messages: _fileMsgs,
+                    messages: _sessionFileMsgs,
                   });
                   logger?.info?.('[compact] ingestBatch result', {
                     ingestedCount: (_ingestResult as any)?.ingestedCount,
-                    expectedCount: _fileMsgs.length,
+                    expectedCount: _sessionFileMsgs.length,
                   });
                 } else {
                   logger?.warn?.('[compact] sessionFile parsed 0 messages', { sessionFile: (params as any).sessionFile });
@@ -1041,8 +1054,47 @@ const pluginEntry: any = definePluginEntry({
           // 优先使用 lossless-claw 返回的真实 token 数，回退到 params.currentTokenCount
           const _lcTokensBefore = compactResult?.result?.tokensBefore ?? 0;
           const _lcTokensAfter = compactResult?.result?.tokensAfter ?? 0;
-          const tokensBefore = _lcTokensBefore > 0 ? _lcTokensBefore : (params.currentTokenCount ?? 0);
-          const tokensAfter = _lcTokensAfter > 0 ? _lcTokensAfter : tokensBefore;
+
+          // 当 SDK 未传 currentTokenCount（手动 /compact 时不传），且 DAG 报告
+          // tokensBefore === tokensAfter（已压缩过，无需再压），我们需要估算
+          // 实际会话的 token 数作为 tokensBefore，让 SDK 知道上下文确实被压缩过。
+          // 原因：DAG 的 tokensBefore 是 DAG 内部的消息 token 数（已压缩后的 13K），
+          // 而非实际会话 transcript 的大小（58K）。SDK 用 tokensBefore → tokensAfter
+          // 判断压缩是否有效，并更新 /status 的 totalTokens。
+          let _estimatedSessionTokens = 0;
+          if (_currentTokens > 0) {
+            _estimatedSessionTokens = _currentTokens;
+          } else if (_sessionFileMsgs.length > 0) {
+            _estimatedSessionTokens = estimateTokensFromMessages(_sessionFileMsgs);
+          }
+
+          // tokensBefore 优先级：
+          // 1) DAG 的 tokensBefore（当 > tokensAfter 时，表示实际发生了压缩）
+          // 2) SDK 传入的 currentTokenCount（auto-compaction 时有值）
+          // 3) 从 sessionFile 估算的 token 数（手动 /compact 时 currentTokenCount=0）
+          // 当 DAG 的 tokensBefore === tokensAfter（无变化）且有估算值时，
+          // 使用估算值作为 tokensBefore，让 SDK 看到实际的压缩效果。
+          let tokensBefore: number;
+          let tokensAfter: number;
+          if (_lcTokensBefore > 0 && _lcTokensBefore > _lcTokensAfter) {
+            // DAG 报告了实际压缩
+            tokensBefore = _lcTokensBefore;
+            tokensAfter = _lcTokensAfter;
+          } else if (_currentTokens > 0) {
+            // auto-compaction：SDK 传入了 currentTokenCount
+            tokensBefore = _currentTokens;
+            tokensAfter = _lcTokensAfter > 0 ? _lcTokensAfter : _lcTokensBefore;
+          } else if (_estimatedSessionTokens > 0 && _lcTokensAfter > 0) {
+            // 手动 /compact：SDK 未传 currentTokenCount，用 sessionFile 估算
+            // DAG 的 tokensAfter 是压缩后的消息 token 数
+            tokensBefore = _estimatedSessionTokens;
+            tokensAfter = _lcTokensAfter;
+          } else {
+            // 回退到 DAG 的值
+            tokensBefore = _lcTokensBefore > 0 ? _lcTokensBefore : (_currentTokens || 0);
+            tokensAfter = _lcTokensAfter > 0 ? _lcTokensAfter : tokensBefore;
+          }
+
           // 压缩成功判定：lossless-claw 报告 compacted=true，或 tokensBefore > tokensAfter（实际压缩）
           const compacted = adapterCompacted || (tokensBefore > tokensAfter);
           // adapterOk 判定：lossless-claw 返回 ok=true，或实际发生了压缩，或 adapter 正常运行过
@@ -1062,6 +1114,7 @@ const pluginEntry: any = definePluginEntry({
               adapterCompacted,
               lcTokensBefore: _lcTokensBefore,
               lcTokensAfter: _lcTokensAfter,
+              estimatedSessionTokens: _estimatedSessionTokens,
               uncompressedCount: _uncompressedCount,
               forceCompact: _forceCompact,
               tokensBefore,
@@ -1086,6 +1139,9 @@ const pluginEntry: any = definePluginEntry({
             hasSummary: !!summaryContent,
             tokensBefore,
             tokensAfter,
+            lcTokensBefore: _lcTokensBefore,
+            lcTokensAfter: _lcTokensAfter,
+            estimatedSessionTokens: _estimatedSessionTokens,
             uncompressedCount: _uncompressedCount,
           });
           return {

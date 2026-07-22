@@ -531,13 +531,21 @@ export class LosslessClawAdapter {
       const tokensInfo = lcResult.result ?? {};
 
       let summaryContent: string | undefined;
-      if (actionTaken && createdSummaryId) {
+      // 当 compaction 执行后（无论是否创建了新摘要），都尝试获取最新的摘要内容。
+      // 场景：DAG 已在之前压缩过，本次 compact 未生成新摘要（createdSummaryId=null），
+      // 但 SDK 仍需要 summary 来更新上下文。此时获取已有摘要返回给 SDK。
+      if (actionTaken) {
         try {
           const convStore = this.engine.getConversationStore?.();
           if (convStore) {
             const summaries = await convStore.listSummaries?.(params.sessionId, 1);
             if (summaries?.length > 0) {
               summaryContent = summaries[0].content;
+              this.logger?.info?.('[lossless-claw-adapter] summary fetched', {
+                createdNewSummary: !!createdSummaryId,
+                summaryLength: summaryContent?.length ?? 0,
+                summaryPreview: summaryContent?.substring(0, 100),
+              });
             }
           }
         } catch (e) {
