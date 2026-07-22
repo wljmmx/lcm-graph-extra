@@ -872,7 +872,10 @@ const pluginEntry: any = definePluginEntry({
                     // BUGFIX: 默认 force=true — 我们的 compact hook 总是被 /compact 主动触发，
                     // 不依赖 SDK 是否传 force。
                     force: true,
-                    compactionTarget: _isInputOverflow ? 'budget' : 'budget',
+                    // BUGFIX: 不传 compactionTarget，避免 lossless-claw 走 budget 模式时
+                    // 尝试用 config.summaryModel 覆盖当前活跃模型（会触发 OpenClaw LCM
+                    // policy 检查并失败）。让 lossless-claw 复用当前活跃模型。
+                    // compactionTarget 由 lossless-claw 根据 tokenBudget 自行决定。
                   }),
                   compactTimeoutPromise,
                   ...(abortOnCompact ? [abortOnCompact] : []),
@@ -883,7 +886,7 @@ const pluginEntry: any = definePluginEntry({
                   usedTokenBudget: _isInputOverflow
                     ? _tryBudget
                     : (params.force === true ? _compactBudget : _contextWindow),
-                  usedCompactionTarget: _isInputOverflow ? 'budget' : 'budget',
+                  usedCompactionTarget: 'auto (not forcing budget mode to avoid summaryModel override)',
                   resultOk: compactResult?.ok,
                   resultCompacted: compactResult?.compacted,
                   resultSummaryId: compactResult?.summaryId,
