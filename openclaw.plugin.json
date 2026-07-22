@@ -16,23 +16,10 @@
       "lcmg_pin",
       "lcmg_import",
       "lcmg_experience_report",
-      "lcmg_backup",
-      "lcmg_restore",
-      "lcmg_diagnose",
-      "lcmg_sync",
       "lcmg_qmd_status",
       "lcmg_get_document",
       "lcmg_batch_get",
-      "lcmg_maintain",
-      "lcmg_forget",
-      "lcmg_distill",
-      "lcmg_compact",
-      "lcmg_reset_breaker",
-      "lcmg_config_get",
-      "lcmg_config_set",
-      "lcmg_moa_reply",
-      "lcmg_distill_retry",
-      "lcmg_backfill"
+      "lcmg_forget"
     ]
   },
   "toolMetadata": {
@@ -48,18 +35,6 @@
     "lcmg_experience_report": {
       "description": "Extract experience summaries from the knowledge graph"
     },
-    "lcmg_backup": {
-      "description": "Backup memory data to a JSON file"
-    },
-    "lcmg_restore": {
-      "description": "Restore memory data from a backup JSON file"
-    },
-    "lcmg_diagnose": {
-      "description": "Run self-diagnostic and output system health analysis report"
-    },
-    "lcmg_sync": {
-      "description": "Three-way data consistency check and repair (lossless-claw \u2194 Neo4j \u2194 files)"
-    },
     "lcmg_qmd_status": {
       "description": "Check QMD MCP server health via status endpoint"
     },
@@ -69,35 +44,8 @@
     "lcmg_batch_get": {
       "description": "Batch retrieve multiple documents by their paths"
     },
-    "lcmg_maintain": {
-      "description": "Trigger knowledge graph maintenance pipeline"
-    },
     "lcmg_forget": {
       "description": "Actively forget a node/experience (G-10 soft/hard mode)"
-    },
-    "lcmg_distill": {
-      "description": "Manually trigger experience distillation (PENDING to DISTILLED)"
-    },
-    "lcmg_compact": {
-      "description": "Manually trigger compaction for a specific conversation"
-    },
-    "lcmg_reset_breaker": {
-      "description": "Reset circuit breaker for a subsystem (lcm/qmd/neo4j)"
-    },
-    "lcmg_config_get": {
-      "description": "View runtime configuration (redacted)"
-    },
-    "lcmg_config_set": {
-      "description": "Update a configuration field (whitelist-controlled)"
-    },
-    "lcmg_moa_reply": {
-      "description": "Get the pre-computed MoA (Mixture of Agents) response synthesized by multiple reference models and an aggregator model"
-    },
-    "lcmg_distill_retry": {
-      "description": "Reset failed distilling experiences back to PENDING so they can be retried"
-    },
-    "lcmg_backfill": {
-      "description": "Re-extract experience from historical conversations into the PENDING queue"
     }
   },
   "configSchema": {
