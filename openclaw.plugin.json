@@ -2,7 +2,7 @@
   "id": "lcm-graph-extra",
   "name": "LCM Graph Extra",
   "description": "Dual-engine retrieval context engine: coordinates lossless-claw + qmd + graph-memory-pro for enhanced context assembly",
-  "version": "2.1.11",
+  "version": "2.1.12",
   "kind": "context-engine",
   "requiresPlugins": [
     "lossless-claw"
@@ -724,6 +724,46 @@
             "default": ["low"]
           }
         }
+      },
+      "stubLargeToolPayloads": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "大工具负载外部分片 + 存根替换（兼容 lossless-claw）",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "启用大工具负载外部分片"
+          },
+          "thresholdBytes": {
+            "type": "integer",
+            "default": 8000,
+            "minimum": 1000,
+            "description": "触发阈值（字节，~2K tokens）"
+          },
+          "filesDir": {
+            "type": "string",
+            "default": "",
+            "description": "外部文件存储目录（空则默认 ~/.openclaw/lcm-files）"
+          },
+          "freshTailCount": {
+            "type": "integer",
+            "default": 8,
+            "minimum": 0,
+            "description": "最近 N 条消息不存根（fresh tail 保护）"
+          }
+        }
+      },
+      "largeFileThreshold": {
+        "type": "integer",
+        "default": 8000,
+        "minimum": 1000,
+        "description": "简写：覆盖 stubLargeToolPayloads.thresholdBytes"
+      },
+      "largeFilesDir": {
+        "type": "string",
+        "default": "",
+        "description": "简写：覆盖 stubLargeToolPayloads.filesDir"
       }
     }
   },
