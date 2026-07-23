@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.12] - 2026-07-23
+
+### Added
+
+- **S-12**: `stubLargeToolPayloads` — 大工具负载外部分片 + 存根替换，完全兼容 lossless-claw 的 `lcm_describe`/`lcm_expand` 按需回溯
+  - assemble 阶段遍历消息 → 检测大工具负载 → 外部化到 `~/.openclaw/lcm-files/<convId>/<fileId>.txt`
+  - 写入 lossless-claw 的 `large_files` 表，使 `lcm_describe(id="file_xxx", expandFile=true)` 可直接检索
+  - 存根格式与 lossless-claw 的 `formatToolOutputReference` 完全一致（含 Exploration Summary）
+  - 块元数据对齐：`externalizedFileId` / `originalByteSize` / `toolOutputExternalized` / `externalizationReason`
+  - 确定性探索摘要：结构化数据（JSON 解析）/ 代码检测 / 文本头部
+  - Fresh tail 保护：最近 N 条消息不存根（默认 8）
+  - 配置项：`stubLargeToolPayloads.enabled` / `thresholdBytes` / `filesDir` / `freshTailCount`
+  - 简写：`stubLargeToolPayloads: true` / `largeFileThreshold` / `largeFilesDir`
+
+### Changed
+
+- **lcm-bridge.ts**: 新增 `insertLargeFile()` 方法，向 lossless-claw 的 `large_files` 表写入记录
+- **assemble/index.ts**: `stubLargeToolPayloads` 调用处传入 `conversationId`，确保 `large_files` 表外键关联正确
+
 ## [2.1.11] - 2026-07-10
 
 ### Fixed

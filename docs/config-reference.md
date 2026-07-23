@@ -495,7 +495,102 @@
 
 ---
 
-## 十一、其他配置
+## 十一、大工具负载外部分片（stubLargeToolPayloads）
+
+> **新增于 v2.1.12**：在 assemble 阶段自动检测大工具调用结果，写入外部文件并用 `[LCM Tool Output: file_xxx | …]` 存根引用替换，防止单轮 token 爆炸。
+
+### 11.1 功能概述
+
+启用后，assemble 阶段遍历消息中的工具调用结果（`role === "tool"` / `"toolResult"`），对超过阈值的负载：
+
+1. **外部化** — 写入 `~/.openclaw/lcm-files/<conversation_id>/<file_id>.txt`
+2. **注册** — 插入 lossless-claw 的 `large_files` 表，使 `lcm_describe` / `lcm_expand` 可检索
+3. **替换** — 消息内容替换为存根引用，包含探索摘要
+
+### 11.2 检索方式
+
+存根化后的内容可通过以下方式按需回溯：
+
+| 工具 | 提供方 | 用法 | 说明 |
+|------|--------|------|------|
+| `lcm_describe` | lossless-claw | `lcm_describe(id="file_xxx", expandFile=true)` | 从 `large_files` 表查找 → 读磁盘 → 返回完整内容 |
+| `lcm_expand` | lossless-claw | `lcm_expand` 遍历 DAG 时自动关联 `fileIds` | 深回溯子代理可发现关联文件 |
+| `Read` 工具 | Agent 内置 | `Read("~/.openclaw/lcm-files/<convId>/<fileId>.txt")` | 通用兜底方式 |
+
+> **兼容性**：`lcmg_*` 工具（lcmg_search、lcmg_get_document 等）是 lcm-graph-extra 的检索/管理工具，不直接参与大文件回溯。外部化文件通过 lossless-claw 的 `lcm_describe`/`lcm_expand` 检索。
+
+### 11.3 存根格式
+
+```
+[LCM Tool Output: file_xxxxxxxxxxxxxxxx | tool=Read | 45,230 bytes]
+
+Exploration Summary:
+结构化/代码/文本 探索摘要
+
+Call lcm_describe(id="<file_id above>", expandFile=true) to fetch the full output content from disk.
+```
+
+### 11.4 配置项
+
+```json
+{
+  "stubLargeToolPayloads": {
+    "enabled": true,
+    "thresholdBytes": 8000,
+    "filesDir": "",
+    "freshTailCount": 8
+  }
+}
+```
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `stubLargeToolPayloads.enabled` | `boolean` | `false` | 启用大工具负载外部分片 |
+| `stubLargeToolPayloads.thresholdBytes` | `number` | `8000` | 触发阈值（字节，~2K tokens），超过此大小的工具结果触发外部分片 |
+| `stubLargeToolPayloads.filesDir` | `string` | `""` | 外部文件存储目录（空则默认 `~/.openclaw/lcm-files`） |
+| `stubLargeToolPayloads.freshTailCount` | `number` | `8` | 最近 N 条消息不存根（fresh tail 保护，避免当前轮交互结果被外部化） |
+
+### 11.5 简写方式
+
+```json
+{
+  "stubLargeToolPayloads": true,
+  "largeFileThreshold": 16000,
+  "largeFilesDir": "/custom/path/lcm-files"
+}
+```
+
+- `stubLargeToolPayloads: true` 等同于 `{ enabled: true }`（其余使用默认值）
+- `largeFileThreshold` 覆盖 `thresholdBytes`
+- `largeFilesDir` 覆盖 `filesDir`
+
+### 11.6 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `LCM_LARGE_FILES_DIR` | `~/.openclaw/lcm-files` | 外部文件存储根目录（优先级低于 `filesDir` 配置） |
+
+### 11.7 完整示例
+
+```json
+{
+  "plugins": {
+    "lcm-graph-extra": {
+      "stubLargeToolPayloads": {
+        "enabled": true,
+        "thresholdBytes": 8000,
+        "freshTailCount": 8
+      }
+    }
+  }
+}
+```
+
+启用后，Agent 在对话中看到 `[LCM Tool Output: file_xxx | tool=Read | 45,230 bytes]` 存根时，可调用 `lcm_describe(id="file_xxx", expandFile=true)` 按需取回完整内容。
+
+---
+
+## 十二、其他配置
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
@@ -507,7 +602,7 @@
 
 ---
 
-## 十二、环境变量
+## 十三、环境变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|

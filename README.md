@@ -64,6 +64,7 @@ cd lcm-graph-extra && npm install && npm run build
 | 健康指标 | src/health-metrics.ts | N-4 压力/熔断/延迟/tier 采集 + SQLite 持久化 |
 | Dashboard 快照 | src/dashboard-snapshot.ts | /internal/snapshot 内存态聚合端点 |
 | 熔断器 | src/circuit-breaker.ts | lcm/qmd/neo4j 三子系统熔断 + 指数退避 |
+| 大工具负载外部分片 | src/assemble/tool-payload-stub.ts | 检测大工具结果 → 外部化 → 存根替换，兼容 lcm_describe/lcm_expand 按需回溯 |
 | 经验系统 | src/experience/ | 4 触发源 + TagRegistry + UserProfile + G-8 验证回路 |
 | 债务调度 | src/core/debt-manager.ts | compact 债务队列 + 调度器 |
 | TTL 清理 | src/core/ttl.ts | 过期节点清理 + 权重衰减（24h）|
