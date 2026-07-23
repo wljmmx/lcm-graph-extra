@@ -232,7 +232,7 @@ export const PluginConfigSchema = Type.Object({
     mediumPressureThreshold: Type.Number({ default: 0.70, minimum: 0, maximum: 1 }),
     proactiveThreshold: Type.Number({ default: 0.65, minimum: 0, maximum: 1 }),
     systemPromptOverheadTokens: Type.Number({ default: 17_000, minimum: 0 }),
-    compactTokenBudget: Type.Number({ default: 114_688, minimum: 0 }),
+    compactTokenBudget: Type.Number({ default: 154_624, minimum: 0 }),
     compactTimeout: Type.Number({ default: 60_000, minimum: 0 }),
     maxSummaryTokenRatio: Type.Number({ default: 0.45, minimum: 0, maximum: 1 }),
     retrievalLimits: Type.Optional(Type.Object({
@@ -302,7 +302,20 @@ export function defaultMaxContextChars(scale: number): ContextCharLimits {
   };
 }
 
-export const COMPACT_RATIO = 0.44;
+/**
+ * 压缩 token budget 占上下文窗口的比例。
+ *
+ * 此值作为 lossless-claw compact() 的 tokenBudget 参数传入。
+ * lossless-claw 内部会再乘以 contextThreshold（默认 0.75）得到实际压缩目标：
+ *   effectiveTarget = COMPACT_RATIO × contextWindow × 0.75
+ *
+ * 因此 COMPACT_RATIO 需要反推：
+ *   若期望 effectiveTarget ≈ 44% × contextWindow（原设计意图），
+ *   则 COMPACT_RATIO = 0.44 / 0.75 ≈ 0.587 → 取整为 0.59。
+ *
+ * 对于 256K 窗口: 0.59 × 262144 × 0.75 ≈ 116,000 tokens 有效目标。
+ */
+export const COMPACT_RATIO = 0.59;
 
 /**
  * SDK untracked overhead 预估值（tokens）。
@@ -389,7 +402,8 @@ export function validateConfig(input: unknown): PluginConfig {
     enabled: true, contextWindow: 262_144, dedupRounds: 24,
     highPressureThreshold: 0.85, mediumPressureThreshold: 0.70,
     proactiveThreshold: 0.65, systemPromptOverheadTokens: 17_000,
-    compactTokenBudget: 114_688, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45
+    // 0.59 × 262144 ≈ 154665，取整
+    compactTokenBudget: 154_624, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45
   };
   // distillationLlm 未配置时保持 undefined，由 resolveDistillationLlm 的 fallback 处理
   // （优先复用主模型 → LLM_MODEL 环境变量 → gpt-4o-mini）

@@ -679,7 +679,7 @@ const pluginEntry: any = definePluginEntry({
             : _activeModelContextWindow ? 'activeModelContextWindow (from last assemble)'
             : (_lcmMonitor as any)?.contextWindow ? 'lcmMonitor.contextWindow'
             : 'default(131072)';
-          const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? Math.floor(_contextWindow * 0.44);
+          const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? Math.floor(_contextWindow * 0.59);
           const _overflowThreshold = Math.floor(_contextWindow * 0.90) - _compactBudget;
           const _isInputOverflow = _currentTokens > _overflowThreshold && _currentTokens > 0;
 
