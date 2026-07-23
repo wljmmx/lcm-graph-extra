@@ -221,6 +221,8 @@ export interface DashboardSnapshot {
     connected: boolean;
     connectFailed: boolean;
     lastError?: string;
+    /** P-CB-6: Neo4j 熔断器实时状态，每次请求从 getHealthSnapshot() 读取 */
+    circuitBreaker?: { available: boolean; failures: number; open: boolean };
   };
   debt: {
     running: number;
@@ -231,6 +233,8 @@ export interface DashboardSnapshot {
   retrieval: {
     lastQuery: string;
     perfSummary: string;
+    /** P-CB-6: QMD 熔断器实时状态，每次请求从 getHealthSnapshot() 读取 */
+    qmdCircuitBreaker?: { available: boolean; failures: number; open: boolean };
   };
   health: {
     latest: HealthSnapshotLite | null; // healthMetrics.getLatest()
@@ -569,12 +573,20 @@ export async function resolveGraphHealth(providers: SnapshotProviders): Promise<
   nodeCount?: number;
   relationshipCount?: number;
   graphAdapterConnected?: boolean;
+  circuitBreakerOpen?: boolean;
+  circuitBreakerFailures?: number;
   details?: Record<string, unknown>;
 }> {
   const local = providers.getGraphAdapterState();
-  // gm-pro 不可用时，仅基于 GraphAdapter 连接状态推断
+  // P-CB-6: 同时考虑熔断器状态。熔断器 OPEN 时，即使 driver 连接正常，
+  // 实际调用也会被拦截，应报告为 unhealthy。
+  const cbOpen = local?.circuitBreaker?.open ?? false;
+  const cbFailures = local?.circuitBreaker?.failures ?? 0;
+  // gm-pro 不可用时，仅基于 GraphAdapter 连接状态 + 熔断器状态推断
   const localStatus: 'healthy' | 'degraded' | 'unhealthy' =
-    local?.connected ? 'healthy' : (local?.connectFailed ? 'unhealthy' : 'degraded');
+    cbOpen ? 'unhealthy'
+    : local?.connected ? 'healthy'
+    : (local?.connectFailed ? 'unhealthy' : 'degraded');
 
   try {
     const { withGmProFallback } = await import('./adapters/gm-pro-fallback.js');
@@ -591,6 +603,8 @@ export async function resolveGraphHealth(providers: SnapshotProviders): Promise<
         nodeCount: gmHealth.nodeCount,
         relationshipCount: gmHealth.relationshipCount,
         graphAdapterConnected: local?.connected,
+        circuitBreakerOpen: cbOpen,
+        circuitBreakerFailures: cbFailures,
         details: gmHealth.details,
       };
     }
@@ -603,6 +617,8 @@ export async function resolveGraphHealth(providers: SnapshotProviders): Promise<
     status: localStatus,
     source: 'local',
     graphAdapterConnected: local?.connected,
+    circuitBreakerOpen: cbOpen,
+    circuitBreakerFailures: cbFailures,
   };
 }
 

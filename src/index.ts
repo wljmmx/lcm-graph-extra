@@ -57,6 +57,7 @@ const userProfile = new UserProfileTracker();
 
 // N-4: 健康指标收集器 —— 全局单例
 import { healthMetrics } from './health-metrics.js';
+import { getHealthSnapshot } from './circuit-breaker.js';
 
 // G-8: 记录最近一轮 assemble 返回的经验 ID + query，供 afterTurn 异步验证
 // B-1 修复: 原为模块级 let 变量，多 session 并发时 G-8 验证回路会串数据
@@ -1543,11 +1544,22 @@ const pluginEntry: any = definePluginEntry({
           }),
           getGraphAdapterState: () => {
             // graphAdapter 可能为 null（未初始化）或已 dispose；用 any 读取私有连接状态
+            // BUGFIX: 修复前仅检查 !!a.driver，stale driver 被误判为 connected。
+            // 修复后：同时检查 _connectFailed 和 _lastFailTime，提供更准确的状态。
+            // P-CB-6: 同时暴露 Neo4j 熔断器实时状态，避免 dashboard 仅依赖 health.latest
+            // （5分钟心跳缓存）导致图谱健康状态显示滞后。
             const a = graphAdapter as any;
-            if (!a) return { connected: false, connectFailed: false };
+            if (!a) return { connected: false, connectFailed: false, circuitBreaker: { available: true, failures: 0, open: false } };
+            const driverOk = !!a.driver;
+            const connectFailed = !!a._connectFailed;
+            const lastFailTime = (a._lastFailTime as number) ?? 0;
+            const recentlyFailed = connectFailed && (Date.now() - lastFailTime < 30_000);
+            const neo4jCb = getHealthSnapshot()?.neo4j ?? { available: true, failures: 0, open: false };
             return {
-              connected: !!a.driver,
-              connectFailed: !!a._connectFailed,
+              connected: driverOk && !connectFailed,
+              connectFailed: recentlyFailed,
+              lastError: connectFailed ? `Neo4j connect failed${lastFailTime > 0 ? ` at ${new Date(lastFailTime).toISOString()}` : ''}` : undefined,
+              circuitBreaker: neo4jCb,
             };
           },
           getDebtStats: () => {
@@ -1561,6 +1573,11 @@ const pluginEntry: any = definePluginEntry({
           getRetrievalState: () => ({
             lastQuery: lastRetrievalQuery,
             perfSummary: _retrievalGateway?.getPerfSummary?.() ?? 'gateway not initialized',
+            // P-CB-6: 暴露 qmd 熔断器实时状态，dashboard 不再依赖心跳缓存
+            qmdCircuitBreaker: (() => {
+              const snap = getHealthSnapshot();
+              return snap?.qmd ?? { available: true, failures: 0, open: false };
+            })(),
           }),
           getHealthLatest: () => {
             const base = healthMetrics.getLatest();
@@ -2015,27 +2032,18 @@ const pluginEntry: any = definePluginEntry({
 
         try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
 
-        // N-4: 收集健康指标快照
+        // P-CB-6: 先执行熔断恢复探针，再采集健康指标。
+        // 修复前：healthMetrics.collect() 在 P-CB-4/P-CB-5 恢复探针之前执行，
+        // 导致即使恢复成功，healthMetrics 中仍保存恢复前的陈旧熔断状态。
+        // dashboard 通过 health.latest 读取的是 5 分钟前的数据，持续显示熔断。
+        // 修复后：先恢复，再采集，确保 health.latest 反映最新状态。
         try {
-          const { getHealthSnapshot } = await import('./circuit-breaker.js');
+          const { getHealthSnapshot, isAvailable, recordSuccess, recordFailure } = await import('./circuit-breaker.js');
           const cbStates = getHealthSnapshot();
-          healthMetrics.collect({
-            pendingMessages: (pendingMessages ?? 0) as number,
-            summaryFragments: (summaryFragments ?? 0) as number,
-            maxTokenRatio: (maxTokenRatio ?? 0) as number,
-            cbLcmAvailable: cbStates?.lcm?.available ?? true,
-            cbQmdAvailable: cbStates?.qmd?.available ?? true,
-            cbNeo4jAvailable: cbStates?.neo4j?.available ?? true,
-            cbLcmFailures: cbStates?.lcm?.failures ?? 0,
-            cbQmdFailures: cbStates?.qmd?.failures ?? 0,
-            cbNeo4jFailures: cbStates?.neo4j?.failures ?? 0,
-          });
 
           // P-CB-4: 主动健康探测 —— 对 OPEN 状态的子系统发起探测，加速低峰期恢复
-          const { isAvailable, recordSuccess, recordFailure } = await import('./circuit-breaker.js');
           // qmd 探测
           if (cbStates?.qmd?.open && isAvailable('qmd')) {
-            // isAvailable 返回 true 表示半开放行了一个探测请求
             try {
               const ok = await qmdClient.ping();
               if (ok) {
@@ -2049,10 +2057,7 @@ const pluginEntry: any = definePluginEntry({
               logger?.debug?.("heartbeat: P-CB-4 qmd probe failed", { err: String(probeErr) });
             }
           }
-          // neo4j 探测：用 graphAdapter.health() 实际验证连通性（修复前用 isConnected
-          // 仅检查 !!driver 不验证真实连接，stale driver 被误判为健康 → recordSuccess
-          // 永不触发 → 熔断器无法恢复。health() 内部调用 driver.verifyConnectivity()，
-          // 失败时自动清理 driver + 重连，确保探测结果准确反映真实连通状态）。
+          // neo4j 探测
           if (cbStates?.neo4j?.open && isAvailable('neo4j')) {
             try {
               const ok = graphAdapter && typeof graphAdapter.health === 'function'
@@ -2070,13 +2075,7 @@ const pluginEntry: any = definePluginEntry({
             }
           }
 
-          // P-CB-5: 低 failures 计数器自动重置。
-          // 修复前：P-CB-4 探针只在 open===true（failures >= threshold=3）时触发，
-          // 1-2 次失败（如启动时 null 引用导致的误报）永不触发 recordSuccess，
-          // 计数器长期残留 → dashboard 持续显示陈旧失败状态。
-          // 修复后：心跳中健康检查已通过（并行块中 qmd ping / graph health 均 ok），
-          // 若对应子系统未 OPEN 但有 failures 残留，调用 recordSuccess 清零。
-          // 条件：子系统未 OPEN（非熔断状态）+ 并行健康检查通过。
+          // P-CB-5: 低 failures 计数器自动重置
           if (cbStates?.qmd && !cbStates.qmd.open && cbStates.qmd.failures > 0) {
             try {
               const ok = await qmdClient.ping();
@@ -2084,7 +2083,7 @@ const pluginEntry: any = definePluginEntry({
                 recordSuccess('qmd');
                 logger?.info?.("heartbeat: P-CB-5 qmd healthy, cleared stale failures=" + String(cbStates.qmd.failures));
               }
-            } catch { /* 探测失败保持原状，下次心跳再试 */ }
+            } catch { /* 探测失败保持原状 */ }
           }
           if (cbStates?.neo4j && !cbStates.neo4j.open && cbStates.neo4j.failures > 0) {
             try {
@@ -2095,8 +2094,23 @@ const pluginEntry: any = definePluginEntry({
                 recordSuccess('neo4j');
                 logger?.info?.("heartbeat: P-CB-5 neo4j healthy, cleared stale failures=" + String(cbStates.neo4j.failures));
               }
-            } catch { /* 探测失败保持原状，下次心跳再试 */ }
+            } catch { /* 探测失败保持原状 */ }
           }
+
+          // P-CB-6: 恢复探针执行完毕后，再采集健康指标快照。
+          // 此时 getHealthSnapshot() 返回的是恢复后的最新状态。
+          const postRecoveryStates = getHealthSnapshot();
+          healthMetrics.collect({
+            pendingMessages: (pendingMessages ?? 0) as number,
+            summaryFragments: (summaryFragments ?? 0) as number,
+            maxTokenRatio: (maxTokenRatio ?? 0) as number,
+            cbLcmAvailable: postRecoveryStates?.lcm?.available ?? true,
+            cbQmdAvailable: postRecoveryStates?.qmd?.available ?? true,
+            cbNeo4jAvailable: postRecoveryStates?.neo4j?.available ?? true,
+            cbLcmFailures: postRecoveryStates?.lcm?.failures ?? 0,
+            cbQmdFailures: postRecoveryStates?.qmd?.failures ?? 0,
+            cbNeo4jFailures: postRecoveryStates?.neo4j?.failures ?? 0,
+          });
         } catch (e) { /* health metrics collection failed, non-fatal */
           logger?.debug?.("heartbeat: health metrics collection failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }
