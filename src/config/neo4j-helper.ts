@@ -133,7 +133,7 @@ export function resolveEmbeddingConfig(
   const rawBaseURL = (embeddingSection.baseURL as string) || process.env.GM_EMBED_BASE_URL || "http://127.0.0.1:11434";
   const baseURL = cleanBaseURL(rawBaseURL);
   const dimensions = (embeddingSection.dimensions as number) ?? 1024;
-  const keepAlive = (embeddingSection.keepAlive as string) || "1h";
+  const keepAlive = (embeddingSection.keepAlive as string) || "-1";
   // P1-6 BUG-3: 原返回对象丢失 apiKey 与 options，导致需要鉴权的远程 embedding 端点不可用。
   const apiKey = (embeddingSection.apiKey as string) || process.env.GM_EMBED_API_KEY || undefined;
   const options = (embeddingSection.options as Record<string, number | boolean | string>) || undefined;

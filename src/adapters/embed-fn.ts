@@ -69,7 +69,7 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
     // 如果用户配置了云端 OpenAI 兼容 API（baseURL 含 /v1），仍走 /v1/embeddings。
     baseURL = 'http://127.0.0.1:11434',
     apiKey,
-    keepAlive = '1h',
+    keepAlive = '-1',
     options,
   } = ecfg;
 
@@ -95,6 +95,10 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
 
+  // Ollama 的 keep_alive 字段：数字 -1 表示永不过期，duration 字符串如 "1h" 也可接受。
+  // 但字符串 "-1" 会被 Ollama 解析为 duration 失败 → 回退到默认 5m。
+  // 因此需要将 "-1" 字符串转换为数字 -1。
+  const keepAliveNorm: string | number = keepAlive === '-1' ? -1 : keepAlive;
   // Ollama 原生端点版本探测状态（闭包持久化，避免每次都探测）
   // false = 新版 /api/embed + input；true = 旧版 /api/embeddings + prompt
   let useLegacyOllama = false;
@@ -117,15 +121,15 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
       let body: Record<string, unknown>;
       if (isOpenAiCompatible) {
         ep = baseClean + '/embeddings';
-        body = { model, input: [text], keep_alive: keepAlive };
+        body = { model, input: [text], keep_alive: keepAliveNorm };
       } else if (useLegacyOllama) {
         // 旧版 Ollama: /api/embeddings + prompt
         ep = baseForOllama + '/api/embeddings';
-        body = { model, prompt: text, keep_alive: keepAlive };
+        body = { model, prompt: text, keep_alive: keepAliveNorm };
       } else {
         // 新版 Ollama: /api/embed + input (数组格式)
         ep = baseForOllama + '/api/embed';
-        body = { model, input: [text], keep_alive: keepAlive };
+        body = { model, input: [text], keep_alive: keepAliveNorm };
       }
       // 透传额外 options：
       // - OpenAI 兼容端点：平铺到 body 顶层（dimensions/encoding_format 等标准字段本就在顶层）

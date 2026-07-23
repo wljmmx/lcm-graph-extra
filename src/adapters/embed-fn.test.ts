@@ -7,7 +7,7 @@
  * - Ollama 原生格式 (/api/embed) 响应解析
  * - apiKey 鉴权头
  * - HTTP 错误处理
- * - 默认值（keepAlive=1h, model, baseURL）
+ * - 默认值（keepAlive=-1, model, baseURL）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createLocalEmbedFn } from './embed-fn.js';
@@ -26,7 +26,7 @@ describe('createLocalEmbedFn', () => {
     vi.restoreAllMocks();
   });
 
-  it('默认 keep_alive=1h 被写入请求 body', async () => {
+  it('默认 keep_alive=-1 (永不过期) 被写入请求 body', async () => {
     // BUGFIX(P0-5): Ollama 端点即使 baseURL 带 /v1，也走原生 /api/embed（支持 keep_alive）
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -40,7 +40,7 @@ describe('createLocalEmbedFn', () => {
     // /v1 后缀被剥离，走原生 /api/embed 而非 /v1/embeddings
     expect(url).toBe('http://localhost:11434/api/embed');
     const body = JSON.parse(opts.body);
-    expect(body.keep_alive).toBe('1h');
+    expect(body.keep_alive).toBe(-1);
     expect(body.model).toBe('test-model');
     expect(body.input).toEqual(['hello']);
   });
@@ -87,7 +87,7 @@ describe('createLocalEmbedFn', () => {
 
     expect(mockFetch.mock.calls[0][0]).toBe('http://host:11434/api/embed');
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.keep_alive).toBe('1h');
+    expect(body.keep_alive).toBe(-1);
     expect(result).toEqual([4, 5, 6]);
   });
 
@@ -208,7 +208,7 @@ describe('createLocalEmbedFn', () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.input).toEqual(['text']);
     expect(body.prompt).toBeUndefined();
-    expect(body.keep_alive).toBe('1h');
+    expect(body.keep_alive).toBe(-1);
     expect(result).toEqual([0.1, 0.2]);
   });
 
@@ -236,7 +236,7 @@ describe('createLocalEmbedFn', () => {
     const legacyBody = JSON.parse(mockFetch.mock.calls[1][1].body);
     expect(legacyBody.prompt).toBe('text');
     expect(legacyBody.input).toBeUndefined();
-    expect(legacyBody.keep_alive).toBe('1h');
+    expect(legacyBody.keep_alive).toBe(-1);
     expect(result).toEqual([0.3, 0.4]);
   });
 
@@ -308,7 +308,7 @@ describe('createLocalEmbedFn', () => {
     // 核心字段保持不变
     expect(body.model).toBe('m');
     expect(body.input).toEqual(['text']);
-    expect(body.keep_alive).toBe('1h');
+    expect(body.keep_alive).toBe(-1);
   });
 
   it('Ollama 旧版端点回退: options 同样嵌套为 body.options', async () => {
@@ -333,7 +333,7 @@ describe('createLocalEmbedFn', () => {
     expect(legacyBody.num_ctx).toBeUndefined();
     expect(legacyBody.top_k).toBeUndefined();
     expect(legacyBody.prompt).toBe('text');
-    expect(legacyBody.keep_alive).toBe('1h');
+    expect(legacyBody.keep_alive).toBe(-1);
   });
 
   it('OpenAI 兼容端点: options 平铺到 body 顶层（不嵌套）', async () => {
