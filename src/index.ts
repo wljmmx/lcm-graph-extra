@@ -147,6 +147,68 @@ const pluginEntry: any = definePluginEntry({
     // Snapshot server handle（heartbeat 中检查状态 + 重试启动）
     let snapshotHandle: import('./dashboard-snapshot.js').SnapshotServerHandle | null = null;
     let snapshotConfig: { port: number; host: string; providers: import('./dashboard-snapshot.js').SnapshotProviders } | null = null;
+    // P-CB-8: 防止并发恢复（onClose 和 heartbeat 可能同时触发）
+    let _snapshotRecoveryInProgress = false;
+
+    /**
+     * P-CB-8: 指数退避重试启动 snapshot server。
+     * 修复前：心跳中只尝试一次，失败后等 5 分钟下一轮。
+     * 修复后：在心跳周期内以 1s/2s/4s/8s/16s/32s 退避重试，
+     * 总耗时约 63s，远小于 5 分钟心跳间隔，大幅缩短恢复窗口。
+     */
+    async function retrySnapshotRestart(): Promise<boolean> {
+      if (!snapshotConfig) return false;
+      if (_snapshotRecoveryInProgress) return false;
+      _snapshotRecoveryInProgress = true;
+      try {
+        const delays = [1000, 2000, 4000, 8000, 16000, 32000];
+        for (let i = 0; i < delays.length; i++) {
+          try {
+            const handle = startDashboardSnapshotServer({
+              ...snapshotConfig,
+              onClose: onSnapshotClose,
+            });
+            // 等待启动完成（最多 1.5s）
+            const waitStart = Date.now();
+            while (Date.now() - waitStart < 1500) {
+              if (handle.started) break;
+              if (handle.failureReason) break;
+              await new Promise((r) => setTimeout(r, 100));
+            }
+            if (handle.started) {
+              snapshotHandle = handle;
+              snapshotServerStop = handle.stop;
+              logger?.info?.(`heartbeat: dashboard snapshot server recovered (attempt ${i + 1}/${delays.length}), listening on ${snapshotConfig.host}:${snapshotConfig.port}`);
+              return true;
+            }
+            logger?.debug?.(`heartbeat: snapshot restart attempt ${i + 1}/${delays.length} failed: ${handle.failureReason || 'unknown'}`);
+          } catch (e) {
+            logger?.debug?.(`heartbeat: snapshot restart attempt ${i + 1}/${delays.length} threw: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          // 最后一次不等待
+          if (i < delays.length - 1) {
+            await new Promise((r) => setTimeout(r, delays[i]));
+          }
+        }
+        return false;
+      } finally {
+        _snapshotRecoveryInProgress = false;
+      }
+    }
+
+    /**
+     * P-CB-8: snapshot server 意外关闭回调。
+     * server 崩溃（非主动 stop）时立即触发恢复，不等待下一轮 5 分钟心跳。
+     */
+    function onSnapshotClose(): void {
+      if (!snapshotConfig) return;
+      // 避免在 close 事件回调中做重操作，用 setImmediate 延后
+      setImmediate(() => {
+        if (!snapshotHandle || snapshotHandle.started) return; // 已被其他恢复路径处理
+        logger?.warn?.('snapshot server onClose triggered, starting immediate recovery');
+        retrySnapshotRestart().catch(() => {});
+      });
+    }
     // 最近一次检索 query，供 dashboard /internal/snapshot 只读访问
     let lastRetrievalQuery: string = '';
     // Session-isolated dedup & overhead caches 已抽出到
@@ -1606,7 +1668,7 @@ const pluginEntry: any = definePluginEntry({
             return { ...base, embedAvailable: _lastEmbedHealth };
           },
         };
-        snapshotHandle = startDashboardSnapshotServer({ port, host, providers });
+        snapshotHandle = startDashboardSnapshotServer({ port, host, providers, onClose: onSnapshotClose });
         snapshotConfig = { port, host, providers };
         snapshotServerStop = snapshotHandle.stop;
         // 启动是异步的（含端口探测 + listen），不能立即 log "listening"。
@@ -1912,24 +1974,11 @@ const pluginEntry: any = definePluginEntry({
             try { await snapshotServerStop?.(); } catch {}
             snapshotServerStop = null;
           }
-          // 重试启动（started=false 时）
+          // 重试启动（started=false 时），使用指数退避重试
           if (!snapshotHandle.started) {
-            try {
-              const handle = startDashboardSnapshotServer(snapshotConfig);
-              // 等待启动完成（最多 1.5s，探测+listen 通常很快）
-              const waitStart = Date.now();
-              while (Date.now() - waitStart < 1500) {
-                if (handle.started) break;
-                if (handle.failureReason) break;
-                await new Promise((r) => setTimeout(r, 100));
-              }
-              if (handle.started) {
-                snapshotHandle = handle;
-                snapshotServerStop = handle.stop;
-                logger?.info?.(`heartbeat: dashboard snapshot server recovered, listening on ${snapshotConfig.host}:${snapshotConfig.port}`);
-              }
-            } catch (snapRetryErr) {
-              logger?.debug?.("heartbeat: snapshot server retry failed (will try again next cycle)", { err: String(snapRetryErr) });
+            const recovered = await retrySnapshotRestart();
+            if (!recovered) {
+              logger?.debug?.('heartbeat: snapshot server retry exhausted (will try again next cycle)');
             }
           }
         }

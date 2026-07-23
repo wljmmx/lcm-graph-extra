@@ -632,6 +632,11 @@ export interface StartSnapshotServerOpts {
    * 探测期间如果端口被占，会尝试 fetch /internal/health 判断是否上一个实例残留。
    */
   probeTimeoutMs?: number;
+  /**
+   * P-CB-8: 服务器异常关闭时的回调。心跳可借此立即感知 server 崩溃，
+   * 在下次心跳周期之前触发恢复，避免 5 分钟真空期。
+   */
+  onClose?: () => void;
 }
 
 /** 启动结果 */
@@ -713,11 +718,14 @@ async function shutdownStaleInstance(host: string, port: number, timeoutMs: numb
  * @returns handle，含 started 标志与 stop 函数（幂等，可多次调用）
  */
 export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): SnapshotServerHandle {
-  const { port, host, providers, probeTimeoutMs = 500 } = opts;
+  const { port, host, providers, probeTimeoutMs = 500, onClose } = opts;
 
   // 标记是否真正启动（用于 stop 幂等）
   let server: Server | null = null;
   let closed = false;
+  // P-CB-8: 区分主动关闭 vs 意外关闭。stop() 主动关闭时不触发 onClose，
+  // 避免心跳误判为崩溃并触发不必要的重启。
+  let closedIntentionally = false;
 
   // 用 Promise 包装 listen，但整体函数保持同步返回（调用方不需 await）
   // 启动失败通过 handle.started = false 体现
@@ -730,6 +738,7 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           return;
         }
         closed = true;
+        closedIntentionally = true;
         if (!server) {
           resolve();
           return;
@@ -740,8 +749,13 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           resolve();
           return;
         }
-        // M-1: 保存兜底 timer handle，close 回调触发后 clearTimeout
-        // 避免进程退出时 timer 仍存活导致延迟 1s
+        // P-CB-8: 强制关闭所有连接（包括卡住的请求），确保端口立即释放。
+        // 修复前：server.close() 是优雅关闭，等待所有连接结束。
+        // requestTimeout=0 时卡住的请求永不超时，close() 回调永不触发，
+        // 只靠 1s 兜底 timer 强行 resolve，server 实际仍占用端口。
+        if (typeof (server as any).closeAllConnections === 'function') {
+          try { (server as any).closeAllConnections(); } catch {}
+        }
         let fallbackTimer: NodeJS.Timeout | undefined;
         server.close(() => {
           if (fallbackTimer) clearTimeout(fallbackTimer);
@@ -1017,6 +1031,42 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
             console.warn('[dashboard-snapshot] runtime error:', err.code, err.message);
           }
         }
+      });
+
+      // P-CB-8: 监听 close 事件，区分主动关闭 vs 意外崩溃。
+      // 修复前：onClose 参数被接受但从未调用，server 崩溃后心跳无法感知，
+      // 只能等 5 分钟后的下一轮健康检查才能发现。
+      server.on('close', () => {
+        if (!closedIntentionally && onClose) {
+          try {
+            getGlobalLogger().warn('dashboard snapshot server closed unexpectedly (crash or external kill)');
+          } catch { /* ignore */ }
+          // 标记 handle 为未启动，让心跳能检测到并触发恢复
+          handle.started = false;
+          handle.failureReason = 'server closed unexpectedly';
+          // 异步调用 onClose，避免在 close 事件回调中阻塞
+          setImmediate(() => {
+            try { onClose(); } catch { /* callback 自身的异常不传播 */ }
+          });
+        }
+      });
+
+      // P-CB-8: 限制最大并发连接数，防止连接泄漏导致端口耗尽。
+      // 长时间运行后，如果 dashboard 端未正确关闭连接（如 keep-alive 连接泄漏），
+      // 累积的连接可能耗尽文件描述符，导致 server 无法接受新连接。
+      // 默认 100 个并发连接足够本机 dashboard 使用。
+      server.maxConnections = 100;
+
+      // P-CB-8: 处理客户端错误（如格式错误的 HTTP 请求），防止这些异常
+      // 导致 server 因 unhandled 'clientError' 事件而崩溃。
+      server.on('clientError', (err: Error, socket: any) => {
+        try {
+          getGlobalLogger().debug('dashboard snapshot server client error', {
+            message: err.message,
+          });
+        } catch { /* ignore */ }
+        // 关闭有问题的 socket，释放资源
+        try { socket.destroy(); } catch { /* ignore */ }
       });
 
       // 用 Promise 包装 listen，等监听成功后才标记 started = true
