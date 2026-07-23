@@ -822,17 +822,37 @@ const pluginEntry: any = definePluginEntry({
             });
 
             // 利用 SDK 传入的 currentTokenCount 反推 SDK overhead 并缓存
-            // _currentTokens 是 SDK precheck 计算的实际 prompt token 数，
-            // 包含 system prompt + tool catalog + 消息等所有内容。
-            // assemble 下轮会用 getSdkOverhead() 读取此值来动态计算 safeThreshold。
             const _sk = typeof params.sessionKey === 'string' ? params.sessionKey
               : (typeof params.session_id === 'string' ? params.session_id : '');
             if (_sk && _currentTokens > 0) {
               const _msgTokens = estimateTokensFromMessages(params.messages ?? []);
-              // additionTokens 未知，传 0；updateSdkOverhead 会保守估算
               updateSdkOverhead(_sk, _currentTokens, _msgTokens, 0);
             }
           }
+
+          // P-CB-7: force compact 时用实际 token 数计算压缩目标预算。
+          // 修复前：tokenBudget = _compactBudget（59% × 上下文窗口 = 77332），
+          // 当实际上下文仅 26k 时，lossless-claw 因 budget 远大于实际 token 数
+          // 而返回 "already under target" 拒绝压缩，37k→35k 仅减 2k。
+          // 修复后：目标预算 = 50% × 当前 token 数（不低于 5000），
+          // 确保 lossless-claw 真正执行压缩而非因 budget 过大而跳过。
+          const _forceCompactBudget = (() => {
+            if (!params.force || _isInputOverflow) return _compactBudget;
+            // 优先使用 SDK 传入的 currentTokenCount，回退到 sessionFile 估算
+            const est = _currentTokens > 0
+              ? _currentTokens
+              : (_sessionFileMsgs.length > 0 ? estimateTokensFromMessages(_sessionFileMsgs) : 0);
+            if (est > 0) {
+              const budget = Math.max(5000, Math.floor(est * 0.5));
+              logger?.info?.('[compact] force compact budget calculated', {
+                estimatedTokens: est,
+                forceBudget: budget,
+                originalCompactBudget: _compactBudget,
+              });
+              return budget;
+            }
+            return _compactBudget;
+          })();
 
           // --- Promise.race + 900s (15min) timeout: trigger lossless-claw DAG compaction ---
           let summaryContent: string | undefined;
@@ -881,9 +901,11 @@ const pluginEntry: any = definePluginEntry({
                 // 非超限场景：使用 _contextWindow 作为 tokenBudget，确保 lossless-claw
                 // 的 threshold 计算基于模型上下文窗口而非 compact budget。
                 // 超限场景：使用降级后的 _tryBudget 作为 budget 模式的目标。
+                // P-CB-7: force compact 时使用 _forceCompactBudget（基于实际 token 数），
+                // 避免 budget 远大于实际 token 数导致 "already under target" 拒绝压缩。
                 const effectiveTokenBudget = _isInputOverflow
                   ? _tryBudget
-                  : _contextWindow;
+                  : (params.force === true ? _forceCompactBudget : _contextWindow);
                 compactResult = await Promise.race([
                   _losslessClawAdapter.compact({
                     ...params,
@@ -903,14 +925,13 @@ const pluginEntry: any = definePluginEntry({
                       ...((params as any).legacyParams ?? {}),
                       llm: undefined,
                     },
-                    // BUGFIX: 主动 /compact 触发时必须用比当前会话 token 数更小的 budget，
-                    // 否则 lossless-claw 会以 threshold 模式算出 50%×ctxWindow=131072，
-                    // 当会话只有 14040 token 时直接返回 "already under target" 拒绝压缩。
-                    // 策略：非超限 + force=true 时，使用 _compactBudget（默认 114688）作为 budget，
-                    // 保证 lossless-claw 走 budget 模式按目标 token 数压缩。
+                    // P-CB-7: force compact 时使用 _forceCompactBudget（基于实际 token 数 50%），
+                    // 确保 lossless-claw 真正执行压缩而非因 budget 过大而跳过。
+                    // 修复前：_compactBudget = 59%×131072 = 77332，远大于 26k 实际上下文，
+                    // lossless-claw 返回 "already under target" 拒绝压缩。
                     tokenBudget: _isInputOverflow
                       ? _tryBudget
-                      : (params.force === true ? _compactBudget : _contextWindow),
+                      : (params.force === true ? _forceCompactBudget : _contextWindow),
                     // BUGFIX: 默认 force=true — 我们的 compact hook 总是被 /compact 主动触发，
                     // 不依赖 SDK 是否传 force。
                     force: true,
@@ -927,7 +948,7 @@ const pluginEntry: any = definePluginEntry({
                   paramsTokenBudget: (params as any).tokenBudget,
                   usedTokenBudget: _isInputOverflow
                     ? _tryBudget
-                    : (params.force === true ? _compactBudget : _contextWindow),
+                    : (params.force === true ? _forceCompactBudget : _contextWindow),
                   usedCompactionTarget: 'auto (not forcing budget mode to avoid summaryModel override)',
                   resultOk: compactResult?.ok,
                   resultCompacted: compactResult?.compacted,
