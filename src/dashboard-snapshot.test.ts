@@ -287,7 +287,7 @@ describe('DashboardSnapshotServer', () => {
   });
 
   describe('provider 异常容错', () => {
-    it('provider 抛错时 snapshot 返回 500 + 错误信息', async () => {
+    it('provider 抛错时 snapshot 返回 200 + fallback 值（不因单个 provider 异常导致整体 500）', async () => {
       const port = getRandomPort();
       const handle = startDashboardSnapshotServer({
         port,
@@ -300,7 +300,16 @@ describe('DashboardSnapshotServer', () => {
       expect(await waitForStartup(handle)).toBe(true);
 
       const resp = await fetch(`http://127.0.0.1:${port}/internal/snapshot`);
-      expect(resp.status).toBe(500);
+      // 修复后：单个 provider 抛错不导致整体 500，而是返回 200 + fallback
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      // cascade 应返回 fallback 值
+      expect(body.cascade.armsCount).toBe(0);
+      expect(body.cascade.topArms).toEqual([]);
+      expect(body.cascade.confidenceThreshold).toBe(0.7);
+      // 其他字段应正常返回
+      expect(body.userProfile).toBeDefined();
+      expect(body.timestamp).toBeGreaterThan(0);
     });
   });
 
