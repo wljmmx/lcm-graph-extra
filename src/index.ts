@@ -554,6 +554,28 @@ const pluginEntry: any = definePluginEntry({
           }
           _activeModelContextWindow = modelCtx;
         }
+
+        // BUGFIX: 确保子系统初始化完成后再构造 AssembleContext。
+        // 修复前：ctx 在 ensureInitialized 之前构造，捕获了闭包变量 qmdClient /
+        // graphAdapter / expStore 的初始 null 值。即使 ensureInitialized 更新了闭包
+        // 变量，ctx 中仍然是 null，导致首次 assemble 的 L2/L3/L4 全部报
+        // "Cannot read properties of null" 错误。
+        // 修复后：先 await ensureInitialized 确保闭包变量已赋值，再构造 ctx。
+        try {
+          await ensureInitialized();
+        } catch (initErr) {
+          const msg = initErr instanceof Error ? initErr.message : String(initErr);
+          logger?.error?.("assemble: init failed, returning empty", { err: msg });
+          return {
+            messages: params.messages ?? [],
+            estimatedTokens: 0,
+            systemPromptAddition: undefined,
+            promptAuthority: "assembled",
+            degraded: true,
+            degradedReasons: ["init_failed: " + msg],
+          };
+        }
+
         // R-1: 委托给 src/assemble/index.ts
         const ctx: AssembleContext = {
           api,
@@ -2027,10 +2049,15 @@ const pluginEntry: any = definePluginEntry({
               logger?.debug?.("heartbeat: P-CB-4 qmd probe failed", { err: String(probeErr) });
             }
           }
-          // neo4j 探测：用 graphAdapter.isConnected 检查（轻量级，不发实际查询）
+          // neo4j 探测：用 graphAdapter.health() 实际验证连通性（修复前用 isConnected
+          // 仅检查 !!driver 不验证真实连接，stale driver 被误判为健康 → recordSuccess
+          // 永不触发 → 熔断器无法恢复。health() 内部调用 driver.verifyConnectivity()，
+          // 失败时自动清理 driver + 重连，确保探测结果准确反映真实连通状态）。
           if (cbStates?.neo4j?.open && isAvailable('neo4j')) {
             try {
-              const ok = graphAdapter?.isConnected ?? false;
+              const ok = graphAdapter && typeof graphAdapter.health === 'function'
+                ? await graphAdapter.health()
+                : (graphAdapter?.isConnected ?? false);
               if (ok) {
                 recordSuccess('neo4j');
                 logger?.info?.("heartbeat: P-CB-4 neo4j probe succeeded, circuit breaker recovered");
@@ -2041,6 +2068,34 @@ const pluginEntry: any = definePluginEntry({
               recordFailure('neo4j');
               logger?.debug?.("heartbeat: P-CB-4 neo4j probe failed", { err: String(probeErr) });
             }
+          }
+
+          // P-CB-5: 低 failures 计数器自动重置。
+          // 修复前：P-CB-4 探针只在 open===true（failures >= threshold=3）时触发，
+          // 1-2 次失败（如启动时 null 引用导致的误报）永不触发 recordSuccess，
+          // 计数器长期残留 → dashboard 持续显示陈旧失败状态。
+          // 修复后：心跳中健康检查已通过（并行块中 qmd ping / graph health 均 ok），
+          // 若对应子系统未 OPEN 但有 failures 残留，调用 recordSuccess 清零。
+          // 条件：子系统未 OPEN（非熔断状态）+ 并行健康检查通过。
+          if (cbStates?.qmd && !cbStates.qmd.open && cbStates.qmd.failures > 0) {
+            try {
+              const ok = await qmdClient.ping();
+              if (ok) {
+                recordSuccess('qmd');
+                logger?.info?.("heartbeat: P-CB-5 qmd healthy, cleared stale failures=" + String(cbStates.qmd.failures));
+              }
+            } catch { /* 探测失败保持原状，下次心跳再试 */ }
+          }
+          if (cbStates?.neo4j && !cbStates.neo4j.open && cbStates.neo4j.failures > 0) {
+            try {
+              const ok = graphAdapter && typeof graphAdapter.health === 'function'
+                ? await graphAdapter.health()
+                : (graphAdapter?.isConnected ?? false);
+              if (ok) {
+                recordSuccess('neo4j');
+                logger?.info?.("heartbeat: P-CB-5 neo4j healthy, cleared stale failures=" + String(cbStates.neo4j.failures));
+              }
+            } catch { /* 探测失败保持原状，下次心跳再试 */ }
           }
         } catch (e) { /* health metrics collection failed, non-fatal */
           logger?.debug?.("heartbeat: health metrics collection failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
