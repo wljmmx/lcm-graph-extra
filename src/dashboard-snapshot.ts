@@ -841,6 +841,9 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, shuttingDown: true }));
+          // P-CB-8: 标记为主动关闭，防止 close 事件触发 onClose 回调，
+          // 避免新实例启动后 probe 发现旧实例 → shutdown → onClose → 死循环。
+          closedIntentionally = true;
           // 延迟关闭，确保响应已发送
           setTimeout(() => {
             try {

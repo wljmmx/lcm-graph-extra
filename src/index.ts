@@ -161,6 +161,18 @@ const pluginEntry: any = definePluginEntry({
       if (_snapshotRecoveryInProgress) return false;
       _snapshotRecoveryInProgress = true;
       try {
+        // P-CB-8: 先主动 stop 旧 server（设置 closedIntentionally=true），
+        // 确保旧 server 的 onClose 不会再触发，且端口被释放。
+        // 修复前：不 stop 旧 server 就直接 startDashboardSnapshotServer，
+        // 新 server 的 probe 检测到旧实例仍占用端口 → 发 shutdown →
+        // 旧 server close 触发 onClose → 再次调用 retrySnapshotRestart → 死循环。
+        if (snapshotServerStop) {
+          try { await snapshotServerStop(); } catch {}
+          snapshotServerStop = null;
+        }
+        // 等待端口释放（closeAllConnections + close 回调需要一点时间）
+        await new Promise((r) => setTimeout(r, 300));
+
         const delays = [1000, 2000, 4000, 8000, 16000, 32000];
         for (let i = 0; i < delays.length; i++) {
           try {
