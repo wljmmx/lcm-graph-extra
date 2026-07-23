@@ -19,7 +19,7 @@ import { registerDiagnoseTool } from './tools/diagnose.js';
 
 import {
   // state management
-  setPluginNeo4jConfig, getPluginNeo4jConfig, setSharedQmdClient,
+  setPluginNeo4jConfig, getPluginNeo4jConfig, setSharedQmdClient, setPluginApiRef,
   // shared utilities
   acquireQmdClient, validateBackupPath, escapeFts5Query, parseTimeRange,
   generateExperienceSummary, openDb, closeSharedDb, getQmdBaseUrl, LCM_DB,
@@ -38,11 +38,13 @@ export type { DashboardToolContext };
 
 export function registerOperationalTools(api: any): void {
   setPluginNeo4jConfig(mergeEntriesNeo4jConfig(api) as Record<string, unknown>);
+  setPluginApiRef(api);
   _registerOperationalToolsImpl(api, undefined);
 }
 
 export function registerOperationalToolsWithDashboard(api: any, dashboardContext?: DashboardToolContext): void {
   setPluginNeo4jConfig(mergeEntriesNeo4jConfig(api) as Record<string, unknown>);
+  setPluginApiRef(api);
   _registerOperationalToolsImpl(api, dashboardContext);
 }
 

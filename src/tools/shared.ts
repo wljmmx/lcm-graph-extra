@@ -15,6 +15,7 @@ import { resolveNeo4jConfig } from '../config/neo4j-helper';
 import { getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
 import { llmTimeout } from '../config/defaults.js';
+import { resolveDistillationLlm } from '../plugin/distillation.js';
 
 const _lcmRequire = createRequire(import.meta.url);
 
@@ -23,9 +24,14 @@ const _lcmRequire = createRequire(import.meta.url);
 let _pluginNeo4jConfig: Record<string, unknown> | undefined;
 let _pluginQmdUrl = "http://127.0.0.1:8081";
 let _sharedQmdClient: any = null;
+let _pluginApiRef: any = null;  // SDK api reference，用于 resolveDistillationLlm
 
 export function setPluginNeo4jConfig(cfg: Record<string, unknown> | undefined): void {
   _pluginNeo4jConfig = cfg;
+}
+
+export function setPluginApiRef(apiRef: any): void {
+  _pluginApiRef = apiRef;
 }
 
 export function getPluginNeo4jConfig(): Record<string, unknown> | undefined {
@@ -148,11 +154,12 @@ export async function generateExperienceSummary(
   const toStr = timeFilter.toTs ? new Date(timeFilter.toTs).toLocaleDateString() : "now";
 
   try {
-    const llmCfg = _pluginNeo4jConfig?.distillationLlm || _pluginNeo4jConfig?.llm;
-    const model = (llmCfg as any)?.model;
-    const apiKey = (llmCfg as any)?.apiKey || '';
-    const baseURL = cleanBaseURL((llmCfg as any)?.baseURL || 'http://127.0.0.1:18789/v1');
-    const keepAlive = (llmCfg as any)?.keepAlive || '1h';
+    // 使用 resolveDistillationLlm 统一解析 LLM 配置，优先复用主模型（避免 GPU 竞争）
+    const llmCfg = _pluginApiRef ? resolveDistillationLlm(_pluginApiRef) : null;
+    const model = llmCfg?.model;
+    const apiKey = llmCfg?.apiKey || '';
+    const baseURL = llmCfg?.baseURL ? cleanBaseURL(llmCfg.baseURL) : cleanBaseURL('http://127.0.0.1:18789/v1');
+    const keepAlive = llmCfg?.keepAlive || '1h';
     if (model) {
       const expList = experiences.map((e, i) => `${i + 1}. [${e.type}] ${e.name} (${e.confidence}, seen ${e.seen}) - ${e.desc}`).join('\n');
       const prompt = `Based on the following ${total} experiences (time range: ${fromStr} to ${toStr}), write a concise natural language summary in the user's language. Group by theme, highlight key lessons learned, and note patterns. Keep it under 500 words.\n\nExperiences:\n${expList}`;

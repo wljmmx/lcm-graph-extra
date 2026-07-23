@@ -380,7 +380,8 @@ export function validateConfig(input: unknown): PluginConfig {
     proactiveThreshold: 0.65, systemPromptOverheadTokens: 17_000,
     compactTokenBudget: 114_688, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45
   };
-  if (!config.distillationLlm) config.distillationLlm = { provider: 'openclaw_hooks', model: 'ollama/qwen3.6:27b' };
+  // distillationLlm 未配置时保持 undefined，由 resolveDistillationLlm 的 fallback 处理
+  // （优先复用主模型 → LLM_MODEL 环境变量 → gpt-4o-mini）
   if (!config.neo4j) config.neo4j = { uri: 'bolt://localhost:7687', user: 'neo4j', password: '' };
   if (!config.moa) config.moa = { enabled: false, complexityThreshold: 0.6, mode: 'serial', referenceModels: [], aggregatorModel: undefined, enabledTiers: ['low'] };
 
