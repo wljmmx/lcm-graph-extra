@@ -52,10 +52,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   let maxContextChars = 12000;
   let finalMessages = params.messages ?? [];
   // S-12: 大工具负载外部分片 + 存根替换（stubLargeToolPayloads）
+  // lossless-claw 兼容：传入 conversationId 以写入 large_files 表，使 lcm_describe / lcm_expand 可检索
   const _stubConfig = resolveStubConfig(ctx.api?.pluginConfig);
   if (_stubConfig.enabled && finalMessages.length > 0) {
     const _stubStart = Date.now();
-    const _stubResult = stubLargeToolPayloads(finalMessages, _stubConfig, ctx.logger);
+    const _stubSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+      : typeof params.session_id === 'string' ? params.session_id : '';
+    const _stubConvId = getConversationId(_stubSessionKey);
+    const _stubResult = stubLargeToolPayloads(finalMessages, _stubConfig, ctx.logger, _stubConvId);
     finalMessages = _stubResult.messages;
     const _stubMs = Date.now() - _stubStart;
     if (_stubResult.stubbedCount > 0) {
@@ -63,6 +67,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         stubbed: _stubResult.stubbedCount,
         tokensSaved: _stubResult.tokensSaved,
         ms: _stubMs,
+        conversationId: _stubConvId ?? 'none',
       });
     }
   }

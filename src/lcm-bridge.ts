@@ -112,6 +112,52 @@ export function closeLcmDb(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Large Files — lossless-claw large_files 表写入（兼容 lcm_describe / lcm_expand）
+// ---------------------------------------------------------------------------
+
+/** large_files 表插入参数 */
+export interface LargeFileInsertParams {
+  fileId: string;
+  conversationId: number;
+  fileName: string;
+  mimeType: string;
+  byteSize: number;
+  lineCount: number;
+  storageUri: string;
+  explorationSummary: string;
+}
+
+/**
+ * 向 lossless-claw 的 large_files 表插入记录。
+ *
+ * 写入后 lcm_describe(id="file_xxx", expandFile=true) 即可从外部存储取回完整内容。
+ * 表结构由 lossless-claw 的 migration 管理，此处仅 INSERT。
+ *
+ * @returns true 表示插入成功，false 表示 DB 不可用或插入失败
+ */
+export function insertLargeFile(params: LargeFileInsertParams): boolean {
+  try {
+    const stmt = getStmt('insertLargeFile',
+      `INSERT INTO large_files (file_id, conversation_id, file_name, mime_type, byte_size, line_count, storage_uri, exploration_summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    if (!stmt) return false;
+    stmt.run(
+      params.fileId,
+      params.conversationId,
+      params.fileName,
+      params.mimeType,
+      params.byteSize,
+      params.lineCount,
+      params.storageUri,
+      params.explorationSummary,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
