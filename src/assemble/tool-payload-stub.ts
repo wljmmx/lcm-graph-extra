@@ -69,9 +69,11 @@ export function resolveStubConfig(pluginConfig: any): StubConfig {
   const thresholdBytes = (typeof stubCfg === 'object' ? stubCfg.thresholdBytes : undefined)
     ?? pluginConfig?.largeFileThreshold
     ?? DEFAULT_THRESHOLD_BYTES;
-  const filesDir = (typeof stubCfg === 'object' ? stubCfg.filesDir : undefined)
-    ?? pluginConfig?.largeFilesDir
-    ?? (process.env.LCM_LARGE_FILES_DIR || join(process.env.OPENCLAW_STATE_DIR || join(process.env.HOME || '/tmp', '.openclaw'), 'lcm-files'));
+  // 注意：不能用 ?? 因为 fieldsDir 默认值是 ""（空字符串），?? 不处理空字符串
+  const filesDir = (typeof stubCfg === 'object' && stubCfg.filesDir ? stubCfg.filesDir : undefined)
+    || pluginConfig?.largeFilesDir
+    || process.env.LCM_LARGE_FILES_DIR
+    || join(process.env.OPENCLAW_STATE_DIR || join(process.env.HOME || '/tmp', '.openclaw'), 'lcm-files');
   const freshTailCount = (typeof stubCfg === 'object' ? stubCfg.freshTailCount : undefined)
     ?? DEFAULT_FRESH_TAIL;
 
@@ -313,6 +315,7 @@ function formatToolOutputReference(
 
 /** 确保目录存在，权限 0700 */
 function ensureDir(dir: string): void {
+  if (!dir || dir.length === 0) return;
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
