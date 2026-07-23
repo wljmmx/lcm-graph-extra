@@ -301,13 +301,66 @@ export function buildSnapshot(providers: SnapshotProviders): DashboardSnapshot {
     capabilityProfile = { current: getCurrentProfile(), available: listProfiles() };
   } catch { /* capability-profiles not available */ }
 
+  // 逐 provider 隔离异常：任一 provider 抛错不影响其他字段，也不导致整个 snapshot 500。
+  // 修复前：若 graphAdapter 在 dispose 竞态中被置 null 后访问 ._connectFailed，
+  // 或 cascadeManager 内部状态异常，整个 /internal/snapshot 端点 500，
+  // dashboard 页面完全不可用。
+
+  let cascade: DashboardSnapshot['cascade'];
+  try {
+    cascade = providers.getCascadeSnapshot();
+  } catch (e) {
+    cascade = { armsCount: 0, topArms: [], confidenceThreshold: 0.7 };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] cascade snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
+  let userProfile: DashboardSnapshot['userProfile'];
+  try {
+    userProfile = providers.getUserProfile();
+  } catch (e) {
+    userProfile = { techStack: [], scenario: [], language: 'mixed' };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] userProfile snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
+  let graphAdapter: DashboardSnapshot['graphAdapter'];
+  try {
+    graphAdapter = providers.getGraphAdapterState();
+  } catch (e) {
+    graphAdapter = { connected: false, connectFailed: true, lastError: String(e) };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] graphAdapter snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
+  let debt: DashboardSnapshot['debt'];
+  try {
+    debt = providers.getDebtStats();
+  } catch (e) {
+    debt = { running: 0, pendingCount: 0, pollIntervalMs: 60000, maxConcurrent: 2 };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] debt snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
+  let retrieval: DashboardSnapshot['retrieval'];
+  try {
+    retrieval = providers.getRetrievalState();
+  } catch (e) {
+    retrieval = { lastQuery: '', perfSummary: 'snapshot error' };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] retrieval snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
+  let health: DashboardSnapshot['health'];
+  try {
+    health = { latest: providers.getHealthLatest() };
+  } catch (e) {
+    health = { latest: null };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] health snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
   return {
-    cascade: providers.getCascadeSnapshot(),
-    userProfile: providers.getUserProfile(),
-    graphAdapter: providers.getGraphAdapterState(),
-    debt: providers.getDebtStats(),
-    retrieval: providers.getRetrievalState(),
-    health: { latest: providers.getHealthLatest() },
+    cascade,
+    userProfile,
+    graphAdapter,
+    debt,
+    retrieval,
+    health,
     capabilityProfile,
     timestamp: Date.now(),
   };

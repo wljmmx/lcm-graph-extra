@@ -240,6 +240,8 @@ export class GraphAdapter {
   private driver: any = null;
   private _connectFailed = false;
   private _connectRetryCount = 0;
+  /** 并发健康检查防护：防止多个 heartbeat/业务调用同时触发 health() → connect() 竞态 */
+  private _healthCheckInProgress = false;
   // P2-3 H-16: 重试次数与冷却期改为引用 DEFAULTS.graph，避免魔术数字散落
   private readonly maxRetries = DEFAULTS.graph.maxRetries;
   // P1-10 GMR-1: 连接失败冷却期。原代码 _connectFailed=true 后无自动恢复路径，
@@ -264,7 +266,7 @@ export class GraphAdapter {
   }
 
   get isConnected(): boolean {
-    return !!this.driver;
+    return !!this.driver && !this._connectFailed;
   }
 
   async connect(): Promise<boolean> {
@@ -986,11 +988,66 @@ export class GraphAdapter {
       return null;
     }
   }
-async health(): Promise<boolean> {
+/**
+   * 健康检查 —— 验证 Neo4j 连接可用性。
+   *
+   * 修复前：verifyConnectivity() 失败时仅返回 false，不清理过期 driver，
+   * 导致后续 health() 反复对同一过期 driver 调用 verifyConnectivity()，
+   * 永远无法自动恢复。
+   *
+   * 修复后：失败时清理过期 driver + Recaller + embedFn，然后尝试重连。
+   * 重连成功则重建 Recaller/embedFn，恢复完整功能。
+   *
+   * v2.1.12 稳定性加固：
+   * - 并发保护：同一时刻只允许一个 health() 执行，避免竞态导致
+   *   connect()/releaseDriver() 交替调用引发 refCount 失衡。
+   * - 重连成功后清空 searchCache：旧 driver 下的缓存结果可能已失效，
+   *   不清空会导致后续 searchWithCache 命中过期数据。
+   */
+  async health(): Promise<boolean> {
+    // 并发保护：如果已有健康检查在进行中，直接返回当前连接状态
+    if (this._healthCheckInProgress) {
+      this.logger?.debug?.('[graph-adapter] health check already in progress, skipping concurrent call');
+      return this.isConnected;
+    }
+    this._healthCheckInProgress = true;
     try {
-      if (this.driver) { await this.driver.verifyConnectivity(); return true; }
-      return await this.connect();
-    } catch { return false; }
+      try {
+        if (this.driver) {
+          await this.driver.verifyConnectivity();
+          return true;
+        }
+        return await this.connect();
+      } catch {
+        // 验证失败 → 清理过期 driver，释放连接池资源
+        if (this.driver) {
+          try {
+            await releaseDriver(this.neo4jConfig);
+          } catch { /* ignore release errors */ }
+          this.driver = null;
+        }
+        // 清理关联的 Recaller 和 embedFn（driver 已失效，它们也无效）
+        this._recaller = null;
+        this._embedFn = null;
+        // 尝试重连（重置计数后重新建立连接）
+        this._connectRetryCount = 0;
+        this._connectFailed = false;
+        this._lastFailTime = 0;
+        try {
+          const reconnected = await this.connect();
+          if (reconnected) {
+            // 重连成功 → 清空 searchCache（旧 driver 下的缓存结果可能已失效）
+            this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+            this.logger?.info?.('[graph-adapter] health check: reconnected successfully, search cache cleared');
+          }
+          return reconnected;
+        } catch {
+          return false;
+        }
+      }
+    } finally {
+      this._healthCheckInProgress = false;
+    }
   }
 
   async close(): Promise<void> {

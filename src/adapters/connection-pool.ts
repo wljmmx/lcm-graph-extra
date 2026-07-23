@@ -46,7 +46,22 @@ export async function acquireDriver(config: Neo4jConfig): Promise<any> {
   const existing = pool.get(key);
 
   if (existing && existing.driver) {
-    // 复用连接：检查是否还活着，引用 +1
+    // 复用连接：先验证连通性，再引用 +1。
+    // 修复前：直接返回 driver，不验证。若 driver 因 maxConnectionLifetime（30min）
+    // 或 Neo4j 服务重启而失效，后续所有查询都会失败，且 health() 的
+    // verifyConnectivity() 反复对同一过期 driver 调用，永远无法自动恢复。
+    // 修复后：先 verifyConnectivity()，失败则关闭旧 driver、从池中移除、新建替换。
+    try {
+      await existing.driver.verifyConnectivity();
+    } catch {
+      // 旧 driver 已失效 → 关闭并从池中移除
+      try {
+        await existing.driver.close();
+      } catch { /* ignore close errors */ }
+      pool.delete(key);
+      // 回退到新建连接逻辑
+      return await acquireDriver(config);
+    }
     existing.refCount++;
     existing.lastUsed = Date.now();
     return existing.driver;

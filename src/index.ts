@@ -1773,13 +1773,30 @@ const pluginEntry: any = definePluginEntry({
               }
             }
           })(),
-          // --- 2b. Graph / Neo4j health check ---
+          // --- 2b. Graph / Neo4j health check + 内存重建验证 ---
           (async () => {
             if (graphAdapter && typeof graphAdapter.health === "function") {
               try {
                 const graphOk = await graphAdapter.health();
                 if (!graphOk) {
-                  logger?.warn?.("heartbeat: graph/neo4j unavailable, will retry on next heartbeat");
+                  logger?.warn?.("heartbeat: graph/neo4j unavailable, health() returned false (driver expired or connect failed)");
+                } else {
+                  // 健康检查通过 → 验证 Recaller / embedFn 是否已重建
+                  // 修复前：仅检查 driver 连通性，不验证 Recaller 和 embedFn 是否有效。
+                  // 若 connect() 中 Recaller 初始化失败（静默降级），后续所有 L3 检索
+                  // 都会 fallback 到 searchNodes，丢失 dual-path recall 能力。
+                  const hasRecaller = !!(graphAdapter as any)._recaller;
+                  const hasEmbedFn = !!(graphAdapter as any)._embedFn;
+                  const hasDriver = !!(graphAdapter as any).driver;
+                  if (!hasRecaller && hasDriver) {
+                    logger?.warn?.("heartbeat: graph/neo4j connected but Recaller NOT rebuilt — L3 recall degraded to searchNodes only");
+                  }
+                  if (!hasEmbedFn && hasDriver) {
+                    logger?.warn?.("heartbeat: graph/neo4j connected but embedFn NOT rebuilt — community recall disabled");
+                  }
+                  if (hasRecaller && hasEmbedFn) {
+                    logger?.debug?.("heartbeat: graph/neo4j healthy, Recaller + embedFn verified");
+                  }
                 }
               } catch (e) {
                 logger?.debug?.("heartbeat: graph health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
