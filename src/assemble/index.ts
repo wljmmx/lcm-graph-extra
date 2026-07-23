@@ -31,6 +31,7 @@ import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import { performRetrieval } from './retrieval.js';
 import { injectContext } from './injection.js';
+import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
 import type { AssembleContext, AssembleResult } from './types.js';
 
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
@@ -50,6 +51,21 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
   let maxContextChars = 12000;
   let finalMessages = params.messages ?? [];
+  // S-12: 大工具负载外部分片 + 存根替换（stubLargeToolPayloads）
+  const _stubConfig = resolveStubConfig(ctx.api?.pluginConfig);
+  if (_stubConfig.enabled && finalMessages.length > 0) {
+    const _stubStart = Date.now();
+    const _stubResult = stubLargeToolPayloads(finalMessages, _stubConfig, ctx.logger);
+    finalMessages = _stubResult.messages;
+    const _stubMs = Date.now() - _stubStart;
+    if (_stubResult.stubbedCount > 0) {
+      ctx.logger?.info?.('[assemble] stubLargeToolPayloads done', {
+        stubbed: _stubResult.stubbedCount,
+        tokensSaved: _stubResult.tokensSaved,
+        ms: _stubMs,
+      });
+    }
+  }
   let qmdResults: any = [];
   let graphResults: any = [];
   let expResults: any = [];

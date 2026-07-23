@@ -140,6 +140,17 @@ export const PluginConfigSchema = Type.Object({
     port: Type.Number({ default: 7423, minimum: 1, maximum: 65535 }),
   })),
 
+  // 大工具负载外部分片 + 存根替换（兼容 lossless-claw 的 stubLargeToolPayloads）
+  stubLargeToolPayloads: Type.Optional(Type.Object({
+    enabled: Type.Boolean({ default: false }),
+    thresholdBytes: Type.Number({ default: 8_000, minimum: 1_000 }),
+    filesDir: Type.String({ default: '' }),
+    freshTailCount: Type.Number({ default: 8, minimum: 0 }),
+  })),
+  // 简写方式：stubLargeToolPayloads: true 等同于 enabled: true
+  largeFileThreshold: Type.Optional(Type.Number({ default: 8_000, minimum: 1_000 })),
+  largeFilesDir: Type.Optional(Type.String({ default: '' })),
+
   // MoA (Mixture of Agents) 多模型分层协作配置
   moa: Type.Optional(Type.Object({
     enabled: Type.Boolean({ default: false }),
