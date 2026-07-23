@@ -2138,6 +2138,117 @@ const pluginEntry: any = definePluginEntry({
     
     // Expose for manual trigger
     (api as any).__lcmHeartbeat = runHeartbeat;
+
+    // -----------------------------------------------------------------------
+    // Compaction Provider（兼容 OpenClaw SDK compaction-safeguard 模式）
+    //
+    // 自 OpenClaw 2026.7+ 起，compaction.mode 默认为 "safeguard"，
+    // 若 compaction.provider 配置了 lcm-graph-extra，SDK 会通过
+    // getCompactionProvider() 查找注册的 provider。未注册时触发：
+    //   "Compaction provider 'lcm-graph-extra' is configured but not registered."
+    //
+    // 此 provider 将 summarize 委托给 LLM（与 SDK 内置 LLM 管道一致），
+    // 同时保留 lcm-graph-extra 的上下文引擎 ownsCompaction 路径不变。
+    // -----------------------------------------------------------------------
+    if (typeof api.registerCompactionProvider === 'function') {
+      // 保持对 api 的弱引用，供 summarize 惰性调用
+      const _apiForCompaction = api;
+      api.registerCompactionProvider({
+        id: 'lcm-graph-extra',
+        async summarize(params: {
+          messages: any[];
+          signal?: AbortSignal;
+          customInstructions?: string;
+          summarizationInstructions?: any;
+          previousSummary?: string | null;
+        }): Promise<string | undefined> {
+          try {
+            // 使用 resolveDistillationLlm 统一解析 LLM 配置（复用主模型）
+            const llmCfg = _apiForCompaction ? resolveDistillationLlm(_apiForCompaction) : null;
+            const model = llmCfg?.model;
+            if (!model) {
+              logger?.warn?.('[compactionProvider] no LLM model resolved, skip');
+              return undefined; // 返回 undefined 触发 SDK 内置 LLM 回退
+            }
+            const apiKey = llmCfg?.apiKey || '';
+            const baseURL = llmCfg?.baseURL
+              ? (llmCfg.baseURL.endsWith('/v1') ? llmCfg.baseURL : llmCfg.baseURL.replace(/\/$/, '') + '/v1')
+              : 'http://127.0.0.1:18789/v1';
+            const keepAlive = llmCfg?.keepAlive || '1h';
+
+            // 构建 messages → 纯文本（供 LLM 摘要），限制总长度
+            const MAX_CHARS = 80_000;
+            const textParts: string[] = [];
+            let totalChars = 0;
+            for (const msg of params.messages ?? []) {
+              const role = msg?.role ?? 'unknown';
+              let content = '';
+              if (typeof msg?.content === 'string') {
+                content = msg.content;
+              } else if (Array.isArray(msg?.content)) {
+                content = msg.content
+                  .filter((b: any) => b?.type === 'text' || typeof b?.text === 'string')
+                  .map((b: any) => b.text)
+                  .join('\n');
+              } else if (msg?.content != null) {
+                content = String(msg.content);
+              }
+              if (totalChars >= MAX_CHARS) break;
+              const entry = `[${role}]: ${content}`;
+              if (totalChars + entry.length > MAX_CHARS) {
+                textParts.push(entry.slice(0, MAX_CHARS - totalChars) + '...');
+                break;
+              }
+              textParts.push(entry);
+              totalChars += entry.length;
+            }
+
+            const previousSummaryNote = params.previousSummary
+              ? `\nPrevious summary context:\n${params.previousSummary}\n`
+              : '';
+            const customNote = params.customInstructions
+              ? `\nAdditional instructions:\n${params.customInstructions}\n`
+              : '';
+
+            const prompt = `You are a lossless context compaction summarization engine. Summarize the following conversation messages into a concise, structured summary that preserves all critical information: decisions made, code changes, bugs found, user preferences, open questions, and key facts.
+
+${previousSummaryNote}${customNote}
+Messages to summarize:
+${textParts.join('\n')}
+
+Return the summary as plain text. Preserve the original language of the conversation.`;
+
+            const { withKeepAliveIfOllama } = await import('./utils/url.js');
+            const body = withKeepAliveIfOllama(
+              baseURL,
+              { model, messages: [{ role: 'user', content: prompt }], temperature: 0.4, max_tokens: 2000 },
+              keepAlive,
+            );
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+            const signal = params.signal ?? AbortSignal.timeout(90_000);
+            const resp = await fetch(baseURL + '/chat/completions', {
+              method: 'POST', headers, body: JSON.stringify(body), signal,
+            });
+            if (!resp.ok) {
+              logger?.warn?.('[compactionProvider] LLM call failed', { status: resp.status });
+              return undefined;
+            }
+            const data: any = await resp.json();
+            const text = data?.choices?.[0]?.message?.content;
+            if (text?.trim()) return text.trim();
+            return undefined;
+          } catch (err) {
+            if ((err as any)?.name === 'AbortError' || (err as any)?.name === 'TimeoutError') {
+              logger?.warn?.('[compactionProvider] summarization timed out');
+            } else {
+              logger?.warn?.('[compactionProvider] summarization failed', { err: String(err) });
+            }
+            return undefined; // 返回 undefined 触发 SDK 内置 LLM 回退
+          }
+        },
+      });
+    }
   },
 });
 
