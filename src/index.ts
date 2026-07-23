@@ -259,13 +259,17 @@ const pluginEntry: any = definePluginEntry({
         const pluginConfig: any = mergeEntriesNeo4jConfig(api) ?? api.pluginConfig ?? {};
         const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? 'search';
         const cliTimeout = pluginConfig.cliTimeout ?? 30_000;
-        // 优化: 允许通过 pluginConfig.qmdMcpTimeout 覆盖 MCP 超时（默认 3000ms）
-        // 原 5000ms 导致 L2_qmd 经常 5.5s+（MCP 超时 + CLI 回退），降至 3s 节省 ~2s
+        // 优化: 允许通过 pluginConfig.qmdMcpTimeout 覆盖 MCP 初始化超时（默认 3000ms）
+        // 初始化仅做 JSON-RPC handshake，通常 < 500ms，3s 足够。
         const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? 3000;
+        // MCP 查询超时独立配置。首次查询 embedding 模型冷启动需 4-5s，
+        // 默认 8000ms 覆盖冷启动。用户可通过 pluginConfig.qmdMcpQueryTimeout 覆盖。
+        const qmdMcpQueryTimeout = pluginConfig.qmdMcpQueryTimeout ?? 8000;
 
         qmdClient = new QmdClient({
           mcpBaseUrl: qmdBaseUrl,
           mcpTimeout: qmdMcpTimeout,
+          mcpQueryTimeout: qmdMcpQueryTimeout,
           cliTimeout: cliTimeout,
           cliFallbackSearchType: cliFallbackSearchType,
         });

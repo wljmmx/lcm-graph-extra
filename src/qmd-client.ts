@@ -49,7 +49,15 @@ export interface SearchParams {
 
 export interface QmdClientOptions {
   mcpBaseUrl?: string;
+  /** MCP 初始化握手超时（ms）。初始化仅做 JSON-RPC handshake，通常 < 500ms。默认 3000ms。 */
   mcpTimeout?: number;
+  /**
+   * MCP 工具调用（查询）超时（ms）。
+   * 首次查询需要 embedding 模型冷启动（4-5s），后续查询仅 300-400ms。
+   * 修复前：mcpTimeout 同时用于 init 和 query，3s 太短导致首次查询永远超时 → 降级 REST。
+   * 修复后：分离两个超时，query 默认 8000ms 覆盖冷启动，用户可通过 qmdMcpQueryTimeout 覆盖。
+   */
+  mcpQueryTimeout?: number;
   cliTimeout?: number;
   pingInterval?: number;
   cliFallbackSearchType?: 'search' | 'vsearch' | 'hybrid';
@@ -77,10 +85,12 @@ interface McpToolsCallResponse {
 
 const DEFAULTS = {
   mcpBaseUrl: "http://127.0.0.1:8081",
-  // 优化: 5000ms → 3000ms。MCP 超时后 CLI 回退仅需 ~500ms，
-  // 原 5s 超时导致 L2_qmd 经常 5.5s+，降至 3s 可节省 ~2s。
-  // 用户可通过 pluginConfig.qmdMcpTimeout 覆盖。
+  // MCP 初始化握手超时。初始化仅做 JSON-RPC handshake，通常 < 500ms。
   mcpTimeout: 3000,
+  // MCP 工具调用（查询）超时。
+  // 首次查询需要 embedding 模型冷启动（4-5s），后续查询仅 300-400ms。
+  // 设为 8000ms 覆盖冷启动场景，避免首次查询永远超时 → 降级 REST。
+  mcpQueryTimeout: 8000,
   cliTimeout: 30_000,
   // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。
@@ -95,6 +105,7 @@ const DEFAULTS = {
 export class QmdClient {
   private readonly mcpBaseUrl: string;
   private readonly mcpTimeout: number;
+  private readonly mcpQueryTimeout: number;
   private mcpSessionId: string | null = null;
   /** inflight initialize promise 去重，防止并发初始化创建多个 session */
   private _initPromise: Promise<string> | null = null;
@@ -115,6 +126,7 @@ export class QmdClient {
   constructor(opts: QmdClientOptions = {}) {
     this.mcpBaseUrl = opts.mcpBaseUrl ?? DEFAULTS.mcpBaseUrl;
     this.mcpTimeout = opts.mcpTimeout ?? DEFAULTS.mcpTimeout;
+    this.mcpQueryTimeout = opts.mcpQueryTimeout ?? DEFAULTS.mcpQueryTimeout;
     this.cliTimeout = opts.cliTimeout ?? DEFAULTS.cliTimeout;
     this.cliFallbackSearchType = opts.cliFallbackSearchType ?? DEFAULTS.cliFallbackSearchType;
     this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
@@ -168,7 +180,7 @@ export class QmdClient {
         } else if (_mcpErr.includes("empty response")) {
           this.logger.warn("[qmd-client] MCP query returned no results, falling back to REST");
         } else if (_mcpErr.includes("timeout") || _mcpErr.includes("Timeout") || _mcpErr.includes("aborted")) {
-          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, timeout: this.mcpTimeout });
+          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, mcpQueryTimeout: this.mcpQueryTimeout });
         } else if (_mcpErr.includes("fetch failed") || _mcpErr.includes("ECONNREFUSED") || _mcpErr.includes("ECONNRESET")) {
           this.logger.warn("[qmd-client] MCP connection failed, falling back to REST", { err: _mcpErr, baseUrl: this.mcpBaseUrl });
         } else {
@@ -353,7 +365,7 @@ export class QmdClient {
         "mcp-session-id": sessionId,
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.mcpTimeout),
+      signal: AbortSignal.timeout(this.mcpQueryTimeout),
     });
 
     this.logger?.debug?.(`[qmd-client] mcpCall response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}`);
