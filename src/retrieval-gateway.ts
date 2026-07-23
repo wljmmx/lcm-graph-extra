@@ -110,8 +110,10 @@ export class RetrievalGateway {
       source: 'graph' as const,
       type: 'definition' as const,
       score: er.score,
+      // 保存原始经验对象，供 injection.ts 的 incrementMatchCount 等使用
+      experience: er.experience,
       metadata: {
-        experience: true,
+        experience: er.experience,
         distilled: true,
         tags: er.experience.tags,
         context: er.experience.context,

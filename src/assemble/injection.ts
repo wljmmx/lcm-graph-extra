@@ -123,17 +123,19 @@ export async function injectContext(
     }
 
     const expBody = '⚠️ 以下经验来自历史对话，可能【主题不同】。请仅引用与当前问题直接相关的经验。\n\n'
-        + personalizedResults.map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
+        + personalizedResults.filter((e: any) => e.experience != null).map((e: any) => '- [' + e.experience.type + '] ' + e.experience.summary).join('\n');
     addSection('## 💡 经验总结（历史经验参考）', expBody, 5);
     for (const e of personalizedResults) {
       // P1-1: 已改为静态导入，直接使用 backgroundTasks
-      backgroundTasks.register('exp:increment-match', ctx.expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}));
+      if (e.experience?.id) {
+        backgroundTasks.register('exp:increment-match', ctx.expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}));
+      }
     }
 
     // G-8: 记录本轮 assemble 返回的经验
     const LAST_EXP_MAP_MAX = 200;
     ctx.lastAssembleExpIdsBySession.set(sessionKey, {
-      ids: personalizedResults.map((e: any) => ({
+      ids: personalizedResults.filter((e: any) => e.experience != null).map((e: any) => ({
         id: e.experience.id,
         summary: e.experience.summary ?? '',
         query: qmdQuery,
