@@ -1212,6 +1212,25 @@ const pluginEntry: any = definePluginEntry({
           const _lcTokensBefore = compactResult?.result?.tokensBefore ?? 0;
           const _lcTokensAfter = compactResult?.result?.tokensAfter ?? 0;
 
+          // BUGFIX: 当 DAG 已压缩到稳定状态（tokensBefore === tokensAfter > 0），
+          // 且 summaryContent 为空（未生成新摘要），从 DAG 获取已有摘要返回给 SDK。
+          // 修复前：auto-compaction 触发时，DAG 已压缩无需新摘要 → summaryContent=undefined，
+          // SDK 收到 compacted=true 但无 summary → 无法替换上下文 → 反复重试直到报错。
+          if (!summaryContent && _lcTokensAfter > 0 && _lcTokensBefore === _lcTokensAfter && _adapterConnected) {
+            try {
+              const _summaries = await _losslessClawAdapter.getSummaries(_compactSessionId ?? '', 3);
+              if (_summaries.length > 0) {
+                summaryContent = _summaries[_summaries.length - 1].content;
+                logger?.info?.('[compact] using existing summary from DAG (no new summary created)', {
+                  summaryLength: summaryContent?.length ?? 0,
+                  summaryCount: _summaries.length,
+                });
+              }
+            } catch (e) {
+              logger?.debug?.('[compact] failed to fetch existing summary', { err: serializeError(e) });
+            }
+          }
+
           // 当 SDK 未传 currentTokenCount（手动 /compact 时不传），且 DAG 报告
           // tokensBefore === tokensAfter（已压缩过，无需再压），我们需要估算
           // 实际会话的 token 数作为 tokensBefore，让 SDK 知道上下文确实被压缩过。
