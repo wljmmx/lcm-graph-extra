@@ -1227,15 +1227,26 @@ const pluginEntry: any = definePluginEntry({
 
           // tokensBefore 优先级：
           // 1) DAG 的 tokensBefore（当 > tokensAfter 时，表示实际发生了压缩）
-          // 2) SDK 传入的 currentTokenCount（auto-compaction 时有值）
-          // 3) 从 sessionFile 估算的 token 数（手动 /compact 时 currentTokenCount=0）
-          // 当 DAG 的 tokensBefore === tokensAfter（无变化）且有估算值时，
-          // 使用估算值作为 tokensBefore，让 SDK 看到实际的压缩效果。
+          // 2) DAG 已压缩到稳定状态（tokensBefore === tokensAfter），使用 DAG 实际值
+          // 3) SDK 传入的 currentTokenCount（auto-compaction 时有值）
+          // 4) 从 sessionFile 估算的 token 数（手动 /compact 时 currentTokenCount=0）
+          //
+          // BUGFIX: 当 DAG 已压缩到稳定状态（_lcTokensBefore === _lcTokensAfter > 0），
+          // 使用 DAG 的实际 token 数而非 SDK 的 currentTokenCount 作为 tokensBefore。
+          // 修复前：auto-compaction 触发时，_currentTokens（含新消息 + SDK overhead）
+          // 被用作 tokensBefore，与 _lcTokensAfter（DAG 已压缩值）的差值很小，
+          // SDK 认为压缩无效 → 反复重试 → Auto-compaction could not recover。
+          // 修复后：直接告知 SDK 上下文已是 _lcTokensAfter 大小，可继续对话。
           let tokensBefore: number;
           let tokensAfter: number;
           if (_lcTokensBefore > 0 && _lcTokensBefore > _lcTokensAfter) {
             // DAG 报告了实际压缩
             tokensBefore = _lcTokensBefore;
+            tokensAfter = _lcTokensAfter;
+          } else if (_lcTokensAfter > 0 && _lcTokensBefore === _lcTokensAfter) {
+            // DAG 已压缩到稳定状态，无变化。使用 DAG 实际值，
+            // 避免 SDK 的 currentTokenCount（含 overhead）导致误判。
+            tokensBefore = _lcTokensAfter;
             tokensAfter = _lcTokensAfter;
           } else if (_currentTokens > 0) {
             // auto-compaction：SDK 传入了 currentTokenCount
@@ -1252,8 +1263,13 @@ const pluginEntry: any = definePluginEntry({
             tokensAfter = _lcTokensAfter > 0 ? _lcTokensAfter : tokensBefore;
           }
 
-          // 压缩成功判定：lossless-claw 报告 compacted=true，或 tokensBefore > tokensAfter（实际压缩）
-          const compacted = adapterCompacted || (tokensBefore > tokensAfter);
+          // 压缩成功判定：
+          // - lossless-claw 报告 compacted=true
+          // - tokensBefore > tokensAfter（实际发生了压缩）
+          // - DAG 已处于稳定压缩状态（_lcTokensAfter > 0 且无变化，无需进一步压缩）
+          const compacted = adapterCompacted
+            || (tokensBefore > tokensAfter)
+            || (_lcTokensAfter > 0 && _lcTokensBefore === _lcTokensAfter);
           // adapterOk 判定：lossless-claw 返回 ok=true，或实际发生了压缩，或 adapter 正常运行过
           const _adapterOk = compactResult?.ok !== false;
           const ok = _adapterOk || compacted;
