@@ -58,6 +58,7 @@ export interface PluginSnapshot {
     connected: boolean;
     connectFailed: boolean;
     lastError?: string;
+    circuitBreaker?: { available: boolean; failures: number; open: boolean };
   };
   debt?: {
     running: number;
@@ -68,6 +69,7 @@ export interface PluginSnapshot {
   retrieval?: {
     lastQuery: string;
     perfSummary: string;
+    qmdCircuitBreaker?: { available: boolean; failures: number; open: boolean };
   };
 }
 

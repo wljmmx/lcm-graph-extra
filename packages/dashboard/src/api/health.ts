@@ -55,6 +55,7 @@ export interface GraphAdapterState {
   connected: boolean;
   connectFailed: boolean;
   lastError?: string;
+  circuitBreaker?: { available: boolean; failures: number; open: boolean };
 }
 
 export interface DebtStats {
@@ -67,6 +68,7 @@ export interface DebtStats {
 export interface RetrievalState {
   lastQuery: string;
   perfSummary: string;
+  qmdCircuitBreaker?: { available: boolean; failures: number; open: boolean };
 }
 
 export interface DashboardSnapshot {
@@ -114,6 +116,8 @@ export interface GraphHealthResponse {
   nodeCount?: number;
   relationshipCount?: number;
   graphAdapterConnected?: boolean;
+  circuitBreakerOpen?: boolean;
+  circuitBreakerFailures?: number;
   details?: Record<string, unknown>;
   fetchedAt: number;
   error?: string;

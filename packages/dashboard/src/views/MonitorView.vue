@@ -1274,12 +1274,26 @@ const moaLatencyPhaseOption = computed(() => {
               <div class="profile-section">
                 <div class="profile-label">图谱适配器</div>
                 <StatusIndicator
-                  label="connected"
+                  label="Neo4j"
                   :available="!!memory.graphAdapter?.connected"
-                  :failures="memory.graphAdapter?.connectFailed ? 1 : 0"
+                  :failures="memory.graphAdapter?.circuitBreaker?.failures ?? (memory.graphAdapter?.connectFailed ? 1 : 0)"
                 />
-                <div v-if="memory.graphAdapter?.lastError" class="muted mono">
+                <div v-if="memory.graphAdapter?.circuitBreaker?.open" class="muted mono" style="color: var(--n-error-color)">
+                  熔断已触发 (failures: {{ memory.graphAdapter.circuitBreaker.failures }})
+                </div>
+                <div v-else-if="memory.graphAdapter?.lastError" class="muted mono">
                   {{ memory.graphAdapter.lastError }}
+                </div>
+              </div>
+              <div class="profile-section" style="margin-top: 8px">
+                <div class="profile-label">QMD 熔断器</div>
+                <StatusIndicator
+                  label="QMD"
+                  :available="memory.retrieval?.qmdCircuitBreaker?.available ?? true"
+                  :failures="memory.retrieval?.qmdCircuitBreaker?.failures ?? 0"
+                />
+                <div v-if="memory.retrieval?.qmdCircuitBreaker?.open" class="muted mono" style="color: var(--n-error-color)">
+                  熔断已触发 (failures: {{ memory.retrieval.qmdCircuitBreaker.failures }})
                 </div>
               </div>
             </template>
@@ -1317,8 +1331,14 @@ const moaLatencyPhaseOption = computed(() => {
                   <StatusIndicator
                     label="connected"
                     :available="!!graphHealth.graphAdapterConnected"
-                    :failures="0"
+                    :failures="graphHealth.circuitBreakerFailures ?? 0"
                   />
+                </NDescriptionsItem>
+                <NDescriptionsItem v-if="graphHealth.circuitBreakerOpen !== undefined" label="熔断器">
+                  <NTag :type="graphHealth.circuitBreakerOpen ? 'error' : 'success'" size="small">
+                    {{ graphHealth.circuitBreakerOpen ? 'OPEN (熔断)' : 'CLOSED (正常)' }}
+                  </NTag>
+                  <span class="mono" style="margin-left: 6px">failures: {{ graphHealth.circuitBreakerFailures ?? 0 }}</span>
                 </NDescriptionsItem>
               </NDescriptions>
               <div v-if="graphHealth.error" class="muted mono" style="margin-top: 6px">

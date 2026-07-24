@@ -18,6 +18,8 @@ export interface GraphHealthResponse {
   nodeCount?: number;
   relationshipCount?: number;
   graphAdapterConnected?: boolean;
+  circuitBreakerOpen?: boolean;
+  circuitBreakerFailures?: number;
   details?: Record<string, unknown>;
   fetchedAt: number;
   error?: string;
