@@ -69,6 +69,39 @@ function computeKeepCount(
   return Math.min(totalMessages, 8);
 }
 
+/**
+ * 根据 dedupRounds 裁剪 summary 列表，移除覆盖范围已超出最近 N 条消息的旧 summary。
+ *
+ * 设计原则：
+ *   - dedupRounds 是 PRIMARY 控制参数，summary 覆盖的消息一旦超出最近 dedupRounds 条，
+ *     应主动移除以避免累积挤占上下文窗口。
+ *   - trimSummariesToBudget（token 预算裁剪）和级联降级是 SECONDARY 兜底策略，
+ *     仅在 dedupRounds 范围内的 summary 仍放不下时才触发。
+ *
+ * 算法：从最新（earliestAt 最大）的 summary 开始向前累加 entryCount，
+ *       当累计覆盖消息数 >= dedupRounds 时停止，丢弃更旧的 summary。
+ *       summaries 必须已按 earliestAt ASC 排序。
+ *
+ * @param summaries   按 earliestAt ASC 排序的摘要列表
+ * @param dedupRounds 保留的最近消息窗口大小
+ * @returns 裁剪后的摘要列表（仍按 earliestAt ASC 排序）
+ */
+function filterSummariesByDedupRounds<T extends { entryCount?: number }>(
+  summaries: T[],
+  dedupRounds: number,
+): T[] {
+  if (summaries.length <= 1) return summaries;
+  let cumulative = 0;
+  const kept: T[] = [];
+  // 从最新（数组末尾）向前遍历
+  for (let i = summaries.length - 1; i >= 0; i--) {
+    cumulative += (summaries[i] as any).entryCount || 0;
+    kept.unshift(summaries[i]);
+    if (cumulative >= dedupRounds) break;
+  }
+  return kept;
+}
+
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
   // AbortSignal support - early exit if cancelled
   const signal = (params as any).abortSignal || (params as any).signal;
@@ -305,11 +338,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           }).then(() => {}, () => {}));
 
           if (hasExistingSummary) {
-            // BUGFIX: 中压路径也使用 trimSummariesToBudget 裁剪 summary，
-            // 避免多个旧 summary 累积挤占上下文窗口。
-            // 修复前：所有 summary 全部注入，长会话中 summary 越积越多。
+            // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
+            const dedupFiltered = filterSummariesByDedupRounds(convSummaries, dedupLimit);
+            // SECONDARY: token 预算裁剪 — dedupRounds 范围内的 summary 仍放不下时兜底
             const trimmedSummaryMsgs = trimSummariesToBudget(
-              convSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+              dedupFiltered.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
               resolvedCtx.compactTokenBudget * maxSummaryRatio,
             ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
             // Goal Anchoring: 中压压缩时也保留原始目标
@@ -317,10 +350,6 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             const goalAnchorMsgs = goalMsg
               ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
               : [];
-            // BUGFIX: 使用 summary 覆盖范围精确裁剪原始消息。
-            // 修复前：finalMessages = [...summaryMsgs, ...messages] 保留全部原始消息，
-            // 导致 summary 已覆盖的消息重复出现，上下文膨胀。
-            // 修复后：仅保留 summary 未覆盖的原始消息。
             const _uncompDb = getUncompressedMessageCount(conversationId);
             const _keepCount = computeKeepCount(convSummaries, messages.length, _uncompDb);
             const _recentRawMsgs = messages.slice(-_keepCount);
@@ -329,7 +358,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               originalMsgCount: messages.length,
               keptMsgCount: _recentRawMsgs.length,
               summaryCount: trimmedSummaryMsgs.length,
-              summaryCountBeforeTrim: convSummaries.length,
+              summaryCountBeforeDedup: convSummaries.length,
+              dedupRounds: dedupLimit,
               uncoveredFromDb: _uncompDb,
               keepCount: _keepCount,
             });
@@ -367,19 +397,18 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             }
 
             if (existingSummaries.length > 0) {
+              // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
+              const dedupFiltered = filterSummariesByDedupRounds(existingSummaries, dedupLimit);
               const summaryBudgetRatio = aggressiveLevel === 1
                 ? maxSummaryRatio * 0.50
                 : maxSummaryRatio;
+              // SECONDARY: token 预算裁剪 — 兜底
               const trimmed = trimSummariesToBudget(
-                existingSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+                dedupFiltered.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                 resolvedCtx.compactTokenBudget * summaryBudgetRatio,
               ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-              // BUGFIX: 用 computeKeepCount 替代硬编码 6/3。
-              // 修复前：hardcode 保留 6 或 3 条最近消息，不区分哪些已被 summary 覆盖。
-              // 修复后：按 summary 覆盖范围精确裁剪，仅保留未覆盖的原始消息。
               const _uncompDb = getUncompressedMessageCount(conversationId);
               const _keepCount = computeKeepCount(existingSummaries, messages.length, _uncompDb);
-              // aggressiveLevel=1 时取更小的值（更激进）
               const recentCount = aggressiveLevel === 1
                 ? Math.min(_keepCount, 3)
                 : _keepCount;
@@ -470,8 +499,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               if (compactTimer) clearTimeout(compactTimer);
               const freshSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
               if (freshSummaries.length > 0) {
+                // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
+                const dedupFiltered = filterSummariesByDedupRounds(freshSummaries, dedupLimit);
+                // SECONDARY: token 预算裁剪 — 兜底
                 const trimmedSummaryMsgs = trimSummariesToBudget(
-                  freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+                  dedupFiltered.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                   resolvedCtx.compactTokenBudget * maxSummaryRatio,
                 ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
 
@@ -481,10 +513,6 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                   ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
                   : [];
 
-                // BUGFIX: 使用 summary 覆盖范围精确裁剪原始消息。
-                // 修复前：hardcode keep last 8，不区分哪些消息已被 summary 覆盖。
-                // 修复后：综合 freshSummaries.entryCount 和 DB uncompressed 计数，
-                // 仅保留真正未被覆盖的原始消息。
                 const _uncompDb = getUncompressedMessageCount(conversationId);
                 const _keepCount = computeKeepCount(freshSummaries, messages.length, _uncompDb);
                 const recentRawMsgs = messages.slice(-_keepCount);
@@ -493,6 +521,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                   originalMsgCount: messages.length,
                   keptMsgCount: recentRawMsgs.length,
                   summaryCount: trimmedSummaryMsgs.length,
+                  summaryCountBeforeDedup: freshSummaries.length,
+                  dedupRounds: dedupLimit,
                   uncoveredFromDb: _uncompDb,
                   keepCount: _keepCount,
                 });
@@ -619,7 +649,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           hasSummaries: _existingSummaries.length > 0,
         });
         if (_existingSummaries.length > 0) {
-          const _summaryMsgs = _existingSummaries.map((s) => ({
+          // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
+          const _dedupRounds = (wm as any)?.dedupRounds ?? 24;
+          const _dedupFiltered = filterSummariesByDedupRounds(_existingSummaries, _dedupRounds);
+          const _summaryMsgs = _dedupFiltered.map((s) => ({
             role: 'user', content: s.content, token_count: s.tokenCount,
           }));
           // Goal Anchoring: 摘要注入时也保留原始目标
@@ -627,9 +660,6 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           const _goalAnchorMsgs = _goalMsg
             ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
             : [];
-          // BUGFIX: 使用 summary 覆盖范围精确裁剪原始消息。
-          // 修复前：hardcode keep last 8，不区分哪些消息已被 summary 覆盖。
-          // 修复后：综合 existingSummaries.entryCount 和 DB uncompressed 计数。
           const _uncompDb = getUncompressedMessageCount(_convId);
           const _keepCount = computeKeepCount(_existingSummaries, messages.length, _uncompDb);
           const _recentRawMsgs = messages.slice(-_keepCount);
@@ -638,6 +668,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             originalMsgCount: messages.length,
             keptMsgCount: _recentRawMsgs.length,
             summaryCount: _summaryMsgs.length,
+            summaryCountBeforeDedup: _existingSummaries.length,
+            dedupRounds: _dedupRounds,
             goalAnchorCount: _goalAnchorMsgs.length,
             finalMsgCount: finalMessages.length,
             uncoveredFromDb: _uncompDb,
