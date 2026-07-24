@@ -163,8 +163,28 @@ function buildChronologicalContext(
   for (let i = segments.length - 1; i >= 0; i--) {
     const seg = segments[i];
     const segCount = seg.type === 'summary' ? seg.summary.entryCount : seg.count;
-    cumulative += segCount;
-    kept.unshift(seg);
+    const nextCumulative = cumulative + segCount;
+
+    if (nextCumulative < dedupRounds) {
+      // 整个段都在窗口内
+      cumulative = nextCumulative;
+      kept.unshift(seg);
+    } else if (cumulative < dedupRounds) {
+      // 段跨越 dedupRounds 边界 — 需要部分保留
+      if (seg.type === 'raw') {
+        // raw 段：只保留落在窗口内的尾部消息
+        const overflow = nextCumulative - dedupRounds;
+        const trimmedMessages = seg.messages.slice(overflow);
+        if (trimmedMessages.length > 0) {
+          kept.unshift({ type: 'raw', messages: trimmedMessages, count: trimmedMessages.length });
+        }
+      } else {
+        // summary 段：原子单位，整体保留
+        kept.unshift(seg);
+      }
+      break; // 已到达边界，停止
+    }
+    // cumulative >= dedupRounds：段已完全在窗口外，停止
     if (cumulative >= dedupRounds) break;
   }
 
