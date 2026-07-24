@@ -1978,6 +1978,22 @@ const pluginEntry: any = definePluginEntry({
                   if (hasRecaller && hasEmbedFn) {
                     logger?.debug?.("heartbeat: graph/neo4j healthy, Recaller + embedFn verified");
                   }
+                  // P-CB-7: 健康检查通过后立即关闭 neo4j 熔断器。
+                  // 修复前：熔断器关闭依赖 200 行之后的 P-CB-4 探针，但探针的
+                  // isAvailable() 半开探测位是全局单例，业务请求的 withCircuitBreaker
+                  // 会在步骤 1 和步骤 2 之间消耗探测位，导致探针被跳过、熔断器永远不恢复。
+                  // 修复后：health() 恢复 driver 成功即同步关闭熔断器，不等探针。
+                  try {
+                    const { getHealthSnapshot, recordSuccess } = await import('./circuit-breaker.js');
+                    const cbSnap = getHealthSnapshot();
+                    if (cbSnap?.neo4j?.open) {
+                      recordSuccess('neo4j');
+                      logger?.info?.("heartbeat: P-CB-7 neo4j circuit breaker closed (health check passed, driver recovered)");
+                    }
+                  } catch (cbErr) {
+                    // 熔断器恢复失败不影响主流程
+                    logger?.debug?.("heartbeat: P-CB-7 circuit breaker recovery failed (non-fatal)", { err: String(cbErr) });
+                  }
                 }
               } catch (e) {
                 logger?.debug?.("heartbeat: graph health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
