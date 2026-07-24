@@ -343,8 +343,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
           // ── 压缩降级工具函数：用已有摘要 + 最近消息构建注入上下文 ──
           // aggressiveLevel:
-          //   0 (默认) — 摘要 + 6 条最近消息, 摘要预算 = maxSummaryRatio
-          //   1        — 摘要 + 3 条最近消息, 摘要预算减半
+          //   0 (默认) — 摘要 + range-aware 最近消息, 摘要预算 = maxSummaryRatio
+          //   1        — 摘要 + range-aware 最近消息, 摘要预算减半
           //   2        — 丢弃摘要, 仅保留 8 条最近消息
           //   3        — 丢弃摘要, 仅保留 4 条最近消息
           const buildDegradedContext = (reason: string, aggressiveLevel: number = 0) => {
@@ -354,7 +354,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
               : [];
 
-            // Level 2+: 丢弃摘要，仅保留最近消息
+            // Level 2+: 丢弃摘要，仅保留最近消息（硬编码，激进降级）
             if (aggressiveLevel >= 2) {
               const keepCount = aggressiveLevel === 2 ? 8 : 4;
               const recentCount = Math.min(messages.length, keepCount);
@@ -369,7 +369,15 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 existingSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                 resolvedCtx.compactTokenBudget * summaryBudgetRatio,
               ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-              const recentCount = Math.min(messages.length, aggressiveLevel === 1 ? 3 : 6);
+              // BUGFIX: 用 computeKeepCount 替代硬编码 6/3。
+              // 修复前：hardcode 保留 6 或 3 条最近消息，不区分哪些已被 summary 覆盖。
+              // 修复后：按 summary 覆盖范围精确裁剪，仅保留未覆盖的原始消息。
+              const _uncompDb = getUncompressedMessageCount(conversationId);
+              const _keepCount = computeKeepCount(existingSummaries, messages.length, _uncompDb);
+              // aggressiveLevel=1 时取更小的值（更激进）
+              const recentCount = aggressiveLevel === 1
+                ? Math.min(_keepCount, 3)
+                : _keepCount;
               return [...goalAnchorMsgs, ...trimmed, ...messages.slice(-recentCount)];
             }
             // 无摘要时只用最近消息
