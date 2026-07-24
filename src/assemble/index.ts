@@ -305,9 +305,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           }).then(() => {}, () => {}));
 
           if (hasExistingSummary) {
-            const summaryMsgs = convSummaries.map((s) => ({
-              role: 'user', content: s.content, token_count: s.tokenCount,
-            }));
+            // BUGFIX: 中压路径也使用 trimSummariesToBudget 裁剪 summary，
+            // 避免多个旧 summary 累积挤占上下文窗口。
+            // 修复前：所有 summary 全部注入，长会话中 summary 越积越多。
+            const trimmedSummaryMsgs = trimSummariesToBudget(
+              convSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+              resolvedCtx.compactTokenBudget * maxSummaryRatio,
+            ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
             // Goal Anchoring: 中压压缩时也保留原始目标
             const goalMsg = getGoal(sessionKey);
             const goalAnchorMsgs = goalMsg
@@ -320,11 +324,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             const _uncompDb = getUncompressedMessageCount(conversationId);
             const _keepCount = computeKeepCount(convSummaries, messages.length, _uncompDb);
             const _recentRawMsgs = messages.slice(-_keepCount);
-            finalMessages = [...goalAnchorMsgs, ...summaryMsgs, ..._recentRawMsgs];
+            finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ..._recentRawMsgs];
             ctx.logger?.info?.('[assemble:medium] messages replaced with summary (range-aware)', {
               originalMsgCount: messages.length,
               keptMsgCount: _recentRawMsgs.length,
-              summaryCount: summaryMsgs.length,
+              summaryCount: trimmedSummaryMsgs.length,
+              summaryCountBeforeTrim: convSummaries.length,
               uncoveredFromDb: _uncompDb,
               keepCount: _keepCount,
             });
