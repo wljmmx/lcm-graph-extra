@@ -70,36 +70,119 @@ function computeKeepCount(
 }
 
 /**
- * 根据 dedupRounds 裁剪 summary 列表，移除覆盖范围已超出最近 N 条消息的旧 summary。
+ * 根据 dedupRounds 构建时序上下文，严格按消息时间顺序交错排列 summary 和原始消息。
  *
  * 设计原则：
- *   - dedupRounds 是 PRIMARY 控制参数，summary 覆盖的消息一旦超出最近 dedupRounds 条，
- *     应主动移除以避免累积挤占上下文窗口。
- *   - trimSummariesToBudget（token 预算裁剪）和级联降级是 SECONDARY 兜底策略，
- *     仅在 dedupRounds 范围内的 summary 仍放不下时才触发。
+ *   - dedupRounds 是 PRIMARY 控制参数，超出最近 dedupRounds 条消息范围的 summary 和原始消息
+ *     都会被主动移除，避免累积挤占上下文窗口。
+ *   - 上下文按实际时间顺序排列：可能呈现 [summary] [raw] [summary] [raw] ... 的交错模式。
+ *   - trimSummariesToBudget（token 预算裁剪）和级联降级是 SECONDARY 兜底策略。
  *
- * 算法：从最新（earliestAt 最大）的 summary 开始向前累加 entryCount，
- *       当累计覆盖消息数 >= dedupRounds 时停止，丢弃更旧的 summary。
- *       summaries 必须已按 earliestAt ASC 排序。
+ * 算法：
+ *   1. 如果有 startOrdinal，用其精确构建时序段列表
+ *   2. 否则回退：假定所有 summary 覆盖最旧消息，原始消息全在末尾
+ *   3. 从最新段向前累加消息数，>= dedupRounds 时停止，丢弃更旧的段
+ *   4. 按时间顺序输出最终上下文
  *
- * @param summaries   按 earliestAt ASC 排序的摘要列表
- * @param dedupRounds 保留的最近消息窗口大小
- * @returns 裁剪后的摘要列表（仍按 earliestAt ASC 排序）
+ * @param summaries      按 earliestAt ASC 排序的摘要列表
+ * @param messages       原始消息数组（按时间顺序）
+ * @param dedupRounds    保留的最近消息窗口大小
+ * @returns 按时序排列的上下文消息数组
  */
-function filterSummariesByDedupRounds<T extends { entryCount?: number }>(
-  summaries: T[],
+function buildChronologicalContext(
+  summaries: Array<{ summaryId: string; content: string; tokenCount: number; entryCount: number; startOrdinal: number | null }>,
+  messages: any[],
   dedupRounds: number,
-): T[] {
-  if (summaries.length <= 1) return summaries;
+): any[] {
+  if (summaries.length === 0) {
+    // 无摘要：直接保留最近 dedupRounds 条消息
+    return messages.slice(-Math.min(messages.length, dedupRounds));
+  }
+
+  const totalMessages = messages.length;
+
+  // 检查是否有 startOrdinal 可用于精确构建时序段
+  const hasOrdinals = summaries.every((s) => s.startOrdinal != null);
+
+  type Segment = { type: 'summary'; summary: typeof summaries[0] } | { type: 'raw'; messages: any[]; count: number };
+
+  let segments: Segment[];
+
+  if (hasOrdinals) {
+    // ── 精确路径：使用 startOrdinal 构建时序段 ──
+    segments = [];
+    // 按 startOrdinal 排序确保顺序正确
+    const sorted = [...summaries].sort((a, b) => (a.startOrdinal ?? 0) - (b.startOrdinal ?? 0));
+    let cursor = 0;
+
+    for (const summary of sorted) {
+      const start = summary.startOrdinal!;
+      const end = start + summary.entryCount;
+
+      // startOrdinal 之前的原始消息
+      if (start > cursor && cursor < totalMessages) {
+        const rawSlice = messages.slice(cursor, Math.min(start, totalMessages));
+        if (rawSlice.length > 0) {
+          segments.push({ type: 'raw', messages: rawSlice, count: rawSlice.length });
+        }
+      }
+
+      // summary 段
+      segments.push({ type: 'summary', summary });
+      cursor = Math.min(end, totalMessages);
+    }
+
+    // 最后一个 summary 之后的原始消息
+    if (cursor < totalMessages) {
+      const rawSlice = messages.slice(cursor);
+      if (rawSlice.length > 0) {
+        segments.push({ type: 'raw', messages: rawSlice, count: rawSlice.length });
+      }
+    }
+  } else {
+    // ── 回退路径：假定所有 summary 覆盖最旧消息，原始消息在末尾 ──
+    segments = [];
+    const totalCovered = summaries.reduce((sum, s) => sum + s.entryCount, 0);
+    const uncovered = Math.max(0, totalMessages - totalCovered);
+
+    // 所有 summary 段（按 earliestAt ASC 顺序，即最旧在前）
+    for (const summary of summaries) {
+      segments.push({ type: 'summary', summary });
+    }
+
+    // 末尾的原始消息
+    if (uncovered > 0) {
+      const rawSlice = messages.slice(-uncovered);
+      segments.push({ type: 'raw', messages: rawSlice, count: rawSlice.length });
+    }
+  }
+
+  // ── 从最新段向前裁剪：保留最近 dedupRounds 条消息 ──
   let cumulative = 0;
-  const kept: T[] = [];
-  // 从最新（数组末尾）向前遍历
-  for (let i = summaries.length - 1; i >= 0; i--) {
-    cumulative += (summaries[i] as any).entryCount || 0;
-    kept.unshift(summaries[i]);
+  const kept: Segment[] = [];
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const seg = segments[i];
+    const segCount = seg.type === 'summary' ? seg.summary.entryCount : seg.count;
+    cumulative += segCount;
+    kept.unshift(seg);
     if (cumulative >= dedupRounds) break;
   }
-  return kept;
+
+  // ── 按时序输出最终上下文 ──
+  const result: any[] = [];
+  for (const seg of kept) {
+    if (seg.type === 'summary') {
+      result.push({
+        role: 'user',
+        content: seg.summary.content,
+        token_count: seg.summary.tokenCount,
+      });
+    } else {
+      result.push(...seg.messages);
+    }
+  }
+
+  return result;
 }
 
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
@@ -338,30 +421,31 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           }).then(() => {}, () => {}));
 
           if (hasExistingSummary) {
-            // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
-            const dedupFiltered = filterSummariesByDedupRounds(convSummaries, dedupLimit);
-            // SECONDARY: token 预算裁剪 — dedupRounds 范围内的 summary 仍放不下时兜底
-            const trimmedSummaryMsgs = trimSummariesToBudget(
-              dedupFiltered.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+            // SECONDARY: token 预算裁剪 — 先裁剪 summary 的 token 总量
+            const budgetTrimmed = trimSummariesToBudget(
+              convSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
               resolvedCtx.compactTokenBudget * maxSummaryRatio,
-            ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-            // Goal Anchoring: 中压压缩时也保留原始目标
+            );
+            // 从原始 convSummaries 中保留 matching 的 summary（保留 entryCount/startOrdinal）
+            const budgetSummaries = convSummaries.filter((s) =>
+              budgetTrimmed.some((t) => t.summaryId === s.summaryId),
+            );
+            // PRIMARY: dedupRounds 控制 — 构建时序上下文，自动交错排列 summary + 原始消息
+            const chronologicalMsgs = buildChronologicalContext(
+              budgetSummaries, messages, dedupLimit,
+            );
+            // Goal Anchoring
             const goalMsg = getGoal(sessionKey);
             const goalAnchorMsgs = goalMsg
               ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
               : [];
-            const _uncompDb = getUncompressedMessageCount(conversationId);
-            const _keepCount = computeKeepCount(convSummaries, messages.length, _uncompDb);
-            const _recentRawMsgs = messages.slice(-_keepCount);
-            finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ..._recentRawMsgs];
-            ctx.logger?.info?.('[assemble:medium] messages replaced with summary (range-aware)', {
+            finalMessages = [...goalAnchorMsgs, ...chronologicalMsgs];
+            ctx.logger?.info?.('[assemble:medium] messages replaced with chronological context', {
               originalMsgCount: messages.length,
-              keptMsgCount: _recentRawMsgs.length,
-              summaryCount: trimmedSummaryMsgs.length,
+              keptMsgCount: chronologicalMsgs.length,
               summaryCountBeforeDedup: convSummaries.length,
+              summaryCountAfterBudget: budgetSummaries.length,
               dedupRounds: dedupLimit,
-              uncoveredFromDb: _uncompDb,
-              keepCount: _keepCount,
             });
           }
 
@@ -397,22 +481,22 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             }
 
             if (existingSummaries.length > 0) {
-              // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
-              const dedupFiltered = filterSummariesByDedupRounds(existingSummaries, dedupLimit);
               const summaryBudgetRatio = aggressiveLevel === 1
                 ? maxSummaryRatio * 0.50
                 : maxSummaryRatio;
-              // SECONDARY: token 预算裁剪 — 兜底
-              const trimmed = trimSummariesToBudget(
-                dedupFiltered.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+              // SECONDARY: token 预算裁剪
+              const budgetTrimmed = trimSummariesToBudget(
+                existingSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                 resolvedCtx.compactTokenBudget * summaryBudgetRatio,
-              ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
-              const _uncompDb = getUncompressedMessageCount(conversationId);
-              const _keepCount = computeKeepCount(existingSummaries, messages.length, _uncompDb);
-              const recentCount = aggressiveLevel === 1
-                ? Math.min(_keepCount, 3)
-                : _keepCount;
-              return [...goalAnchorMsgs, ...trimmed, ...messages.slice(-recentCount)];
+              );
+              const budgetSummaries = existingSummaries.filter((s) =>
+                budgetTrimmed.some((t) => t.summaryId === s.summaryId),
+              );
+              // PRIMARY: dedupRounds 控制 — 构建时序上下文
+              const chronologicalMsgs = buildChronologicalContext(
+                budgetSummaries, messages, dedupLimit,
+              );
+              return [...goalAnchorMsgs, ...chronologicalMsgs];
             }
             // 无摘要时只用最近消息
             const fallbackCount = Math.min(messages.length, aggressiveLevel === 1 ? 8 : 12);
@@ -499,13 +583,18 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               if (compactTimer) clearTimeout(compactTimer);
               const freshSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
               if (freshSummaries.length > 0) {
-                // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
-                const dedupFiltered = filterSummariesByDedupRounds(freshSummaries, dedupLimit);
-                // SECONDARY: token 预算裁剪 — 兜底
-                const trimmedSummaryMsgs = trimSummariesToBudget(
-                  dedupFiltered.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+                // SECONDARY: token 预算裁剪
+                const budgetTrimmed = trimSummariesToBudget(
+                  freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                   resolvedCtx.compactTokenBudget * maxSummaryRatio,
-                ).map((s) => ({ role: 'user', content: s.content, token_count: s.tokenCount }));
+                );
+                const budgetSummaries = freshSummaries.filter((s) =>
+                  budgetTrimmed.some((t) => t.summaryId === s.summaryId),
+                );
+                // PRIMARY: dedupRounds 控制 — 构建时序上下文
+                const chronologicalMsgs = buildChronologicalContext(
+                  budgetSummaries, messages, dedupLimit,
+                );
 
                 // Goal Anchoring: 压缩时保留原始用户目标，防止任务丢失
                 const goalMsg = getGoal(sessionKey);
@@ -513,18 +602,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                   ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
                   : [];
 
-                const _uncompDb = getUncompressedMessageCount(conversationId);
-                const _keepCount = computeKeepCount(freshSummaries, messages.length, _uncompDb);
-                const recentRawMsgs = messages.slice(-_keepCount);
-                finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ...recentRawMsgs];
-                ctx.logger?.info?.('[assemble:high] messages replaced with summary (range-aware)', {
+                finalMessages = [...goalAnchorMsgs, ...chronologicalMsgs];
+                ctx.logger?.info?.('[assemble:high] messages replaced with chronological context', {
                   originalMsgCount: messages.length,
-                  keptMsgCount: recentRawMsgs.length,
-                  summaryCount: trimmedSummaryMsgs.length,
+                  keptMsgCount: chronologicalMsgs.length,
                   summaryCountBeforeDedup: freshSummaries.length,
+                  summaryCountAfterBudget: budgetSummaries.length,
                   dedupRounds: dedupLimit,
-                  uncoveredFromDb: _uncompDb,
-                  keepCount: _keepCount,
                 });
 
                 // Re-evaluate pressure tier after successful compaction
@@ -649,31 +733,24 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           hasSummaries: _existingSummaries.length > 0,
         });
         if (_existingSummaries.length > 0) {
-          // PRIMARY: dedupRounds 控制 — 移除覆盖范围超出最近 N 条消息的旧 summary
           const _dedupRounds = (wm as any)?.dedupRounds ?? 24;
-          const _dedupFiltered = filterSummariesByDedupRounds(_existingSummaries, _dedupRounds);
-          const _summaryMsgs = _dedupFiltered.map((s) => ({
-            role: 'user', content: s.content, token_count: s.tokenCount,
-          }));
+          // PRIMARY: dedupRounds 控制 — 构建时序上下文，自动交错排列 summary + 原始消息
+          const _chronologicalMsgs = buildChronologicalContext(
+            _existingSummaries, messages, _dedupRounds,
+          );
           // Goal Anchoring: 摘要注入时也保留原始目标
           const _goalMsg = getGoal(_sessionKey);
           const _goalAnchorMsgs = _goalMsg
             ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
             : [];
-          const _uncompDb = getUncompressedMessageCount(_convId);
-          const _keepCount = computeKeepCount(_existingSummaries, messages.length, _uncompDb);
-          const _recentRawMsgs = messages.slice(-_keepCount);
-          finalMessages = [..._goalAnchorMsgs, ..._summaryMsgs, ..._recentRawMsgs];
-          ctx.logger?.info?.('[assemble:low-tier] messages replaced with summary (range-aware)', {
+          finalMessages = [..._goalAnchorMsgs, ..._chronologicalMsgs];
+          ctx.logger?.info?.('[assemble:low-tier] messages replaced with chronological context', {
             originalMsgCount: messages.length,
-            keptMsgCount: _recentRawMsgs.length,
-            summaryCount: _summaryMsgs.length,
+            keptMsgCount: _chronologicalMsgs.length,
             summaryCountBeforeDedup: _existingSummaries.length,
             dedupRounds: _dedupRounds,
             goalAnchorCount: _goalAnchorMsgs.length,
             finalMsgCount: finalMessages.length,
-            uncoveredFromDb: _uncompDb,
-            keepCount: _keepCount,
           });
 
           // ── 低压力路径裁剪后校验 ──

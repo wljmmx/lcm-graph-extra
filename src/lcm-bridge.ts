@@ -588,13 +588,9 @@ export function getConversationSummaries(conversationId: number): Array<{
   earliestAt: string | null;
   latestAt: string | null;
   entryCount: number;
+  startOrdinal: number | null;
 }> {
-  // P3-8: 统一 fail-open 语义 —— db.close 移入 finally，防止 prepare 抛错时连接泄漏
-  // P0-2 H-1: 改为单例 DB + 预编译 statement，不再每次 open/close
   try {
-    // BUGFIX: 同时查询 latest_at（覆盖的最晚消息时间戳），
-    // 修复前仅查询 earliest_at，assemble 无法知道 summary 覆盖了哪些消息范围，
-    // 只能用粗粒度 "prepend 所有 summary + keep last N" 策略。
     const stmt = getStmt('getConversationSummaries',
       "SELECT summary_id, content, token_count, earliest_at, latest_at, entry_count " +
       "FROM summaries WHERE conversation_id = ? ORDER BY earliest_at ASC");
@@ -607,6 +603,7 @@ export function getConversationSummaries(conversationId: number): Array<{
       earliestAt: r.earliest_at as string | null,
       latestAt: r.latest_at as string | null,
       entryCount: Number(r.entry_count) || 0,
+      startOrdinal: null, // LCM DB summaries table 没有 ordinal 列，仅 DAG adapter 返回
     }));
   } catch {
     return [];
