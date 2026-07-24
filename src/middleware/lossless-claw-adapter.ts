@@ -691,7 +691,7 @@ export class LosslessClawAdapter {
     return this.engine.getSummaryStore?.();
   }
 
-  async getSummaries(sessionId: string, limit: number = 1): Promise<Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null }>> {
+  async getSummaries(sessionId: string, limit: number = 1): Promise<Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null; latestAt: string | null; entryCount: number }>> {
     if (!this._connected || !this.engine) {
       return [];
     }
@@ -716,24 +716,45 @@ export class LosslessClawAdapter {
       }
       const contextItems = await summaryStore.getContextItems(conversation.conversationId);
 
-      // Step 3: Filter for summary items, get newest ones (highest ordinal last)
-      const summaryItems = (contextItems ?? [])
+      // Step 3: Filter for summary items, get newest ones (highest ordinal last).
+      // Keep the contextItem alongside the summaryId so we can extract entryCount
+      // from the DAG item (ordinal range covered by this summary).
+      const summaryItemPairs = (contextItems ?? [])
         .filter((item: any) => item.itemType === 'summary' && item.summaryId)
-        .slice(-limit);
+        .slice(-limit)
+        .map((item: any) => ({ item, summaryId: item.summaryId }));
 
       // Step 4: Fetch summary content for each summary item
-      const result: Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null }> = [];
-      for (const item of summaryItems) {
+      const result: Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null; latestAt: string | null; entryCount: number }> = [];
+      for (const { item, summaryId } of summaryItemPairs) {
         if (typeof summaryStore.getSummary !== 'function') continue;
-        const summary = await summaryStore.getSummary(item.summaryId);
+        const summary = await summaryStore.getSummary(summaryId);
         if (summary) {
+          // BUGFIX: summary 覆盖范围追踪。
+          // 修复前：仅返回 earliestAt，缺少 latestAt 和 entryCount，
+          // assemble 无法知道 summary 具体覆盖了哪些消息，只能用粗粒度
+          // "prepend 所有 summary + keep last N" 策略，导致：
+          //   1. 已覆盖的消息在 summary 和原始消息中重复出现
+          //   2. 多个 summary 时上下文膨胀
+          // 修复后：同时返回 latestAt（覆盖的最晚时间）和 entryCount（覆盖的消息数），
+          // assemble 可据此精确裁剪：仅保留 summary 未覆盖的原始消息。
+          const earliestAtVal = summary.earliestAt instanceof Date
+            ? summary.earliestAt.toISOString()
+            : (summary.earliestAt ?? null);
+          const latestAtVal = summary.latestAt instanceof Date
+            ? summary.latestAt.toISOString()
+            : (summary.latestAt != null ? String(summary.latestAt) : null);
+          // entryCount: DAG contextItem.entryCount 或 summary.entryCount，兜底 0
+          const entryCountVal = typeof item.entryCount === 'number' ? item.entryCount
+            : typeof summary.entryCount === 'number' ? summary.entryCount
+            : 0;
           result.push({
             summaryId: summary.summaryId ?? '',
             content: summary.content ?? '',
             tokenCount: summary.tokenCount ?? 0,
-            earliestAt: summary.earliestAt instanceof Date
-              ? summary.earliestAt.toISOString()
-              : (summary.earliestAt ?? null),
+            earliestAt: earliestAtVal,
+            latestAt: latestAtVal,
+            entryCount: entryCountVal,
           });
         }
       }

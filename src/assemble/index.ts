@@ -34,6 +34,41 @@ import { injectContext } from './injection.js';
 import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
 import type { AssembleContext, AssembleResult } from './types.js';
 
+/**
+ * BUGFIX: 根据 summary 覆盖范围计算应保留的原始消息数。
+ *
+ * 修复前：上下文替换用粗粒度 "prepend 所有 summary + keep last N" 策略，
+ * 不知道每个 summary 具体覆盖了哪些消息，导致：
+ *   1. 已覆盖的消息在 summary 和原始消息中重复出现（token 浪费）
+ *   2. 多个 summary 时全部 prepend 导致上下文膨胀
+ *
+ * 修复后：综合 summary.entryCount 和 DB 的 getUncompressedMessageCount
+ * 计算实际未被覆盖的消息数，仅保留这些消息作为原始上下文。
+ *
+ * @param summaries          摘要列表（含 entryCount 覆盖范围）
+ * @param totalMessages      当前消息总数
+ * @param uncompressedFromDb DB 报告的未压缩消息数（-1 表示不可用）
+ * @returns 应保留的原始消息数（最少 2 条，最多 totalMessages）
+ */
+function computeKeepCount(
+  summaries: Array<{ entryCount?: number }>,
+  totalMessages: number,
+  uncompressedFromDb: number,
+): number {
+  // Priority 1: 使用 summary entryCount（DAG 直接提供的覆盖消息数）
+  const totalCovered = summaries.reduce((sum, s) => sum + ((s as any).entryCount || 0), 0);
+  if (totalCovered > 0 && totalCovered < totalMessages) {
+    const uncovered = totalMessages - totalCovered;
+    return Math.max(2, Math.min(uncovered, totalMessages));
+  }
+  // Priority 2: 使用 DB 的 getUncompressedMessageCount
+  if (uncompressedFromDb >= 0) {
+    return Math.max(2, Math.min(uncompressedFromDb, totalMessages));
+  }
+  // Priority 3: 回退到默认值 8
+  return Math.min(totalMessages, 8);
+}
+
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
   // AbortSignal support - early exit if cancelled
   const signal = (params as any).abortSignal || (params as any).signal;
@@ -278,7 +313,21 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             const goalAnchorMsgs = goalMsg
               ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
               : [];
-            finalMessages = [...goalAnchorMsgs, ...summaryMsgs, ...messages];
+            // BUGFIX: 使用 summary 覆盖范围精确裁剪原始消息。
+            // 修复前：finalMessages = [...summaryMsgs, ...messages] 保留全部原始消息，
+            // 导致 summary 已覆盖的消息重复出现，上下文膨胀。
+            // 修复后：仅保留 summary 未覆盖的原始消息。
+            const _uncompDb = getUncompressedMessageCount(conversationId);
+            const _keepCount = computeKeepCount(convSummaries, messages.length, _uncompDb);
+            const _recentRawMsgs = messages.slice(-_keepCount);
+            finalMessages = [...goalAnchorMsgs, ...summaryMsgs, ..._recentRawMsgs];
+            ctx.logger?.info?.('[assemble:medium] messages replaced with summary (range-aware)', {
+              originalMsgCount: messages.length,
+              keptMsgCount: _recentRawMsgs.length,
+              summaryCount: summaryMsgs.length,
+              uncoveredFromDb: _uncompDb,
+              keepCount: _keepCount,
+            });
           }
 
           const hasPendingUncompressed = hasUncompressedMessages(conversationId);
@@ -419,9 +468,21 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                   ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
                   : [];
 
-                const recentRawCount = Math.min(messages.length, 8);
-                const recentRawMsgs = messages.slice(-recentRawCount);
+                // BUGFIX: 使用 summary 覆盖范围精确裁剪原始消息。
+                // 修复前：hardcode keep last 8，不区分哪些消息已被 summary 覆盖。
+                // 修复后：综合 freshSummaries.entryCount 和 DB uncompressed 计数，
+                // 仅保留真正未被覆盖的原始消息。
+                const _uncompDb = getUncompressedMessageCount(conversationId);
+                const _keepCount = computeKeepCount(freshSummaries, messages.length, _uncompDb);
+                const recentRawMsgs = messages.slice(-_keepCount);
                 finalMessages = [...goalAnchorMsgs, ...trimmedSummaryMsgs, ...recentRawMsgs];
+                ctx.logger?.info?.('[assemble:high] messages replaced with summary (range-aware)', {
+                  originalMsgCount: messages.length,
+                  keptMsgCount: recentRawMsgs.length,
+                  summaryCount: trimmedSummaryMsgs.length,
+                  uncoveredFromDb: _uncompDb,
+                  keepCount: _keepCount,
+                });
 
                 // Re-evaluate pressure tier after successful compaction
                 if (wm) {
@@ -553,15 +614,21 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           const _goalAnchorMsgs = _goalMsg
             ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
             : [];
-          const _recentCount = Math.min(messages.length, 8);
-          const _recentRawMsgs = messages.slice(-_recentCount);
+          // BUGFIX: 使用 summary 覆盖范围精确裁剪原始消息。
+          // 修复前：hardcode keep last 8，不区分哪些消息已被 summary 覆盖。
+          // 修复后：综合 existingSummaries.entryCount 和 DB uncompressed 计数。
+          const _uncompDb = getUncompressedMessageCount(_convId);
+          const _keepCount = computeKeepCount(_existingSummaries, messages.length, _uncompDb);
+          const _recentRawMsgs = messages.slice(-_keepCount);
           finalMessages = [..._goalAnchorMsgs, ..._summaryMsgs, ..._recentRawMsgs];
-          ctx.logger?.info?.('[assemble:low-tier] messages replaced with summary', {
+          ctx.logger?.info?.('[assemble:low-tier] messages replaced with summary (range-aware)', {
             originalMsgCount: messages.length,
             keptMsgCount: _recentRawMsgs.length,
             summaryCount: _summaryMsgs.length,
             goalAnchorCount: _goalAnchorMsgs.length,
             finalMsgCount: finalMessages.length,
+            uncoveredFromDb: _uncompDb,
+            keepCount: _keepCount,
           });
 
           // ── 低压力路径裁剪后校验 ──
