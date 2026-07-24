@@ -2105,6 +2105,17 @@ const pluginEntry: any = definePluginEntry({
               });
             }
           }
+        } else if (!_retrievalGateway) {
+          // 恢复条件不满足，记录缺失项方便诊断
+          // 仅首次不满足时输出 info，避免刷屏
+          if (_retrievalGatewayRecoveryAttempts === 0) {
+            logger?.info?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovery skipped (conditions not met)', {
+              hasGateway: !!_retrievalGateway,
+              hasConfig: !!_retrievalGatewayConfig,
+              hasGraphAdapter: !!graphAdapter,
+              hasQmdClient: !!qmdClient,
+            });
+          }
         }
         
         // --- 3. Experience distillation (scheduled async, default every 2h) ---
