@@ -137,6 +137,8 @@ const pluginEntry: any = definePluginEntry({
     let merger: any = null;
     let expStore: any = null;
     let _retrievalGateway: any = null;
+    // 存储 RetrievalGateway 初始化配置，供 heartbeat 中恢复重试
+    let _retrievalGatewayConfig: { maxResults: number; fuzzyMatchThreshold: number; decayHalfLifeDays: number } | null = null;
     let _lastEmbedHealth: boolean = true;
     let _modelRegistry: Record<string, number> | undefined;
     // 从 assemble 中捕获活跃模型 ID，供 compact 回查模型上下文窗口
@@ -389,15 +391,20 @@ const pluginEntry: any = definePluginEntry({
         });
 
         // 创建全局 RetrievalGateway 单例，供 dashboard snapshot 读取检索性能
+        // 存储配置供 heartbeat 中恢复重试（初始化失败时 _retrievalGateway 为 null）
+        _retrievalGatewayConfig = {
+          maxResults: merger.config.maxResults,
+          fuzzyMatchThreshold: merger.config.fuzzyMatchThreshold,
+          decayHalfLifeDays: merger.config.decayHalfLifeDays,
+        };
         try {
           const { RetrievalGateway } = await import("./retrieval-gateway.js");
-          _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, {
-            maxResults: merger.config.maxResults,
-            fuzzyMatchThreshold: merger.config.fuzzyMatchThreshold,
-            decayHalfLifeDays: merger.config.decayHalfLifeDays,
-          });
+          _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, _retrievalGatewayConfig);
         } catch (gwErr) {
-          logger?.warn?.('[lcm-graph-extra] RetrievalGateway initialization failed, retrieval stats will show "not initialized"', { err: String(gwErr) });
+          const errDetail = gwErr instanceof Error
+            ? { message: gwErr.message, stack: gwErr.stack, name: gwErr.name }
+            : { err: String(gwErr) };
+          logger?.warn?.('[lcm-graph-extra] RetrievalGateway initialization failed, retrieval stats will show "not initialized". Will retry in heartbeat.', errDetail);
         }
 
         // S5-2: Update MAX_DEDUP_ROUNDS from plugin config
@@ -1468,6 +1475,7 @@ const pluginEntry: any = definePluginEntry({
         graphAdapter = null;
         expStore = null;
         _retrievalGateway = null;
+        _retrievalGatewayConfig = null;
         lastRetrievalQuery = '';
         _lastEmbedHealth = true;
         _modelRegistry = undefined;
@@ -2027,6 +2035,20 @@ const pluginEntry: any = definePluginEntry({
             if (!recovered) {
               logger?.debug?.('heartbeat: snapshot server retry exhausted (will try again next cycle)');
             }
+          }
+        }
+
+        // --- 2e. RetrievalGateway 延迟恢复：初始化失败时每轮 heartbeat 重试 ---
+        if (!_retrievalGateway && _retrievalGatewayConfig && graphAdapter && qmdClient) {
+          try {
+            const { RetrievalGateway } = await import("./retrieval-gateway.js");
+            _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, _retrievalGatewayConfig);
+            logger?.info?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovered (lazy init succeeded)');
+          } catch (gwErr) {
+            // 静默重试，不做日志刷屏（下次 heartbeat 继续尝试）
+            logger?.debug?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovery retry failed', {
+              err: gwErr instanceof Error ? gwErr.message : String(gwErr),
+            });
           }
         }
         
