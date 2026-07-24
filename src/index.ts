@@ -1476,6 +1476,8 @@ const pluginEntry: any = definePluginEntry({
         expStore = null;
         _retrievalGateway = null;
         _retrievalGatewayConfig = null;
+        _retrievalGatewayRecoveryAttempts = 0;
+        _retrievalGatewayLastRecoveryError = null;
         lastRetrievalQuery = '';
         _lastEmbedHealth = true;
         _modelRegistry = undefined;
@@ -1716,6 +1718,12 @@ const pluginEntry: any = definePluginEntry({
               const snap = getHealthSnapshot();
               return snap?.qmd ?? { available: true, failures: 0, open: false };
             })(),
+            // 暴露 gateway 心跳恢复状态，便于诊断恢复失败原因
+            gatewayRecovery: {
+              initialized: !!_retrievalGateway,
+              recoveryAttempts: _retrievalGatewayRecoveryAttempts,
+              lastRecoveryError: _retrievalGatewayLastRecoveryError,
+            },
           }),
           getHealthLatest: () => {
             const base = healthMetrics.getLatest();
@@ -1766,6 +1774,9 @@ const pluginEntry: any = definePluginEntry({
     // 清理孤儿债务（会话已删除）与 7 天前墓碑，防止 conversation_compaction_maintenance 无限增长。
     let lastDebtReconcileRun = 0;
     const DEBT_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    // RetrievalGateway 心跳恢复重试计数器（用于诊断恢复失败原因）
+    let _retrievalGatewayRecoveryAttempts = 0;
+    let _retrievalGatewayLastRecoveryError: string | null = null;
     // Distillation helpers 已抽出到 src/plugin/distillation.ts
     const { runDistillation, resolveDistillationLlm } = distillationModule;
 
@@ -2055,16 +2066,44 @@ const pluginEntry: any = definePluginEntry({
         }
 
         // --- 2e. RetrievalGateway 延迟恢复：初始化失败时每轮 heartbeat 重试 ---
+        // 时序说明：此代码在 await Promise.all([...健康检查...]) 之后执行，
+        // 因此 graphAdapter.health() 已先完成（可能恢复了 Neo4j driver），
+        // 确保 RetrievalGateway 构造时 graphAdapter 的 driver 已就绪。
         if (!_retrievalGateway && _retrievalGatewayConfig && graphAdapter && qmdClient) {
+          // 额外验证：graphAdapter 的 driver 是否已连通（health check 可能失败）
+          const graphConnected = typeof graphAdapter.isConnected === 'boolean'
+            ? graphAdapter.isConnected
+            : true; // 无法判断时乐观放行（构造函数不依赖 driver）
+          _retrievalGatewayRecoveryAttempts++;
           try {
             const { RetrievalGateway } = await import("./retrieval-gateway.js");
             _retrievalGateway = new RetrievalGateway(qmdClient, graphAdapter, _retrievalGatewayConfig);
-            logger?.info?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovered (lazy init succeeded)');
-          } catch (gwErr) {
-            // 静默重试，不做日志刷屏（下次 heartbeat 继续尝试）
-            logger?.debug?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovery retry failed', {
-              err: gwErr instanceof Error ? gwErr.message : String(gwErr),
+            _retrievalGatewayLastRecoveryError = null;
+            logger?.info?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovered (lazy init succeeded)', {
+              attempts: _retrievalGatewayRecoveryAttempts,
+              graphConnected,
             });
+          } catch (gwErr) {
+            const errMsg = gwErr instanceof Error ? gwErr.message : String(gwErr);
+            const errStack = gwErr instanceof Error ? gwErr.stack : undefined;
+            _retrievalGatewayLastRecoveryError = errMsg;
+            // 首次失败和每 12 次（约 1 小时）输出 warn 日志，避免刷屏
+            if (_retrievalGatewayRecoveryAttempts === 1 || _retrievalGatewayRecoveryAttempts % 12 === 0) {
+              logger?.warn?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovery retry failed', {
+                attempt: _retrievalGatewayRecoveryAttempts,
+                err: errMsg,
+                stack: errStack,
+                graphConnected,
+                hasConfig: !!_retrievalGatewayConfig,
+                hasQmdClient: !!qmdClient,
+                hasGraphAdapter: !!graphAdapter,
+              });
+            } else {
+              logger?.debug?.('[lcm-graph-extra] heartbeat: RetrievalGateway recovery retry failed', {
+                attempt: _retrievalGatewayRecoveryAttempts,
+                err: errMsg,
+              });
+            }
           }
         }
         
