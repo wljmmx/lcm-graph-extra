@@ -440,6 +440,7 @@ const pluginEntry: any = definePluginEntry({
         }
 
         initialized = true;
+        logger?.info?.('[ensureInitialized] completed, graphAdapter=' + (graphAdapter ? 'set' : 'NULL') + ', driver=' + ((graphAdapter as any)?.driver ? 'set' : 'NULL'));
       } catch (err) {
         // Reset lock so next assemble retries instead of being permanently stuck
         initPromise = null;
@@ -1413,6 +1414,7 @@ const pluginEntry: any = definePluginEntry({
       async dispose() {
         // 幂等短路：已 dispose 则直接返回
         if (!initialized && !snapshotServerStop && !hbTimer) return;
+        logger?.info?.('[dispose] called, resetting graphAdapter and stopping servers');
         // 1. 先停止 heartbeat timer，避免新任务进入
         if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
         // 关闭 dashboard 快照 HTTP 服务（幂等，可多次调用）
@@ -1682,12 +1684,13 @@ const pluginEntry: any = definePluginEntry({
             language: userProfile.getLanguage(),
           }),
           getGraphAdapterState: () => {
-            // graphAdapter 可能为 null（未初始化）或已 dispose；用 any 读取私有连接状态
-            // BUGFIX: 修复前仅检查 !!a.driver，stale driver 被误判为 connected。
-            // 修复后：同时检查 _connectFailed 和 _lastFailTime，提供更准确的状态。
-            // P-CB-6: 同时暴露 Neo4j 熔断器实时状态，避免 dashboard 仅依赖 health.latest
-            // （5分钟心跳缓存）导致图谱健康状态显示滞后。
             const a = graphAdapter as any;
+            // 调试日志：每次 snapshot 请求时记录 graphAdapter 状态
+            logger?.debug?.('[snapshot] getGraphAdapterState called', {
+              graphAdapterNull: !a,
+              initialized,
+              hasInitPromise: !!initPromise,
+            });
             if (!a) return {
               connected: false,
               connectFailed: false,
