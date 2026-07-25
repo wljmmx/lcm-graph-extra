@@ -612,8 +612,14 @@ export async function resolveGraphHealth(providers: SnapshotProviders): Promise<
       { label: 'N-4 getGraphHealth' },
     );
     if (gmHealth && typeof gmHealth.status === 'string') {
+      // 修复：如果 gm-pro 返回 unknown 或无效的 status 值，降级到 local status
+      // 避免 dashboard 显示 unknown（gm-pro 可能在初始化阶段返回 unknown）
+      const validStatuses = ['healthy', 'degraded', 'unhealthy'] as const;
+      const status = validStatuses.includes(gmHealth.status as typeof validStatuses[number])
+        ? gmHealth.status as 'healthy' | 'degraded' | 'unhealthy'
+        : localStatus;
       return {
-        status: gmHealth.status,
+        status,
         source: 'gm-pro',
         nodeCount: gmHealth.nodeCount,
         relationshipCount: gmHealth.relationshipCount,
