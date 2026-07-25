@@ -646,12 +646,12 @@ export class QmdClient {
     const withRerank = params.rerank ?? true;
 
     // Pure lex -> qmd search
+    // qmd search 是纯 BM25 检索，无 LLM rerank 步骤，--no-rerank 参数无效
     if (hasLex && !hasVec && !hasHyde) {
       // SEC-L: 修复前 `find(...).query!` 非空断言。虽然 hasLex 已确认存在，但显式检查更稳健。
       const lexEntry = params.searches.find((s) => s.type === "lex");
       const query = lexEntry?.query ?? "";
       const args = ["search", query, "-n", n, "--format", "json"];
-      if (!withRerank) args.push("--no-rerank");
       return { cmd: "qmd", args };
     }
 
@@ -663,10 +663,10 @@ export class QmdClient {
     }
 
     // Mixed -> use search (lightweight) if cliFallbackSearchType is "search"
+    // qmd search 纯 BM25，--no-rerank 无效，不添加
     if (this.cliFallbackSearchType === 'search') {
       const lexQuery = params.searches.find((s) => s.type === "lex")?.query ?? "";
       const args = ["search", lexQuery, "-n", n, "--format", "json"];
-      if (!withRerank) args.push("--no-rerank");
       return { cmd: "qmd", args };
     }
 
