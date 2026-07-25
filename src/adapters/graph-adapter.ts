@@ -240,6 +240,8 @@ export class GraphAdapter {
   private driver: any = null;
   private _connectFailed = false;
   private _connectRetryCount = 0;
+  /** 最近一次连接/健康检查失败的具体错误信息，供 dashboard 诊断展示 */
+  private _lastError: string | null = null;
   /** 并发健康检查防护：防止多个 heartbeat/业务调用同时触发 health() → connect() 竞态 */
   private _healthCheckInProgress = false;
   // P2-3 H-16: 重试次数与冷却期改为引用 DEFAULTS.graph，避免魔术数字散落
@@ -277,16 +279,15 @@ export class GraphAdapter {
       this.logger?.info?.('[graph-adapter] loading graph-memory-pro', { path: GM_PRO_PATH, source: _GM_PRO_RESOLVED.source });
       const mod = await import(`${GM_PRO_PATH}/dist/index.js`);
       this.mod = mod;
-      this.driver = mod.getDriver?.() ?? null;
-      if (!this.driver) {
-        // graph-memory-pro 尚未初始化驱动 → 自己建一个
-        // Use connection pool instead of creating new driver each time
-        // acquireDriver 内部调用 verifyConnectivity，失败时抛异常
+      const gmDriver = mod.getDriver?.() ?? null;
+      if (gmDriver) {
+        this.driver = gmDriver;
+      } else {
+        this.logger?.debug?.('[graph-adapter] graph-memory-pro getDriver() returned null, acquiring own driver');
         this.driver = await acquireDriver(this.neo4jConfig);
       }
-      // BUGFIX: 如果 driver 仍为 null（理论上 acquireDriver 要么返回 driver 要么抛异常，
-      // 但防御性检查），返回 false 而非 true，避免 isConnected 误报为 connected
       if (!this.driver) {
+        this._lastError = 'no driver available (gm-pro getDriver null + acquireDriver returned null)';
         this.logger?.warn?.('[graph-adapter] connect: no driver available after all attempts');
         this._connectRetryCount++;
         if (this._connectRetryCount >= this.maxRetries) {
@@ -340,9 +341,12 @@ export class GraphAdapter {
       this._connectRetryCount = 0;
       this._connectFailed = false;
       this._lastFailTime = 0;
+      this._lastError = null;
       return true;
     } catch (err) {
       this._connectRetryCount++;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this._lastError = `connect attempt ${this._connectRetryCount}/${this.maxRetries} failed: ${errMsg}`;
       this.logger?.warn?.(`[graph-adapter] connect attempt ${this._connectRetryCount}/${this.maxRetries} failed: ${err}`);
       if (this._connectRetryCount >= this.maxRetries) {
         this._connectFailed = true;
@@ -1050,6 +1054,7 @@ export class GraphAdapter {
             this._connectRetryCount = 0;
             this._connectFailed = false;
             this._lastFailTime = 0;
+            this._lastError = null;
             try {
               await this._ensureRecaller();
             } catch (recallerErr) {
@@ -1091,9 +1096,14 @@ export class GraphAdapter {
           if (reconnected) {
             this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
             this.logger?.info?.('[graph-adapter] health check: reconnected successfully, search cache cleared');
+            this._lastError = null;
+          } else if (this._lastError) {
+            this.logger?.warn?.(`[graph-adapter] health check: still not connected — ${this._lastError}`);
           }
           return reconnected;
-        } catch {
+        } catch (reconnectErr) {
+          this._lastError = `health check reconnect failed: ${reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr)}`;
+          this.logger?.warn?.(`[graph-adapter] health check: ${this._lastError}`);
           return false;
         }
       }

@@ -1694,10 +1694,11 @@ const pluginEntry: any = definePluginEntry({
             const lastFailTime = (a._lastFailTime as number) ?? 0;
             const recentlyFailed = connectFailed && (Date.now() - lastFailTime < 30_000);
             const neo4jCb = getHealthSnapshot()?.neo4j ?? { available: true, failures: 0, open: false };
+            const lastError = (a._lastError as string | null) ?? null;
             return {
               connected: driverOk && !connectFailed,
               connectFailed: recentlyFailed,
-              lastError: connectFailed ? `Neo4j connect failed${lastFailTime > 0 ? ` at ${new Date(lastFailTime).toISOString()}` : ''}` : undefined,
+              lastError: lastError ?? (connectFailed ? `Neo4j connect failed${lastFailTime > 0 ? ` at ${new Date(lastFailTime).toISOString()}` : ''}` : undefined),
               circuitBreaker: neo4jCb,
             };
           },
