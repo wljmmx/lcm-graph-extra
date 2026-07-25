@@ -242,6 +242,8 @@ export class GraphAdapter {
   private _connectRetryCount = 0;
   /** 最近一次连接/健康检查失败的具体错误信息，供 dashboard 诊断展示 */
   private _lastError: string | null = null;
+  /** health() 被调用的总次数，用于诊断 heartbeat 是否在运行 */
+  private _healthCheckCount = 0;
   /** 并发健康检查防护：防止多个 heartbeat/业务调用同时触发 health() → connect() 竞态 */
   private _healthCheckInProgress = false;
   // P2-3 H-16: 重试次数与冷却期改为引用 DEFAULTS.graph，避免魔术数字散落
@@ -1035,6 +1037,7 @@ export class GraphAdapter {
    *   不清空会导致后续 searchWithCache 命中过期数据。
    */
   async health(): Promise<boolean> {
+    this._healthCheckCount++;
     if (this._healthCheckInProgress) {
       this.logger?.debug?.('[graph-adapter] health check already in progress, skipping concurrent call');
       return this.isConnected;
@@ -1154,5 +1157,37 @@ export class GraphAdapter {
 
   setLlm(llm: (system: string, user: string) => Promise<string>): void {
     this._llm = llm;
+  }
+
+  getDiagnostics(): {
+    healthCheckCount: number;
+    gmProHasModule: boolean;
+    gmProGetDriverType: string;
+    gmProDriverAvailable: boolean;
+    hasOwnDriver: boolean;
+    connectRetryCount: number;
+    lastError: string | null;
+    connectFailed: boolean;
+    gmProPath: string;
+    gmProSource: string;
+  } {
+    let gmProDriverAvailable = false;
+    try {
+      if (this.mod && typeof this.mod.getDriver === 'function') {
+        gmProDriverAvailable = !!this.mod.getDriver();
+      }
+    } catch { /* ignore */ }
+    return {
+      healthCheckCount: this._healthCheckCount,
+      gmProHasModule: !!this.mod,
+      gmProGetDriverType: typeof this.mod?.getDriver,
+      gmProDriverAvailable,
+      hasOwnDriver: !!this.driver,
+      connectRetryCount: this._connectRetryCount,
+      lastError: this._lastError,
+      connectFailed: this._connectFailed,
+      gmProPath: GM_PRO_PATH,
+      gmProSource: _GM_PRO_RESOLVED.source,
+    };
   }
 }

@@ -1688,18 +1688,53 @@ const pluginEntry: any = definePluginEntry({
             // P-CB-6: 同时暴露 Neo4j 熔断器实时状态，避免 dashboard 仅依赖 health.latest
             // （5分钟心跳缓存）导致图谱健康状态显示滞后。
             const a = graphAdapter as any;
-            if (!a) return { connected: false, connectFailed: false, circuitBreaker: { available: true, failures: 0, open: false } };
+            if (!a) return {
+              connected: false,
+              connectFailed: false,
+              circuitBreaker: { available: true, failures: 0, open: false },
+              healthCheckCount: 0,
+              gmProHasModule: false,
+              gmProGetDriverType: 'undefined',
+              gmProDriverAvailable: false,
+              hasOwnDriver: false,
+              connectRetryCount: 0,
+              lastError: 'graphAdapter not initialized',
+            };
             const driverOk = !!a.driver;
             const connectFailed = !!a._connectFailed;
             const lastFailTime = (a._lastFailTime as number) ?? 0;
             const recentlyFailed = connectFailed && (Date.now() - lastFailTime < 30_000);
             const neo4jCb = getHealthSnapshot()?.neo4j ?? { available: true, failures: 0, open: false };
             const lastError = (a._lastError as string | null) ?? null;
+            // 尝试调用 getDiagnostics()（新版本才有），失败则用旧方式读取
+            let diag: any = {};
+            try {
+              if (typeof a.getDiagnostics === 'function') {
+                diag = a.getDiagnostics();
+              } else {
+                // 旧版本兼容：直接读取私有字段
+                let gmProDriverAvailable = false;
+                try {
+                  if (a.mod && typeof a.mod.getDriver === 'function') {
+                    gmProDriverAvailable = !!a.mod.getDriver();
+                  }
+                } catch { /* ignore */ }
+                diag = {
+                  healthCheckCount: a._healthCheckCount ?? 0,
+                  gmProHasModule: !!a.mod,
+                  gmProGetDriverType: typeof a.mod?.getDriver,
+                  gmProDriverAvailable,
+                  hasOwnDriver: !!a.driver,
+                  connectRetryCount: a._connectRetryCount ?? 0,
+                };
+              }
+            } catch { /* ignore */ }
             return {
               connected: driverOk && !connectFailed,
               connectFailed: recentlyFailed,
               lastError: lastError ?? (connectFailed ? `Neo4j connect failed${lastFailTime > 0 ? ` at ${new Date(lastFailTime).toISOString()}` : ''}` : undefined),
               circuitBreaker: neo4jCb,
+              ...diag,
             };
           },
           getDebtStats: () => {

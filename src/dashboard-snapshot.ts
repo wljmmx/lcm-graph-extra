@@ -223,6 +223,21 @@ export interface DashboardSnapshot {
     lastError?: string;
     /** P-CB-6: Neo4j 熔断器实时状态，每次请求从 getHealthSnapshot() 读取 */
     circuitBreaker?: { available: boolean; failures: number; open: boolean };
+    /** 诊断信息：health() 被调用的总次数，用于判断 heartbeat 是否运行 */
+    healthCheckCount?: number;
+    /** 诊断信息：是否成功加载了 graph-memory-pro 模块 */
+    gmProHasModule?: boolean;
+    /** 诊断信息：gm-pro 模块中 getDriver 方法的类型（function/undefined） */
+    gmProGetDriverType?: string;
+    /** 诊断信息：gm-pro 的 getDriver() 是否返回了非 null 的 driver */
+    gmProDriverAvailable?: boolean;
+    /** 诊断信息：graphAdapter 自身是否持有 driver */
+    hasOwnDriver?: boolean;
+    /** 诊断信息：连接重试次数 */
+    connectRetryCount?: number;
+    /** 诊断信息：graph-memory-pro 模块路径与来源 */
+    gmProPath?: string;
+    gmProSource?: string;
   };
   debt: {
     running: number;

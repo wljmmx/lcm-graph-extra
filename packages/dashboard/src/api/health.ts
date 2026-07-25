@@ -56,6 +56,14 @@ export interface GraphAdapterState {
   connectFailed: boolean;
   lastError?: string;
   circuitBreaker?: { available: boolean; failures: number; open: boolean };
+  healthCheckCount?: number;
+  gmProHasModule?: boolean;
+  gmProGetDriverType?: string;
+  gmProDriverAvailable?: boolean;
+  hasOwnDriver?: boolean;
+  connectRetryCount?: number;
+  gmProPath?: string;
+  gmProSource?: string;
 }
 
 export interface DebtStats {
