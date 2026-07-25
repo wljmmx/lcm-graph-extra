@@ -475,8 +475,9 @@ export class QmdClient {
       // 超时，或总耗时 >2s 的失败，都输出环节分解日志
       if (isTimeout || totalMs > 2000) {
         this.logger?.warn?.(
-          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, initMs=${initMs}ms, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms`,
+          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, initMs=${initMs}ms, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, baseUrl=${this.mcpBaseUrl}`,
           {
+            tool: toolName,
             failedPhase,
             isTimeout,
             initMs,
@@ -485,6 +486,7 @@ export class QmdClient {
             totalMs,
             mcpTimeout: this.mcpTimeout,
             mcpQueryTimeout: this.mcpQueryTimeout,
+            mcpBaseUrl: this.mcpBaseUrl,  // 显式打印连接地址，便于核实
             hasSession: !!this.mcpSessionId,
             err: errMsg,
           },
@@ -648,7 +650,7 @@ export class QmdClient {
 
       if (isTimeout || totalMs > 2000) {
         this.logger?.warn?.(
-          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms`,
+          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, baseUrl=${this.mcpBaseUrl}`,
           {
             failedPhase,
             isTimeout,
@@ -656,6 +658,7 @@ export class QmdClient {
             parseMs,
             totalMs,
             mcpQueryTimeout: this.mcpQueryTimeout,
+            mcpBaseUrl: this.mcpBaseUrl,  // 显式打印连接地址，便于核实
             searchTypes,
             rerank: body.rerank,
             avoidVec,
