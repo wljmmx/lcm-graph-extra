@@ -351,83 +351,147 @@ export class QmdClient {
    * @param retried 内部使用，是否已经是重试（防止无限递归）
    */
   private async mcpCall(toolName: string, args: Record<string, unknown>, retried = false): Promise<any> {
+    const t0 = Date.now();
     this.logger?.debug?.(`[qmd-client] mcpCall: tool=${toolName}, retried=${retried}, mcpAvailable=${this.mcpAvailable}, hasSession=${!!this.mcpSessionId}`);
-    const sessionId = await this.mcpInitialize();
-    const body = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: toolName, arguments: args },
-    };
-    this.logger?.debug?.(`[qmd-client] POST ${this.mcpBaseUrl}/mcp (tools/call: ${toolName}), sessionId=${sessionId?.slice(0, 8)}...`);
-    const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "mcp-session-id": sessionId,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.mcpQueryTimeout),
-    });
 
-    this.logger?.debug?.(`[qmd-client] mcpCall response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}`);
+    // 环节计时变量：在 catch 中用于定位超时发生在哪个环节。
+    // 0 表示该环节未开始/未完成（失败时据此推断失败环节）。
+    let initMs = 0;
+    let fetchMs = 0;
+    let parseMs = 0;
 
-    if (!resp.ok) {
-      let respBody: any = null;
-      try { respBody = await resp.json(); } catch (e) {
-        this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body parse failed`, { err: e instanceof Error ? e.message : String(e) });
+    try {
+      // === 环节 1: initialize (session 握手) ===
+      const initStart = Date.now();
+      const sessionId = await this.mcpInitialize();
+      initMs = Date.now() - initStart;
+
+      const body = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: toolName, arguments: args },
+      };
+      this.logger?.debug?.(`[qmd-client] POST ${this.mcpBaseUrl}/mcp (tools/call: ${toolName}), sessionId=${sessionId?.slice(0, 8)}..., initMs=${initMs}ms`);
+
+      // === 环节 2: fetch (HTTP 请求 + 服务端处理) ===
+      // 服务端处理包含: lex(BM25) + vec(embedding+ANN) + RRF + rerank(LLM)
+      // 超时多发生在此环节（rerank LLM 调用慢 或 embedding 冷启动）
+      const fetchStart = Date.now();
+      const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "mcp-session-id": sessionId,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.mcpQueryTimeout),
+      });
+      fetchMs = Date.now() - fetchStart;
+
+      this.logger?.debug?.(`[qmd-client] mcpCall response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}, initMs=${initMs}ms, fetchMs=${fetchMs}ms`);
+
+      if (!resp.ok) {
+        let respBody: any = null;
+        try { respBody = await resp.json(); } catch (e) {
+          this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body parse failed`, { err: e instanceof Error ? e.message : String(e) });
+        }
+        this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body`, { status: resp.status, body: respBody });
+
+        if (!retried && this.isSessionExpiredError(resp, respBody)) {
+          this.logger?.warn?.('[qmd-client] MCP session expired, reinitializing...');
+          await this.mcpReinitialize();
+          return this.mcpCall(toolName, args, true);
+        }
+        throw new Error(`MCP HTTP ${resp.status} ${resp.statusText}`);
       }
-      this.logger?.debug?.(`[qmd-client] mcpCall non-ok response body`, { status: resp.status, body: respBody });
 
-      if (!retried && this.isSessionExpiredError(resp, respBody)) {
-        this.logger?.warn?.('[qmd-client] MCP session expired, reinitializing...');
-        await this.mcpReinitialize();
-        return this.mcpCall(toolName, args, true);
+      // === 环节 3: parse (响应体解析: SSE 或 JSON) ===
+      const contentType = resp.headers?.get('content-type') ?? '';
+      let data: any;
+      const parseStart = Date.now();
+      if (contentType.includes('text/event-stream')) {
+        // SSE 格式：解析 data: 行
+        const text = await resp.text();
+        const sseReadMs = Date.now() - parseStart;
+        this.logger?.debug?.(`[qmd-client] mcpCall SSE response (len=${text.length}), parsing..., sseReadMs=${sseReadMs}ms`);
+        const dataLines = text.split('\n').filter((l: string) => l.startsWith('data: ')).map((l: string) => l.slice(6));
+        if (dataLines.length === 0) {
+          throw new Error(`MCP SSE response has no data lines (len=${text.length})`);
+        }
+        try {
+          data = JSON.parse(dataLines[dataLines.length - 1]);
+          this.logger?.debug?.(`[qmd-client] mcpCall SSE parsed successfully, keys=${Object.keys(data ?? {}).join(',')}`);
+        } catch (parseErr) {
+          this.logger?.debug?.(`[qmd-client] mcpCall SSE parse failed`, { rawPreview: dataLines[dataLines.length - 1]?.slice(0, 200), err: String(parseErr) });
+          throw new Error(`MCP SSE parse failed: ${String(parseErr)}`);
+        }
+      } else {
+        try {
+          data = await resp.json() as any;
+          this.logger?.debug?.(`[qmd-client] mcpCall JSON parsed, keys=${Object.keys(data ?? {}).join(',')}, hasError=${!!data?.error}, hasResult=${!!data?.result}, parseMs=${Date.now() - parseStart}ms`);
+        } catch (jsonErr) {
+          // JSON 解析失败，可能是空响应或非 JSON 内容
+          const rawText = await resp.text().catch(() => '');
+          this.logger?.debug?.(`[qmd-client] mcpCall JSON parse failed`, { err: String(jsonErr), rawPreview: rawText.slice(0, 200) });
+          throw new Error(`MCP response JSON parse failed: ${String(jsonErr)} (rawLen=${rawText.length})`);
+        }
       }
-      throw new Error(`MCP HTTP ${resp.status} ${resp.statusText}`);
+      parseMs = Date.now() - parseStart;
+
+      const totalMs = Date.now() - t0;
+      // 慢查询 (>3s) 时输出 warn 级别，便于定位瓶颈
+      if (totalMs > 3000) {
+        this.logger?.warn?.(`[qmd-client] mcpCall slow: tool=${toolName}, total=${totalMs}ms (init=${initMs}ms, fetch=${fetchMs}ms, parse=${parseMs}ms)`);
+      }
+
+      if (data?.error && !retried) {
+        if (this.isSessionExpiredError(resp, data)) {
+          this.logger?.warn?.('[qmd-client] MCP session expired (from response error), reinitializing...', { errorMsg: data?.error?.message });
+          await this.mcpReinitialize();
+          return this.mcpCall(toolName, args, true);
+        }
+        this.logger?.debug?.(`[qmd-client] mcpCall response has error`, { error: data?.error });
+        throw new Error(`MCP response error: ${data?.error?.message ?? JSON.stringify(data?.error)}`);
+      }
+      return data;
+    } catch (err) {
+      // 失败时输出各环节耗时，重点诊断超时场景。
+      // 根据已完成的环节计时变量推断失败环节：
+      //   initMs=0 → initialize 阶段失败
+      //   fetchMs=0 → fetch 阶段失败（最常见超时点：服务端 rerank/embedding 慢）
+      //   parseMs=0 → parse 阶段失败
+      //   都>0     → post-parse（如 data.error 抛错）
+      const totalMs = Date.now() - t0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isTimeout = /timeout|aborted/i.test(errMsg);
+      let failedPhase: 'initialize' | 'fetch' | 'parse' | 'post-parse';
+      if (initMs === 0) failedPhase = 'initialize';
+      else if (fetchMs === 0) failedPhase = 'fetch';
+      else if (parseMs === 0) failedPhase = 'parse';
+      else failedPhase = 'post-parse';
+
+      // 超时，或总耗时 >2s 的失败，都输出环节分解日志
+      if (isTimeout || totalMs > 2000) {
+        this.logger?.warn?.(
+          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, initMs=${initMs}ms, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms`,
+          {
+            failedPhase,
+            isTimeout,
+            initMs,
+            fetchMs,
+            parseMs,
+            totalMs,
+            mcpTimeout: this.mcpTimeout,
+            mcpQueryTimeout: this.mcpQueryTimeout,
+            hasSession: !!this.mcpSessionId,
+            err: errMsg,
+          },
+        );
+      }
+      throw err;
     }
-
-    // 检查 content-type：MCP 可能返回 SSE 格式（text/event-stream）而非 JSON
-    const contentType = resp.headers?.get('content-type') ?? '';
-    let data: any;
-    if (contentType.includes('text/event-stream')) {
-      // SSE 格式：解析 data: 行
-      const text = await resp.text();
-      this.logger?.debug?.(`[qmd-client] mcpCall SSE response (len=${text.length}), parsing...`);
-      const dataLines = text.split('\n').filter((l: string) => l.startsWith('data: ')).map((l: string) => l.slice(6));
-      if (dataLines.length === 0) {
-        throw new Error(`MCP SSE response has no data lines (len=${text.length})`);
-      }
-      try {
-        data = JSON.parse(dataLines[dataLines.length - 1]);
-        this.logger?.debug?.(`[qmd-client] mcpCall SSE parsed successfully, keys=${Object.keys(data ?? {}).join(',')}`);
-      } catch (parseErr) {
-        this.logger?.debug?.(`[qmd-client] mcpCall SSE parse failed`, { rawPreview: dataLines[dataLines.length - 1]?.slice(0, 200), err: String(parseErr) });
-        throw new Error(`MCP SSE parse failed: ${String(parseErr)}`);
-      }
-    } else {
-      try {
-        data = await resp.json() as any;
-        this.logger?.debug?.(`[qmd-client] mcpCall JSON parsed, keys=${Object.keys(data ?? {}).join(',')}, hasError=${!!data?.error}, hasResult=${!!data?.result}`);
-      } catch (jsonErr) {
-        // JSON 解析失败，可能是空响应或非 JSON 内容
-        const rawText = await resp.text().catch(() => '');
-        this.logger?.debug?.(`[qmd-client] mcpCall JSON parse failed`, { err: String(jsonErr), rawPreview: rawText.slice(0, 200) });
-        throw new Error(`MCP response JSON parse failed: ${String(jsonErr)} (rawLen=${rawText.length})`);
-      }
-    }
-
-    if (data?.error && !retried) {
-      if (this.isSessionExpiredError(resp, data)) {
-        this.logger?.warn?.('[qmd-client] MCP session expired (from response error), reinitializing...', { errorMsg: data?.error?.message });
-        await this.mcpReinitialize();
-        return this.mcpCall(toolName, args, true);
-      }
-      this.logger?.debug?.(`[qmd-client] mcpCall response has error`, { error: data?.error });
-      throw new Error(`MCP response error: ${data?.error?.message ?? JSON.stringify(data?.error)}`);
-    }
-    return data;
   }
 
   /** Initialize MCP session via initialize handshake */
@@ -504,6 +568,7 @@ export class QmdClient {
    *   若过滤后无 lex 子查询，退化为使用原始所有子查询（保证不返回 0 结果的空操作）。
    */
   private async queryViaRest(params: SearchParams, avoidVec = false): Promise<QmdSearchResult[]> {
+    const t0 = Date.now();
     // MCP embed 错误时降级为 lex-only（纯 BM25），避免再次触发 vec embed 错误
     let searches = params.searches;
     if (avoidVec) {
@@ -524,37 +589,86 @@ export class QmdClient {
     if (params.collections) body.collections = params.collections;
     if (params.intent) body.intent = params.intent;
 
-    this.logger?.debug?.(`[qmd-client] queryViaRest: POST ${this.mcpBaseUrl}/query (${searches.length} searches, avoidVec=${avoidVec})`);
-    const resp = await fetch(`${this.mcpBaseUrl}/query`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.mcpQueryTimeout),
-    });
+    const searchTypes = searches.map((s) => s.type).join(',');
+    this.logger?.debug?.(`[qmd-client] queryViaRest: POST ${this.mcpBaseUrl}/query (${searches.length} searches [${searchTypes}], avoidVec=${avoidVec}, rerank=${body.rerank})`);
 
-    if (!resp.ok) {
-      throw new Error(`REST /query HTTP ${resp.status} ${resp.statusText}`);
+    // 环节计时变量：catch 中用于定位超时环节
+    let fetchMs = 0;
+    let parseMs = 0;
+    try {
+      // === 环节 1: fetch (REST /query, 服务端处理) ===
+      const fetchStart = Date.now();
+      const resp = await fetch(`${this.mcpBaseUrl}/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.mcpQueryTimeout),
+      });
+      fetchMs = Date.now() - fetchStart;
+
+      if (!resp.ok) {
+        throw new Error(`REST /query HTTP ${resp.status} ${resp.statusText}`);
+      }
+
+      // === 环节 2: parse (JSON 解析) ===
+      const parseStart = Date.now();
+      const data = await resp.json() as { results?: Array<Record<string, unknown>> };
+      parseMs = Date.now() - parseStart;
+
+      const totalMs = Date.now() - t0;
+      // 慢查询 (>3s) 时输出 warn 级别，便于定位瓶颈
+      if (totalMs > 3000) {
+        this.logger?.warn?.(`[qmd-client] queryViaRest slow: total=${totalMs}ms (fetch=${fetchMs}ms, parse=${parseMs}ms), searchTypes=[${searchTypes}], rerank=${body.rerank}`);
+      }
+      const results = Array.isArray(data?.results) ? data.results : [];
+      if (results.length === 0) return [];
+
+      return results.map((r) => ({
+        docid: typeof r.docid === "string" ? r.docid : "",
+        file: typeof r.file === "string" ? r.file : "",
+        title: typeof r.title === "string" ? r.title : "",
+        score: typeof r.score === "number" ? r.score : 0,
+        snippet: typeof r.snippet === "string" ? r.snippet : "",
+        line: typeof r.line === "number" ? r.line : 0,
+        context: typeof r.context === "string" ? r.context : null,
+      }));
+    } catch (err) {
+      // 失败时输出各环节耗时，定位超时环节
+      const totalMs = Date.now() - t0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isTimeout = /timeout|aborted/i.test(errMsg);
+      // REST 仅有 fetch + parse 两个环节
+      let failedPhase: 'fetch' | 'parse' | 'post-parse';
+      if (fetchMs === 0) failedPhase = 'fetch';
+      else if (parseMs === 0) failedPhase = 'parse';
+      else failedPhase = 'post-parse';
+
+      if (isTimeout || totalMs > 2000) {
+        this.logger?.warn?.(
+          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms`,
+          {
+            failedPhase,
+            isTimeout,
+            fetchMs,
+            parseMs,
+            totalMs,
+            mcpQueryTimeout: this.mcpQueryTimeout,
+            searchTypes,
+            rerank: body.rerank,
+            avoidVec,
+            err: errMsg,
+          },
+        );
+      }
+      throw err;
     }
-
-    const data = await resp.json() as { results?: Array<Record<string, unknown>> };
-    const results = Array.isArray(data?.results) ? data.results : [];
-    if (results.length === 0) return [];
-
-    return results.map((r) => ({
-      docid: typeof r.docid === "string" ? r.docid : "",
-      file: typeof r.file === "string" ? r.file : "",
-      title: typeof r.title === "string" ? r.title : "",
-      score: typeof r.score === "number" ? r.score : 0,
-      snippet: typeof r.snippet === "string" ? r.snippet : "",
-      line: typeof r.line === "number" ? r.line : 0,
-      context: typeof r.context === "string" ? r.context : null,
-    }));
   }
 
   private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
+    const t0 = Date.now();
     const args: Record<string, unknown> = {
       searches: params.searches,
       limit: params.limit ?? 10,
@@ -564,11 +678,32 @@ export class QmdClient {
     if (params.collections) args.collections = params.collections;
     if (params.intent) args.intent = params.intent;
 
-    this.logger?.debug?.(`[qmd-client] queryViaMcp: searches=${params.searches.length}, limit=${args.limit}, minScore=${args.minScore}`);
-    const data = await this.mcpCall("query", args) as McpToolsCallResponse;
+    const searchTypes = params.searches.map((s) => s.type).join(',');
+    this.logger?.debug?.(`[qmd-client] queryViaMcp: searches=${params.searches.length} (${searchTypes}), limit=${args.limit}, minScore=${args.minScore}, rerank=${args.rerank}`);
+    let data: McpToolsCallResponse;
+    try {
+      data = await this.mcpCall("query", args) as McpToolsCallResponse;
+    } catch (err) {
+      // 超时时补充 query 上下文（环节分解见 mcpCall 失败环节诊断日志）
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isTimeout = /timeout|aborted/i.test(errMsg);
+      if (isTimeout) {
+        this.logger?.warn?.(`[qmd-client] MCP query 超时 (query 上下文): 环节分解见上一条 mcpCall 失败诊断日志`, {
+          totalMs: Date.now() - t0,
+          mcpQueryTimeout: this.mcpQueryTimeout,
+          hasSessionBefore: !!this.mcpSessionId,
+          searchTypes,
+          rerank: args.rerank,
+          searchesCount: params.searches.length,
+          limit: args.limit,
+        });
+      }
+      throw err;
+    }
+    const mcpCallMs = Date.now() - t0;
     const contentArr = data?.result?.content;
     const textContent = contentArr?.[0]?.text;
-    this.logger?.debug?.(`[qmd-client] queryViaMcp response: contentArr=${Array.isArray(contentArr) ? contentArr.length : 'N/A'} items, textContentLen=${textContent?.length ?? 0}, isError=${data?.result?.isError}`);
+    this.logger?.debug?.(`[qmd-client] queryViaMcp response: mcpCallMs=${mcpCallMs}ms, contentArr=${Array.isArray(contentArr) ? contentArr.length : 'N/A'} items, textContentLen=${textContent?.length ?? 0}, isError=${data?.result?.isError}`);
     if (!textContent) {
       // 记录响应结构帮助排查空响应问题
       this.logger?.debug?.(`[qmd-client] queryViaMcp: empty textContent`, { 
