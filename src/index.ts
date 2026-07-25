@@ -2002,6 +2002,18 @@ const pluginEntry: any = definePluginEntry({
           })(),
           // --- 2b. Graph / Neo4j health check + 内存重建验证 ---
           (async () => {
+            // 如果 graphAdapter 尚未初始化，尝试通过 ensureInitialized() 创建它
+            // 修复：graphAdapter 是懒加载的，首次 assemble 才会创建。
+            // 如果用户还没发起过对话，heartbeat 中 graphAdapter 始终为 null，
+            // 导致永远无法进行健康检查和自动重连。
+            if (!graphAdapter) {
+              try {
+                await ensureInitialized();
+              } catch (initErr) {
+                logger?.debug?.("heartbeat: ensureInitialized failed (non-fatal, will retry next cycle)", { err: initErr instanceof Error ? initErr.message : String(initErr) });
+                return;
+              }
+            }
             if (graphAdapter && typeof graphAdapter.health === "function") {
               try {
                 const graphOk = await graphAdapter.health();
