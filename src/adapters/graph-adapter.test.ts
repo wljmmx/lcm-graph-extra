@@ -88,4 +88,54 @@ describe('GraphAdapter', () => {
     );
     expect(result).toEqual({ nodes: 0, edges: 0 });
   });
+
+  describe('health() 重试计数', () => {
+    it('driver=null 时多次 health() 失败，_connectRetryCount 应递增而非重置', async () => {
+      const a = new GraphAdapter(nc, ac);
+      expect((a as any)._connectRetryCount).toBe(0);
+      expect((a as any)._connectFailed).toBe(false);
+
+      await a.health();
+      const countAfter1 = (a as any)._connectRetryCount;
+      expect(countAfter1).toBeGreaterThan(0);
+
+      await a.health();
+      const countAfter2 = (a as any)._connectRetryCount;
+      expect(countAfter2).toBeGreaterThanOrEqual(countAfter1);
+    });
+
+    it('maxRetries 次失败后 _connectFailed 应为 true', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const maxRetries = (a as any).maxRetries;
+
+      for (let i = 0; i < maxRetries + 1; i++) {
+        await a.health();
+      }
+      expect((a as any)._connectFailed).toBe(true);
+    });
+  });
+
+  describe('health() gm-pro 懒加载 driver', () => {
+    it('mod.getDriver() 后来返回 driver 时，health() 应获取并恢复连接', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const fakeDriver = { verifyConnectivity: vi.fn().mockResolvedValue(undefined) };
+      const fakeRecaller = { setEmbedFn: vi.fn() };
+      let driverAvailable = false;
+
+      (a as any).mod = {
+        getDriver: () => driverAvailable ? fakeDriver : null,
+        Recaller: vi.fn().mockImplementation(() => fakeRecaller),
+      };
+
+      expect(await a.health()).toBe(false);
+      expect((a as any).driver).toBeNull();
+
+      driverAvailable = true;
+      const result = await a.health();
+      expect(result).toBe(true);
+      expect((a as any).driver).toBe(fakeDriver);
+      expect((a as any)._connectFailed).toBe(false);
+      expect((a as any)._connectRetryCount).toBe(0);
+    });
+  });
 });

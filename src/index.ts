@@ -2234,7 +2234,7 @@ const pluginEntry: any = definePluginEntry({
           }
         }
 
-        try { logger?.debug?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
+        try { logger?.info?.("heartbeat: cycle completed in " + String(Date.now() - t0) + "ms"); } catch { /* logger crash, non-fatal */ }
 
         // P-CB-6: 先执行熔断恢复探针，再采集健康指标。
         // 修复前：healthMetrics.collect() 在 P-CB-4/P-CB-5 恢复探针之前执行，
@@ -2425,6 +2425,7 @@ const pluginEntry: any = definePluginEntry({
     lastDistillationRun = Date.now();
 
     // Start heartbeat 60s after plugin init, then every 5 minutes
+    logger?.info?.("[lcm-graph-extra] heartbeat scheduled (first run in 60s, then every " + String(HB_INTERVAL_MS / 60000) + "min)");
     hbTimer = setTimeout(function startHb() {
       runHeartbeat();
       hbTimer = setInterval(runHeartbeat, HB_INTERVAL_MS);

@@ -360,6 +360,32 @@ export class GraphAdapter {
     this._lastFailTime = 0;
   }
 
+  private async _ensureRecaller(): Promise<void> {
+    if (!this.mod || !this.driver) return;
+    if (this._recaller) return;
+    this._recaller = new this.mod.Recaller(this.driver, buildGmConfig(this.neo4jConfig));
+    const ecfg = this.config.embedding;
+    if (ecfg) {
+      try {
+        this._embedFn = createLocalEmbedFn(ecfg);
+        this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
+      } catch (localErr) {
+        if (this.mod.createEmbedFn) {
+          this._embedFn = this.mod.createEmbedFn({ ...ecfg });
+          this.logger?.warn?.('[graph-adapter] Local embed fn failed, using graph-memory-pro createEmbedFn (keep_alive not guaranteed)', { err: localErr instanceof Error ? localErr.message : String(localErr) });
+        } else {
+          throw localErr;
+        }
+      }
+      if (this._embedFn) {
+        this._recaller.setEmbedFn(this._embedFn);
+      }
+    } else {
+      this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
+    }
+    this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
+  }
+
   /**
    * P1-10 GMR-1: 检查连接失败冷却期是否已过。如果冷却期满，自动重置失败标记，允许重试。
    * 返回 true 表示当前处于"失败锁定"状态（调用方应跳过），false 表示可以尝试 connect。
@@ -1005,7 +1031,6 @@ export class GraphAdapter {
    *   不清空会导致后续 searchWithCache 命中过期数据。
    */
   async health(): Promise<boolean> {
-    // 并发保护：如果已有健康检查在进行中，直接返回当前连接状态
     if (this._healthCheckInProgress) {
       this.logger?.debug?.('[graph-adapter] health check already in progress, skipping concurrent call');
       return this.isConnected;
@@ -1017,26 +1042,53 @@ export class GraphAdapter {
           await this.driver.verifyConnectivity();
           return true;
         }
+        if (this.mod && typeof this.mod.getDriver === 'function') {
+          const gmDriver = this.mod.getDriver();
+          if (gmDriver) {
+            this.driver = gmDriver;
+            this.logger?.info?.('[graph-adapter] health check: acquired driver from graph-memory-pro (was lazy-init)');
+            this._connectRetryCount = 0;
+            this._connectFailed = false;
+            this._lastFailTime = 0;
+            try {
+              await this._ensureRecaller();
+            } catch (recallerErr) {
+              this.logger?.warn?.('[graph-adapter] health check: Recaller init failed after driver acquired', { err: recallerErr instanceof Error ? recallerErr.message : String(recallerErr) });
+            }
+            return true;
+          }
+        }
         return await this.connect();
       } catch {
-        // 验证失败 → 清理过期 driver，释放连接池资源
+        const hadExistingDriver = !!this.driver;
         if (this.driver) {
           try {
             await releaseDriver(this.neo4jConfig);
           } catch { /* ignore release errors */ }
           this.driver = null;
         }
-        // 清理关联的 Recaller 和 embedFn（driver 已失效，它们也无效）
         this._recaller = null;
         this._embedFn = null;
-        // 尝试重连（重置计数后重新建立连接）
-        this._connectRetryCount = 0;
-        this._connectFailed = false;
-        this._lastFailTime = 0;
+        if (hadExistingDriver) {
+          this._connectRetryCount = 0;
+          this._connectFailed = false;
+          this._lastFailTime = 0;
+        }
         try {
+          if (this.mod && typeof this.mod.getDriver === 'function') {
+            const gmDriver = this.mod.getDriver();
+            if (gmDriver) {
+              this.driver = gmDriver;
+              this.logger?.info?.('[graph-adapter] health check: recovered via graph-memory-pro driver');
+              try {
+                await this._ensureRecaller();
+              } catch { /* recaller init non-fatal */ }
+              this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+              return true;
+            }
+          }
           const reconnected = await this.connect();
           if (reconnected) {
-            // 重连成功 → 清空 searchCache（旧 driver 下的缓存结果可能已失效）
             this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
             this.logger?.info?.('[graph-adapter] health check: reconnected successfully, search cache cleared');
           }

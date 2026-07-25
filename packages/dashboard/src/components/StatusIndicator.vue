@@ -2,7 +2,8 @@
 /**
  * 状态指示灯：熔断器 / 连接状态可视化。
  *
- * - available=true 绿灯（圆形 + ✓），false 红灯（方块 + ✗）
+ * - mode="circuit-breaker"（默认）：熔断器语义 — 正常/降级/熔断
+ * - mode="connection"：连接状态语义 — 已连接/未连接
  * - 形状 + 符号双重区分，色盲用户也能识别（不依赖颜色单一信号）
  * - 显示 failures 失败计数（NTag 颜色随状态变化）
  * - 颜色由 CSS 变量驱动，支持暗色模式自动适配
@@ -15,17 +16,23 @@ const props = defineProps<{
   label: string;
   available: boolean;
   failures: number;
+  mode?: 'circuit-breaker' | 'connection';
 }>();
 
-// 状态语义：正常 / 故障中（仍有失败计数）/ 已熔断
+const mode = computed(() => props.mode ?? 'circuit-breaker');
+
 const stateKind = computed<'ok' | 'warning' | 'fail'>(() => {
   if (!props.available) return 'fail';
   if (props.failures > 0) return 'warning';
   return 'ok';
 });
 
-// 屏幕阅读器文案
 const ariaLabel = computed(() => {
+  if (mode.value === 'connection') {
+    return props.available
+      ? `${props.label}：已连接${props.failures > 0 ? `，历史失败 ${props.failures} 次` : ''}`
+      : `${props.label}：未连接${props.failures > 0 ? `，失败 ${props.failures} 次` : ''}`;
+  }
   switch (stateKind.value) {
     case 'ok':       return `${props.label}：正常`;
     case 'warning':  return `${props.label}：可用，但失败 ${props.failures} 次`;
@@ -33,18 +40,37 @@ const ariaLabel = computed(() => {
   }
 });
 
-// 形状 class：ok/warning 用圆形，fail 用方块
 const shapeClass = computed(() =>
   stateKind.value === 'fail' ? 'shape-square' : 'shape-circle',
 );
 
-// 符号：ok=✓ / warning=! / fail=✗
 const symbol = computed(() => {
   switch (stateKind.value) {
     case 'ok':       return '✓';
     case 'warning':  return '!';
     case 'fail':     return '✗';
   }
+});
+
+const tagType = computed(() => {
+  if (stateKind.value === 'ok') return 'success';
+  if (stateKind.value === 'warning') return 'warning';
+  return 'error';
+});
+
+const tagText = computed(() => {
+  if (mode.value === 'connection') {
+    if (props.available) return '已连接';
+    return '未连接';
+  }
+  if (stateKind.value === 'ok') return '正常';
+  if (stateKind.value === 'warning') return `失败 ${props.failures}`;
+  return `熔断 (失败 ${props.failures})`;
+});
+
+const showFailureCount = computed(() => {
+  if (mode.value === 'connection' && props.available && props.failures > 0) return true;
+  return mode.value === 'circuit-breaker';
 });
 </script>
 
@@ -60,9 +86,13 @@ const symbol = computed(() => {
       aria-hidden="true"
     >{{ symbol }}</span>
     <span class="status-label">{{ label }}</span>
-    <NTag v-if="stateKind === 'ok'" size="small" type="success">正常</NTag>
-    <NTag v-else-if="stateKind === 'warning'" size="small" type="warning">失败 {{ failures }}</NTag>
-    <NTag v-else size="small" type="error">熔断 (失败 {{ failures }})</NTag>
+    <NTag size="small" :type="tagType">{{ tagText }}</NTag>
+    <NTag
+      v-if="showFailureCount && mode === 'connection' && failures > 0"
+      size="small"
+      type="default"
+      class="failures-tag"
+    >历史失败 {{ failures }}</NTag>
   </div>
 </template>
 
@@ -74,7 +104,6 @@ const symbol = computed(() => {
   padding: var(--space-xs) 0;
 }
 .dot {
-  /* 尺寸固定，符号居中 */
   width: 16px;
   height: 16px;
   display: inline-flex;
@@ -84,10 +113,8 @@ const symbol = computed(() => {
   font-size: var(--fs-caption);
   font-weight: 700;
   line-height: 1;
-  /* v2.3.3：符号色用染色表面（白 + 1.5% 蓝），避免纯白 */
   color: var(--color-surface);
 }
-/* L4 修复：warning 态（橙底）白字对比度不足 WCAG AA，改深色字 */
 .dot.dot-warning {
   color: var(--color-text-primary);
 }
@@ -97,7 +124,6 @@ const symbol = computed(() => {
 .shape-square {
   border-radius: var(--radius-sm);
 }
-/* 颜色由 token 驱动，自动适配暗色模式 */
 .dot-ok {
   background: var(--color-success);
   box-shadow: 0 0 4px color-mix(in srgb, var(--color-success) 60%, transparent);
@@ -113,5 +139,8 @@ const symbol = computed(() => {
 .status-label {
   font-size: var(--fs-body);
   flex: 1;
+}
+.failures-tag {
+  opacity: 0.7;
 }
 </style>

@@ -1275,6 +1275,7 @@ const moaLatencyPhaseOption = computed(() => {
                 <div class="profile-label">图谱适配器</div>
                 <StatusIndicator
                   label="Neo4j"
+                  mode="connection"
                   :available="!!memory.graphAdapter?.connected"
                   :failures="memory.graphAdapter?.circuitBreaker?.failures ?? (memory.graphAdapter?.connectFailed ? 1 : 0)"
                 />
@@ -1330,6 +1331,7 @@ const moaLatencyPhaseOption = computed(() => {
                 <NDescriptionsItem label="graphAdapter">
                   <StatusIndicator
                     label="connected"
+                    mode="connection"
                     :available="!!graphHealth.graphAdapterConnected"
                     :failures="graphHealth.circuitBreakerFailures ?? 0"
                   />
