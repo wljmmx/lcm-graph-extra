@@ -1783,6 +1783,17 @@ const pluginEntry: any = definePluginEntry({
             logger?.warn?.(`[lcm-graph-extra] dashboard snapshot server NOT started on ${host}:${port}: ${handleForLog.failureReason || 'unknown reason'} (non-fatal, plugin continues)`);
           }
         }, 600);
+
+        // 修复：插件热重载时新实例的 snapshot server 会立即启动，但 graphAdapter
+        // 是懒加载的（首次 assemble 才创建）。如果用户还没发起对话，snapshot
+        // 会一直报 "graphAdapter not initialized"。
+        // 在此 fire-and-forget 调用 ensureInitialized()，确保 graphAdapter
+        // 在当前闭包中被创建，不依赖 assemble 或 heartbeat。
+        ensureInitialized().then(() => {
+          logger?.info?.('[lcm-graph-extra] pre-init completed, graphAdapter ready for snapshot');
+        }).catch((err) => {
+          logger?.warn?.('[lcm-graph-extra] pre-init failed (will retry on assemble/heartbeat)', { err: err instanceof Error ? err.message : String(err) });
+        });
       }
     } catch (snapErr) {
       logger?.warn?.('[lcm-graph-extra] dashboard snapshot server failed to start (non-fatal)', { err: String(snapErr) });
