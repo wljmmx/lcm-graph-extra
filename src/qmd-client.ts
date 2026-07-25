@@ -201,7 +201,7 @@ export class QmdClient {
         this.restAvailable = false;
         const msg = (err as Error).message;
         if (msg.includes("timeout") || msg.includes("aborted")) {
-          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpTimeout });
+          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpQueryTimeout });
         } else if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
           this.logger.warn("[qmd-client] REST /query connection failed, falling back to CLI", { err: msg, baseUrl: this.mcpBaseUrl });
         } else {
@@ -529,7 +529,7 @@ export class QmdClient {
         Accept: "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.mcpTimeout),
+      signal: AbortSignal.timeout(this.mcpQueryTimeout),
     });
 
     if (!resp.ok) {
