@@ -1685,12 +1685,13 @@ const pluginEntry: any = definePluginEntry({
           }),
           getGraphAdapterState: () => {
             const a = graphAdapter as any;
-            // 调试日志：每次 snapshot 请求时记录 graphAdapter 状态
-            logger?.debug?.('[snapshot] getGraphAdapterState called', {
-              graphAdapterNull: !a,
-              initialized,
-              hasInitPromise: !!initPromise,
-            });
+            // 调试日志：graphAdapter 为 null 时输出 warn（便于排查）
+            if (!a) {
+              logger?.warn?.('[snapshot] getGraphAdapterState: graphAdapter is NULL', {
+                initialized,
+                hasInitPromise: !!initPromise,
+              });
+            }
             if (!a) return {
               connected: false,
               connectFailed: false,
