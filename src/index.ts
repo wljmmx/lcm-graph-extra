@@ -318,7 +318,7 @@ const pluginEntry: any = definePluginEntry({
         } catch (adapterErr) {
           logger?.warn?.("init: lossless-claw adapter connect threw", { err: (adapterErr as Error).message });
         }
-        const { QmdClient } = await import("./qmd-client.js");
+        const { QmdClient, QMD_CLIENT_DEFAULTS } = await import("./qmd-client.js");
         const { GraphAdapter } = await import("./adapters/graph-adapter.js");
         const { ExperienceStorage } = await import("./experience/index.js");
 
@@ -334,14 +334,13 @@ const pluginEntry: any = definePluginEntry({
         // 原问题：api.pluginConfig 可能不包含 entries 中的 neo4j 配置，
         // 导致 graphAdapter 连接失败但 getNeo4jDriver()（tools.ts）连接成功。
         const pluginConfig: any = mergeEntriesNeo4jConfig(api) ?? api.pluginConfig ?? {};
-        const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? 'search';
-        const cliTimeout = pluginConfig.cliTimeout ?? 30_000;
-        // 优化: 允许通过 pluginConfig.qmdMcpTimeout 覆盖 MCP 初始化超时（默认 3000ms）
-        // 初始化仅做 JSON-RPC handshake，通常 < 500ms，3s 足够。
-        const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? 3000;
-        // MCP 查询超时独立配置。首次查询 embedding 模型冷启动需 4-5s，
-        // 默认 8000ms 覆盖冷启动。用户可通过 pluginConfig.qmdMcpQueryTimeout 覆盖。
-        const qmdMcpQueryTimeout = pluginConfig.qmdMcpQueryTimeout ?? 8000;
+        // 统一从 QMD_CLIENT_DEFAULTS 取默认值，避免硬编码导致默认值不一致
+        const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? QMD_CLIENT_DEFAULTS.cliFallbackSearchType;
+        const cliTimeout = pluginConfig.cliTimeout ?? QMD_CLIENT_DEFAULTS.cliTimeout;
+        // MCP 初始化握手超时（JSON-RPC handshake，通常 < 500ms）
+        const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? QMD_CLIENT_DEFAULTS.mcpTimeout;
+        // MCP/REST 查询超时（首次 embedding 冷启动需 4-5s，默认 8000ms 覆盖冷启动）
+        const qmdMcpQueryTimeout = pluginConfig.qmdMcpQueryTimeout ?? QMD_CLIENT_DEFAULTS.mcpQueryTimeout;
 
         qmdClient = new QmdClient({
           mcpBaseUrl: qmdBaseUrl,
@@ -2560,7 +2559,7 @@ export {
   CompactionConfigSchema, WindowMonitorConfigSchema,
 } from './config.js';
 export type { PluginConfig, ExperienceTrigger } from './config.js';
-export { QmdClient } from './qmd-client.js';
+export { QmdClient, QMD_CLIENT_DEFAULTS } from './qmd-client.js';
 export type { QmdSearchResult, SearchParams } from './qmd-client.js';
 export { RetrievalGateway } from './retrieval-gateway.js';
 export { GraphAdapter } from './adapters/graph-adapter.js';

@@ -83,7 +83,7 @@ interface McpToolsCallResponse {
 // Defaults
 // ---------------------------------------------------------------------------
 
-const DEFAULTS = {
+export const QMD_CLIENT_DEFAULTS = {
   mcpBaseUrl: "http://127.0.0.1:8081",
   // MCP 初始化握手超时。初始化仅做 JSON-RPC handshake，通常 < 500ms。
   mcpTimeout: 3000,
@@ -94,9 +94,12 @@ const DEFAULTS = {
   cliTimeout: 30_000,
   // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。
-  cliFallbackSearchType: 'hybrid',
+  cliFallbackSearchType: 'hybrid' as 'hybrid' | 'search' | 'vsearch',
   pingInterval: 30_000,
 };
+
+/** @deprecated 使用 QMD_CLIENT_DEFAULTS，保留向后兼容 */
+const DEFAULTS = QMD_CLIENT_DEFAULTS;
 
 // ---------------------------------------------------------------------------
 // QmdClient
