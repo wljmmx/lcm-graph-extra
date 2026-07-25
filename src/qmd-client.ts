@@ -183,11 +183,11 @@ export class QmdClient {
         } else if (_mcpErr.includes("empty response")) {
           this.logger.warn("[qmd-client] MCP query returned no results, falling back to REST");
         } else if (_mcpErr.includes("timeout") || _mcpErr.includes("Timeout") || _mcpErr.includes("aborted")) {
-          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, mcpQueryTimeout: this.mcpQueryTimeout, mcpBaseUrl: this.mcpBaseUrl, mcpUrl: `${this.mcpBaseUrl}/mcp` });
+          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, mcpQueryTimeout: this.mcpQueryTimeout, url: `${this.mcpBaseUrl}/mcp` });
         } else if (_mcpErr.includes("fetch failed") || _mcpErr.includes("ECONNREFUSED") || _mcpErr.includes("ECONNRESET")) {
-          this.logger.warn("[qmd-client] MCP connection failed, falling back to REST", { err: _mcpErr, baseUrl: this.mcpBaseUrl, mcpUrl: `${this.mcpBaseUrl}/mcp` });
+          this.logger.warn("[qmd-client] MCP connection failed, falling back to REST", { err: _mcpErr, url: `${this.mcpBaseUrl}/mcp` });
         } else {
-          this.logger.warn("[qmd-client] MCP query failed, falling back to REST", { err: _mcpErr, mcpBaseUrl: this.mcpBaseUrl, mcpUrl: `${this.mcpBaseUrl}/mcp`, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
+          this.logger.warn("[qmd-client] MCP query failed, falling back to REST", { err: _mcpErr, url: `${this.mcpBaseUrl}/mcp`, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
         }
       }
     }
@@ -204,11 +204,11 @@ export class QmdClient {
         this.restAvailable = false;
         const msg = (err as Error).message;
         if (msg.includes("timeout") || msg.includes("aborted")) {
-          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpQueryTimeout, mcpBaseUrl: this.mcpBaseUrl, restUrl: `${this.mcpBaseUrl}/query` });
+          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpQueryTimeout, url: `${this.mcpBaseUrl}/query` });
         } else if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
-          this.logger.warn("[qmd-client] REST /query connection failed, falling back to CLI", { err: msg, baseUrl: this.mcpBaseUrl, restUrl: `${this.mcpBaseUrl}/query` });
+          this.logger.warn("[qmd-client] REST /query connection failed, falling back to CLI", { err: msg, url: `${this.mcpBaseUrl}/query` });
         } else {
-          this.logger.warn("[qmd-client] REST /query failed, falling back to CLI", { err: msg, mcpBaseUrl: this.mcpBaseUrl, restUrl: `${this.mcpBaseUrl}/query` });
+          this.logger.warn("[qmd-client] REST /query failed, falling back to CLI", { err: msg, url: `${this.mcpBaseUrl}/query` });
         }
       }
     }
@@ -475,9 +475,8 @@ export class QmdClient {
       // 超时，或总耗时 >2s 的失败，都输出环节分解日志
       if (isTimeout || totalMs > 2000) {
         this.logger?.warn?.(
-          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, initMs=${initMs}ms, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, baseUrl=${this.mcpBaseUrl}`,
+          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, initMs=${initMs}ms, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, url=${this.mcpBaseUrl}/mcp`,
           {
-            tool: toolName,
             failedPhase,
             isTimeout,
             initMs,
@@ -486,7 +485,7 @@ export class QmdClient {
             totalMs,
             mcpTimeout: this.mcpTimeout,
             mcpQueryTimeout: this.mcpQueryTimeout,
-            mcpBaseUrl: this.mcpBaseUrl,  // 显式打印连接地址，便于核实
+            url: `${this.mcpBaseUrl}/mcp`,
             hasSession: !!this.mcpSessionId,
             err: errMsg,
           },
@@ -546,14 +545,14 @@ export class QmdClient {
       const errMsg = err instanceof Error ? err.message : String(err);
       const isTimeout = /timeout|aborted/i.test(errMsg);
       const elapsedMs = Date.now() - initStart;
+      const initUrl = `${this.mcpBaseUrl}/mcp`;
       this.logger?.warn?.(
-        `[qmd-client] _doInitialize 失败: isTimeout=${isTimeout}, elapsedMs=${elapsedMs}ms, mcpTimeout=${this.mcpTimeout}ms, mcpBaseUrl=${this.mcpBaseUrl}, initUrl=${initUrl}`,
+        `[qmd-client] _doInitialize 失败: isTimeout=${isTimeout}, elapsedMs=${elapsedMs}ms, mcpTimeout=${this.mcpTimeout}ms, url=${initUrl}`,
         {
           isTimeout,
           elapsedMs,
           mcpTimeout: this.mcpTimeout,
-          mcpBaseUrl: this.mcpBaseUrl,
-          initUrl,
+          url: initUrl,
           err: errMsg,
         },
       );
@@ -671,7 +670,7 @@ export class QmdClient {
 
       if (isTimeout || totalMs > 2000) {
         this.logger?.warn?.(
-          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, baseUrl=${this.mcpBaseUrl}`,
+          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, url=${this.mcpBaseUrl}/query`,
           {
             failedPhase,
             isTimeout,
@@ -679,7 +678,7 @@ export class QmdClient {
             parseMs,
             totalMs,
             mcpQueryTimeout: this.mcpQueryTimeout,
-            mcpBaseUrl: this.mcpBaseUrl,  // 显式打印连接地址，便于核实
+            url: `${this.mcpBaseUrl}/query`,
             searchTypes,
             rerank: body.rerank,
             avoidVec,
@@ -715,8 +714,7 @@ export class QmdClient {
         this.logger?.warn?.(`[qmd-client] MCP query 超时 (query 上下文): 环节分解见上一条 mcpCall 失败诊断日志`, {
           totalMs: Date.now() - t0,
           mcpQueryTimeout: this.mcpQueryTimeout,
-          mcpBaseUrl: this.mcpBaseUrl,
-          mcpUrl: `${this.mcpBaseUrl}/mcp`,
+          url: `${this.mcpBaseUrl}/mcp`,
           hasSessionBefore: !!this.mcpSessionId,
           searchTypes,
           rerank: args.rerank,
