@@ -183,11 +183,11 @@ export class QmdClient {
         } else if (_mcpErr.includes("empty response")) {
           this.logger.warn("[qmd-client] MCP query returned no results, falling back to REST");
         } else if (_mcpErr.includes("timeout") || _mcpErr.includes("Timeout") || _mcpErr.includes("aborted")) {
-          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, mcpQueryTimeout: this.mcpQueryTimeout });
+          this.logger.warn("[qmd-client] MCP query timeout, falling back to REST", { err: _mcpErr, mcpQueryTimeout: this.mcpQueryTimeout, mcpBaseUrl: this.mcpBaseUrl, mcpUrl: `${this.mcpBaseUrl}/mcp` });
         } else if (_mcpErr.includes("fetch failed") || _mcpErr.includes("ECONNREFUSED") || _mcpErr.includes("ECONNRESET")) {
-          this.logger.warn("[qmd-client] MCP connection failed, falling back to REST", { err: _mcpErr, baseUrl: this.mcpBaseUrl });
+          this.logger.warn("[qmd-client] MCP connection failed, falling back to REST", { err: _mcpErr, baseUrl: this.mcpBaseUrl, mcpUrl: `${this.mcpBaseUrl}/mcp` });
         } else {
-          this.logger.warn("[qmd-client] MCP query failed, falling back to REST", { err: _mcpErr, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
+          this.logger.warn("[qmd-client] MCP query failed, falling back to REST", { err: _mcpErr, mcpBaseUrl: this.mcpBaseUrl, mcpUrl: `${this.mcpBaseUrl}/mcp`, stack: _mcpStack?.split('\n').slice(0, 5).join(' | ') });
         }
       }
     }
@@ -204,11 +204,11 @@ export class QmdClient {
         this.restAvailable = false;
         const msg = (err as Error).message;
         if (msg.includes("timeout") || msg.includes("aborted")) {
-          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpQueryTimeout });
+          this.logger.warn("[qmd-client] REST /query timeout, falling back to CLI", { err: msg, timeout: this.mcpQueryTimeout, mcpBaseUrl: this.mcpBaseUrl, restUrl: `${this.mcpBaseUrl}/query` });
         } else if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED")) {
-          this.logger.warn("[qmd-client] REST /query connection failed, falling back to CLI", { err: msg, baseUrl: this.mcpBaseUrl });
+          this.logger.warn("[qmd-client] REST /query connection failed, falling back to CLI", { err: msg, baseUrl: this.mcpBaseUrl, restUrl: `${this.mcpBaseUrl}/query` });
         } else {
-          this.logger.warn("[qmd-client] REST /query failed, falling back to CLI", { err: msg });
+          this.logger.warn("[qmd-client] REST /query failed, falling back to CLI", { err: msg, mcpBaseUrl: this.mcpBaseUrl, restUrl: `${this.mcpBaseUrl}/query` });
         }
       }
     }
@@ -520,26 +520,47 @@ export class QmdClient {
   private async _doInitialize(): Promise<string> {
     const initUrl = `${this.mcpBaseUrl}/mcp`;
     this.logger?.debug?.(`[qmd-client] _doInitialize: POST ${initUrl} (initialize), timeout=${this.mcpTimeout}ms`);
-    const resp = await fetch(initUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "init",
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: { tools: {}, resources: {} },
-          clientInfo: { name: "qmd-client", version: "1.0" },
+    const initStart = Date.now();
+    let resp: Response;
+    try {
+      resp = await fetch(initUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
         },
-      }),
-      signal: AbortSignal.timeout(this.mcpTimeout),
-    });
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "init",
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: { tools: {}, resources: {} },
+            clientInfo: { name: "qmd-client", version: "1.0" },
+          },
+        }),
+        signal: AbortSignal.timeout(this.mcpTimeout),
+      });
+    } catch (err) {
+      // initialize 阶段失败（含超时）输出连接地址+端口，便于核实
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isTimeout = /timeout|aborted/i.test(errMsg);
+      const elapsedMs = Date.now() - initStart;
+      this.logger?.warn?.(
+        `[qmd-client] _doInitialize 失败: isTimeout=${isTimeout}, elapsedMs=${elapsedMs}ms, mcpTimeout=${this.mcpTimeout}ms, mcpBaseUrl=${this.mcpBaseUrl}, initUrl=${initUrl}`,
+        {
+          isTimeout,
+          elapsedMs,
+          mcpTimeout: this.mcpTimeout,
+          mcpBaseUrl: this.mcpBaseUrl,
+          initUrl,
+          err: errMsg,
+        },
+      );
+      throw err;
+    }
 
-    this.logger?.debug?.(`[qmd-client] _doInitialize response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}`);
+    this.logger?.debug?.(`[qmd-client] _doInitialize response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}, elapsedMs=${Date.now() - initStart}ms`);
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
@@ -556,7 +577,7 @@ export class QmdClient {
       throw new Error("MCP initialize: no mcp-session-id header in response");
     }
 
-    this.logger?.debug?.(`[qmd-client] _doInitialize success: sessionId=${sessionId.slice(0, 8)}...`);
+    this.logger?.debug?.(`[qmd-client] _doInitialize success: sessionId=${sessionId.slice(0, 8)}..., elapsedMs=${Date.now() - initStart}ms`);
     return sessionId;
   }
 
@@ -694,6 +715,8 @@ export class QmdClient {
         this.logger?.warn?.(`[qmd-client] MCP query 超时 (query 上下文): 环节分解见上一条 mcpCall 失败诊断日志`, {
           totalMs: Date.now() - t0,
           mcpQueryTimeout: this.mcpQueryTimeout,
+          mcpBaseUrl: this.mcpBaseUrl,
+          mcpUrl: `${this.mcpBaseUrl}/mcp`,
           hasSessionBefore: !!this.mcpSessionId,
           searchTypes,
           rerank: args.rerank,
