@@ -115,15 +115,30 @@
       },
       "cliTimeout": {
         "type": "integer",
-        "default": 30000
+        "default": 30000,
+        "minimum": 1000,
+        "description": "QMD CLI fallback command timeout (ms). Default 30s."
       },
       "cliFallbackSearchType": {
         "type": "string",
         "enum": [
           "search",
-          "query"
+          "hybrid"
         ],
-        "default": "search"
+        "default": "hybrid",
+        "description": "CLI fallback search type. 'search' = lightweight lex-only (loses vector results); 'hybrid' = full typed query (preserves lex+vec)."
+      },
+      "qmdMcpTimeout": {
+        "type": "integer",
+        "default": 3000,
+        "minimum": 500,
+        "description": "QMD MCP initialize handshake timeout (ms). JSON-RPC handshake usually < 500ms. Default 3s."
+      },
+      "qmdMcpQueryTimeout": {
+        "type": "integer",
+        "default": 8000,
+        "minimum": 1000,
+        "description": "QMD MCP/REST query timeout (ms). First query needs embedding model cold-start (4-5s), later queries ~300-400ms. Default 8s covers cold-start."
       },
       "distillationIntervalMs": {
         "type": "integer",

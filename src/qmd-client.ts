@@ -60,7 +60,7 @@ export interface QmdClientOptions {
   mcpQueryTimeout?: number;
   cliTimeout?: number;
   pingInterval?: number;
-  cliFallbackSearchType?: 'search' | 'vsearch' | 'hybrid';
+  cliFallbackSearchType?: 'search' | 'hybrid';
   /** P3-B3: 注入统一 logger；未提供时降级到 globalLogger。 */
   logger?: Logger;
 }
@@ -94,7 +94,7 @@ export const QMD_CLIENT_DEFAULTS = {
   cliTimeout: 30_000,
   // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。
-  cliFallbackSearchType: 'hybrid' as 'hybrid' | 'search' | 'vsearch',
+  cliFallbackSearchType: 'hybrid' as 'hybrid' | 'search',
   pingInterval: 30_000,
 };
 
