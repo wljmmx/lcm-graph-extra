@@ -20,6 +20,28 @@ import { resolveLogger } from './utils/logger.js';
 const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
+// vec/hyde 否定语法剥离
+// ---------------------------------------------------------------------------
+// qmd server 对 vec/hyde 子查询不支持 lex 的 `-term` 否定语法，会整体返回 isError：
+//   "Structured search (vec): Negation (-term) is not supported in vec/hyde queries.
+//    Use lex for exclusions."
+// 该函数移除 query 中形如 `-term` / `-multi-word` 的否定词，仅保留正向词喂给 vec/hyde。
+// lex 子查询不走本函数，保留否定语义。
+//
+// 规则：
+//   - 匹配 `-term`：前导为空白或行首，`-` 后紧跟非 `-` 开头的非空白字符序列
+//   - 跳过 `--xxx`（双连字符视作其它语义，不处理）
+//   - 连续空格压缩为单空格，首尾 trim
+function stripVecNegation(q: string): string {
+  let out = q.replace(/(^|\s)-(\S+)/g, (match, prefix: string, term: string) => {
+    // term 以 `-` 开头说明是 `--xxx`，不当作否定词处理
+    if (term.startsWith('-')) return match;
+    return ' ';
+  });
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -143,6 +165,38 @@ export class QmdClient {
    * Results are normalised to QmdSearchResult[] regardless of source.
    */
   async query(params: SearchParams): Promise<QmdSearchResult[]> {
+    // 分阶段计时：用于总耗时超阈值时输出 breakdown，定位 L2_qmd 与 mcpCall 耗时差距来源。
+    // 阶段含义：mcpMs/restMs/cliMs 仅在该阶段被尝试时累加；status 标记 ok/fail/skip。
+    const qStart = Date.now();
+    let mcpMs = 0, restMs = 0, cliMs = 0;
+    let mcpStatus: 'ok' | 'fail' | 'skip' = 'skip';
+    let restStatus: 'ok' | 'fail' | 'skip' = 'skip';
+    let cliStatus: 'ok' | 'fail' = 'ok';
+    const finalizeBreakdown = (finalTotalMs: number) => {
+      // 总耗时 > 5s 时输出 breakdown，与 mcpCall 内部 >3s 的 slow 日志配合定位瓶颈。
+      // 解决问题：日志曾出现 assemble L2_qmd=44711ms 但 mcpCall slow 仅 5598ms 的差距，
+      // 差距来自 REST/CLI 降级链的累积耗时，此前无对应日志可证实。
+      if (finalTotalMs <= 5000) return;
+      const searchTypes = Array.isArray(params.searches)
+        ? params.searches.map((s) => s.type).join(',')
+        : '';
+      this.logger?.warn?.(
+        `[qmd-client] query slow breakdown: total=${finalTotalMs}ms (mcp=${mcpMs}ms/${mcpStatus}, rest=${restMs}ms/${restStatus}, cli=${cliMs}ms/${cliStatus}), searches=${params.searches?.length ?? 0}, searchTypes=${searchTypes}`,
+        {
+          totalMs: finalTotalMs,
+          mcpMs, mcpStatus,
+          restMs, restStatus,
+          cliMs, cliStatus,
+          searchesCount: params.searches?.length ?? 0,
+          searchTypes,
+          mcpAvailable: this.mcpAvailable,
+          restAvailable: this.restAvailable,
+          mcpQueryTimeout: this.mcpQueryTimeout,
+          cliTimeout: this.cliTimeout,
+        },
+      );
+    };
+
     // 清理 searches 中每个 query 的换行符。
     // qmd structured search (lex 模式) 不支持多行查询，含 \n/\r 会报错：
     //   "Structured search (lex): queries must be single-line. Remove newline characters."
@@ -151,22 +205,33 @@ export class QmdClient {
     if (Array.isArray(params.searches)) {
       params = {
         ...params,
-        searches: params.searches.map((s) => ({
-          ...s,
-          query: typeof s.query === 'string'
-            ? s.query.replace(/\r\n|\n|\r/g, ' ').replace(/\s+/g, ' ').trim()
-            : s.query,
-        })),
+        searches: params.searches.map((s) => {
+          if (typeof s.query !== 'string') return s;
+          let q = s.query.replace(/\r\n|\n|\r/g, ' ').replace(/\s+/g, ' ').trim();
+          // vec/hyde 不支持 lex 的 -term 否定语法，qmd server 会报错：
+          //   "Structured search (vec): Negation (-term) is not supported in vec/hyde queries. Use lex for exclusions."
+          // 仅 lex 保留否定（lex 支持排除语义）。vec/hyde 剥离 -term 形式的否定词。
+          if (s.type === 'vec' || s.type === 'hyde') {
+            q = stripVecNegation(q);
+          }
+          return { ...s, query: q };
+        }),
       };
     }
     // 1. MCP 优先 — 完整 hybrid 搜索能力（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
     if (this.mcpAvailable !== false) {
+      const mcpStart = Date.now();
       try {
         const results = await this.queryViaMcp(params);
         this.mcpAvailable = true;
         this.clearRecovery();
+        mcpMs = Date.now() - mcpStart;
+        mcpStatus = 'ok';
+        finalizeBreakdown(Date.now() - qStart);
         return results;
       } catch (err) {
+        mcpMs = Date.now() - mcpStart;
+        mcpStatus = 'fail';
         this.mcpAvailable = false;
         this.scheduleRecovery();
         const _mcpErr = (err as Error).message;
@@ -195,12 +260,18 @@ export class QmdClient {
     // 2. REST /query 备选 — 仅在 MCP 失败后启用。
     //    若 MCP 失败是 embed 维度错误，REST 降级为 lex-only 避免再次触发 vec embed 错误。
     if (this.restAvailable !== false) {
+      const restStart = Date.now();
       try {
         const results = await this.queryViaRest(params, this.lastMcpErrorIsEmbed);
         this.restAvailable = true;
         this.clearRecovery();
+        restMs = Date.now() - restStart;
+        restStatus = 'ok';
+        finalizeBreakdown(Date.now() - qStart);
         return results;
       } catch (err) {
+        restMs = Date.now() - restStart;
+        restStatus = 'fail';
         this.restAvailable = false;
         const msg = (err as Error).message;
         if (msg.includes("timeout") || msg.includes("aborted")) {
@@ -214,7 +285,19 @@ export class QmdClient {
     }
 
     // 3. CLI 兜底
-    return this.queryViaCli(params);
+    const cliStart = Date.now();
+    try {
+      const results = await this.queryViaCli(params);
+      cliMs = Date.now() - cliStart;
+      cliStatus = 'ok';
+      finalizeBreakdown(Date.now() - qStart);
+      return results;
+    } catch (err) {
+      cliMs = Date.now() - cliStart;
+      cliStatus = 'fail';
+      finalizeBreakdown(Date.now() - qStart);
+      throw err;
+    }
   }
 
   /**
@@ -739,10 +822,13 @@ export class QmdClient {
       throw new Error("MCP query returned empty response");
     }
 
-    // MCP 返回错误时，textContent 是错误描述而非 JSON，直接返回空结果
+    // MCP 返回错误时（如 vec/hyde 不支持 -term 否定语法），textContent 是错误描述而非 JSON。
+    // 抛错触发 query() 中的降级链（REST → CLI），避免静默丢失 L2 检索结果。
+    // 修复前为 return [] —— 绕过降级链导致 l2_count:0 即使 lex 子查询本可成功。
     if (data?.result?.isError) {
-      this.logger?.warn?.(`[qmd-client] MCP query returned error: ${textContent.slice(0, 200)}`);
-      return [];
+      const errText = textContent.slice(0, 200);
+      this.logger?.warn?.(`[qmd-client] MCP query returned error: ${errText}`);
+      throw new Error(`MCP query returned error: ${errText}`);
     }
 
     let raw: Array<{

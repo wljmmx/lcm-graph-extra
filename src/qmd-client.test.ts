@@ -103,6 +103,25 @@ function mockMcpCallError(errorMessage: string): void {
   } as Response);
 }
 
+/**
+ * MCP tools/call 返回 isError=true 的响应（如 vec/hyde 不支持 -term 否定语法时）。
+ * textContent 是错误描述而非 JSON，对应 qmd-client.ts queryViaMcp 中 isError 分支。
+ */
+function mockMcpIsError(errorText: string): void {
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
+    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
+  } as Response);
+  mockFetch.mockResolvedValueOnce({
+    ok: true,
+    json: async () => ({
+      jsonrpc: "2.0", id: 1,
+      result: { content: [{ type: "text", text: errorText }], isError: true },
+    }),
+  } as Response);
+}
+
 function mockMcpTimeout(): void {
   mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
 }
@@ -343,6 +362,127 @@ describe("QmdClient", () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].docid).toBe("#cli");
+    });
+  });
+
+  // ===================== Fix 1.1: vec/hyde 剥离 -term 否定语法 ===========
+
+  describe("Fix 1.1: strip -term negation from vec/hyde searches", () => {
+    it("strips -term from vec query before sending to MCP", async () => {
+      mockMcpOk({ results: [] });
+
+      await client.query({
+        searches: [
+          { type: "lex", query: "hello -world" },
+          { type: "vec", query: "hello -world" },
+        ],
+      });
+
+      // 找到 tools/call (MCP /mcp) 请求的 body
+      const mcpCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
+      );
+      expect(mcpCall).toBeDefined();
+      const mcpBody = JSON.parse((mcpCall![1] as any).body);
+      // method 为 tools/call 的请求才是 query 调用
+      if (mcpBody.method === "tools/call") {
+        const searches = mcpBody.params.arguments.searches;
+        const lex = searches.find((s: any) => s.type === "lex");
+        const vec = searches.find((s: any) => s.type === "vec");
+        // lex 保留 -term（lex 支持否定语义）
+        expect(lex.query).toBe("hello -world");
+        // vec 剥离 -term（vec/hyde 不支持否定，会触发 isError）
+        expect(vec.query).toBe("hello");
+        expect(vec.query).not.toContain("-");
+      }
+    });
+
+    it("does not strip --flag style double-hyphen from vec query", async () => {
+      mockMcpOk({ results: [] });
+
+      await client.query({
+        searches: [{ type: "vec", query: "--no-rerank flag" }],
+      });
+
+      const mcpCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
+      );
+      const mcpBody = JSON.parse((mcpCall![1] as any).body);
+      if (mcpBody.method === "tools/call") {
+        const vec = mcpBody.params.arguments.searches[0];
+        // --no-rerank 不应被当作 -term 剥离
+        expect(vec.query).toContain("--no-rerank");
+      }
+    });
+
+    it("strips multiple -term from hyde query", async () => {
+      mockMcpOk({ results: [] });
+
+      await client.query({
+        searches: [{ type: "hyde", query: "foo -bar baz -qux" }],
+      });
+
+      const mcpCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
+      );
+      const mcpBody = JSON.parse((mcpCall![1] as any).body);
+      if (mcpBody.method === "tools/call") {
+        const hyde = mcpBody.params.arguments.searches[0];
+        expect(hyde.query).toBe("foo baz");
+        expect(hyde.query).not.toContain("-bar");
+        expect(hyde.query).not.toContain("-qux");
+      }
+    });
+  });
+
+  // ===================== Fix 1.2: MCP isError 触发降级 ================
+
+  describe("Fix 1.2: MCP isError triggers REST fallback", () => {
+    it("falls back to REST when MCP returns isError (vec negation error)", async () => {
+      // MCP 返回 isError=true（vec/hyde 不支持 -term），修复前会 return [] 丢失 L2 数据
+      mockMcpIsError("Structured search (vec): Negation (-term) is not supported in vec/hyde queries. Use lex for exclusions.");
+      // REST 应被触发降级
+      mockRestOk({
+        results: [{ docid: "#rest", file: "r.md", title: "R", score: 0.7, snippet: "", line: 1, context: null }],
+      });
+
+      const results = await client.query({
+        searches: [
+          { type: "lex", query: "hello -world" },
+          { type: "vec", query: "hello" }, // vec 已被 Fix 1.1 剥离 -term
+        ],
+      });
+
+      // 应从 REST 拿到结果，而非返回空数组
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#rest");
+      // MCP init + tools/call + REST = 3 次 fetch
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+    });
+
+    it("falls back to CLI when MCP isError and REST both fail", async () => {
+      mockMcpIsError("Structured search (vec): Negation (-term) is not supported in vec/hyde queries.");
+      mockRestFail(500);
+      mockCliOk(JSON.stringify([{ docid: "#cli", file: "c.md", title: "C", score: 0.5, snippet: "", line: 1, context: null }]));
+
+      const results = await client.query({
+        searches: [{ type: "lex", query: "test" }, { type: "vec", query: "test" }],
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#cli");
+    });
+
+    it("does not silently return empty array on MCP isError", async () => {
+      mockMcpIsError("Some MCP error");
+      mockRestFail(500);
+      mockCliFail("CLI also failed");
+
+      // 修复前：MCP isError 时 return []，不会抛错
+      // 修复后：isError 抛错 → REST 失败 → CLI 失败 → 最终抛错
+      await expect(
+        client.query({ searches: [{ type: "lex", query: "test" }] }),
+      ).rejects.toThrow();
     });
   });
 
