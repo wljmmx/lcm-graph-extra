@@ -183,6 +183,45 @@ describe('Config Schema Compatibility — real-world config', () => {
     expect(parsed.distillationLlm?.model).toBe('qwen2.5-72b');
     expect(parsed.distillationLlm?.baseURL).toBe('http://192.168.50.5:8888');
   });
+
+  it('should accept moa.referenceModels with unsloth provider', () => {
+    const parsed = validateConfig({
+      moa: {
+        enabled: true,
+        referenceModels: [
+          {
+            provider: 'unsloth',
+            model: 'qwen2.5-72b',
+            baseURL: 'http://192.168.50.5:8888',
+            apiKey: 'local-key',
+            temperature: 0.6,
+            systemPrompt: 'analyst',
+            timeoutMs: 900_000,
+          },
+        ],
+      },
+    });
+    expect(parsed.moa?.referenceModels[0].provider).toBe('unsloth');
+    expect(parsed.moa?.referenceModels[0].model).toBe('qwen2.5-72b');
+  });
+
+  it('should accept moa.aggregatorModel with unsloth provider', () => {
+    const parsed = validateConfig({
+      moa: {
+        enabled: true,
+        aggregatorModel: {
+          provider: 'unsloth',
+          model: 'qwen2.5-72b',
+          baseURL: 'http://192.168.50.5:8888',
+          apiKey: 'local-key',
+          temperature: 0.3,
+          timeoutMs: 1_200_000,
+        },
+      },
+    });
+    expect(parsed.moa?.aggregatorModel?.provider).toBe('unsloth');
+    expect(parsed.moa?.aggregatorModel?.model).toBe('qwen2.5-72b');
+  });
 });
 
 describe('Config Schema — loadConfig with file', () => {

@@ -431,6 +431,7 @@
               "openclaw_hooks",
               "openai",
               "ollama",
+              "unsloth",
               "custom"
             ],
             "default": "openclaw_hooks"
@@ -483,6 +484,7 @@
               "openclaw_hooks",
               "openai",
               "ollama",
+              "unsloth",
               "custom"
             ],
             "default": "openclaw_hooks"
@@ -648,7 +650,7 @@
               "properties": {
                 "provider": {
                   "type": "string",
-                  "enum": ["openai", "ollama", "deepseek", "custom", "openclaw_hooks"],
+                  "enum": ["openai", "ollama", "deepseek", "unsloth", "custom", "openclaw_hooks"],
                   "default": "ollama"
                 },
                 "model": {
@@ -693,7 +695,7 @@
             "properties": {
               "provider": {
                 "type": "string",
-                "enum": ["openai", "ollama", "deepseek", "custom", "openclaw_hooks"],
+                "enum": ["openai", "ollama", "deepseek", "unsloth", "custom", "openclaw_hooks"],
                 "default": "ollama"
               },
               "model": {

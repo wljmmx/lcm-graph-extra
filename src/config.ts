@@ -162,6 +162,7 @@ export const PluginConfigSchema = Type.Object({
       provider: Type.Union([
         Type.Literal('openai'),
         Type.Literal('ollama'),
+        Type.Literal('unsloth'),
         Type.Literal('deepseek'),
         Type.Literal('custom'),
         Type.Literal('openclaw_hooks'),
@@ -178,6 +179,7 @@ export const PluginConfigSchema = Type.Object({
       provider: Type.Union([
         Type.Literal('openai'),
         Type.Literal('ollama'),
+        Type.Literal('unsloth'),
         Type.Literal('deepseek'),
         Type.Literal('custom'),
         Type.Literal('openclaw_hooks'),
