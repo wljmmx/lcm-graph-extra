@@ -74,7 +74,7 @@ export async function acquireDriver(config: Neo4jConfig): Promise<any> {
     neo4j.default.auth.basic(config.user || 'neo4j', config.password || ''),
     {
       maxConnectionLifetime: 30 * 60 * 1000,
-      // P2-3 H-16: 集中到 DEFAULTS.connectionPool
+      idleTimeBeforeConnectionTest: 30 * 1000,
       connectionAcquisitionTimeout: DEFAULTS.connectionPool.acquireTimeoutMs,
     },
   );

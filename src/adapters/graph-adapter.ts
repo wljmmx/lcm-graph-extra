@@ -246,6 +246,7 @@ export class GraphAdapter {
   private _healthCheckCount = 0;
   /** 并发健康检查防护：防止多个 heartbeat/业务调用同时触发 health() → connect() 竞态 */
   private _healthCheckInProgress = false;
+  private _poolRecoveryInProgress = false;
   // P2-3 H-16: 重试次数与冷却期改为引用 DEFAULTS.graph，避免魔术数字散落
   private readonly maxRetries = DEFAULTS.graph.maxRetries;
   // P1-10 GMR-1: 连接失败冷却期。原代码 _connectFailed=true 后无自动恢复路径，
@@ -409,81 +410,154 @@ export class GraphAdapter {
     return true; // 仍在冷却期，跳过
   }
 
+  private _isConnectionError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    const lowerMsg = msg.toLowerCase();
+    return lowerMsg.includes('pool is closed')
+      || lowerMsg.includes('connection closed')
+      || lowerMsg.includes('connection refused')
+      || lowerMsg.includes('connection reset')
+      || lowerMsg.includes('connection timeout')
+      || lowerMsg.includes('failed to connect')
+      || lowerMsg.includes('session closed')
+      || lowerMsg.includes('service is not available');
+  }
+
+  private async _tryRecoverConnection(context: string): Promise<boolean> {
+    if (this._poolRecoveryInProgress) {
+      this.logger?.debug?.(`[graph-adapter] pool recovery already in progress, skipping (${context})`);
+      return false;
+    }
+    this._poolRecoveryInProgress = true;
+    try {
+      this.logger?.warn?.(`[graph-adapter] connection error detected (${context}), initiating recovery`);
+
+      if (this.driver) {
+        try {
+          await releaseDriver(this.neo4jConfig);
+        } catch { /* ignore */ }
+        this.driver = null;
+      }
+      this._recaller = null;
+      this._embedFn = null;
+      this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+
+      if (this.mod && typeof this.mod.getDriver === 'function') {
+        try {
+          const gmDriver = this.mod.getDriver();
+          if (gmDriver) {
+            this.driver = gmDriver;
+            this.logger?.info?.('[graph-adapter] recovery: re-acquired driver from graph-memory-pro');
+            try {
+              await this._ensureRecaller();
+            } catch { /* non-fatal */ }
+            this._connectRetryCount = 0;
+            this._connectFailed = false;
+            this._lastFailTime = 0;
+            this._lastError = null;
+            return true;
+          }
+        } catch (gmErr) {
+          this.logger?.debug?.('[graph-adapter] recovery: gm-pro getDriver failed, falling back to own driver', { err: String(gmErr) });
+        }
+      }
+
+      const reconnected = await this.connect();
+      if (reconnected) {
+        this.logger?.info?.('[graph-adapter] recovery: reconnected successfully');
+      } else {
+        this.logger?.warn?.('[graph-adapter] recovery: reconnect failed');
+      }
+      return reconnected;
+    } catch (recoveryErr) {
+      this._lastError = `recovery failed: ${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)}`;
+      this.logger?.error?.(`[graph-adapter] recovery error: ${this._lastError}`);
+      return false;
+    } finally {
+      this._poolRecoveryInProgress = false;
+    }
+  }
+
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
-      // P1-10 GMR-1: 用冷却期检查代替原永久失败逻辑
       if (this._checkCooldownAndMaybeReset()) {
         this.logger?.warn?.(`[lcm-graph-extra] search: in reconnect cooldown, skipping`);
         return [];
       }
       await this.connect();
     }
-    // AUDIT: connect() 可能成功加载 mod 但 this.driver 仍为 null
-    // （gm-pro getDriver 返回 null + acquireDriver 失败），此时调用
-    // mod.searchNodes(this.driver, ...) 会把 null 传给 gm-pro，
-    // gm-pro 内部 driver.session() 抛 "Cannot read properties of null (reading 'session')"
     if (!this.mod || !this.driver) return [];
-    // P3-9 GMR-3: 捕获到局部常量，跨 await 保持非空收窄。
-    // 防止 dispose() → close() 在 await 期间将 this.mod / this.driver 置 null，
-    // 导致 "Cannot read properties of null (reading 'searchNodes')" 崩溃。
     const mod = this.mod;
     const driver = this.driver;
     const rl = limit ?? this.config.searchLimit;
     try {
-      let nodes: any[] = [];
-
-      // Prefer Recaller (dual-path: precise + generalized community recall)
-      if (this._recaller) {
-        try {
-          const recallResult = await this._recaller.recall(query);
-          nodes = recallResult.nodes ?? [];
-          this.logger?.debug?.('[graph-adapter] Recaller returned', { nodeCount: nodes.length });
-        } catch (recallErr) {
-          this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back', { err: recallErr });
-        }
-      }
-
-      // Fallback to simple searchNodes if no results
-      if (nodes.length === 0) {
-        nodes = await mod.searchNodes(driver, query, rl);
-      }
-      // G-10: 过滤被主动遗忘（hard mode）标记为 superseded 的节点。
-      // searchNodes / Recaller 来自外部 graph-memory-pro 模块，无法注入 WHERE 条件，
-      // 因此在返回结果上做后置过滤。节点属性可能挂在 n.properties 上。
-      let reranked = (nodes ?? []).filter((n: any) => {
-        const st = n?.state ?? n?.properties?.state;
-        return st !== 'superseded';
-      });
-      if (reranked.length >= 2) {
-        const nodeIds = reranked.map((n: any) => n.id).filter(Boolean);
-        if (nodeIds.length >= 2) {
-          const pprScores = await this.rerankByPageRank(nodeIds);
-          if (pprScores.size > 0) {
-            reranked.sort((a: any, b: any) => {
-              const sa = pprScores.get(a.id) ?? 0.5;
-              const sb = pprScores.get(b.id) ?? 0.5;
-              return sb - sa;
-            });
+      return await this._doSearch(mod, driver, query, rl);
+    } catch (err) {
+      if (this._isConnectionError(err)) {
+        const recovered = await this._tryRecoverConnection('search');
+        if (recovered && this.mod && this.driver) {
+          try {
+            this.logger?.info?.('[graph-adapter] search: retrying after connection recovery');
+            return await this._doSearch(this.mod, this.driver, query, rl);
+          } catch (retryErr) {
+            this.logger?.warn?.('[graph-adapter] search: retry after recovery failed', { err: String(retryErr) });
           }
         }
       }
-      return (reranked).map((n: any) => {
-        const name = n.name ?? n.properties?.name ?? '';
-        const label = n.type ?? n.labels?.[0] ?? 'TASK';
-        const desc = n.description ?? n.properties?.description ?? '';
-        const content = n.content ?? n.properties?.content ?? '';
-        const ppr = n.pagerank ?? n.properties?.pagerank ?? 0.5;
-        return {
-          id: createHash('sha256').update(`g:${n.id ?? name}`).digest('hex').slice(0, 16),
-          content: `[${label}] ${name}${desc ? '\n' + desc : ''}${content ? '\n' + String(content).slice(0, 500) : ''}`,
-          source: 'graph' as RetrievalSource,
-          type: inferType(label),
-          score: (n.score ?? Number(ppr)) as number,
-          metadata: { nodeId: n.id, nodeType: label, name, updatedAt: n.updatedAt ?? n.properties?.updatedAt ?? 0 },
-        };
-      });
-    } catch (err) { this.logger?.error?.(`[lcm-graph-extra] search error: ${err}`); return []; }
+      this.logger?.error?.(`[lcm-graph-extra] search error: ${err}`);
+      return [];
+    }
+  }
+
+  private async _doSearch(mod: any, driver: any, query: string, rl: number): Promise<RetrievalResult[]> {
+    let nodes: any[] = [];
+
+    if (this._recaller) {
+      try {
+        const recallResult = await this._recaller.recall(query);
+        nodes = recallResult.nodes ?? [];
+        this.logger?.debug?.('[graph-adapter] Recaller returned', { nodeCount: nodes.length });
+      } catch (recallErr) {
+        this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back', { err: recallErr });
+      }
+    }
+
+    if (nodes.length === 0) {
+      nodes = await mod.searchNodes(driver, query, rl);
+    }
+    let reranked = (nodes ?? []).filter((n: any) => {
+      const st = n?.state ?? n?.properties?.state;
+      return st !== 'superseded';
+    });
+    if (reranked.length >= 2) {
+      const nodeIds = reranked.map((n: any) => n.id).filter(Boolean);
+      if (nodeIds.length >= 2) {
+        const pprScores = await this.rerankByPageRank(nodeIds);
+        if (pprScores.size > 0) {
+          reranked.sort((a: any, b: any) => {
+            const sa = pprScores.get(a.id) ?? 0.5;
+            const sb = pprScores.get(b.id) ?? 0.5;
+            return sb - sa;
+          });
+        }
+      }
+    }
+    return (reranked).map((n: any) => {
+      const name = n.name ?? n.properties?.name ?? '';
+      const label = n.type ?? n.labels?.[0] ?? 'TASK';
+      const desc = n.description ?? n.properties?.description ?? '';
+      const content = n.content ?? n.properties?.content ?? '';
+      const ppr = n.pagerank ?? n.properties?.pagerank ?? 0.5;
+      return {
+        id: createHash('sha256').update(`g:${n.id ?? name}`).digest('hex').slice(0, 16),
+        content: `[${label}] ${name}${desc ? '\n' + desc : ''}${content ? '\n' + String(content).slice(0, 500) : ''}`,
+        source: 'graph' as RetrievalSource,
+        type: inferType(label),
+        score: (n.score ?? Number(ppr)) as number,
+        metadata: { nodeId: n.id, nodeType: label, name, updatedAt: n.updatedAt ?? n.properties?.updatedAt ?? 0 },
+      };
+    });
   }
 
   // P1-9: searchWithCache 是 L3 图检索的正式入口（index.ts 唯一调用点），
@@ -533,7 +607,12 @@ export class GraphAdapter {
           }
         }
       } catch (err) {
-        this.logger?.warn?.('[graph-adapter] community enrichment failed', { err: String(err) });
+        if (this._isConnectionError(err)) {
+          this.logger?.warn?.('[graph-adapter] community enrichment: connection error, triggering recovery');
+          this._tryRecoverConnection('community-enrichment').catch(() => {});
+        } else {
+          this.logger?.warn?.('[graph-adapter] community enrichment failed', { err: String(err) });
+        }
       } finally {
         if (session) { try { await session.close(); } catch {} }
       }
@@ -548,7 +627,6 @@ export class GraphAdapter {
   ): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
-      // P1-10 GMR-1: 用冷却期检查代替原永久失败逻辑
       if (this._checkCooldownAndMaybeReset()) {
         this.logger?.warn(`[lcm-graph-extra] searchExperience: in reconnect cooldown, skipping`);
         return [];
@@ -556,113 +634,118 @@ export class GraphAdapter {
       await this.connect();
     }
     if (!this.mod) return [];
-    // AUDIT: 同 search() —— mod 已加载但 driver 为 null 时不能调用 searchNodes
     if (!this.driver) return [];
-    // P3-9 GMR-3: 捕获到局部常量，跨 await 保持非空收窄，消除后续 this.mod! 非空断言
     const mod = this.mod;
     const rl = options?.limit ?? this.config.searchLimit;
     const ctx = options?.context;
     try {
-      const nodes = await mod.searchNodes(this.driver, query, rl * 3);
-      // G-10: 排除被主动遗忘（superseded）的节点
-      const events = (nodes ?? []).filter((n: any) => {
-        if ((n.type ?? n.labels?.[0]) !== 'EVENT') return false;
-        const st = n?.state ?? n?.properties?.state;
-        return st !== 'superseded';
-      });
-
-      // 场景优先级加权排序
-      const ranked = events.map((evt: any) => {
-        let scenarioBonus = 0;
-        let techBonus = 0;
-        const evtTags = evt.properties?.tags ?? {};
-
-        if (ctx?.scenario) {
-          for (const s of ctx.scenario) {
-            if ((evtTags.scenario ?? []).includes(s)) scenarioBonus += 0.15;
-          }
-        }
-        if (ctx?.techStack) {
-          for (const t of ctx.techStack) {
-            if ((evtTags.techStack ?? []).includes(t)) techBonus += 0.1;
-          }
-        }
-        const urgencyBoost = (evtTags.severity === 'critical' && ctx?.urgency > 0.5) ? 0.2 : 0;
-
-        return { ...evt, boostedScore: (Number(evt.properties?.pagerank ?? 0.5)) + scenarioBonus + techBonus + urgencyBoost };
-      }).sort((a: any, b: any) => b.boostedScore - a.boostedScore);
-
-      // P1-1 M-1: 消除 N+1 —— 原代码 per-event 调用 getEdgesForNodes（共 rl 次往返），
-      // 改为一次性批量取所有 top events 的 edges，再在内存中按 source id 分组成 Map<eventId, edges[]>，
-      // 遍历 topEvents 时从 Map 取对应 edges。
-      // gm-pro 兼容性：优先尝试 mod.getEdgesForNodes（Neo4j 版 API），
-      // 不存在时降级到 Cypher 批量查询，确保 graph-memory（SQLite 版）也能工作。
-      const topEvents = ranked.slice(0, rl);
-      const topIds = topEvents.map((evt: any) => evt.id).filter(Boolean);
-      let rawEdges: any[] = [];
-      if (topIds.length > 0) {
-        if (typeof mod.getEdgesForNodes === 'function') {
-          rawEdges = await mod.getEdgesForNodes(this.driver, topIds);
-        } else {
-          // Fallback: 用 Cypher 批量查询所有边（兼容 Neo4j）
-          let session: any = null;
+      return await this._doSearchExperience(mod, query, rl, ctx);
+    } catch (err) {
+      if (this._isConnectionError(err)) {
+        const recovered = await this._tryRecoverConnection('searchExperience');
+        if (recovered && this.mod && this.driver) {
           try {
-            session = this.driver.session();
-            const placeholders = topIds.map((_: string, i: number) => `$id${i}`).join(',');
-            const params: Record<string, any> = {};
-            topIds.forEach((id: string, i: number) => { params[`id${i}`] = id; });
-            const result = await session.run(
-              `MATCH (a)-[r]->(b) WHERE a.id IN [${placeholders}] OR b.id IN [${placeholders}]
+            this.logger?.info?.('[graph-adapter] searchExperience: retrying after connection recovery');
+            return await this._doSearchExperience(this.mod, query, rl, ctx);
+          } catch (retryErr) {
+            this.logger?.warn?.('[graph-adapter] searchExperience: retry after recovery failed', { err: String(retryErr) });
+          }
+        }
+      }
+      return [];
+    }
+  }
+
+  private async _doSearchExperience(mod: any, query: string, rl: number, ctx: any): Promise<RetrievalResult[]> {
+    const nodes = await mod.searchNodes(this.driver, query, rl * 3);
+    const events = (nodes ?? []).filter((n: any) => {
+      if ((n.type ?? n.labels?.[0]) !== 'EVENT') return false;
+      const st = n?.state ?? n?.properties?.state;
+      return st !== 'superseded';
+    });
+
+    const ranked = events.map((evt: any) => {
+      let scenarioBonus = 0;
+      let techBonus = 0;
+      const evtTags = evt.properties?.tags ?? {};
+
+      if (ctx?.scenario) {
+        for (const s of ctx.scenario) {
+          if ((evtTags.scenario ?? []).includes(s)) scenarioBonus += 0.15;
+        }
+      }
+      if (ctx?.techStack) {
+        for (const t of ctx.techStack) {
+          if ((evtTags.techStack ?? []).includes(t)) techBonus += 0.1;
+        }
+      }
+      const urgencyBoost = (evtTags.severity === 'critical' && ctx?.urgency > 0.5) ? 0.2 : 0;
+
+      return { ...evt, boostedScore: (Number(evt.properties?.pagerank ?? 0.5)) + scenarioBonus + techBonus + urgencyBoost };
+    }).sort((a: any, b: any) => b.boostedScore - a.boostedScore);
+
+    const topEvents = ranked.slice(0, rl);
+    const topIds = topEvents.map((evt: any) => evt.id).filter(Boolean);
+    let rawEdges: any[] = [];
+    if (topIds.length > 0) {
+      if (typeof mod.getEdgesForNodes === 'function') {
+        rawEdges = await mod.getEdgesForNodes(this.driver, topIds);
+      } else {
+        let session: any = null;
+        try {
+          session = this.driver.session();
+          const placeholders = topIds.map((_: string, i: number) => `$id${i}`).join(',');
+          const params: Record<string, any> = {};
+          topIds.forEach((id: string, i: number) => { params[`id${i}`] = id; });
+          const result = await session.run(
+            `MATCH (a)-[r]->(b) WHERE a.id IN [${placeholders}] OR b.id IN [${placeholders}]
                RETURN a.id AS fromId, b.id AS toId, type(r) AS type,
                       coalesce(r.instruction, '') AS instruction,
                       coalesce(r.name, '') AS targetName`,
-              params,
-            );
-            rawEdges = result.records.map((rec: any) => ({
-              fromId: rec.get('fromId'),
-              toId: rec.get('toId'),
-              type: rec.get('type'),
-              instruction: rec.get('instruction'),
-              targetName: rec.get('targetName'),
-            }));
-          } catch (err) {
-            rawEdges = [];
-            this.logger?.warn?.('[graph-adapter] edges batch query failed', { err: String(err) });
-          } finally {
-            if (session) { try { await session.close(); } catch {} }
-          }
+            params,
+          );
+          rawEdges = result.records.map((rec: any) => ({
+            fromId: rec.get('fromId'),
+            toId: rec.get('toId'),
+            type: rec.get('type'),
+            instruction: rec.get('instruction'),
+            targetName: rec.get('targetName'),
+          }));
+        } catch (err) {
+          rawEdges = [];
+          this.logger?.warn?.('[graph-adapter] edges batch query failed', { err: String(err) });
+        } finally {
+          if (session) { try { await session.close(); } catch {} }
         }
       }
-      const allEdges: any[] = rawEdges ?? [];
-      // 按 source id 分组（防御性多字段查找，兼容不同 edge 形态）
-      const edgesBySource = new Map<string, any[]>();
-      for (const e of allEdges) {
-        const srcId = e.fromId ?? e.sourceId ?? e.from ?? e.source;
-        if (!srcId) continue;
-        const list = edgesBySource.get(srcId) ?? [];
-        list.push(e);
-        edgesBySource.set(srcId, list);
-      }
+    }
+    const allEdges: any[] = rawEdges ?? [];
+    const edgesBySource = new Map<string, any[]>();
+    for (const e of allEdges) {
+      const srcId = e.fromId ?? e.sourceId ?? e.from ?? e.source;
+      if (!srcId) continue;
+      const list = edgesBySource.get(srcId) ?? [];
+      list.push(e);
+      edgesBySource.set(srcId, list);
+    }
 
-      const out: RetrievalResult[] = [];
-      for (const evt of topEvents) {
-        const name = evt.name ?? evt.properties?.name ?? '';
-        const desc = evt.description ?? evt.properties?.description ?? '';
-        const edges = edgesBySource.get(evt.id) ?? [];
-        // 防御性多字段查找 type/label（兼容不同 edge 形态）
-        const sols = edges.filter((e: any) => (e.type ?? e.label) === 'SOLVED_BY');
-        let expText = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
-        for (const s of sols) expText += `\n- ${s.targetName ?? 'Unknown'}`;
-        out.push({
-          id: createHash('sha256').update(`exp:${evt.id ?? name}`).digest('hex').slice(0, 16),
-          content: expText, source: 'graph' as RetrievalSource,
-          type: 'definition' as RetrievalType,
-          score: Math.min(0.8 + (ranked.indexOf(evt) < rl / 2 ? 0.15 : 0.05), 1),
-          metadata: { experience: true, problemName: name, solutionCount: sols.length, updatedAt: evt.updatedAt ?? evt.properties?.updatedAt ?? 0 },
-        });
-      }
-      return out;
-    } catch { return []; }
+    const out: RetrievalResult[] = [];
+    for (const evt of topEvents) {
+      const name = evt.name ?? evt.properties?.name ?? '';
+      const desc = evt.description ?? evt.properties?.description ?? '';
+      const edges = edgesBySource.get(evt.id) ?? [];
+      const sols = edges.filter((e: any) => (e.type ?? e.label) === 'SOLVED_BY');
+      let expText = `[EVENT] ${name}\n${desc}${sols.length > 0 ? '\nSolutions:' : ''}`;
+      for (const s of sols) expText += `\n- ${s.targetName ?? 'Unknown'}`;
+      out.push({
+        id: createHash('sha256').update(`exp:${evt.id ?? name}`).digest('hex').slice(0, 16),
+        content: expText, source: 'graph' as RetrievalSource,
+        type: 'definition' as RetrievalType,
+        score: Math.min(0.8 + (ranked.indexOf(evt) < rl / 2 ? 0.15 : 0.05), 1),
+        metadata: { experience: true, problemName: name, solutionCount: sols.length, updatedAt: evt.updatedAt ?? evt.properties?.updatedAt ?? 0 },
+      });
+    }
+    return out;
   }
 
 
@@ -822,14 +905,30 @@ export class GraphAdapter {
       throw new Error('Neo4j driver not initialized — graphAdapter is not connected. ' +
         'Call connect() first or check Neo4j availability.');
     }
+    try {
+      return await this._doQuery(cypher, params);
+    } catch (err) {
+      if (this._isConnectionError(err)) {
+        const recovered = await this._tryRecoverConnection('query');
+        if (recovered && this.driver) {
+          try {
+            this.logger?.info?.('[graph-adapter] query: retrying after connection recovery');
+            return await this._doQuery(cypher, params);
+          } catch (retryErr) {
+            this.logger?.warn?.('[graph-adapter] query: retry after recovery failed', { err: String(retryErr) });
+            throw retryErr;
+          }
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async _doQuery(cypher: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]> {
     const session = this.driver.session();
     try {
       const safeParams = params ? sanitizeNeo4jParams(params) : {};
       const result = await session.run(cypher, safeParams);
-      // BUGFIX: neo4j-driver 6.x 的 Integer 对象 valueOf() 返回 BigInt，
-      // 上层代码 new Date(integer) / Math.trunc(integer) 会报
-      // "Cannot convert a BigInt value to a number"。
-      // 在返回边界统一把 Integer 转为原生 number，隔离 driver 内部类型。
       return result.records.map((r: any) => convertNeo4jIntegers(r.toObject()) as Record<string, unknown>);
     } finally {
       await session.close();
