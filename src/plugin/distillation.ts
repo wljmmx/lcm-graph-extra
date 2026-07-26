@@ -8,8 +8,8 @@
  * - runDistillation: batch process pending experiences
  */
 import { randomUUID } from 'node:crypto';
-import { withKeepAliveIfOllama, ensureOllamaV1Path } from '../utils/url.js';
-// v1.2.0-3: 业务指标 —— 跟踪蒸馏成功率
+import { ensureOllamaV1Path } from '../utils/url.js';
+import { callLlm, isLocalLlm } from '../utils/llm-call.js';
 import { businessMetrics } from '../health-metrics.js';
 import { llmTimeout } from '../config/defaults.js';
 
@@ -46,7 +46,15 @@ export function resolveDistillationLlm(apiRef: any) {
   const defaultKeepAlive = pluginConfig?.distillationLlm?.keepAlive
     || pluginConfig?.embedding?.keepAlive
     || '1h';
-  // Session model is local Ollama → reuse it to avoid GPU model swapping
+  // Session model is local (Ollama, vLLM/unsloth, etc.) → reuse it to avoid GPU model swapping
+  if (runtimeLlm?.model && runtimeLlm?.baseURL && isLocalLlm(runtimeLlm.baseURL, runtimeLlm.model)) {
+    return {
+      model: runtimeLlm.model,
+      apiKey: runtimeLlm.apiKey || '',
+      baseURL: runtimeLlm.baseURL,
+      keepAlive: defaultKeepAlive,
+    };
+  }
   if (runtimeLlm?.model && isOllamaModel(runtimeLlm.model)) {
     return {
       model: runtimeLlm.model,
@@ -100,44 +108,23 @@ export async function distillOne(
     + ' relatedConcepts (array of 2-5 short keywords/phrases representing closely related topics or concepts for cross-linking).'
     + ' Return ONLY JSON without any thinking process.';
   const controller = new AbortController();
-  // v2.2.3: 原 15s 硬编码 → 可配置（默认 120s，蒸馏输入较长，本地大模型需更宽容）
   const timer = setTimeout(() => controller.abort(), llmTimeout('distillMs'));
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
-    // 仅 Ollama 端点注入 keep_alive，避免模型 5 分钟后卸载导致冷启动延迟
-    // max_tokens=4096: 即使 /no_think 未完全生效，也留足空间让 content 在思考后生成
-    const body = withKeepAliveIfOllama(
-      llm.baseURL,
-      { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 4096 },
-      llm.keepAlive,
-    );
-    const resp = await fetch(llm.baseURL + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+    const result = await callLlm({
+      baseURL: llm.baseURL,
+      apiKey: llm.apiKey,
+      model: llm.model,
+      prompt,
+      temperature: 0.3,
+      maxTokens: 4096,
+      keepAlive: llm.keepAlive,
+      signal: controller.signal,
+    });
     clearTimeout(timer);
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '<unreadable>');
-      const errMsg = `HTTP ${resp.status} from ${llm.baseURL}/chat/completions (model: ${llm.model}): ${errBody.slice(0, 200)}`;
-      log?.warn?.('distillOne: LLM HTTP error', { status: resp.status, model: llm.model, baseURL: llm.baseURL, rawId: raw.id, errBody: errBody.slice(0, 300) });
-      errorSink?.push(errMsg);
-      return null;
-    }
-    const data: any = await resp.json();
-    const msg = data?.choices?.[0]?.message;
-    // qwen3 思考模式兜底：
-    // 1. content 可能为空，实际输出在 reasoning_content 中
-    // 2. content 可能包含 <think>...</think> 标签，需要剥离
-    let text = msg?.content;
-    if (!text && msg?.reasoning_content) {
-      log?.info?.('distillOne: content empty, falling back to reasoning_content', { rawId: raw.id, model: llm.model });
-      text = msg.reasoning_content;
-    }
-    if (text) {
-      // 剥离 <think>...</think> 块（qwen3 思考内容包裹标签）
-      text = stripThinkTags(text);
-    }
+    const text = result.text;
     if (!text) {
-      const errMsg = `LLM returned empty content (model: ${llm.model}, endpoint: ${llm.baseURL}, finish_reason: ${data?.choices?.[0]?.finish_reason})`;
-      log?.warn?.('distillOne: LLM returned empty content', { rawId: raw.id, model: llm.model, finishReason: data?.choices?.[0]?.finish_reason });
+      const errMsg = `LLM returned empty content (model: ${llm.model}, endpoint: ${llm.baseURL})`;
+      log?.warn?.('distillOne: LLM returned empty content', { rawId: raw.id, model: llm.model });
       errorSink?.push(errMsg);
       return null;
     }

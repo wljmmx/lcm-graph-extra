@@ -13,7 +13,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { withKeepAliveIfOllama, ensureOllamaV1Path } from '../utils/url.js';
+import { ensureOllamaV1Path } from '../utils/url.js';
+import { callLlm as universalCallLlm } from '../utils/llm-call.js';
 import { llmTimeout } from '../config/defaults.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import {
@@ -226,67 +227,26 @@ async function callLlm(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // 如果外部 signal 先触发，也取消
   if (signal) {
     signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (modelConfig.apiKey) headers['Authorization'] = 'Bearer ' + modelConfig.apiKey;
-
-    const messages: Array<{ role: string; content: string }> = [];
-    if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-    messages.push({ role: 'user', content: userMessage });
-
-    const body = withKeepAliveIfOllama(
+    const result = await universalCallLlm({
       baseURL,
-      {
-        model: modelConfig.model,
-        messages,
-        temperature: modelConfig.temperature,
-        max_tokens: 4096,
-      },
-      modelConfig.keepAlive || '1h',
-    );
-
-    const resp = await fetch(baseURL + '/chat/completions', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
+      apiKey: modelConfig.apiKey,
+      model: modelConfig.model,
+      system: systemPrompt || undefined,
+      prompt: userMessage,
+      temperature: modelConfig.temperature,
+      maxTokens: 4096,
+      keepAlive: modelConfig.keepAlive || '1h',
       signal: controller.signal,
     });
-
     clearTimeout(timer);
-
-    if (!resp.ok) {
-      const errBody = await resp.text().catch(() => '<unreadable>');
-      throw new Error(`MoA LLM HTTP ${resp.status} from ${baseURL} (model: ${modelConfig.model}): ${errBody.slice(0, 200)}`);
-    }
-
-    const data: any = await resp.json();
-    const msg = data?.choices?.[0]?.message;
-    let text = msg?.content;
-
-    // qwen3 思考模式兜底
-    if (!text && msg?.reasoning_content) {
-      text = msg.reasoning_content;
-    }
-
-    if (text) {
-      // 剥离  think... 标签
-      text = text.replace(/<think[\s\S]*?<\/think>/gi, '').trim();
-    }
-
-    if (!text) {
-      const finishReason = data?.choices?.[0]?.finish_reason;
-      throw new Error(`MoA LLM returned empty content (model: ${modelConfig.model}, finish_reason: ${finishReason})`);
-    }
-
-    const tokensUsed = data?.usage?.total_tokens ?? 0;
     const ms = Date.now() - startTime;
-
-    return { text, tokensUsed, ms, model: modelConfig.model };
+    const tokensUsed = result.raw?.usage?.total_tokens ?? 0;
+    return { text: result.text, tokensUsed, ms, model: modelConfig.model };
   } catch (err) {
     clearTimeout(timer);
     const errName = err instanceof Error ? err.name : '';

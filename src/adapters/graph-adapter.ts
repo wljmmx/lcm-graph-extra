@@ -20,7 +20,8 @@ import { acquireDriver, releaseDriver } from './connection-pool';
 import { createLocalEmbedFn } from './embed-fn';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, getGlobalLogger } from '../utils/logger.js';
-import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
+import { cleanBaseURL } from '../utils/url.js';
+import { callLlm } from '../utils/llm-call.js';
 // P2-3 H-16: 接入集中化默认常量（maxRetries / reconnectCooldownMs / searchCache*）
 import { DEFAULTS, llmTimeout } from '../config/defaults.js';
 // v1.2.0-3: 业务指标 —— 跟踪 searchWithCache 的 TTL 命中率
@@ -1080,19 +1081,19 @@ export class GraphAdapter {
     const baseUrl = cleanBaseURL(config.baseURL || 'https://api.openai.com/v1');
     const model = config.model || 'gpt-4o-mini';
     const keepAlive = config.keepAlive;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (config.apiKey) headers['Authorization'] = 'Bearer ' + config.apiKey;
     return async (system, user) => {
-      // 仅 Ollama 端点注入 keep_alive，避免冷启动延迟
-      const body = withKeepAliveIfOllama(
-        baseUrl,
-        { model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], max_tokens: 1024, temperature: 0.3 },
+      const result = await callLlm({
+        baseURL: baseUrl,
+        apiKey: config.apiKey,
+        model,
+        system,
+        prompt: user,
+        temperature: 0.3,
+        maxTokens: 1024,
         keepAlive,
-      );
-      const res = await fetch(baseUrl + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(llmTimeout('graphLlmTimeoutMs')) });
-      if (!res.ok) throw new Error('LLM ' + res.status);
-      const data = await res.json();
-      return (data as any)?.choices?.[0]?.message?.content ?? '';
+        signal: AbortSignal.timeout(llmTimeout('graphLlmTimeoutMs')),
+      });
+      return result.text ?? '';
     };
   }
 

@@ -2597,26 +2597,25 @@ ${textParts.join('\n')}
 
 Return the summary as plain text. Preserve the original language of the conversation.`;
 
-            const { withKeepAliveIfOllama } = await import('./utils/url.js');
-            const body = withKeepAliveIfOllama(
-              baseURL,
-              { model, messages: [{ role: 'user', content: prompt }], temperature: 0.4, max_tokens: 2000 },
-              keepAlive,
-            );
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+            const { callLlm } = await import('./utils/llm-call.js');
             const signal = params.signal ?? AbortSignal.timeout(90_000);
-            const resp = await fetch(baseURL + '/chat/completions', {
-              method: 'POST', headers, body: JSON.stringify(body), signal,
-            });
-            if (!resp.ok) {
-              logger?.warn?.('[compactionProvider] LLM call failed', { status: resp.status });
+            try {
+              const result = await callLlm({
+                baseURL,
+                apiKey,
+                model,
+                prompt,
+                temperature: 0.4,
+                maxTokens: 2000,
+                keepAlive,
+                signal,
+              });
+              if (result.text?.trim()) return result.text.trim();
+              return undefined;
+            } catch (llmErr) {
+              logger?.warn?.('[compactionProvider] LLM call failed', { err: String(llmErr) });
               return undefined;
             }
-            const data: any = await resp.json();
-            const text = data?.choices?.[0]?.message?.content;
-            if (text?.trim()) return text.trim();
-            return undefined;
           } catch (err) {
             if ((err as any)?.name === 'AbortError' || (err as any)?.name === 'TimeoutError') {
               logger?.warn?.('[compactionProvider] summarization timed out');

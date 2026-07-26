@@ -13,7 +13,8 @@ import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { resolveNeo4jConfig } from '../config/neo4j-helper';
 import { getGlobalLogger } from '../utils/logger.js';
-import { cleanBaseURL, withKeepAliveIfOllama } from '../utils/url.js';
+import { cleanBaseURL } from '../utils/url.js';
+import { callLlm } from '../utils/llm-call.js';
 import { llmTimeout } from '../config/defaults.js';
 import { resolveDistillationLlm } from '../plugin/distillation.js';
 
@@ -163,17 +164,22 @@ export async function generateExperienceSummary(
     if (model) {
       const expList = experiences.map((e, i) => `${i + 1}. [${e.type}] ${e.name} (${e.confidence}, seen ${e.seen}) - ${e.desc}`).join('\n');
       const prompt = `Based on the following ${total} experiences (time range: ${fromStr} to ${toStr}), write a concise natural language summary in the user's language. Group by theme, highlight key lessons learned, and note patterns. Keep it under 500 words.\n\nExperiences:\n${expList}`;
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
-      const body = withKeepAliveIfOllama(baseURL, { model, messages: [{ role: 'user', content: prompt }], temperature: 0.4, max_tokens: 800 }, keepAlive);
-      const resp = await fetch(baseURL + '/chat/completions', {
-        method: 'POST', headers, body: JSON.stringify(body),
-        signal: AbortSignal.timeout(llmTimeout('summarizeTimeoutMs')),
-      });
-      if (resp.ok) {
-        const data: any = await resp.json();
-        const text = data?.choices?.[0]?.message?.content;
-        if (text?.trim()) return `## 经验回顾摘要\n\n**时间范围**: ${fromStr} → ${toStr}\n**总数**: ${total} 条经验\n\n${text.trim()}`;
+      try {
+        const result = await callLlm({
+          baseURL,
+          apiKey,
+          model,
+          prompt,
+          temperature: 0.4,
+          maxTokens: 800,
+          keepAlive,
+          signal: AbortSignal.timeout(llmTimeout('summarizeTimeoutMs')),
+        });
+        if (result.text?.trim()) {
+          return `## 经验回顾摘要\n\n**时间范围**: ${fromStr} → ${toStr}\n**总数**: ${total} 条经验\n\n${result.text.trim()}`;
+        }
+      } catch {
+        /* non-fatal, fall through to text summary */
       }
     }
   } catch (e) {

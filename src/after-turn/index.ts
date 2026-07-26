@@ -7,7 +7,7 @@
 import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
 import { llmTimeout } from '../config/defaults.js';
-import { withKeepAliveIfOllama } from '../utils/url.js';
+import { callLlm } from '../utils/llm-call.js';
 import { serializeError } from '../utils/logger.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
@@ -154,21 +154,17 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
             const validateOne = async (exp: { id: string; query: string; summary: string }) => {
               try {
                 const prompt = `Rate the relevance of this experience to the user's query on a scale of 0 to 1.\nQuery: "${exp.query.slice(0, 500)}"\nExperience: "${exp.summary.slice(0, 300)}"\nReturn ONLY a number between 0 and 1 (e.g., 0.8). 1 means highly relevant, 0 means completely irrelevant.`;
-                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-                if (llm.apiKey) headers['Authorization'] = 'Bearer ' + llm.apiKey;
-                const body = withKeepAliveIfOllama(
-                  llm.baseURL,
-                  { model: llm.model, messages: [{ role: 'user', content: prompt }], temperature: 0.1, max_tokens: 10 },
-                  llm.keepAlive,
-                );
-                const resp = await fetch(llm.baseURL + '/chat/completions', {
-                  method: 'POST', headers,
-                  body: JSON.stringify(body),
+                const result = await callLlm({
+                  baseURL: llm.baseURL,
+                  apiKey: llm.apiKey,
+                  model: llm.model,
+                  prompt,
+                  temperature: 0.1,
+                  maxTokens: 10,
+                  keepAlive: llm.keepAlive,
                   signal: AbortSignal.timeout(llmTimeout('validateTimeoutMs')),
                 });
-                if (!resp.ok) return;
-                const data: any = await resp.json();
-                const text = data?.choices?.[0]?.message?.content?.trim() || '';
+                const text = result.text?.trim() || '';
                 const score = parseFloat(text);
                 if (isNaN(score) || score < 0 || score > 1) return;
 

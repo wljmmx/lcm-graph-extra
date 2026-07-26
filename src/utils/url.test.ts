@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama } from './url.js';
+import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama, isLocalEndpoint, detectApiFormat } from './url.js';
 
 describe('cleanBaseURL', () => {
   it('去掉反引号包裹', () => {
@@ -113,5 +113,80 @@ describe('withKeepAliveIfOllama', () => {
     const original = { model: 'x' };
     withKeepAliveIfOllama('http://127.0.0.1:11434', original, '1h');
     expect(original).toEqual({ model: 'x' });
+  });
+});
+
+describe('isLocalEndpoint', () => {
+  it('127.0.0.1 是本地', () => {
+    expect(isLocalEndpoint('http://127.0.0.1:8000/v1')).toBe(true);
+  });
+
+  it('localhost 是本地', () => {
+    expect(isLocalEndpoint('http://localhost:8000/v1')).toBe(true);
+  });
+
+  it('0.0.0.0 是本地', () => {
+    expect(isLocalEndpoint('http://0.0.0.0:8000/v1')).toBe(true);
+  });
+
+  it('192.168.x.x 私有网段是本地', () => {
+    expect(isLocalEndpoint('http://192.168.1.100:8000/v1')).toBe(true);
+    expect(isLocalEndpoint('http://192.168.50.5:11434')).toBe(true);
+  });
+
+  it('10.x.x.x 私有网段是本地', () => {
+    expect(isLocalEndpoint('http://10.0.0.1:8000/v1')).toBe(true);
+  });
+
+  it('172.16-31.x.x 私有网段是本地', () => {
+    expect(isLocalEndpoint('http://172.16.0.1:8000/v1')).toBe(true);
+    expect(isLocalEndpoint('http://172.31.255.254:8000/v1')).toBe(true);
+    expect(isLocalEndpoint('http://172.15.0.1:8000/v1')).toBe(false);
+    expect(isLocalEndpoint('http://172.32.0.1:8000/v1')).toBe(false);
+  });
+
+  it('.local 域名是本地', () => {
+    expect(isLocalEndpoint('http://my-mac.local:8000/v1')).toBe(true);
+  });
+
+  it('公网 IP 不是本地', () => {
+    expect(isLocalEndpoint('https://api.openai.com/v1')).toBe(false);
+    expect(isLocalEndpoint('https://8.8.8.8:8000/v1')).toBe(false);
+  });
+
+  it('unsloth 本地部署 Anthropic 格式是本地', () => {
+    expect(isLocalEndpoint('http://127.0.0.1:8000/v1/messages')).toBe(true);
+    expect(isLocalEndpoint('http://192.168.50.10:8000/v1/messages')).toBe(true);
+  });
+
+  it('空值返回 false', () => {
+    expect(isLocalEndpoint('')).toBe(false);
+    expect(isLocalEndpoint(null)).toBe(false);
+  });
+});
+
+describe('detectApiFormat', () => {
+  it('默认 OpenAI 格式', () => {
+    expect(detectApiFormat('https://api.openai.com/v1')).toBe('openai');
+    expect(detectApiFormat('http://127.0.0.1:11434/v1')).toBe('openai');
+  });
+
+  it('/v1/messages 路径识别为 Anthropic 格式', () => {
+    expect(detectApiFormat('https://api.anthropic.com/v1/messages')).toBe('anthropic');
+    expect(detectApiFormat('http://127.0.0.1:8000/v1/messages')).toBe('anthropic');
+  });
+
+  it('/messages 路径识别为 Anthropic 格式', () => {
+    expect(detectApiFormat('http://localhost:8000/messages')).toBe('anthropic');
+  });
+
+  it('claude- 前缀模型识别为 Anthropic 格式', () => {
+    expect(detectApiFormat('', 'claude-3-5-sonnet-20240620')).toBe('anthropic');
+    expect(detectApiFormat('http://127.0.0.1:8000/v1', 'claude-3-opus')).toBe('anthropic');
+  });
+
+  it('unsloth 本地部署 Anthropic 格式识别正确', () => {
+    expect(detectApiFormat('http://127.0.0.1:8000/v1/messages', 'qwen2.5-72b')).toBe('anthropic');
+    expect(detectApiFormat('http://192.168.50.10:8000/v1/messages')).toBe('anthropic');
   });
 });

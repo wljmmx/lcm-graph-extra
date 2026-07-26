@@ -25,7 +25,6 @@
 export function cleanBaseURL(url: string | undefined | null): string {
   if (!url) return '';
   let s = String(url).trim();
-  // 循环剥离包裹引号（最多 5 层，足够覆盖任何合理场景，避免无限循环）
   for (let i = 0; i < 5; i++) {
     const len = s.length;
     const first = s[0];
@@ -36,7 +35,6 @@ export function cleanBaseURL(url: string | undefined | null): string {
     if (!isWrapped) break;
     s = s.slice(1, -1).trim();
   }
-  // 去掉尾部斜杠（保留协议头的双斜杠）
   s = s.replace(/\/+$/, '');
   return s;
 }
@@ -45,13 +43,11 @@ export function cleanBaseURL(url: string | undefined | null): string {
  * 判断 baseURL 是否指向 Ollama 端点。
  *
  * 判断依据（任一命中即视为 Ollama）：
- *  - hostname 是 127.0.0.1 / localhost / 0.0.0.0
+ *  - hostname 是 127.0.0.1 / localhost / 0.0.0.0 且端口是 11434/18789
  *  - 端口是 11434（Ollama 默认）或 18789（OpenClaw 桥接 Ollama 默认）
- *  - URL 路径包含 /api/ （Ollama 原生端点特征）
+ *  - URL 路径是 Ollama 原生端点（/api/generate, /api/chat 等）
  *
  * 用于决定是否在 LLM/embedding 请求 body 注入 keep_alive。
- * OpenAI / Anthropic 等官方 API 不识别 keep_alive，传了也会被忽略，
- * 但为了减少不必要的字段，仅在 Ollama 端点时注入。
  */
 export function isOllamaEndpoint(baseURL: string | undefined | null): boolean {
   const cleaned = cleanBaseURL(baseURL);
@@ -60,16 +56,10 @@ export function isOllamaEndpoint(baseURL: string | undefined | null): boolean {
     const u = new URL(cleaned);
     const host = u.hostname;
     const port = u.port;
-    // M-5: 删除 port === '' 分支 —— localhost 无端口不能确定是 Ollama
-    // （vLLM、LM Studio、Ollama 的 OpenAI 兼容网关都可能监听 localhost:80/443）
-    // 仅在端口明确为 11434/18789 时判定
     if (host === '127.0.0.1' || host === 'localhost' || host === '0.0.0.0') {
       if (port === '11434' || port === '18789') return true;
     }
-    // 端口匹配也认为是 Ollama（无论 host）
     if (port === '11434' || port === '18789') return true;
-    // M-6: 收紧 /api/ 路径判断 —— 仅匹配 Ollama 原生端点特征路径
-    // 避免 /v1/api/... 这类 OpenAI 兼容网关路径误判
     const OLLAMA_API_PREFIXES = ['/api/generate', '/api/chat', '/api/embed',
       '/api/tags', '/api/show', '/api/pull', '/api/push', '/api/version'];
     if (OLLAMA_API_PREFIXES.some((p) => u.pathname === p || u.pathname.startsWith(p + '/') || u.pathname.startsWith(p + '?'))) {
@@ -77,7 +67,6 @@ export function isOllamaEndpoint(baseURL: string | undefined | null): boolean {
     }
     return false;
   } catch {
-    // URL 解析失败，做兜底字符串匹配
     const lower = cleaned.toLowerCase();
     return (
       lower.includes(':11434') ||
@@ -93,10 +82,6 @@ export function isOllamaEndpoint(baseURL: string | undefined | null): boolean {
  * 构造 LLM 请求 body 的辅助函数：
  *  - 自动注入 keep_alive（仅 Ollama 端点）
  *  - 保证不污染 OpenAI 等官方端点
- *
- * @param baseURL 已清洗的 baseURL
- * @param baseBody 基础 body（不含 keep_alive）
- * @param keepAlive keepAlive 配置值，如 "1h"
  */
 export function withKeepAliveIfOllama(
   baseURL: string,
@@ -107,6 +92,76 @@ export function withKeepAliveIfOllama(
     return { ...baseBody, keep_alive: keepAlive };
   }
   return baseBody;
+}
+
+/**
+ * 判断 baseURL 是否指向本地/私有部署端点。
+ *
+ * 判断依据（任一命中即视为本地）：
+ *  - hostname 是 127.0.0.1 / localhost / 0.0.0.0
+ *  - hostname 是私有网段 IP：10.x.x.x / 172.(16-31).x.x / 192.168.x.x
+ *  - hostname 以 .local 结尾（mDNS 本地域名）
+ *
+ * 与 isOllamaEndpoint 的区别：
+ *  - isOllamaEndpoint 判断具体产品（Ollama），用于 keep_alive 等 Ollama 特有功能
+ *  - isLocalEndpoint 判断部署位置，用于模型复用、超时策略等通用本地模型优化
+ */
+export function isLocalEndpoint(baseURL: string | undefined | null): boolean {
+  const cleaned = cleanBaseURL(baseURL);
+  if (!cleaned) return false;
+  try {
+    const u = new URL(cleaned);
+    const host = u.hostname;
+    if (host === '127.0.0.1' || host === 'localhost' || host === '0.0.0.0') return true;
+    if (host.endsWith('.local')) return true;
+    const ipMatch = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ipMatch) {
+      const [, a, b] = ipMatch;
+      const na = Number(a);
+      const nb = Number(b);
+      if (na === 10) return true;
+      if (na === 172 && nb >= 16 && nb <= 31) return true;
+      if (na === 192 && nb === 168) return true;
+    }
+    return false;
+  } catch {
+    const lower = cleaned.toLowerCase();
+    return (
+      lower.includes('127.0.0.1') ||
+      lower.includes('localhost') ||
+      lower.includes('0.0.0.0') ||
+      lower.includes('.local') ||
+      /\b10\.\d+\.\d+\.\d+\b/.test(lower) ||
+      /\b192\.168\.\d+\.\d+\b/.test(lower) ||
+      /\b172\.(1[6-9]|2[0-9]|3[01])\.\d+\.\d+\b/.test(lower)
+    );
+  }
+}
+
+/**
+ * 判断 LLM API 格式：OpenAI 兼容 或 Anthropic Messages 格式。
+ *
+ * 判断依据：
+ *  - baseURL 路径包含 /v1/messages 或 /messages → Anthropic 格式
+ *  - 模型名以 claude- 开头 → Anthropic 格式
+ *  - 其他 → 默认 OpenAI 兼容格式
+ *
+ * 用途：决定请求 body 格式和端点路径。
+ */
+export function detectApiFormat(baseURL: string | undefined | null, model?: string): 'openai' | 'anthropic' {
+  const cleaned = cleanBaseURL(baseURL);
+  if (cleaned) {
+    try {
+      const u = new URL(cleaned);
+      const path = u.pathname.toLowerCase();
+      if (path.includes('/v1/messages') || path.includes('/messages')) return 'anthropic';
+    } catch {
+      const lower = cleaned.toLowerCase();
+      if (lower.includes('/v1/messages') || lower.includes('/messages')) return 'anthropic';
+    }
+  }
+  if (model?.startsWith('claude-')) return 'anthropic';
+  return 'openai';
 }
 
 /**
@@ -127,9 +182,7 @@ export function withKeepAliveIfOllama(
 export function ensureOllamaV1Path(baseURL: string | undefined | null): string {
   const cleaned = cleanBaseURL(baseURL);
   if (!cleaned) return '';
-  // 仅 Ollama 端点需要补全
   if (!isOllamaEndpoint(cleaned)) return cleaned;
-  // 已有 /v1 后缀则不重复添加
   if (/\/v\d+$/.test(cleaned)) return cleaned;
   return cleaned + '/v1';
 }
