@@ -598,17 +598,34 @@ describe("QmdClient", () => {
       expect(queryArg).not.toContain("\\n");
     });
 
-    it("appends --no-rerank when rerank=false", async () => {
+    it("appends --no-rerank when rerank=false (mixed search)", async () => {
       mockMcpFail(500);
       mockRestFail(500);
       mockCliOk(JSON.stringify([]));
-      await client.query({ searches: [{ type: "lex", query: "kw" }], rerank: false });
+      // 混合搜索走 qmd query 路径，--no-rerank 在此路径生效
+      // 纯 lex 走 qmd search（BM25 无 rerank），--no-rerank 不适用
+      await client.query({
+        searches: [
+          { type: "lex", query: "kw" },
+          { type: "vec", query: "vec-kw" },
+        ],
+        rerank: false,
+      });
       expect(mockExecFile).toHaveBeenCalledWith(
         "qmd",
         expect.arrayContaining(["--no-rerank"]),
         expect.any(Object),
         expect.any(Function),
       );
+    });
+
+    it("does not append --no-rerank for pure lex search (BM25 has no rerank)", async () => {
+      mockMcpFail(500);
+      mockRestFail(500);
+      mockCliOk(JSON.stringify([]));
+      await client.query({ searches: [{ type: "lex", query: "kw" }], rerank: false });
+      const callArgs = mockExecFile.mock.calls[0];
+      expect(callArgs[1]).not.toContain("--no-rerank");
     });
   });
 
