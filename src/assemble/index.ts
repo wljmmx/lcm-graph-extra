@@ -525,8 +525,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
           // ── 级联降级校验：裁剪后估算 token，若仍超安全阈值则逐级升级 ──
           // 安全阈值 = contextWindow - SDK overhead（动态获取，SDK 注入但 assemble 不可见的开销）
-          // 预留 30% 给下轮增量 + reserveTokens
-          const safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.70);
+          // 预留 20% 给下轮增量 + reserveTokens（原为 30%，过于保守导致频繁降级）
+          const safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.80);
           const applyCascadingDegradation = (baseReason: string): any[] => {
             let result = buildDegradedContext(baseReason, 0);
             for (let level = 0; level < 4; level++) {
@@ -544,8 +544,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             return result;
           };
 
-          // ── P0: 输入超限保护 —— 当 raw token 超过 LLM 上下文窗口 90% 时，compact 必然失败 ──
-          const inputOverflowThreshold = Math.floor(contextWindow * 0.90) - resolvedCtx.compactTokenBudget;
+          // ── P0: 输入超限保护 —— 当 raw token 超过 LLM 上下文窗口 80% 时，同步 compact 可能超时 ──
+          // 原公式 contextWindow * 0.90 - compactTokenBudget 存在逻辑错误：
+          // compactTokenBudget 是压缩目标预算（约 59%），不是压缩过程的额外开销。
+          // 对于 128K 窗口，原公式得到 41K（仅 32%）就触发降级，过于保守。
+          // 修复：直接用 contextWindow 的 80% 作为阈值，消息超过 80% 才跳过同步 compact。
+          const inputOverflowThreshold = Math.floor(contextWindow * 0.80);
           if (effectiveTokenCount > inputOverflowThreshold && effectiveTokenCount > 0) {
             ctx.logger?.warn?.('[assemble] compact input overflow — skipping sync compact, using degraded context', {
               effectiveTokenCount,
@@ -777,9 +781,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // SDK precheck 会追加 system prompt + tools 等大量额外开销（可达 60-90K tokens），
           // 仅看消息 token 不足以判断是否会溢出。当消息 token 超安全阈值时，
           // 级联降级：丢弃摘要 → 减少最近消息数，确保总 prompt 不超模型窗口。
+          // 原阈值 0.25 过于保守：system prompt + tools + overhead 通常只占 15-25%，
+          // 消息应该能占到 50-60%。提高到 0.50 以充分利用上下文窗口。
           const _fullEstimate = estimateTokensFromMessages(finalMessages);
-          const _safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.25);
-          if (_fullEstimate > _safeThreshold || msgCount > 50) {
+          const _safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.50);
+          if (_fullEstimate > _safeThreshold || msgCount > 100) {
             ctx.logger?.warn?.('[assemble] low-tier context exceeds safe threshold, applying cascading trim', {
               fullEstimate: _fullEstimate,
               safeThreshold: _safeThreshold,
