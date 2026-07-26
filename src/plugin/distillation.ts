@@ -8,7 +8,7 @@
  * - runDistillation: batch process pending experiences
  */
 import { randomUUID } from 'node:crypto';
-import { ensureOllamaV1Path } from '../utils/url.js';
+import { ensureOllamaV1Path, ensureAnthropicMessagesPath } from '../utils/url.js';
 import { callLlm, isLocalLlm } from '../utils/llm-call.js';
 import { businessMetrics } from '../health-metrics.js';
 import { llmTimeout } from '../config/defaults.js';
@@ -68,6 +68,14 @@ export function resolveDistillationLlm(apiRef: any) {
     model: dLlm.model || 'ollama/qwen3.6:27b',
     apiKey: '',
     baseURL: ensureOllamaV1Path(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+    keepAlive: dLlm.keepAlive || defaultKeepAlive,
+  };
+  // unsloth 本地部署：使用 Anthropic /v1/messages 格式
+  // 用户填写的地址类似 http://192.168.50.5:8888，自动拼接 /v1/messages
+  if (dLlm?.provider === 'unsloth') return {
+    model: dLlm.model || 'qwen2.5-72b',
+    apiKey: dLlm.apiKey || '',
+    baseURL: ensureAnthropicMessagesPath(dLlm.baseURL || 'http://127.0.0.1:8000'),
     keepAlive: dLlm.keepAlive || defaultKeepAlive,
   };
   if (dLlm?.provider && dLlm?.model) {

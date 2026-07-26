@@ -225,6 +225,26 @@ describe('callLlm', () => {
       expect(headers['x-api-key']).toBe('local-key');
       expect(headers['anthropic-version']).toBe('2023-06-01');
     });
+
+    it('supports unsloth bare baseURL (http://192.168.50.5:8888) via ensureAnthropicMessagesPath', async () => {
+      // 用户填写裸地址 http://192.168.50.5:8888，ensureAnthropicMessagesPath 自动拼接 /v1/messages
+      const { ensureAnthropicMessagesPath } = await import('./url.js');
+      const baseURL = ensureAnthropicMessagesPath('http://192.168.50.5:8888');
+      expect(baseURL).toBe('http://192.168.50.5:8888/v1/messages');
+
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        content: [{ type: 'text', text: 'unsloth ok' }],
+      }));
+      const result = await callLlm({
+        baseURL,
+        model: 'qwen2.5-72b',
+        apiKey: 'local-key',
+        prompt: 'hi',
+      });
+      expect(result.text).toBe('unsloth ok');
+      // 验证 fetch 调用的 URL 是拼接后的完整 /v1/messages
+      expect(mockFetch.mock.calls[0][0]).toBe('http://192.168.50.5:8888/v1/messages');
+    });
   });
 
   describe('endpoint construction', () => {

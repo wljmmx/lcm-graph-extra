@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama, isLocalEndpoint, detectApiFormat } from './url.js';
+import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama, isLocalEndpoint, detectApiFormat, ensureAnthropicMessagesPath } from './url.js';
 
 describe('cleanBaseURL', () => {
   it('去掉反引号包裹', () => {
@@ -188,5 +188,36 @@ describe('detectApiFormat', () => {
   it('unsloth 本地部署 Anthropic 格式识别正确', () => {
     expect(detectApiFormat('http://127.0.0.1:8000/v1/messages', 'qwen2.5-72b')).toBe('anthropic');
     expect(detectApiFormat('http://192.168.50.10:8000/v1/messages')).toBe('anthropic');
+  });
+});
+
+describe('ensureAnthropicMessagesPath', () => {
+  it('裸 baseURL 自动拼接 /v1/messages', () => {
+    expect(ensureAnthropicMessagesPath('http://192.168.50.5:8888')).toBe('http://192.168.50.5:8888/v1/messages');
+    expect(ensureAnthropicMessagesPath('http://127.0.0.1:8000')).toBe('http://127.0.0.1:8000/v1/messages');
+  });
+
+  it('已有 /v1 后缀则补全 /messages', () => {
+    expect(ensureAnthropicMessagesPath('http://192.168.50.5:8888/v1')).toBe('http://192.168.50.5:8888/v1/messages');
+    expect(ensureAnthropicMessagesPath('http://127.0.0.1:8000/v1')).toBe('http://127.0.0.1:8000/v1/messages');
+  });
+
+  it('已有 /v1/messages 则不变', () => {
+    expect(ensureAnthropicMessagesPath('http://192.168.50.5:8888/v1/messages')).toBe('http://192.168.50.5:8888/v1/messages');
+  });
+
+  it('已有 /messages 后缀则不变', () => {
+    expect(ensureAnthropicMessagesPath('http://localhost:8000/messages')).toBe('http://localhost:8000/messages');
+  });
+
+  it('清洗包裹字符后拼接', () => {
+    expect(ensureAnthropicMessagesPath('`http://192.168.50.5:8888`')).toBe('http://192.168.50.5:8888/v1/messages');
+    expect(ensureAnthropicMessagesPath(' "http://192.168.50.5:8888/v1" ')).toBe('http://192.168.50.5:8888/v1/messages');
+  });
+
+  it('空值返回空字符串', () => {
+    expect(ensureAnthropicMessagesPath('')).toBe('');
+    expect(ensureAnthropicMessagesPath(null)).toBe('');
+    expect(ensureAnthropicMessagesPath(undefined)).toBe('');
   });
 });

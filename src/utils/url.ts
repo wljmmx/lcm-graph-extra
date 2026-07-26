@@ -186,3 +186,30 @@ export function ensureOllamaV1Path(baseURL: string | undefined | null): string {
   if (/\/v\d+$/.test(cleaned)) return cleaned;
   return cleaned + '/v1';
 }
+
+/**
+ * 确保 Anthropic Messages 端点的 baseURL 包含 /v1/messages 路径。
+ *
+ * unsloth 等本地部署的 Anthropic 格式端点，用户配置中常写
+ * http://192.168.50.5:8888（不带 /v1/messages），导致请求路径错误。
+ * 此函数自动补全：
+ *  - http://host:port               → http://host:port/v1/messages
+ *  - http://host:port/v1            → http://host:port/v1/messages
+ *  - http://host:port/v1/messages   → 不变
+ *  - http://host:port/messages      → 不变
+ *
+ * @example
+ *   ensureAnthropicMessagesPath('http://192.168.50.5:8888')        → 'http://192.168.50.5:8888/v1/messages'
+ *   ensureAnthropicMessagesPath('http://127.0.0.1:8000/v1')        → 'http://127.0.0.1:8000/v1/messages'
+ *   ensureAnthropicMessagesPath('http://host:8000/v1/messages')    → 'http://host:8000/v1/messages'  (已有，不变)
+ */
+export function ensureAnthropicMessagesPath(baseURL: string | undefined | null): string {
+  const cleaned = cleanBaseURL(baseURL);
+  if (!cleaned) return '';
+  // 已有 /messages 后缀则不重复添加
+  if (/\/messages$/.test(cleaned)) return cleaned;
+  // 已有 /v1 后缀则补全 /messages
+  if (/\/v\d+$/.test(cleaned)) return cleaned + '/messages';
+  // 裸 baseURL 补全 /v1/messages
+  return cleaned + '/v1/messages';
+}

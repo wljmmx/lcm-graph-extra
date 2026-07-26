@@ -163,11 +163,25 @@ describe('Config Schema Compatibility — real-world config', () => {
     expect(parsed.backupConfig?.backupDir).toBe('/custom/backups');
   });
 
-  it('should accept llmProvider with all three provider enum values', () => {
-    for (const prov of ['openclaw_hooks', 'openai', 'ollama'] as const) {
+  it('should accept llmProvider with all provider enum values', () => {
+    for (const prov of ['openclaw_hooks', 'openai', 'ollama', 'unsloth'] as const) {
       const parsed = validateConfig({ llmProvider: { provider: prov } });
       expect(parsed.llmProvider?.provider).toBe(prov);
     }
+  });
+
+  it('should accept distillationLlm with unsloth provider', () => {
+    const parsed = validateConfig({
+      distillationLlm: {
+        provider: 'unsloth',
+        model: 'qwen2.5-72b',
+        baseURL: 'http://192.168.50.5:8888',
+        apiKey: 'local-key',
+      },
+    });
+    expect(parsed.distillationLlm?.provider).toBe('unsloth');
+    expect(parsed.distillationLlm?.model).toBe('qwen2.5-72b');
+    expect(parsed.distillationLlm?.baseURL).toBe('http://192.168.50.5:8888');
   });
 });
 

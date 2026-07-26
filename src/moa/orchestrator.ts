@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { ensureOllamaV1Path } from '../utils/url.js';
+import { ensureOllamaV1Path, ensureAnthropicMessagesPath } from '../utils/url.js';
 import { callLlm as universalCallLlm } from '../utils/llm-call.js';
 import { llmTimeout } from '../config/defaults.js';
 import { backgroundTasks } from '../async/task-registry.js';
@@ -217,11 +217,14 @@ const MOA_REF_CACHE_TTL_MS = 10 * 60 * 1000; // 10min
 async function callLlm(
   systemPrompt: string,
   userMessage: string,
-  modelConfig: { model: string; temperature: number; apiKey?: string; baseURL?: string; keepAlive?: string },
+  modelConfig: { model: string; temperature: number; apiKey?: string; baseURL?: string; keepAlive?: string; provider?: string },
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<LlmCallResult> {
-  const baseURL = ensureOllamaV1Path(modelConfig.baseURL || 'http://127.0.0.1:18789/v1');
+  // unsloth provider 使用 Anthropic /v1/messages 格式，自动拼接路径
+  const baseURL = modelConfig.provider === 'unsloth'
+    ? ensureAnthropicMessagesPath(modelConfig.baseURL || 'http://127.0.0.1:8000')
+    : ensureOllamaV1Path(modelConfig.baseURL || 'http://127.0.0.1:18789/v1');
   const startTime = Date.now();
 
   const controller = new AbortController();

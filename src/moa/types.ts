@@ -9,7 +9,7 @@
 /** 单个参考模型配置 */
 export interface ReferenceModelConfig {
   /** LLM provider */
-  provider: 'openai' | 'ollama' | 'deepseek' | 'custom' | 'openclaw_hooks';
+  provider: 'openai' | 'ollama' | 'unsloth' | 'deepseek' | 'custom' | 'openclaw_hooks';
   /** 模型名称 */
   model: string;
   /** 参考模型温度（0.5-0.7，鼓励多样性） */
@@ -29,7 +29,7 @@ export interface ReferenceModelConfig {
 /** 聚合模型配置 */
 export interface AggregatorModelConfig {
   /** LLM provider */
-  provider: 'openai' | 'ollama' | 'deepseek' | 'custom' | 'openclaw_hooks';
+  provider: 'openai' | 'ollama' | 'unsloth' | 'deepseek' | 'custom' | 'openclaw_hooks';
   /** 模型名称 */
   model: string;
   /** 聚合模型温度（0.3-0.5，偏收敛） */
