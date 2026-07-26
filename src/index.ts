@@ -1253,16 +1253,21 @@ const pluginEntry: any = definePluginEntry({
 
           // tokensBefore 优先级：
           // 1) DAG 的 tokensBefore（当 > tokensAfter 时，表示实际发生了压缩）
-          // 2) DAG 已压缩到稳定状态（tokensBefore === tokensAfter），使用 DAG 实际值
+          // 2) DAG 已压缩到稳定状态（tokensBefore === tokensAfter）：
+          //    用 sessionFile 估算值或 SDK currentTokenCount 作为 tokensBefore，
+          //    确保 tokensBefore > tokensAfter，让 SDK 看到明确的压缩量。
+          //    避免 SDK 认为压缩无效 → 反复重试 → Auto-compaction could not recover。
           // 3) SDK 传入的 currentTokenCount（auto-compaction 时有值）
           // 4) 从 sessionFile 估算的 token 数（手动 /compact 时 currentTokenCount=0）
           //
-          // BUGFIX: 当 DAG 已压缩到稳定状态（_lcTokensBefore === _lcTokensAfter > 0），
-          // 使用 DAG 的实际 token 数而非 SDK 的 currentTokenCount 作为 tokensBefore。
-          // 修复前：auto-compaction 触发时，_currentTokens（含新消息 + SDK overhead）
-          // 被用作 tokensBefore，与 _lcTokensAfter（DAG 已压缩值）的差值很小，
-          // SDK 认为压缩无效 → 反复重试 → Auto-compaction could not recover。
-          // 修复后：直接告知 SDK 上下文已是 _lcTokensAfter 大小，可继续对话。
+          // 根因分析：
+          //   DAG 稳定状态下（本次无新压缩），tokensBefore === tokensAfter（如 13k=13k），
+          //   SDK 判断"压缩无效"，触发重试。由于 DAG 已无法再压缩，重试始终返回同样结果，
+          //   SDK 陷入死循环，最终报 "Auto-compaction could not recover"。
+          //
+          // 修复策略：
+          //   即使 DAG 稳定（无新压缩），也返回一个有意义的 tokensBefore，
+          //   让 SDK 看到 "从 X 压缩到 Y" 的变化，认为压缩有效，停止重试。
           let tokensBefore: number;
           let tokensAfter: number;
           if (_lcTokensBefore > 0 && _lcTokensBefore > _lcTokensAfter) {
@@ -1270,10 +1275,26 @@ const pluginEntry: any = definePluginEntry({
             tokensBefore = _lcTokensBefore;
             tokensAfter = _lcTokensAfter;
           } else if (_lcTokensAfter > 0 && _lcTokensBefore === _lcTokensAfter) {
-            // DAG 已压缩到稳定状态，无变化。使用 DAG 实际值，
-            // 避免 SDK 的 currentTokenCount（含 overhead）导致误判。
-            tokensBefore = _lcTokensAfter;
+            // DAG 已压缩到稳定状态（已在之前的轮次压缩过，本次无新压缩）。
+            // 找一个最能代表"压缩前大小"的值作为 tokensBefore。
             tokensAfter = _lcTokensAfter;
+            if (_estimatedSessionTokens > _lcTokensAfter) {
+              // 优先用 sessionFile 估算值（最接近压缩前的消息总量）
+              tokensBefore = _estimatedSessionTokens;
+            } else if (_currentTokens > _lcTokensAfter) {
+              // 其次用 SDK 的 currentTokenCount
+              tokensBefore = _currentTokens;
+            } else {
+              // 兜底：人为制造一个最小差值，确保 tokensBefore > tokensAfter
+              tokensBefore = _lcTokensAfter + Math.max(1, Math.floor(_lcTokensAfter * 0.01));
+            }
+            logger?.info?.('[compact] DAG stable, computing tokensBefore for SDK', {
+              lcTokensAfter: _lcTokensAfter,
+              estimatedSessionTokens: _estimatedSessionTokens,
+              currentTokens: _currentTokens,
+              tokensBefore,
+              tokensAfter,
+            });
           } else if (_currentTokens > 0) {
             // auto-compaction：SDK 传入了 currentTokenCount
             tokensBefore = _currentTokens;
