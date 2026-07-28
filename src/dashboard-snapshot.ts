@@ -1045,7 +1045,7 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           // C-4: 运行时出错（如 ECONNRESET、socket 异常），上报 logger 不再静默
           // 不停止服务，下次请求可能仍能正常响应
           try {
-            getGlobalLogger().warn('dashboard snapshot server runtime error', {
+            getGlobalLogger().warn('[dashboard-snapshot] server runtime error', {
               code: err.code,
               message: err.message,
             });
@@ -1063,7 +1063,7 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
       server.on('close', () => {
         if (!closedIntentionally && onClose) {
           try {
-            getGlobalLogger().warn('dashboard snapshot server closed unexpectedly (crash or external kill)');
+            getGlobalLogger().warn('[dashboard-snapshot] server closed unexpectedly (crash or external kill)');
           } catch { /* ignore */ }
           // 标记 handle 为未启动，让心跳能检测到并触发恢复
           handle.started = false;
@@ -1085,7 +1085,7 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
       // 导致 server 因 unhandled 'clientError' 事件而崩溃。
       server.on('clientError', (err: Error, socket: any) => {
         try {
-          getGlobalLogger().debug('dashboard snapshot server client error', {
+          getGlobalLogger().debug('[dashboard-snapshot] server client error', {
             message: err.message,
           });
         } catch { /* ignore */ }

@@ -6,11 +6,25 @@
  */
 
 import { DEFAULTS } from './config/defaults.js';
+import { getGlobalLogger } from './utils/logger.js';
 
 // P1-8: "lcm" 子系统为死注册 —— 生产代码无 withCircuitBreaker("lcm", ...) 调用点，
 // 仅 circuit-breaker.test.ts 和 health_metrics 表 schema（cb_lcm_ok/cb_lcm_fails）引用。
 // 保留类型定义以兼容 DB schema 与 dashboard reset_breaker 工具，实际熔断保护未生效。
 type Subsystem = "lcm" | "qmd" | "neo4j";
+
+// 熔断器状态变化日志：仅在 open/recover/half-open-probe 关键节点记录，
+// 避免高频 isAvailable/recordSuccess 调用污染日志。
+// - 熔断打开 (CLOSED→OPEN)：warn（运维需感知）
+// - 探测放行 (OPEN→HALF_OPEN)：debug（半开探测，恢复尝试）
+// - 探测成功 (HALF_OPEN→CLOSED)：info（关键恢复事件）
+function logStateChange(name: Subsystem, event: 'open' | 'half_open_probe' | 'recovered', ctx?: Record<string, unknown>): void {
+  const logger = getGlobalLogger();
+  const msg = `[circuit-breaker] ${name} ${event}`;
+  if (event === 'open') logger.warn(msg, ctx);
+  else if (event === 'recovered') logger.info(msg, ctx);
+  else logger.debug(msg, ctx);
+}
 
 interface CircuitState {
   failures: number;
@@ -98,6 +112,7 @@ export function isAvailable(name: Subsystem): boolean {
     s.halfOpenAt = null;
     s.halfOpenProbeInFlight = true;
     s.halfOpenProbeStartedAt = Date.now();
+    logStateChange(name, 'half_open_probe');
     return true;
   }
 
@@ -111,12 +126,15 @@ export function isAvailable(name: Subsystem): boolean {
  */
 export function recordSuccess(name: Subsystem): void {
   const s = getState(name);
+  const wasOpen = s.open;
   s.failures = 0;
   s.open = false;
   s.halfOpenAt = null;
   s.lastFailureAt = null;
   s.halfOpenProbeInFlight = false;
   s.halfOpenProbeStartedAt = null;
+  // 仅在从 OPEN 恢复到 CLOSED 时记录，避免每次成功都刷日志
+  if (wasOpen) logStateChange(name, 'recovered');
 }
 
 /**
@@ -134,9 +152,10 @@ export function recordFailure(name: Subsystem): void {
   s.halfOpenProbeInFlight = false;
   s.halfOpenProbeStartedAt = null;
 
-  if (s.failures >= CONFIG.threshold) {
+  if (s.failures >= CONFIG.threshold && !s.open) {
     s.open = true;
     s.halfOpenAt = Date.now() + CONFIG.cooldownMs;
+    logStateChange(name, 'open', { failures: s.failures, threshold: CONFIG.threshold, cooldownMs: CONFIG.cooldownMs });
   }
 }
 

@@ -298,7 +298,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     estimatedTokens = estimateTokensFromMessages(messages);
     const modelFullId = typeof params.model === "string" ? params.model : "";
     let providerModelCtx = ctx.modelRegistry ? ctx.modelRegistry[modelFullId] : undefined;
-    ctx.logger.info(`[TOKEN-BUDGET] tokenBudget=${tokenBudget}, estimatedTokens=${estimatedTokens}, model=${modelFullId}`);
+    ctx.logger.debug?.(`[TOKEN-BUDGET] tokenBudget=${tokenBudget}, estimatedTokens=${estimatedTokens}, model=${modelFullId}`);
     if (providerModelCtx === undefined && ctx.modelRegistry && modelFullId) {
       const shortId = modelFullId.includes('/') ? modelFullId.split('/').pop() : modelFullId;
       for (const [key, val] of Object.entries(ctx.modelRegistry)) {

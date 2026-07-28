@@ -355,7 +355,7 @@ export class GraphAdapter {
       if (this._connectRetryCount >= this.maxRetries) {
         this._connectFailed = true;
         this._lastFailTime = Date.now();
-        this.logger?.error?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts, will retry in ${this.reconnectCooldownMs / 1000}s`);
+        this.logger?.warn?.(`[graph-adapter] connect failed after ${this.maxRetries} attempts, will retry in ${this.reconnectCooldownMs / 1000}s`);
       }
       return false;
     }
@@ -472,7 +472,7 @@ export class GraphAdapter {
       return reconnected;
     } catch (recoveryErr) {
       this._lastError = `recovery failed: ${recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr)}`;
-      this.logger?.error?.(`[graph-adapter] recovery error: ${this._lastError}`);
+      this.logger?.warn?.(`[graph-adapter] recovery error: ${this._lastError}`);
       return false;
     } finally {
       this._poolRecoveryInProgress = false;
@@ -506,7 +506,7 @@ export class GraphAdapter {
           }
         }
       }
-      this.logger?.error?.(`[lcm-graph-extra] search error: ${err}`);
+      this.logger?.warn?.(`[lcm-graph-extra] search error: ${err}`);
       return [];
     }
   }
@@ -877,7 +877,7 @@ export class GraphAdapter {
       // 避免调用方收到虚高的节点数。关系仍正常 upsert。
       // uc += validRelations.length;
     } catch (err) {
-      this.logger?.error?.(`[lcm-graph-extra] batchUpsert error: ${err}`);
+      this.logger?.warn?.(`[lcm-graph-extra] batchUpsert error: ${err}`);
     } finally {
       await session.close();
     }
@@ -963,7 +963,7 @@ export class GraphAdapter {
     try {
       return await this.fallbackPageRank(nodeIds);
     } catch (fallbackErr) {
-      this.logger?.error?.('[lcm-graph-extra] PPR rerank failed (both gm-pro and fallback)', { err: String(fallbackErr) });
+      this.logger?.warn?.('[lcm-graph-extra] PPR rerank failed (both gm-pro and fallback)', { err: String(fallbackErr) });
       return new Map();
     }
   }

@@ -440,11 +440,11 @@ const pluginEntry: any = definePluginEntry({
         }
 
         initialized = true;
-        logger?.info?.('[ensureInitialized] completed, graphAdapter=' + (graphAdapter ? 'set' : 'NULL') + ', driver=' + ((graphAdapter as any)?.driver ? 'set' : 'NULL'));
+        logger?.debug?.('[ensureInitialized] completed, graphAdapter=' + (graphAdapter ? 'set' : 'NULL') + ', driver=' + ((graphAdapter as any)?.driver ? 'set' : 'NULL'));
       } catch (err) {
         // Reset lock so next assemble retries instead of being permanently stuck
         initPromise = null;
-        logger?.error?.("init: failed, will retry on next assemble", { err: (err as Error).message });
+        logger?.warn?.("init: failed, will retry on next assemble", { err: (err as Error).message });
         // SEC-4 H-10: rethrow 让调用方感知初始化失败，避免静默继续导致后续空指针/未初始化访问。
         throw err;
       }
@@ -647,7 +647,7 @@ const pluginEntry: any = definePluginEntry({
           await ensureInitialized();
         } catch (initErr) {
           const msg = initErr instanceof Error ? initErr.message : String(initErr);
-          logger?.error?.("assemble: init failed, returning empty", { err: msg });
+          logger?.warn?.("assemble: init failed, returning empty", { err: msg });
           return {
             messages: params.messages ?? [],
             estimatedTokens: 0,
@@ -725,7 +725,7 @@ const pluginEntry: any = definePluginEntry({
             await ensureInitialized();
           } catch (initErr) {
             const errMsg = initErr instanceof Error ? initErr.message : String(initErr);
-            logger?.error?.("compact: init failed", { err: errMsg });
+            logger?.warn?.("compact: init failed", { err: errMsg });
             return { ok: false, compacted: false, reason: 'init failed: ' + errMsg };
           }
 
@@ -833,7 +833,7 @@ const pluginEntry: any = definePluginEntry({
               });
               const _backfillReason = (_backfill as any)?.reason ?? '';
               const _backfillImported = (_backfill as any)?.importedMessages ?? 0;
-              logger?.info?.('[compact] backfill bootstrap result', {
+              logger?.debug?.('[compact] backfill bootstrap result', {
                 sessionFile: (params as any).sessionFile,
                 bootstrapped: (_backfill as any)?.bootstrapped,
                 importedMessages: _backfillImported,
@@ -843,7 +843,7 @@ const pluginEntry: any = definePluginEntry({
               if (_backfillReason.includes('already bootstrapped') || _backfillImported === 0) {
                 _sessionFileMsgs = await readSessionFileMessages((params as any).sessionFile);
                 if (_sessionFileMsgs.length > 0) {
-                  logger?.info?.('[compact] injecting sessionFile messages via ingestBatch', {
+                  logger?.debug?.('[compact] injecting sessionFile messages via ingestBatch', {
                     count: _sessionFileMsgs.length,
                     sessionFile: (params as any).sessionFile,
                   });
@@ -852,7 +852,7 @@ const pluginEntry: any = definePluginEntry({
                     sessionKey: _compactSessionKey || undefined,
                     messages: _sessionFileMsgs,
                   });
-                  logger?.info?.('[compact] ingestBatch result', {
+                  logger?.debug?.('[compact] ingestBatch result', {
                     ingestedCount: (_ingestResult as any)?.ingestedCount,
                     expectedCount: _sessionFileMsgs.length,
                   });
@@ -865,7 +865,7 @@ const pluginEntry: any = definePluginEntry({
             }
           }
 
-          logger?.info?.('[compact] start', {
+          logger?.debug?.('[compact] start', {
             sessionId: _compactSessionId,
             sessionKey: _compactSessionKey ? 'set' : 'missing',
             conversationId: _compactConvId,
@@ -887,7 +887,7 @@ const pluginEntry: any = definePluginEntry({
             modelRegistryKeys: _modelRegistry ? Object.keys(_modelRegistry).length : 0,
           });
           if (_forceCompact) {
-            logger?.info?.('[compact] uncompressed messages exceeded dedupRounds, forcing compaction', {
+            logger?.debug?.('[compact] uncompressed messages exceeded dedupRounds, forcing compaction', {
               uncompressedCount: _uncompressedCount,
               dedupRounds: _dedupRounds,
               conversationId: _compactConvId,
@@ -925,7 +925,7 @@ const pluginEntry: any = definePluginEntry({
               : (_sessionFileMsgs.length > 0 ? estimateTokensFromMessages(_sessionFileMsgs) : 0);
             if (est > 0) {
               const budget = Math.max(5000, Math.floor(est * 0.5));
-              logger?.info?.('[compact] force compact budget calculated', {
+              logger?.debug?.('[compact] force compact budget calculated', {
                 estimatedTokens: est,
                 forceBudget: budget,
                 originalCompactBudget: _compactBudget,
@@ -955,7 +955,7 @@ const pluginEntry: any = definePluginEntry({
 
               const _isRetry = _tryBudget !== _progressiveBudgets[0];
               if (_isRetry) {
-                logger?.info?.('[compact] retrying with reduced budget', {
+                logger?.debug?.('[compact] retrying with reduced budget', {
                   budget: _tryBudget,
                   originalBudget: _compactBudget,
                   ratio: Number((_tryBudget / _compactBudget).toFixed(2)),
@@ -1024,7 +1024,7 @@ const pluginEntry: any = definePluginEntry({
                   compactTimeoutPromise,
                   ...(abortOnCompact ? [abortOnCompact] : []),
                 ]);
-                logger?.info?.('[compact] adapter.compact result received', {
+                logger?.debug?.('[compact] adapter.compact result received', {
                   paramsForce: params.force,
                   paramsTokenBudget: (params as any).tokenBudget,
                   usedTokenBudget: _isInputOverflow
@@ -1057,7 +1057,7 @@ const pluginEntry: any = definePluginEntry({
                 };
                 if (adapterCompacted) {
                   _succeededBudget = _tryBudget;
-                  logger?.info?.('[compact] segmented compaction succeeded', {
+                  logger?.debug?.('[compact] segmented compaction succeeded', {
                     budget: _tryBudget,
                     attempt: _progressiveBudgets.indexOf(_tryBudget) + 1,
                     totalAttempts: _progressiveBudgets.length,
@@ -1118,7 +1118,7 @@ const pluginEntry: any = definePluginEntry({
             // 目的：用正常 budget + threshold 模式再做一轮压缩，确保上下文充分精简。
             // compactionTarget 每次调用独立，不会残留 'budget' 模式到后续调用。
             if (_isInputOverflow && adapterCompacted && _succeededBudget < _compactBudget) {
-              logger?.info?.('[compact] iterative follow-up compaction triggered (budget restored to normal)', {
+              logger?.debug?.('[compact] iterative follow-up compaction triggered (budget restored to normal)', {
                 succeededBudget: _succeededBudget,
                 normalBudget: _compactBudget,
               });
@@ -1129,7 +1129,7 @@ const pluginEntry: any = definePluginEntry({
                 compactionTarget: 'budget',
               }).then((_followUp: any) => {
                 if (_followUp.ok && _followUp.compacted) {
-                  logger?.info?.('[compact] iterative follow-up compaction succeeded');
+                  logger?.debug?.('[compact] iterative follow-up compaction succeeded');
                 }
               }, () => {});
             }
@@ -1187,7 +1187,7 @@ const pluginEntry: any = definePluginEntry({
             // 如果 onCompaction 返回成功（且之前的 DAG compact 失败），用它的结果更新
             // compactResult 和 adapterCompacted，确保 SDK 收到正确的压缩结果。
             if (_hookResult && _hookResult.ok && _hookResult.compacted) {
-              logger?.info?.('[compact] onCompaction hook succeeded, updating compactResult', {
+              logger?.debug?.('[compact] onCompaction hook succeeded, updating compactResult', {
                 hookTokensBefore: _hookResult.result?.tokensBefore,
                 hookTokensAfter: _hookResult.result?.tokensAfter,
               });
@@ -1228,7 +1228,7 @@ const pluginEntry: any = definePluginEntry({
               const _summaries = await _losslessClawAdapter.getSummaries(_compactSessionId ?? '', 3);
               if (_summaries.length > 0) {
                 summaryContent = _summaries[_summaries.length - 1].content;
-                logger?.info?.('[compact] using existing summary from DAG (no new summary created)', {
+                logger?.debug?.('[compact] using existing summary from DAG (no new summary created)', {
                   summaryLength: summaryContent?.length ?? 0,
                   summaryCount: _summaries.length,
                 });
@@ -1288,7 +1288,7 @@ const pluginEntry: any = definePluginEntry({
               // 兜底：人为制造一个最小差值，确保 tokensBefore > tokensAfter
               tokensBefore = _lcTokensAfter + Math.max(1, Math.floor(_lcTokensAfter * 0.01));
             }
-            logger?.info?.('[compact] DAG stable, computing tokensBefore for SDK', {
+            logger?.debug?.('[compact] DAG stable, computing tokensBefore for SDK', {
               lcTokensAfter: _lcTokensAfter,
               estimatedSessionTokens: _estimatedSessionTokens,
               currentTokens: _currentTokens,
@@ -1328,7 +1328,7 @@ const pluginEntry: any = definePluginEntry({
             const reason = ok
               ? 'compaction evaluated — context below threshold, no compaction needed'
               : 'DAG compaction did not produce a summary — session tokens unchanged, will retry';
-            logger?.info?.('[compact] no compaction produced', {
+            logger?.debug?.('[compact] no compaction produced', {
               ok,
               adapterOk: _adapterOk,
               adapterCompacted,

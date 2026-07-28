@@ -649,7 +649,7 @@ export async function runMoaRefsSync(
   const effectiveAggModel = effective.aggregatorModel;
   const effectiveMode = effective.mode;
 
-  logger?.info?.('[moa] Phase 1: Reference models (sync)', {
+  logger?.debug?.('[moa] Phase 1: Reference models (sync)', {
     mode: effectiveMode,
     refCount: effectiveRefModels.length,
     budgetMs: syncBudgetMs,
@@ -755,7 +755,7 @@ export function dispatchMoaAggregator(
 
   moaAggregatorPending = true;
 
-  logger?.info?.('[moa] Phase 2: Aggregator (async dispatch)', {
+  logger?.debug?.('[moa] Phase 2: Aggregator (async dispatch)', {
     sessionKey,
     refCount: entry.referenceOutputs.length,
     aggModel: entry.aggregatorModel.model,
@@ -855,7 +855,7 @@ ${refSections}
       aggregatorModel: entry.aggregatorModel,
     }, entry.complexityScore);
 
-    logger?.info?.('[moa] Aggregator async completed', {
+    logger?.debug?.('[moa] Aggregator async completed', {
       sessionKey,
       aggMs,
       totalTokens,
