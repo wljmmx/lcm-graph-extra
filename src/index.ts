@@ -1410,8 +1410,10 @@ const pluginEntry: any = definePluginEntry({
                   parentId: lastEntry.id,
                   type: 'compaction',
                   timestamp: new Date().toISOString(),
+                  summary: summaryContent ?? '[compacted]',
                   firstKeptEntryId: boundaryId,
                   tokensBefore,
+                  fromHook: true,
                 });
                 await appendFile(params.sessionFile, compactionEntry + '\n', 'utf-8');
                 compactResultExtra.firstKeptEntryId = boundaryId;
