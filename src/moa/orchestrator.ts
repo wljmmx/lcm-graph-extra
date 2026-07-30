@@ -97,10 +97,32 @@ const DEFAULT_PRESETS: MoaPreset[] = [
   },
 ];
 
+/** 判断 provider/host 是否为本地部署：ollama/unsloth 或 baseURL 指向内网/localhost */
+function isLocalDeployment(refConfigs: ReferenceModelConfig[]): boolean {
+  if (refConfigs.length === 0) return false;
+  return refConfigs.some((cfg) => {
+    if (cfg.provider === 'ollama' || cfg.provider === 'unsloth') return true;
+    if (cfg.baseURL) {
+      try {
+        const u = new URL(cfg.baseURL);
+        const host = u.hostname;
+        if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+        if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.')) return true;
+      } catch { /* ignore malformed */ }
+    }
+    return false;
+  });
+}
+
 /**
  * 解析激活预设，返回有效配置。
  * 如果 activePreset 匹配到预设，使用预设的 referenceModels + aggregatorModel + mode；
  * 否则回退到 config 根级别的配置。
+ *
+ * 关键约束：本地部署（ollama/unsloth 或内网 baseURL）强制 mode=serial，
+ * 避免多个参考模型并行争抢同一套 GPU 资源，导致：
+ *   - 单个模型吞吐骤降（vRAM 反复 swap / CUDA OOM 重算）
+ *   - 整体耗时 > syncBudgetMs，触发 "MoA sync budget exceeded"
  */
 export function resolveActivePreset(config: MoaConfig): {
   referenceModels: ReferenceModelConfig[];
@@ -109,21 +131,30 @@ export function resolveActivePreset(config: MoaConfig): {
 } {
   const presets = getAvailablePresets(config);
   const activeName = config.activePreset;
+  let referenceModels: ReferenceModelConfig[];
+  let aggregatorModel: AggregatorModelConfig;
+  let mode: 'parallel' | 'serial';
   if (activeName) {
     const preset = presets.find((p) => p.name === activeName);
     if (preset) {
-      return {
-        referenceModels: preset.referenceModels,
-        aggregatorModel: preset.aggregatorModel,
-        mode: preset.mode ?? config.mode,
-      };
+      referenceModels = preset.referenceModels;
+      aggregatorModel = preset.aggregatorModel;
+      mode = preset.mode ?? config.mode;
+    } else {
+      referenceModels = config.referenceModels;
+      aggregatorModel = config.aggregatorModel;
+      mode = config.mode;
     }
+  } else {
+    referenceModels = config.referenceModels;
+    aggregatorModel = config.aggregatorModel;
+    mode = config.mode;
   }
-  return {
-    referenceModels: config.referenceModels,
-    aggregatorModel: config.aggregatorModel,
-    mode: config.mode,
-  };
+  // 本地部署：强制串行，无论 preset 或 config 中 mode 设置是什么
+  if (isLocalDeployment(referenceModels)) {
+    mode = 'serial';
+  }
+  return { referenceModels, aggregatorModel, mode };
 }
 
 /**
