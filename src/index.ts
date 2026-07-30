@@ -1409,6 +1409,7 @@ const pluginEntry: any = definePluginEntry({
                   id: compactionId,
                   parentId: lastEntry.id,
                   type: 'compaction',
+                  timestamp: new Date().toISOString(),
                   firstKeptEntryId: boundaryId,
                   tokensBefore,
                 });
