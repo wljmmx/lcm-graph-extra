@@ -1373,9 +1373,9 @@ const pluginEntry: any = definePluginEntry({
           // 会通过 firstKeptEntryId 跳过已压缩的消息，只计算保留部分的 token 数。
           if (compacted && tokensBefore > tokensAfter && typeof params.sessionFile === 'string' && params.sessionFile) {
             try {
-              const { readFile, appendFile } = await import('node:fs/promises');
+              const { readFile, appendFile } = await import('node:fs/promises') as typeof import('node:fs/promises');
               const content = await readFile(params.sessionFile, 'utf-8');
-              const lines = content.split('\n').filter(l => l.trim());
+              const lines = content.split('\n').filter((l: string) => l.trim());
               const entries: Map<string, any> = new Map();
               let lastEntry: any = null;
               for (const line of lines) {

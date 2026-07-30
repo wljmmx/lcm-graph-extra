@@ -100,18 +100,7 @@ const DEFAULT_PRESETS: MoaPreset[] = [
 /** 判断 provider/host 是否为本地部署：ollama/unsloth 或 baseURL 指向内网/localhost */
 function isLocalDeployment(refConfigs: ReferenceModelConfig[]): boolean {
   if (refConfigs.length === 0) return false;
-  return refConfigs.some((cfg) => {
-    if (cfg.provider === 'ollama' || cfg.provider === 'unsloth') return true;
-    if (cfg.baseURL) {
-      try {
-        const u = new URL(cfg.baseURL);
-        const host = u.hostname;
-        if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
-        if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.')) return true;
-      } catch { /* ignore malformed */ }
-    }
-    return false;
-  });
+  return refConfigs.some((cfg) => isLocalRefConfig(cfg));
 }
 
 /**
@@ -119,10 +108,11 @@ function isLocalDeployment(refConfigs: ReferenceModelConfig[]): boolean {
  * 如果 activePreset 匹配到预设，使用预设的 referenceModels + aggregatorModel + mode；
  * 否则回退到 config 根级别的配置。
  *
- * 关键约束：本地部署（ollama/unsloth 或内网 baseURL）强制 mode=serial，
- * 避免多个参考模型并行争抢同一套 GPU 资源，导致：
- *   - 单个模型吞吐骤降（vRAM 反复 swap / CUDA OOM 重算）
- *   - 整体耗时 > syncBudgetMs，触发 "MoA sync budget exceeded"
+ * 说明：执行模式（mode）控制**整体调度倾向**：
+ *   - 'parallel': 默认，远程组并行。混合场景（本地+远程）由 runReferenceModels 自动拆分：
+ *     本地组串行（防 GPU 争抢），远程组并行，两组并发。
+ *   - 'serial': 全链路串行，适用于所有 ref 都是本地大模型 + 单卡容量仅能容纳一个模型的情况。
+ * preset 的 mode 仅作为默认值；用户根级 mode 可覆盖 preset mode。
  */
 export function resolveActivePreset(config: MoaConfig): {
   referenceModels: ReferenceModelConfig[];
@@ -131,30 +121,22 @@ export function resolveActivePreset(config: MoaConfig): {
 } {
   const presets = getAvailablePresets(config);
   const activeName = config.activePreset;
-  let referenceModels: ReferenceModelConfig[];
-  let aggregatorModel: AggregatorModelConfig;
-  let mode: 'parallel' | 'serial';
   if (activeName) {
     const preset = presets.find((p) => p.name === activeName);
     if (preset) {
-      referenceModels = preset.referenceModels;
-      aggregatorModel = preset.aggregatorModel;
-      mode = preset.mode ?? config.mode;
-    } else {
-      referenceModels = config.referenceModels;
-      aggregatorModel = config.aggregatorModel;
-      mode = config.mode;
+      return {
+        referenceModels: preset.referenceModels,
+        aggregatorModel: preset.aggregatorModel,
+        // 根级 mode 优先级高于 preset mode，允许用户对本地/混合场景自行切换
+        mode: config.mode ?? preset.mode ?? 'parallel',
+      };
     }
-  } else {
-    referenceModels = config.referenceModels;
-    aggregatorModel = config.aggregatorModel;
-    mode = config.mode;
   }
-  // 本地部署：强制串行，无论 preset 或 config 中 mode 设置是什么
-  if (isLocalDeployment(referenceModels)) {
-    mode = 'serial';
-  }
-  return { referenceModels, aggregatorModel, mode };
+  return {
+    referenceModels: config.referenceModels,
+    aggregatorModel: config.aggregatorModel,
+    mode: config.mode,
+  };
 }
 
 /**
@@ -295,6 +277,20 @@ async function callLlm(
 // 参考模型层
 // ============================================================================
 
+/** 判断单个 refConfig 是否为本地部署：ollama/unsloth provider 或 baseURL 指向 localhost/内网 */
+export function isLocalRefConfig(cfg: ReferenceModelConfig): boolean {
+  if (cfg.provider === 'ollama' || cfg.provider === 'unsloth') return true;
+  if (cfg.baseURL) {
+    try {
+      const u = new URL(cfg.baseURL);
+      const host = u.hostname;
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+      if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.')) return true;
+    } catch { /* ignore malformed */ }
+  }
+  return false;
+}
+
 /**
  * 调用单个参考模型。
  * 参考模型不调用工具、不执行命令，仅输出纯文本分析。
@@ -326,44 +322,27 @@ async function callReferenceModel(
       apiKey: refConfig.apiKey,
       baseURL: refConfig.baseURL,
       keepAlive: refConfig.keepAlive,
+      provider: refConfig.provider,
     },
     refConfig.timeoutMs,
     signal,
   );
 }
 
-/**
- * 运行所有参考模型。
- *
- * @param query 用户查询
- * @param refConfigs 参考模型配置列表
- * @param mode 执行模式（parallel/serial）
- * @param signal AbortSignal
- * @returns 各参考模型的结果
- */
-async function runReferenceModels(
+/** 串行执行一组 refConfigs（本地 GPU 模型独享资源） */
+async function runSerialGroup(
   query: string,
-  refConfigs: ReferenceModelConfig[],
-  mode: 'parallel' | 'serial',
-  classificationContext?: string,
-  signal?: AbortSignal,
+  cfgs: ReferenceModelConfig[],
+  classificationContext: string | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<LlmCallResult[]> {
-  if (mode === 'parallel') {
-    // 云端部署：不同模型并行调用
-    return Promise.all(
-      refConfigs.map((cfg) => callReferenceModel(query, cfg, classificationContext, signal))
-    );
-  }
-
-  // 本地部署：同模型串行多轮（共享 keepAlive 会话，避免模型反复加载卸载）
   const results: LlmCallResult[] = [];
-  for (const cfg of refConfigs) {
+  for (const cfg of cfgs) {
     if (signal?.aborted) break;
     try {
       const result = await callReferenceModel(query, cfg, classificationContext, signal);
       results.push(result);
     } catch (err) {
-      // 单个参考模型失败不影响其他模型
       const errMsg = err instanceof Error ? err.message : String(err);
       results.push({
         text: `[Reference model error: ${errMsg}]`,
@@ -374,6 +353,110 @@ async function runReferenceModels(
     }
   }
   return results;
+}
+
+/** 并行执行一组 refConfigs（远程 API 模型互不抢资源） */
+async function runParallelGroup(
+  query: string,
+  cfgs: ReferenceModelConfig[],
+  classificationContext: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<LlmCallResult[]> {
+  return Promise.all(
+    cfgs.map((cfg) =>
+      callReferenceModel(query, cfg, classificationContext, signal).catch((err) => {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        return {
+          text: `[Reference model error: ${errMsg}]`,
+          tokensUsed: 0,
+          ms: 0,
+          model: cfg.model,
+        } as LlmCallResult;
+      }),
+    ),
+  );
+}
+
+/**
+ * 运行所有参考模型。
+ *
+ * 核心调度策略：**按部署位置拆分执行组**，避免本地 GPU 争抢：
+ *   - 本地组（ollama/unsloth 或内网 IP）: 串行执行，独占 GPU 显存与算力
+ *   - 远程组（openai/deepseek/custom 公网 API）: 并行执行，利用网络并发
+ *
+ * 当 mode === 'parallel' 且全部为远程时，整组并行（最快）。
+ * 当 mode === 'serial' 或全部为本地时，整组串行。
+ * 当混合时：本地串行 + 远程并行，两个分组之间可并发启动（节省总时间）。
+ */
+async function runReferenceModels(
+  query: string,
+  refConfigs: ReferenceModelConfig[],
+  mode: 'parallel' | 'serial',
+  classificationContext?: string,
+  signal?: AbortSignal,
+): Promise<LlmCallResult[]> {
+  // 按原 refConfigs 顺序建立 "index -> 结果" 映射，用于恢复顺序
+  type IndexedCfg = { idx: number; cfg: ReferenceModelConfig };
+  const indexed: IndexedCfg[] = refConfigs.map((cfg, idx) => ({ idx, cfg }));
+  const localGroup: IndexedCfg[] = indexed.filter((x) => isLocalRefConfig(x.cfg));
+  const remoteGroup: IndexedCfg[] = indexed.filter((x) => !isLocalRefConfig(x.cfg));
+
+  const hasLocal = localGroup.length > 0;
+  const hasRemote = remoteGroup.length > 0;
+
+  // 纯串行：不管本地/远程，全部顺序（mode=serial 或无远程全本地时兜底）
+  const allSerial = mode === 'serial' || !hasRemote;
+  if (allSerial) {
+    return runSerialGroup(
+      query,
+      refConfigs,
+      classificationContext,
+      signal,
+    );
+  }
+
+  // 纯远程：整组并行（mode=parallel + 0 本地）
+  if (!hasLocal) {
+    return runParallelGroup(
+      query,
+      refConfigs,
+      classificationContext,
+      signal,
+    );
+  }
+
+  // 混合模式：本地串行组 + 远程并行组，两个分组同时启动，最后按原顺序合并
+  const localPromise = runSerialGroup(
+    query,
+    localGroup.map((x) => x.cfg),
+    classificationContext,
+    signal,
+  );
+  const remotePromise = runParallelGroup(
+    query,
+    remoteGroup.map((x) => x.cfg),
+    classificationContext,
+    signal,
+  );
+
+  const [localResults, remoteResults] = await Promise.all([localPromise, remotePromise]);
+
+  // 按原 refConfigs 顺序还原结果
+  const out: (LlmCallResult | undefined)[] = new Array(refConfigs.length);
+  localGroup.forEach((x, i) => { out[x.idx] = localResults[i]; });
+  remoteGroup.forEach((x, i) => { out[x.idx] = remoteResults[i]; });
+  // 兜底填充（aborted 时可能有 undefined）
+  refConfigs.forEach((cfg, idx) => {
+    if (!out[idx]) {
+      out[idx] = {
+        text: `[Reference model error: aborted or missing result]`,
+        tokensUsed: 0,
+        ms: 0,
+        model: cfg.model,
+      };
+    }
+  });
+  return out as LlmCallResult[];
 }
 
 // ============================================================================
