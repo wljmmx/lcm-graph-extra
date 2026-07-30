@@ -1,7 +1,49 @@
-import { Type, Static } from 'typebox';
+import { Type, Static, type TSchemaOptions } from 'typebox';
 import { Value } from 'typebox/value';
 import { resolve } from 'path';
 import { getGlobalLogger } from './utils/logger.js';
+
+/**
+ * 所有支持的 LLM provider 类型（统一枚举常量）。
+ *
+ * 此常量是 config.ts 中所有 provider 字段（llmProvider / distillationLlm /
+ * moa.referenceModels / moa.aggregatorModel）以及 moa/types.ts 中
+ * ReferenceModelConfig / AggregatorModelConfig 的唯一来源。
+ *
+ * 注意：必须包含 'openclaw_hooks'，因为它是 llmProvider 与 distillationLlm
+ * 的默认值，移除会破坏现有配置的 schema 校验（向后兼容）。
+ */
+export const LLM_PROVIDERS = [
+  'openai',
+  'ollama',
+  'deepseek',
+  'unsloth',
+  'custom',
+  'openclaw_hooks',
+] as const;
+export type LlmProvider = typeof LLM_PROVIDERS[number];
+
+/**
+ * 构建 LLM provider 的 Type.Union schema。
+ *
+ * 实现说明：不能直接用 `LLM_PROVIDERS.map(p => Type.Literal(p))` 传给
+ * Type.Union——typebox 的 `Union<Types>(anyOf: [...Types])` 需要元组类型才能
+ * 正确推断 Static，而 .map() 返回普通数组且 Type.Literal(联合类型) 会使
+ * Static 退化为 never。因此这里用内联字面量元组（值与 LLM_PROVIDERS 镜像），
+ * 借助 Type.Union 的上下文类型推断保留字面量联合类型。
+ *
+ * 修改 LLM_PROVIDERS 时需同步更新此函数内的 Type.Literal 列表。
+ */
+function LlmProviderUnion(options?: TSchemaOptions) {
+  return Type.Union([
+    Type.Literal('openai'),
+    Type.Literal('ollama'),
+    Type.Literal('deepseek'),
+    Type.Literal('unsloth'),
+    Type.Literal('custom'),
+    Type.Literal('openclaw_hooks'),
+  ], options);
+}
 
 export const BackupConfigSchema = Type.Object({
   enabled: Type.Boolean({ default: true }),
@@ -84,13 +126,7 @@ export const PluginConfigSchema = Type.Object({
 
 
   llmProvider: Type.Optional(Type.Object({
-    provider: Type.Union([
-      Type.Literal('openclaw_hooks'),
-      Type.Literal('openai'),
-      Type.Literal('ollama'),
-      Type.Literal('unsloth'),
-      Type.Literal('custom'),
-    ], { default: 'openclaw_hooks' }),
+    provider: LlmProviderUnion({ default: 'openclaw_hooks', description: 'LLM provider 类型，见 LLM_PROVIDERS 常量' }),
     model: Type.String({ default: 'default' }),
     maxTokens: Type.Number({ default: 4096, minimum: 1 }),
   })),
@@ -121,13 +157,7 @@ export const PluginConfigSchema = Type.Object({
   experienceTtlIntervalMs: Type.Number({ default: 24 * 60 * 60 * 1000, minimum: 60_000 }),
 
   distillationLlm: Type.Optional(Type.Object({
-    provider: Type.Union([
-      Type.Literal('openclaw_hooks'),
-      Type.Literal('openai'),
-      Type.Literal('ollama'),
-      Type.Literal('unsloth'),
-      Type.Literal('custom'),
-    ], { default: 'openclaw_hooks' }),
+    provider: LlmProviderUnion({ default: 'openclaw_hooks', description: '蒸馏 LLM 的 provider 类型，见 LLM_PROVIDERS 常量' }),
     model: Type.String({ default: 'ollama/qwen3.6:27b' }),
     apiKey: Type.Optional(Type.String()),
     baseURL: Type.Optional(Type.String()),
@@ -157,16 +187,9 @@ export const PluginConfigSchema = Type.Object({
   moa: Type.Optional(Type.Object({
     enabled: Type.Boolean({ default: false }),
     complexityThreshold: Type.Number({ default: 0.6, minimum: 0, maximum: 1 }),
-    mode: Type.Union([Type.Literal('parallel'), Type.Literal('serial')], { default: 'serial' }),
+    mode: Type.Union([Type.Literal('auto'), Type.Literal('parallel'), Type.Literal('serial')], { default: 'auto' }),
     referenceModels: Type.Array(Type.Object({
-      provider: Type.Union([
-        Type.Literal('openai'),
-        Type.Literal('ollama'),
-        Type.Literal('unsloth'),
-        Type.Literal('deepseek'),
-        Type.Literal('custom'),
-        Type.Literal('openclaw_hooks'),
-      ], { default: 'ollama' }),
+      provider: LlmProviderUnion({ default: 'ollama', description: '参考模型 LLM provider 类型，见 LLM_PROVIDERS 常量' }),
       model: Type.String({ default: 'qwen3.6:27b' }),
       temperature: Type.Number({ default: 0.6, minimum: 0, maximum: 2 }),
       systemPrompt: Type.String({ default: '' }),
@@ -176,14 +199,7 @@ export const PluginConfigSchema = Type.Object({
       keepAlive: Type.Optional(Type.String({ default: '1h' })),
     }), { default: [] }),
     aggregatorModel: Type.Optional(Type.Object({
-      provider: Type.Union([
-        Type.Literal('openai'),
-        Type.Literal('ollama'),
-        Type.Literal('unsloth'),
-        Type.Literal('deepseek'),
-        Type.Literal('custom'),
-        Type.Literal('openclaw_hooks'),
-      ], { default: 'ollama' }),
+      provider: LlmProviderUnion({ default: 'ollama', description: '聚合模型 LLM provider 类型，见 LLM_PROVIDERS 常量' }),
       model: Type.String({ default: 'qwen3.6:27b' }),
       temperature: Type.Number({ default: 0.3, minimum: 0, maximum: 2 }),
       systemPrompt: Type.Optional(Type.String({ default: '' })),
@@ -412,7 +428,7 @@ export function validateConfig(input: unknown): PluginConfig {
   // distillationLlm 未配置时保持 undefined，由 resolveDistillationLlm 的 fallback 处理
   // （优先复用主模型 → LLM_MODEL 环境变量 → gpt-4o-mini）
   if (!config.neo4j) config.neo4j = { uri: 'bolt://localhost:7687', user: 'neo4j', password: '' };
-  if (!config.moa) config.moa = { enabled: false, complexityThreshold: 0.6, mode: 'serial', referenceModels: [], aggregatorModel: undefined, enabledTiers: ['low'] };
+  if (!config.moa) config.moa = { enabled: false, complexityThreshold: 0.6, mode: 'auto', referenceModels: [], aggregatorModel: undefined, enabledTiers: ['low'] };
 
   const result = Value.Errors(PluginConfigSchema, config);
 

@@ -30,6 +30,7 @@ import {
   NTabs,
   NTabPane,
   NSelect,
+  NProgress,
   NTable,
   NDivider,
   NButton,
@@ -37,6 +38,7 @@ import {
 import EChart from '../components/EChart.vue';
 import KpiCard from '../components/KpiCard.vue';
 import StatusIndicator from '../components/StatusIndicator.vue';
+import MoaStatusBadge from '../components/MoaStatusBadge.vue';
 import {
   fetchHealthLatest,
   fetchHealthHistory,
@@ -260,6 +262,129 @@ const kpiCbFailures = computed<number | string>(() => {
 
 // ===== 最近更新时间（HH:mm:ss） =====
 const lastUpdated = computed(() => formatTimeWithSeconds(db.value?.timestamp));
+
+// ===== P1-2: 熔断器状态（来自 healthLatest，NTag 颜色标记） =====
+// 颜色规则：available=绿 / failures>0=红 / 否则灰
+interface CircuitBreakerItem {
+  key: string;
+  label: string;
+  available: boolean;
+  failures: number;
+  tagType: 'success' | 'error' | 'default';
+}
+const circuitBreakerItems = computed<CircuitBreakerItem[]>(() => {
+  const d = db.value;
+  if (!d) return [];
+  const build = (
+    key: string,
+    label: string,
+    available: boolean,
+    failures: number,
+  ): CircuitBreakerItem => ({
+    key,
+    label,
+    available,
+    failures,
+    // available 优先绿；否则 failures>0 红；否则灰
+    tagType: available ? 'success' : failures > 0 ? 'error' : 'default',
+  });
+  return [
+    build('lcm', 'LCM', d.cbLcmAvailable, d.cbLcmFailures),
+    build('qmd', 'QMD', d.cbQmdAvailable, d.cbQmdFailures),
+    build('neo4j', 'Neo4j', d.cbNeo4jAvailable, d.cbNeo4jFailures),
+  ];
+});
+
+// ===== P1-6: 当前压力 Tier 徽章 =====
+// 根据 tierLow/tierMedium/tierHigh 值判断当前 tier（值最大的那个即为当前 tier）
+type TierLevel = 'low' | 'medium' | 'high';
+const currentTier = computed<TierLevel | null>(() => {
+  const d = db.value;
+  if (!d) return null;
+  const low = d.tierLow ?? 0;
+  const medium = d.tierMedium ?? 0;
+  const high = d.tierHigh ?? 0;
+  // 三项均为 0 时无法判断
+  if (low === 0 && medium === 0 && high === 0) return null;
+  if (high >= low && high >= medium) return 'high';
+  if (medium >= low && medium >= high) return 'medium';
+  return 'low';
+});
+const currentTierTagType = computed<'success' | 'warning' | 'error' | 'default'>(() => {
+  switch (currentTier.value) {
+    case 'low': return 'success';
+    case 'medium': return 'warning';
+    case 'high': return 'error';
+    default: return 'default';
+  }
+});
+const currentTierLabel = computed(() => {
+  switch (currentTier.value) {
+    case 'low': return 'Low';
+    case 'medium': return 'Medium';
+    case 'high': return 'High';
+    default: return '—';
+  }
+});
+
+// 当前快照 tier 分布占比（供 NProgress 三条展示）
+const currentTierDistribution = computed(() => {
+  const d = db.value;
+  const low = d?.tierLow ?? 0;
+  const medium = d?.tierMedium ?? 0;
+  const high = d?.tierHigh ?? 0;
+  const total = low + medium + high;
+  return {
+    low,
+    medium,
+    high,
+    total,
+    lowPct: total > 0 ? (low / total) * 100 : 0,
+    mediumPct: total > 0 ? (medium / total) * 100 : 0,
+    highPct: total > 0 ? (high / total) * 100 : 0,
+  };
+});
+
+// ===== P1-6: 最近 10 次 tier 分布趋势（水平条形图） =====
+interface TierTrendPoint {
+  timestamp: number;
+  low: number;
+  medium: number;
+  high: number;
+  total: number;
+  lowPct: number;
+  mediumPct: number;
+  highPct: number;
+  dominant: TierLevel | null;
+}
+const recentTierTrend = computed<TierTrendPoint[]>(() => {
+  // historyAsc 已是 ASC（最旧在前），取最后 10 条（最新 10 次）
+  const snaps = historyAsc.value.slice(-10);
+  return snaps.map((s) => {
+    const low = s.tierLow ?? 0;
+    const medium = s.tierMedium ?? 0;
+    const high = s.tierHigh ?? 0;
+    const total = low + medium + high;
+    const pct = (v: number): number => (total > 0 ? (v / total) * 100 : 0);
+    let dominant: TierLevel | null = null;
+    if (total > 0) {
+      if (high >= low && high >= medium) dominant = 'high';
+      else if (medium >= low && medium >= high) dominant = 'medium';
+      else dominant = 'low';
+    }
+    return {
+      timestamp: s.timestamp,
+      low,
+      medium,
+      high,
+      total,
+      lowPct: pct(low),
+      mediumPct: pct(medium),
+      highPct: pct(high),
+      dominant,
+    };
+  });
+});
 
 // ===== 时序图 X 轴标签（按统计粒度格式化） =====
 const timeLabels = computed(() =>
@@ -932,6 +1057,23 @@ const moaLatencyPhaseOption = computed(() => {
           </NGi>
         </NGrid>
 
+        <!-- P1-6: 当前压力 Tier 徽章（紧邻 KPI 区域） -->
+        <div class="tier-badge-bar">
+          <span class="tier-badge-label">当前压力 Tier：</span>
+          <NTag
+            v-if="currentTier"
+            :type="currentTierTagType"
+            size="medium"
+            round
+          >
+            {{ currentTierLabel }}
+          </NTag>
+          <NTag v-else type="default" size="medium" round>—</NTag>
+          <span v-if="db" class="tier-badge-detail muted mono">
+            Low: {{ db.tierLow }} · Medium: {{ db.tierMedium }} · High: {{ db.tierHigh }}
+          </span>
+        </div>
+
         <NAlert
           v-if="latestIsError"
           type="error"
@@ -1039,8 +1181,120 @@ const moaLatencyPhaseOption = computed(() => {
             </NGi>
           </NGrid>
         </NSpace>
+
+        <!-- P1-2 / P1-6: 熔断器状态 + 最近 10 次 tier 趋势 -->
+        <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen" style="margin-top: 12px">
+          <!-- P1-2: 熔断器状态卡片 -->
+          <NGi>
+            <NCard title="熔断器状态" size="small">
+              <template v-if="circuitBreakerItems.length">
+                <NSpace vertical :size="8">
+                  <div
+                    v-for="item in circuitBreakerItems"
+                    :key="item.key"
+                    class="cb-row"
+                  >
+                    <span class="cb-label">{{ item.label }}</span>
+                    <NTag size="small" :type="item.tagType">
+                      {{ item.available ? '可用' : item.failures > 0 ? '熔断' : '未知' }}
+                    </NTag>
+                    <span class="cb-failures muted mono">失败 {{ item.failures }} 次</span>
+                  </div>
+                </NSpace>
+              </template>
+              <NEmpty v-else description="无历史数据" style="padding: 12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- P1-6: 最近 10 次 tier 分布趋势 -->
+          <NGi>
+            <NCard title="最近 10 次 tier 分布趋势" size="small">
+              <template v-if="recentTierTrend.length">
+                <!-- 当前 tier 分布占比（NProgress 三条） -->
+                <div v-if="db" class="tier-current-dist">
+                  <div class="tier-dist-row">
+                    <span class="tier-dist-label">Low</span>
+                    <NProgress
+                      type="line"
+                      :percentage="currentTierDistribution.lowPct"
+                      :color="CHART.success"
+                      :show-indicator="false"
+                      :height="8"
+                      style="flex: 1"
+                    />
+                    <span class="tier-dist-value mono">
+                      {{ currentTierDistribution.low }} ({{ currentTierDistribution.lowPct.toFixed(0) }}%)
+                    </span>
+                  </div>
+                  <div class="tier-dist-row">
+                    <span class="tier-dist-label">Medium</span>
+                    <NProgress
+                      type="line"
+                      :percentage="currentTierDistribution.mediumPct"
+                      :color="CHART.warning"
+                      :show-indicator="false"
+                      :height="8"
+                      style="flex: 1"
+                    />
+                    <span class="tier-dist-value mono">
+                      {{ currentTierDistribution.medium }} ({{ currentTierDistribution.mediumPct.toFixed(0) }}%)
+                    </span>
+                  </div>
+                  <div class="tier-dist-row">
+                    <span class="tier-dist-label">High</span>
+                    <NProgress
+                      type="line"
+                      :percentage="currentTierDistribution.highPct"
+                      :color="CHART.danger"
+                      :show-indicator="false"
+                      :height="8"
+                      style="flex: 1"
+                    />
+                    <span class="tier-dist-value mono">
+                      {{ currentTierDistribution.high }} ({{ currentTierDistribution.highPct.toFixed(0) }}%)
+                    </span>
+                  </div>
+                </div>
+                <NDivider style="margin: 8px 0" />
+                <!-- 最近 10 次轨迹（水平条形图） -->
+                <div class="tier-trend-list">
+                  <div
+                    v-for="point in recentTierTrend"
+                    :key="point.timestamp"
+                    class="tier-trend-row"
+                  >
+                    <span class="tier-trend-time mono">{{ formatTime(point.timestamp) }}</span>
+                    <div class="tier-trend-bar">
+                      <div
+                        class="tier-trend-seg tier-low"
+                        :style="{ width: point.lowPct + '%' }"
+                      />
+                      <div
+                        class="tier-trend-seg tier-medium"
+                        :style="{ width: point.mediumPct + '%' }"
+                      />
+                      <div
+                        class="tier-trend-seg tier-high"
+                        :style="{ width: point.highPct + '%' }"
+                      />
+                    </div>
+                    <NTag
+                      size="tiny"
+                      :type="point.dominant === 'high' ? 'error' : point.dominant === 'medium' ? 'warning' : point.dominant === 'low' ? 'success' : 'default'"
+                    >
+                      {{ point.dominant ?? '—' }}
+                    </NTag>
+                    <span class="tier-trend-total mono muted">{{ point.total }}</span>
+                  </div>
+                </div>
+              </template>
+              <NEmpty v-else description="无历史数据" style="padding: 12px 0" />
+            </NCard>
+          </NGi>
+        </NGrid>
+
         <div style="margin-top: 4px; font-size: var(--fs-caption); color: var(--color-text-muted);">
-          最近更新: {{ historyLastUpdated || '—' }}
+          最近更新: {{ lastUpdated || '—' }}
         </div>
       </NTabPane>
 
@@ -1404,6 +1658,11 @@ const moaLatencyPhaseOption = computed(() => {
         </div>
 
         <template v-else-if="moaPerf">
+          <!-- MoA 状态徽章：最近一次运行状态 + 成功率 + fallback 次数 -->
+          <div class="moa-badge-bar">
+            <MoaStatusBadge />
+          </div>
+
           <!-- KPI 概览行 -->
           <NGrid :cols="'1 s:2 m:3'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
             <NGi>
@@ -1786,6 +2045,104 @@ const moaLatencyPhaseOption = computed(() => {
   opacity: 0.8;
 }
 
+/* ===== P1-6: 当前压力 Tier 徽章 ===== */
+.tier-badge-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.tier-badge-label {
+  font-size: var(--fs-body);
+  color: var(--color-text-secondary);
+}
+.tier-badge-detail {
+  font-size: var(--fs-caption);
+  margin-left: var(--space-xs);
+}
+
+/* ===== P1-2: 熔断器状态 ===== */
+.cb-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.cb-label {
+  flex: 1;
+  font-size: var(--fs-body);
+}
+.cb-failures {
+  font-size: var(--fs-caption);
+}
+
+/* ===== P1-6: tier 分布趋势 ===== */
+.tier-current-dist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tier-dist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tier-dist-label {
+  width: 56px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+.tier-dist-value {
+  width: 90px;
+  font-size: var(--fs-caption);
+  text-align: right;
+  flex-shrink: 0;
+}
+.tier-trend-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tier-trend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tier-trend-time {
+  width: 60px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+.tier-trend-bar {
+  flex: 1;
+  height: 10px;
+  display: flex;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--color-border);
+}
+.tier-trend-seg {
+  height: 100%;
+  transition: width 0.4s ease;
+}
+.tier-trend-seg.tier-low {
+  background: var(--color-success);
+}
+.tier-trend-seg.tier-medium {
+  background: var(--color-warning);
+}
+.tier-trend-seg.tier-high {
+  background: var(--color-danger);
+}
+.tier-trend-total {
+  width: 32px;
+  font-size: var(--fs-caption);
+  text-align: right;
+  flex-shrink: 0;
+}
+
 /* 复杂度趋势图头部 */
 .trend-header {
   display: flex;
@@ -1800,6 +2157,13 @@ const moaLatencyPhaseOption = computed(() => {
 }
 
 /* ===== MoA 性能样式 ===== */
+/* 状态徽章容器：紧贴 KPI 行上方，左对齐 */
+.moa-badge-bar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
 .stat-card {
   display: flex;
   flex-direction: column;

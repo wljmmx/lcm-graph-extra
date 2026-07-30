@@ -109,15 +109,15 @@ function isLocalDeployment(refConfigs: ReferenceModelConfig[]): boolean {
  * 否则回退到 config 根级别的配置。
  *
  * 说明：执行模式（mode）控制**整体调度倾向**：
- *   - 'parallel': 默认，远程组并行。混合场景（本地+远程）由 runReferenceModels 自动拆分：
- *     本地组串行（防 GPU 争抢），远程组并行，两组并发。
- *   - 'serial': 全链路串行，适用于所有 ref 都是本地大模型 + 单卡容量仅能容纳一个模型的情况。
+ *   - 'auto'（默认）: 自动按部署位置拆分——本地组串行（防 GPU 争抢），远程组并行，两组并发。
+ *   - 'parallel': 强制全部并行（多 GPU 或纯远程 API 场景）。
+ *   - 'serial': 强制全链路串行，最保守。
  * preset 的 mode 仅作为默认值；用户根级 mode 可覆盖 preset mode。
  */
 export function resolveActivePreset(config: MoaConfig): {
   referenceModels: ReferenceModelConfig[];
   aggregatorModel: AggregatorModelConfig;
-  mode: 'parallel' | 'serial';
+  mode: 'auto' | 'parallel' | 'serial';
 } {
   const presets = getAvailablePresets(config);
   const activeName = config.activePreset;
@@ -128,14 +128,15 @@ export function resolveActivePreset(config: MoaConfig): {
         referenceModels: preset.referenceModels,
         aggregatorModel: preset.aggregatorModel,
         // 根级 mode 优先级高于 preset mode，允许用户对本地/混合场景自行切换
-        mode: config.mode ?? preset.mode ?? 'parallel',
+        mode: config.mode ?? preset.mode ?? 'auto',
       };
     }
   }
   return {
     referenceModels: config.referenceModels,
     aggregatorModel: config.aggregatorModel,
-    mode: config.mode,
+    // config.mode 现为可选；缺省时回退到 'auto'（与上面 preset 分支的兜底一致）
+    mode: config.mode ?? 'auto',
   };
 }
 
@@ -208,7 +209,7 @@ interface MoaRefCacheEntry {
   /** 聚合模型配置 */
   aggregatorModel: AggregatorModelConfig;
   /** 执行模式 */
-  mode: 'parallel' | 'serial';
+  mode: 'auto' | 'parallel' | 'serial';
   /** 复杂度评分 */
   complexityScore?: number;
   /** 创建时间 */
@@ -380,21 +381,36 @@ async function runParallelGroup(
 /**
  * 运行所有参考模型。
  *
- * 核心调度策略：**按部署位置拆分执行组**，避免本地 GPU 争抢：
+ * 核心调度策略根据 mode 决定：
+ *
+ * - mode === 'auto'（默认，推荐）: **按部署位置拆分执行组**
  *   - 本地组（ollama/unsloth 或内网 IP）: 串行执行，独占 GPU 显存与算力
  *   - 远程组（openai/deepseek/custom 公网 API）: 并行执行，利用网络并发
+ *   - 混合时：本地串行 + 远程并行，两个分组之间并发启动（节省总时间）
  *
- * 当 mode === 'parallel' 且全部为远程时，整组并行（最快）。
- * 当 mode === 'serial' 或全部为本地时，整组串行。
- * 当混合时：本地串行 + 远程并行，两个分组之间可并发启动（节省总时间）。
+ * - mode === 'parallel': 强制全部并行（不区分本地/远程）
+ *   ⚠️ 多个本地大模型并行会争抢 GPU 显存导致吞吐骤降，仅适合多 GPU 或纯远程 API
+ *
+ * - mode === 'serial': 强制全链路串行，最保守
  */
 async function runReferenceModels(
   query: string,
   refConfigs: ReferenceModelConfig[],
-  mode: 'parallel' | 'serial',
+  mode: 'auto' | 'parallel' | 'serial',
   classificationContext?: string,
   signal?: AbortSignal,
 ): Promise<LlmCallResult[]> {
+  // --- serial: 强制全串行 ---
+  if (mode === 'serial') {
+    return runSerialGroup(query, refConfigs, classificationContext, signal);
+  }
+
+  // --- parallel: 强制全并行（不区分本地/远程） ---
+  if (mode === 'parallel') {
+    return runParallelGroup(query, refConfigs, classificationContext, signal);
+  }
+
+  // --- auto: 按部署位置拆分 ---
   // 按原 refConfigs 顺序建立 "index -> 结果" 映射，用于恢复顺序
   type IndexedCfg = { idx: number; cfg: ReferenceModelConfig };
   const indexed: IndexedCfg[] = refConfigs.map((cfg, idx) => ({ idx, cfg }));
@@ -404,25 +420,14 @@ async function runReferenceModels(
   const hasLocal = localGroup.length > 0;
   const hasRemote = remoteGroup.length > 0;
 
-  // 纯串行：不管本地/远程，全部顺序（mode=serial 或无远程全本地时兜底）
-  const allSerial = mode === 'serial' || !hasRemote;
-  if (allSerial) {
-    return runSerialGroup(
-      query,
-      refConfigs,
-      classificationContext,
-      signal,
-    );
+  // 纯本地：全部串行
+  if (!hasRemote) {
+    return runSerialGroup(query, refConfigs, classificationContext, signal);
   }
 
-  // 纯远程：整组并行（mode=parallel + 0 本地）
+  // 纯远程：全部并行
   if (!hasLocal) {
-    return runParallelGroup(
-      query,
-      refConfigs,
-      classificationContext,
-      signal,
-    );
+    return runParallelGroup(query, refConfigs, classificationContext, signal);
   }
 
   // 混合模式：本地串行组 + 远程并行组，两个分组同时启动，最后按原顺序合并

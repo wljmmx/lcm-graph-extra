@@ -431,6 +431,7 @@
               "openclaw_hooks",
               "openai",
               "ollama",
+              "deepseek",
               "unsloth",
               "custom"
             ],
@@ -484,6 +485,7 @@
               "openclaw_hooks",
               "openai",
               "ollama",
+              "deepseek",
               "unsloth",
               "custom"
             ],
@@ -637,9 +639,9 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["parallel", "serial"],
-            "default": "serial",
-            "description": "协作模式：parallel 并行 / serial 串行"
+            "enum": ["auto", "parallel", "serial"],
+            "default": "auto",
+            "description": "协作模式：auto 自动判断（本地串行+远程并行，推荐）/ parallel 强制并行 / serial 强制串行"
           },
           "referenceModels": {
             "type": "array",

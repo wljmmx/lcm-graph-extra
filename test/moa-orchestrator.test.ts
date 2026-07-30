@@ -63,8 +63,36 @@ describe('resolveActivePreset', () => {
     expect(result.referenceModels).toHaveLength(2);
     expect(result.referenceModels[0].model).toBe('custom-a');
     expect(result.referenceModels[1].model).toBe('custom-b');
-    expect(result.mode).toBe('serial');
+    // 设计：根级 config.mode 优先级高于 preset.mode，允许用户对本地/混合场景自行切换
+    // 这里 config.mode='parallel'，preset.mode='serial'，结果应为 'parallel'
+    expect(result.mode).toBe('parallel');
     expect(result.aggregatorModel.model).toBe('custom-agg');
+  });
+
+  it('should use preset mode when config.mode is unset', () => {
+    const customPreset: MoaPreset = {
+      name: 'custom-serial',
+      description: 'Serial preset',
+      mode: 'serial',
+      referenceModels: [
+        { provider: 'ollama', model: 'm-a', temperature: 0.5, timeoutMs: 30000 },
+      ],
+      aggregatorModel: { provider: 'ollama', model: 'm-agg', temperature: 0.3, timeoutMs: 60000 },
+    };
+
+    const config: MoaConfig = {
+      enabled: true,
+      // 根级 mode 未设置时回退到 preset.mode
+      complexityThreshold: 0.6,
+      referenceModels: [],
+      aggregatorModel: { provider: 'ollama', model: 'default', temperature: 0.3, timeoutMs: 60000 },
+      enabledTiers: ['low'],
+      presets: [customPreset],
+      activePreset: 'custom-serial',
+    };
+
+    const result = resolveActivePreset(config);
+    expect(result.mode).toBe('serial');
   });
 
   it('should fall back to default built-in preset when name matches built-in', () => {

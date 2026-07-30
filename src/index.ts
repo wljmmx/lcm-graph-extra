@@ -1448,7 +1448,14 @@ const pluginEntry: any = definePluginEntry({
           };
         } catch (err) {
           logger?.warn?.("compact: top-level failed (non-fatal)", { err: serializeError(err) });
-          return { ok: false, compacted: false, reason: String(err) };
+          return {
+            ok: false,
+            compacted: false,
+            reason: String(err),
+            // P0-4: 给 SDK/用户提供 actionable 建议，避免 "Auto-compaction could not recover" 后用户不知道下一步
+            suggestedAction: 'compact_failed',
+            userHint: '压缩失败。可尝试发送 /compact 手动重试，或 /new 开始新会话（历史记忆不受影响）。',
+          };
         }
       },
       async maintain(params: any) {
@@ -2161,17 +2168,29 @@ const pluginEntry: any = definePluginEntry({
               }
             }
           })(),
-          // --- 2c. Embedding API health check ---
+          // --- 2c. Embedding API health check (带状态去抖) ---
           (async () => {
             try {
-              const { probeEmbeddingHealth } = await import("./adapters/embed-fn.js");
-              if (typeof probeEmbeddingHealth === "function") {
+              const { probeEmbeddingHealthDetailed } = await import("./adapters/embed-fn.js");
+              if (typeof probeEmbeddingHealthDetailed === "function") {
                 const embedCfg = api.pluginConfig?.embedding;
                 if (embedCfg?.baseURL) {
-                  const embedOk = await probeEmbeddingHealth(embedCfg);
-                  _lastEmbedHealth = embedOk;
-                  if (!embedOk) {
-                    logger?.warn?.("heartbeat: embedding API unavailable");
+                  const result = await probeEmbeddingHealthDetailed(embedCfg);
+                  const prevHealth = _lastEmbedHealth;
+                  _lastEmbedHealth = result.ok;
+
+                  if (!result.ok) {
+                    // P0-3 去抖：首次失败或状态变化时 warn，否则降为 debug 避免刷屏
+                    if (prevHealth) {
+                      // 从 OK 变为 FAIL —— 首次失败或恢复后再次失败
+                      logger?.warn?.("heartbeat: embedding API unavailable", { detail: result.detail, baseURL: embedCfg.baseURL });
+                    } else {
+                      // 持续失败 —— debug 级别
+                      logger?.debug?.("heartbeat: embedding API still unavailable", { detail: result.detail });
+                    }
+                  } else if (!prevHealth) {
+                    // 从 FAIL 恢复为 OK —— info 级别
+                    logger?.info?.("heartbeat: embedding API recovered");
                   }
                 }
               }

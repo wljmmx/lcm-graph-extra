@@ -41,6 +41,7 @@ interface MoaConfigResponse {
   enabledTiers: string[];
   referenceModels: MoaModelConfig[];
   aggregatorModel: MoaModelConfig | null;
+  syncBudgetMs?: number;
 }
 
 function readMoaConfig(): MoaConfigResponse {
@@ -56,10 +57,14 @@ function readMoaConfig(): MoaConfigResponse {
     aggregatorModel = moa.aggregatorModel as MoaModelConfig;
   }
 
+  // mode 支持 auto / parallel / serial，向后兼容旧的 serial/parallel
+  const rawMode = typeof moa.mode === 'string' ? moa.mode : 'auto';
+  const mode = ['auto', 'parallel', 'serial'].includes(rawMode) ? rawMode : 'auto';
+
   return {
     enabled: typeof moa.enabled === 'boolean' ? moa.enabled : false,
     complexityThreshold: typeof moa.complexityThreshold === 'number' ? moa.complexityThreshold : 0.6,
-    mode: (moa.mode as string) === 'parallel' ? 'parallel' : 'serial',
+    mode,
     enabledTiers: Array.isArray(moa.enabledTiers) ? moa.enabledTiers as string[] : ['low'],
     referenceModels: referenceModels.map((m) => ({
       provider: m.provider ?? 'ollama',
@@ -80,6 +85,7 @@ function readMoaConfig(): MoaConfigResponse {
       baseURL: aggregatorModel.baseURL ?? undefined,
       keepAlive: aggregatorModel.keepAlive ?? '1h',
     } : null,
+    syncBudgetMs: typeof moa.syncBudgetMs === 'number' ? moa.syncBudgetMs : 240_000,
   };
 }
 
@@ -154,7 +160,7 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
     // 允许更新的字段
     const allowedKeys = new Set([
       'enabled', 'complexityThreshold', 'mode', 'enabledTiers',
-      'referenceModels', 'aggregatorModel',
+      'referenceModels', 'aggregatorModel', 'syncBudgetMs',
     ]);
 
     const applied: string[] = [];

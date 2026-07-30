@@ -27,6 +27,7 @@ export interface MoaConfig {
   enabledTiers: string[];
   referenceModels: MoaModelConfig[];
   aggregatorModel: MoaModelConfig | null;
+  syncBudgetMs?: number;
 }
 
 export interface MoaConfigResponse {

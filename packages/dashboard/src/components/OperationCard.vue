@@ -143,6 +143,9 @@ const elapsedLabel = computed(() => {
     :bordered="true"
     :class="['operation-card', { 'operation-card-danger': danger }]"
   >
+    <!-- 顶部横幅 slot（如 Backup 卡片的“最近一次备份”状态） -->
+    <slot name="banner" />
+
     <!-- 标题 + 危险标签 -->
     <div class="card-header">
       <NSpace align="center" :size="6">
@@ -269,6 +272,9 @@ const elapsedLabel = computed(() => {
         </NPopconfirm>
       </template>
     </div>
+
+    <!-- 底部扩展 slot（如“最近执行结果”历史区） -->
+    <slot name="extra" />
   </NCard>
 </template>
 

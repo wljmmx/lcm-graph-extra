@@ -8,6 +8,7 @@
  * 中已注册的 POST /api/mcp/invoke 转发到 OpenClaw MCP host。
  */
 import { invokeMcpTool, type McpInvokeResponse } from './experience';
+import { apiGet } from './client';
 
 /** 图谱维护（dedup / PageRank / community + 债务表对账） */
 export function invokeMaintain(): Promise<McpInvokeResponse> {
@@ -73,4 +74,49 @@ export function invokeSync(mode: string, dryRun: boolean): Promise<McpInvokeResp
 /** 历史导入：source=lcm_messages / memory_files / all */
 export function invokeImport(source: string, limit: number): Promise<McpInvokeResponse> {
   return invokeMcpTool('lcmg_import', { source, limit });
+}
+
+// ===== 操作日志查询（对应后端 GET /api/operation-logs，读取 ~/.openclaw/operation_logs.db） =====
+
+/**
+ * 后端 /api/operation-logs 返回的单条持久化记录。
+ * status 取值：'success' | 'failure'（注意与前端会话态 OperationLogEntry 的 'error' 不同）。
+ */
+export interface OperationLogRecord {
+  id: number;
+  ts: number;
+  tool: string;
+  params: Record<string, unknown>;
+  result: unknown;
+  status: string;
+  durationMs: number;
+  error: string | null;
+  user?: string | null;
+  sessionId?: string | null;
+}
+
+interface OperationLogsResponse {
+  logs: OperationLogRecord[];
+}
+
+/**
+ * 拉取持久化的操作日志。
+ * 支持按 tool / user / 时间范围过滤；n 控制返回条数（后端默认 50）。
+ * 后端按 ts DESC 返回，前端可直接取头部作为“最近”记录。
+ */
+export function fetchOperationLogs(opts: {
+  n?: number;
+  tool?: string;
+  user?: string;
+  fromTs?: number;
+  toTs?: number;
+} = {}): Promise<OperationLogsResponse> {
+  const qs = new URLSearchParams();
+  if (opts.n != null) qs.set('n', String(opts.n));
+  if (opts.tool) qs.set('tool', opts.tool);
+  if (opts.user) qs.set('user', opts.user);
+  if (opts.fromTs != null) qs.set('from', String(opts.fromTs));
+  if (opts.toTs != null) qs.set('to', String(opts.toTs));
+  const query = qs.toString();
+  return apiGet<OperationLogsResponse>(`/api/operation-logs${query ? `?${query}` : ''}`);
 }

@@ -212,10 +212,19 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
  * - OpenAI 兼容 (baseURL 以 /v1 结尾): 探测 /v1/models
  * - Ollama 原生: 探测 /api/tags
  *
- * 返回 true 表示服务可用，false 表示不可用。
+ * 返回 { ok: true } 或 { ok: false, detail: "具体错误信息" }。
  */
+export interface EmbeddingProbeResult {
+  ok: boolean;
+  detail?: string;
+}
+
 export async function probeEmbeddingHealth(cfg: EmbeddingConfig): Promise<boolean> {
-  if (!cfg?.baseURL) return false;
+  return (await probeEmbeddingHealthDetailed(cfg)).ok;
+}
+
+export async function probeEmbeddingHealthDetailed(cfg: EmbeddingConfig): Promise<EmbeddingProbeResult> {
+  if (!cfg?.baseURL) return { ok: false, detail: 'embedding.baseURL not configured' };
   const baseClean = cleanBaseURL(cfg.baseURL);
   // BUGFIX(P0-5): 使用 isOllamaEndpoint 判断，与 createLocalEmbedFn 保持一致
   const isOllama = isOllamaEndpoint(baseClean);
@@ -226,6 +235,7 @@ export async function probeEmbeddingHealth(cfg: EmbeddingConfig): Promise<boolea
     ? ['/models', '/health']
     : ['/api/tags', '/health'];
 
+  const errors: string[] = [];
   for (const path of probePaths) {
     try {
       const controller = new AbortController();
@@ -236,14 +246,16 @@ export async function probeEmbeddingHealth(cfg: EmbeddingConfig): Promise<boolea
           signal: controller.signal,
           headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : undefined,
         });
-        if (resp.ok) return true;
-        if (resp.status === 401 || resp.status === 403) return true;
+        if (resp.ok) return { ok: true };
+        if (resp.status === 401 || resp.status === 403) return { ok: true };
+        errors.push(`${path} → HTTP ${resp.status}`);
       } finally {
         clearTimeout(timer);
       }
-    } catch {
-      continue;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`${path} → ${msg}`);
     }
   }
-  return false;
+  return { ok: false, detail: errors.join('; ') };
 }

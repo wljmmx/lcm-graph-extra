@@ -6,10 +6,12 @@
  * 将多个 LLM 整合为虚拟超级模型，在复杂推理场景超越单模型上限。
  */
 
+import type { LlmProvider } from '../config.js';
+
 /** 单个参考模型配置 */
 export interface ReferenceModelConfig {
-  /** LLM provider */
-  provider: 'openai' | 'ollama' | 'unsloth' | 'deepseek' | 'custom' | 'openclaw_hooks';
+  /** LLM provider，可选值见 config.ts 中的 LLM_PROVIDERS 常量 */
+  provider: LlmProvider;
   /** 模型名称 */
   model: string;
   /** 参考模型温度（0.5-0.7，鼓励多样性） */
@@ -28,8 +30,8 @@ export interface ReferenceModelConfig {
 
 /** 聚合模型配置 */
 export interface AggregatorModelConfig {
-  /** LLM provider */
-  provider: 'openai' | 'ollama' | 'unsloth' | 'deepseek' | 'custom' | 'openclaw_hooks';
+  /** LLM provider，可选值见 config.ts 中的 LLM_PROVIDERS 常量 */
+  provider: LlmProvider;
   /** 模型名称 */
   model: string;
   /** 聚合模型温度（0.3-0.5，偏收敛） */
@@ -50,8 +52,13 @@ export interface MoaPreset {
   name: string;
   /** 预设描述 */
   description?: string;
-  /** 执行模式 */
-  mode?: 'parallel' | 'serial';
+  /**
+   * 执行模式（可选，缺省时由根级 config.mode 或 'auto' 兜底）
+   * - 'auto': 自动判断——本地模型串行（防 GPU 争抢），远程模型并行，混合时分组并发（推荐）
+   * - 'parallel': 强制全部并行（需要用户明确知道有多张 GPU 或纯远程 API）
+   * - 'serial': 强制全链路串行，最保守
+   */
+  mode?: 'auto' | 'parallel' | 'serial';
   /** 参考模型列表（2-4 个） */
   referenceModels: ReferenceModelConfig[];
   /** 聚合模型配置 */
@@ -65,11 +72,17 @@ export interface MoaConfig {
   /** 任务复杂度阈值（0-1，默认 0.6） */
   complexityThreshold: number;
   /**
-   * 执行模式
-   * - 'parallel': 云端部署，不同模型并行调用
-   * - 'serial': 本地部署，同模型串行多轮（不同 temperature/prompt）
+   * 执行模式（可选）。
+   * - 'auto': 自动判断——本地模型串行（防 GPU 争抢），远程模型并行，混合时分组并发（推荐，默认）
+   * - 'parallel': 强制全部并行（需要用户明确知道有多张 GPU 或纯远程 API）
+   * - 'serial': 强制全链路串行，最保守
+   *
+   * 优先级规则（见 resolveActivePreset）：
+   *   根级 config.mode > preset.mode > 'auto'
+   * 即用户在根级显式设置的 mode 始终覆盖预设，便于本地/混合场景手动切换。
+   * 配置加载层（config.ts）会填充默认 'auto'，因此生产运行时始终有值。
    */
-  mode: 'parallel' | 'serial';
+  mode?: 'auto' | 'parallel' | 'serial';
   /** 参考模型列表（2-4 个） */
   referenceModels: ReferenceModelConfig[];
   /** 聚合模型配置 */

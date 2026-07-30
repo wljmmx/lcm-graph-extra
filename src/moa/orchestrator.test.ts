@@ -107,6 +107,7 @@ describe('resolveActivePreset', () => {
     const config = createBaseConfig();
     config.presets = [customPreset];
     config.activePreset = 'custom-preset';
+    config.mode = undefined as any; // 清除根级 mode，使 preset.mode 生效
     const result = resolveActivePreset(config);
     expect(result.referenceModels.length).toBe(1);
     expect(result.referenceModels[0].provider).toBe('deepseek');

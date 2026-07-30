@@ -19,11 +19,12 @@
  *   - reset_breaker / sync repair / compact / maintain / ttl_cleanup / import 二次确认
  *   - 危险操作（restore / reset_breaker / sync repair）按钮 type=error
  */
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useMutation } from '@tanstack/vue-query';
-import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, useMessage } from 'naive-ui';
+import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, NTag, NText, useMessage } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
+import OperationRecentHistory from '../components/OperationRecentHistory.vue';
 import {
   invokeMaintain,
   invokeDiagnose,
@@ -36,7 +37,10 @@ import {
   invokeRestore,
   invokeSync,
   invokeImport,
+  fetchOperationLogs,
+  type OperationLogRecord,
 } from '../api/maintain';
+import { formatDateTime } from '../utils/format';
 import type { McpInvokeResponse } from '../api/experience';
 import { extractDetails, extractText } from '../api/experience';
 
@@ -209,6 +213,8 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
       lastResultMap[vars.cardKey] = { status, details, text };
     }
     loadingMap[vars.cardKey] = false;
+    // 后端已持久化该次调用，刷新卡片历史区
+    void refreshHistory();
   },
   onError: (err, vars) => {
     const logId = pendingLogIds.get(vars.cardKey);
@@ -223,6 +229,8 @@ const mutation = useMutation<McpInvokeResponse, Error, MutationVars>({
       lastResultMap[vars.cardKey] = { status: 'error', details: null, text: null };
     }
     loadingMap[vars.cardKey] = false;
+    // 后端已持久化该次调用，刷新卡片历史区
+    void refreshHistory();
   },
 });
 
@@ -246,6 +254,60 @@ function runMutation(vars: MutationVars): void {
   loadingMap[vars.cardKey] = true;
   mutation.mutate(vars);
 }
+
+// ===== 持久化操作历史（P1-3 / P1-4：读取 /api/operation-logs，跨刷新保留） =====
+
+/** 最近拉取的持久化日志（按 ts DESC），供卡片底部“最近执行结果”与 Backup 横幅使用 */
+const historyLogs = ref<OperationLogRecord[]>([]);
+const historyLoading = ref<boolean>(false);
+/** 一次拉取的条数：取较大值以覆盖各 tool 的最近 5 条（多 tool 共享一次请求） */
+const HISTORY_FETCH_N = 200;
+
+/**
+ * 拉取持久化操作日志。失败静默（历史区为非关键展示，不阻塞主流程）。
+ * 后端在 /api/mcp/invoke 返回前已 appendOperationLog，故 mutation 完成后即可刷新到最新。
+ */
+async function refreshHistory(): Promise<void> {
+  historyLoading.value = true;
+  try {
+    const res = await fetchOperationLogs({ n: HISTORY_FETCH_N });
+    historyLogs.value = res.logs ?? [];
+  } catch {
+    // 拉取失败保留既有数据，不弹 toast 避免干扰
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+/** 按 tool 分组（后端已 DESC，组内直接取头部即“最近”） */
+const historyByTool = computed<Record<string, OperationLogRecord[]>>(() => {
+  const map: Record<string, OperationLogRecord[]> = {};
+  for (const log of historyLogs.value) {
+    (map[log.tool] ??= []).push(log);
+  }
+  return map;
+});
+
+/** 取某 tool 的历史切片（最近 n 条） */
+function historyOf(tool: string, n: number = 5): OperationLogRecord[] {
+  return (historyByTool.value[tool] ?? []).slice(0, n);
+}
+
+/** 最近一次备份记录（用于 Backup 卡片顶部横幅） */
+const lastBackupLog = computed<OperationLogRecord | null>(() => {
+  return historyByTool.value['lcmg_backup']?.[0] ?? null;
+});
+
+/** 从备份记录中提取文件路径：优先 params.outputPath */
+function backupFilePath(log: OperationLogRecord | null): string | null {
+  if (!log) return null;
+  const p = log.params?.outputPath;
+  return typeof p === 'string' && p.trim() ? p.trim() : null;
+}
+
+onMounted(() => {
+  void refreshHistory();
+});
 
 // ===== 各卡片执行入口（封装 runMutation） =====
 
@@ -401,7 +463,11 @@ function executeImport(): void {
             :last-details="lastResultMap.maintain?.details ?? null"
             :last-text="lastResultMap.maintain?.text ?? null"
             @execute="executeMaintain"
-          />
+          >
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_maintain')" />
+            </template>
+          </OperationCard>
         </NGi>
 
         <!-- 卡片 1.5: 系统诊断 -->
@@ -417,7 +483,11 @@ function executeImport(): void {
             :last-details="lastResultMap.diagnose?.details ?? null"
             :last-text="lastResultMap.diagnose?.text ?? null"
             @execute="executeDiagnose"
-          />
+          >
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_diagnose')" />
+            </template>
+          </OperationCard>
         </NGi>
 
         <!-- 卡片 2: 触发蒸馏 -->
@@ -445,6 +515,9 @@ function executeImport(): void {
                 />
               </NFormItem>
             </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_distill')" />
+            </template>
           </OperationCard>
         </NGi>
 
@@ -471,6 +544,9 @@ function executeImport(): void {
                   style="width: 100%"
                 />
               </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_distill_retry')" />
             </template>
           </OperationCard>
         </NGi>
@@ -506,6 +582,9 @@ function executeImport(): void {
                 </span>
               </NFormItem>
             </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_backfill')" />
+            </template>
           </OperationCard>
         </NGi>
 
@@ -534,6 +613,9 @@ function executeImport(): void {
                 />
               </NFormItem>
             </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_compact')" />
+            </template>
           </OperationCard>
         </NGi>
 
@@ -561,6 +643,9 @@ function executeImport(): void {
                 />
               </NFormItem>
             </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_reset_breaker')" />
+            </template>
           </OperationCard>
         </NGi>
 
@@ -577,7 +662,11 @@ function executeImport(): void {
             :last-details="lastResultMap.ttl_cleanup?.details ?? null"
             :last-text="lastResultMap.ttl_cleanup?.text ?? null"
             @execute="executeTtlCleanup"
-          />
+          >
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_maintain')" />
+            </template>
+          </OperationCard>
         </NGi>
 
         <!-- 卡片 6: 备份 -->
@@ -594,6 +683,37 @@ function executeImport(): void {
             :last-text="lastResultMap.backup?.text ?? null"
             @execute="executeBackup"
           >
+            <template #banner>
+              <!-- P1-4：最近一次备份状态横幅 -->
+              <NAlert
+                :type="lastBackupLog ? (lastBackupLog.status === 'success' ? 'success' : 'error') : 'info'"
+                :show-icon="true"
+                style="margin-bottom: 8px"
+              >
+                <NSpace align="center" :size="6" :wrap="false">
+                  <span style="font-weight: 600">最近一次备份</span>
+                  <template v-if="lastBackupLog">
+                    <NTag
+                      :type="lastBackupLog.status === 'success' ? 'success' : 'error'"
+                      size="tiny"
+                      round
+                    >
+                      {{ lastBackupLog.status === 'success' ? '成功' : '失败' }}
+                    </NTag>
+                    <NText depth="3">{{ formatDateTime(lastBackupLog.ts) }}</NText>
+                    <NText
+                      v-if="backupFilePath(lastBackupLog)"
+                      depth="2"
+                      code
+                      style="font-size: 12px; word-break: break-all"
+                    >
+                      {{ backupFilePath(lastBackupLog) }}
+                    </NText>
+                  </template>
+                  <NText v-else depth="3">尚未执行过备份</NText>
+                </NSpace>
+              </NAlert>
+            </template>
             <template #form>
               <NFormItem
                 label="输出路径（目录）"
@@ -607,6 +727,9 @@ function executeImport(): void {
                   placeholder="~/.openclaw/backup-YYYYMMDD"
                 />
               </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_backup')" />
             </template>
           </OperationCard>
         </NGi>
@@ -661,6 +784,9 @@ function executeImport(): void {
                 dryRun 已关闭：执行后将实际向 Neo4j / LCM 写入数据，请再次确认备份文件路径正确。
               </NAlert>
             </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_restore')" />
+            </template>
           </OperationCard>
         </NGi>
 
@@ -702,6 +828,9 @@ function executeImport(): void {
                 repair 模式且 dryRun 已关闭：执行后将实际删除孤儿节点，操作不可逆。
               </NAlert>
             </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_sync')" />
+            </template>
           </OperationCard>
         </NGi>
 
@@ -736,6 +865,9 @@ function executeImport(): void {
                   style="width: 100%"
                 />
               </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_import')" />
             </template>
           </OperationCard>
         </NGi>

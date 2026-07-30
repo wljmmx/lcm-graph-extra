@@ -1,13 +1,13 @@
 /**
- * 配置管理 API 封装（v1.1.0-5）。
+ * 配置管理 API 封装（v1.1.0-5 + v1.2.0 P1-1 全字段表单）。
  *
- * - GET  /api/capability-profile  —— 能力档次查看
- * - POST /api/capability-profile  —— 能力档次切换
- *
- * 注：运行时配置 / schema / 热更新相关封装因暂无 UI 消费，已移除，
- * 后端端点（GET /api/config 等）仍保留，需要时再补回 client 封装。
+ * - GET  /api/config                —— 运行时配置查看（脱敏后）
+ * - GET  /api/config/schema         —— 配置字段 schema 文档
+ * - PATCH /api/config               —— 白名单字段热更新
+ * - GET  /api/capability-profile    —— 能力档次查看
+ * - POST /api/capability-profile    —— 能力档次切换
  */
-import { apiGet, apiPost } from './client';
+import { apiGet, apiPatch, apiPost } from './client';
 
 // ─── 能力档次 ─────────────────────────────────────────────────────────────
 
@@ -32,4 +32,48 @@ export function fetchCapabilityProfile(): Promise<CapabilityProfileResponse> {
 
 export function switchCapabilityProfile(id: string): Promise<CapabilityProfileResponse> {
   return apiPost<CapabilityProfileResponse>('/api/capability-profile', { id });
+}
+
+// ─── 运行时配置 + Schema ─────────────────────────────────────────────────
+
+export interface SchemaFieldDoc {
+  path: string;
+  type: string;
+  description: string;
+  updatable: boolean;
+  defaultValue?: unknown;
+}
+
+export interface ConfigSchemaResponse {
+  ok: boolean;
+  fields?: SchemaFieldDoc[];
+  error?: string;
+}
+
+export interface ConfigResponse {
+  ok: boolean;
+  config?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface ConfigUpdateResponse {
+  ok: boolean;
+  applied?: string[];
+  rejected?: Array<{ path: string; reason: string }>;
+  error?: string;
+}
+
+/** 获取配置 schema 文档 */
+export function fetchConfigSchema(): Promise<ConfigSchemaResponse> {
+  return apiGet<ConfigSchemaResponse>('/api/config/schema');
+}
+
+/** 获取运行时配置（脱敏后） */
+export function fetchConfig(): Promise<ConfigResponse> {
+  return apiGet<ConfigResponse>('/api/config');
+}
+
+/** 热更新配置（白名单字段） */
+export function updateConfig(updates: Record<string, unknown>): Promise<ConfigUpdateResponse> {
+  return apiPatch<ConfigUpdateResponse>('/api/config', { updates });
 }

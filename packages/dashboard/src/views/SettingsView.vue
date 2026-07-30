@@ -15,11 +15,12 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import {
   NGrid, NGi, NCard, NSwitch, NInputNumber, NSelect, NButton,
   NDivider, NTag, NSpace, NSpin, NAlert, NModal, NForm,
-  NFormItem, NInput, NCheckboxGroup, NCheckbox, NEmpty,
+  NFormItem, NInput, NCheckboxGroup, NCheckbox, NEmpty, NTabs, NTabPane,
   useMessage, type FormInst,
 } from 'naive-ui';
 import { fetchMoaConfig, updateMoaConfig, fetchMoaStatus } from '../api/moa';
 import type { MoaConfig, MoaModelConfig } from '../api/moa';
+import GeneralConfigCard from '../components/GeneralConfigCard.vue';
 import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
 
 const message = useMessage();
@@ -44,9 +45,17 @@ const moaConfig = computed<MoaConfig | null>(() => configData.value?.config ?? n
 const editConfig = reactive({
   enabled: false,
   complexityThreshold: 0.6,
-  mode: 'serial' as string,
+  mode: 'auto' as string,
   enabledTiers: [] as string[],
+  syncBudgetMs: 240_000,
 });
+
+// mode 下拉选项（含描述说明）
+const modeOptions = [
+  { label: '自动（本地串行 + 远程并行，推荐）', value: 'auto' },
+  { label: '强制并行（多 GPU 或纯远程 API）', value: 'parallel' },
+  { label: '强制串行（最保守）', value: 'serial' },
+];
 
 // 同步服务器配置到编辑态
 watch(moaConfig, (cfg) => {
@@ -55,6 +64,7 @@ watch(moaConfig, (cfg) => {
     editConfig.complexityThreshold = cfg.complexityThreshold;
     editConfig.mode = cfg.mode;
     editConfig.enabledTiers = [...cfg.enabledTiers];
+    editConfig.syncBudgetMs = cfg.syncBudgetMs ?? 240_000;
   }
 }, { immediate: true });
 
@@ -81,6 +91,7 @@ function saveConfig(): void {
     complexityThreshold: editConfig.complexityThreshold,
     mode: editConfig.mode,
     enabledTiers: editConfig.enabledTiers,
+    syncBudgetMs: editConfig.syncBudgetMs,
   });
 }
 
@@ -423,6 +434,8 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
     </NSpin>
 
     <template v-if="moaConfig">
+      <NTabs type="line" animated style="margin-top: 12px">
+        <NTabPane name="moa" tab="MoA 多模型协作">
       <NSpace vertical :size="16" style="margin-top: 12px">
         <!-- ===== 区块 1：MOA 总控 ===== -->
         <NCard title="MoA 多模型协作" size="small">
@@ -467,17 +480,34 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
                 <div>
                   <div class="setting-label">协作模式</div>
                   <div class="setting-desc">
-                    serial：串行调用 · parallel：并行调用
+                    auto：本地串行+远程并行（推荐） · parallel：强制并行 · serial：强制串行
                   </div>
                 </div>
                 <NSelect
                   v-model:value="editConfig.mode"
-                  :options="[
-                    { label: '串行 (serial)', value: 'serial' },
-                    { label: '并行 (parallel)', value: 'parallel' },
-                  ]"
+                  :options="modeOptions"
                   size="small"
-                  style="width: 140px"
+                  style="width: 260px"
+                />
+              </div>
+            </NGi>
+
+            <!-- 同步预算 -->
+            <NGi>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">同步预算 (ms)</div>
+                  <div class="setting-desc">
+                    Phase 1 参考模型同步阶段总时间预算，超时则 fallback
+                  </div>
+                </div>
+                <NInputNumber
+                  v-model:value="editConfig.syncBudgetMs"
+                  :min="30_000"
+                  :max="3_600_000"
+                  :step="30_000"
+                  size="small"
+                  style="width: 160px"
                 />
               </div>
             </NGi>
@@ -710,6 +740,13 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
           </NButton>
         </div>
       </div>
+        </NTabPane>
+
+        <!-- P1-1: 通用配置 tab -->
+        <NTabPane name="general" tab="通用配置">
+          <GeneralConfigCard />
+        </NTabPane>
+      </NTabs>
     </template>
   </div>
 
