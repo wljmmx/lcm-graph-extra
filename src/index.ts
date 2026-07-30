@@ -1365,6 +1365,70 @@ const pluginEntry: any = definePluginEntry({
             uncompressedCount: _uncompressedCount,
           });
 
+          // 向 sessionFile 追加 compaction entry，使 SDK 的 context-overflow-precheck
+          // 能正确跳过已压缩的消息。
+          // 根因：lossless-claw DAG 压缩后 sessionFile 不变，SDK precheck 读 sessionFile
+          // 仍看到全量 token（210873），每次 compact 后 precheck 再次 overflow → 死循环。
+          // 修复：追加 compaction entry 到 sessionFile JSONL，SDK 读取时遇到该条目
+          // 会通过 firstKeptEntryId 跳过已压缩的消息，只计算保留部分的 token 数。
+          if (compacted && tokensBefore > tokensAfter && typeof params.sessionFile === 'string' && params.sessionFile) {
+            try {
+              const { readFile, appendFile } = await import('node:fs/promises');
+              const content = await readFile(params.sessionFile, 'utf-8');
+              const lines = content.split('\n').filter(l => l.trim());
+              const entries: Map<string, any> = new Map();
+              let lastEntry: any = null;
+              for (const line of lines) {
+                try {
+                  const entry = JSON.parse(line);
+                  if (entry && entry.id) {
+                    entries.set(entry.id, entry);
+                    lastEntry = entry;
+                  }
+                } catch { /* skip malformed lines */ }
+              }
+              // 如果最后一条已经是 compaction entry，说明已追加过，跳过
+              if (lastEntry && lastEntry.type !== 'compaction') {
+                // 从叶子节点沿 parentId 往回走，找到压缩边界（保留最近 N 条消息）
+                let current = lastEntry;
+                let msgCount = 0;
+                const targetKeep = _dedupRounds > 0 ? _dedupRounds : 24;
+                while (current && msgCount < targetKeep) {
+                  if (current.type === 'message') msgCount++;
+                  if (msgCount >= targetKeep) break;
+                  const parentId = current.parentId;
+                  if (parentId && entries.has(parentId)) {
+                    current = entries.get(parentId)!;
+                  } else {
+                    break;
+                  }
+                }
+                const boundaryId = current?.id ?? lastEntry.id;
+                const compactionId = `compaction-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                const compactionEntry = JSON.stringify({
+                  id: compactionId,
+                  parentId: lastEntry.id,
+                  type: 'compaction',
+                  firstKeptEntryId: boundaryId,
+                  tokensBefore,
+                });
+                await appendFile(params.sessionFile, compactionEntry + '\n', 'utf-8');
+                compactResultExtra.firstKeptEntryId = boundaryId;
+                logger?.info?.('[compact] compaction entry appended to sessionFile', {
+                  sessionFile: params.sessionFile,
+                  firstKeptEntryId: boundaryId,
+                  compactionEntryId: compactionId,
+                  tokensBefore,
+                  walkedBackMessages: msgCount,
+                });
+              }
+            } catch (e) {
+              logger?.warn?.('[compact] failed to append compaction entry to sessionFile (non-fatal)', {
+                err: serializeError(e),
+              });
+            }
+          }
+
           return {
             ok: true,
             compacted,
