@@ -31,11 +31,12 @@ import {
   type MenuOption,
 } from 'naive-ui';
 import { useBreakpoints } from './composables/useBreakpoints';
-import { RouterLink, useRoute } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import { useTheme, type ThemeMode } from './composables/useTheme';
 import Icon from './components/Icon.vue';
 
 const route = useRoute();
+const router = useRouter();
 
 // H5 修复：窄屏导航收起（< 768px 用 hamburger + drawer）
 const breakpoints = useBreakpoints({ xs: 0, s: 640, m: 768, l: 1024, xl: 1280 });
@@ -189,14 +190,14 @@ const menuOptions = computed<MenuOption[]>(() => [
             <!-- 面包屑导航 -->
             <div style="padding: 8px 24px 0; border-bottom: 1px solid var(--color-border);">
               <NBreadcrumb>
-                <NBreadcrumbItem>首页</NBreadcrumbItem>
+                <NBreadcrumbItem clickable @click="router.push('/')">首页</NBreadcrumbItem>
                 <NBreadcrumbItem>{{ breadcrumbLabel }}</NBreadcrumbItem>
               </NBreadcrumb>
             </div>
             <NLayoutContent id="main" role="main" tabindex="-1" style="padding: 24px;">
               <RouterView v-slot="{ Component: RouteComponent }">
                 <Transition name="page-fade" mode="out-in">
-                  <component :is="RouteComponent" />
+                  <component :is="RouteComponent" :key="route.path" />
                 </Transition>
               </RouterView>
             </NLayoutContent>

@@ -60,6 +60,20 @@ vi.mock('../../src/composables/useTheme', async () => {
   };
 });
 
+// mock vue-router（MonitorView 使用 useRouter/useRoute 同步 tab）
+vi.mock('vue-router', async () => {
+  const { ref } = await import('vue');
+  const mockRoute = ref({ path: '/', query: {} as Record<string, string> });
+  return {
+    useRouter: () => ({
+      push: vi.fn(),
+      replace: vi.fn().mockResolvedValue(undefined),
+    }),
+    useRoute: () => mockRoute.value,
+    RouterLink: { template: '<a><slot /></a>' },
+  };
+});
+
 import { useQuery } from '@tanstack/vue-query';
 import MonitorView from '../../src/views/MonitorView.vue';
 

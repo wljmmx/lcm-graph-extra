@@ -717,26 +717,16 @@ const failedPanelSummary = computed(() => {
 const activeTab = ref<'overview' | 'panels' | 'moa'>('overview');
 
 // P3-14: NTabs 切换路由同步（读取 URL query ?tab=）
-let router: ReturnType<typeof useRouter> | null = null;
-let route: ReturnType<typeof useRoute> | null = null;
-try {
-  router = useRouter();
-  route = useRoute();
-} catch {
-  // 非路由上下文（如测试环境）静默跳过
-}
+const router = useRouter();
+const route = useRoute();
 
-if (route) {
-  const tabFromQuery = (route.query.tab as string) ?? '';
-  if (tabFromQuery === 'overview' || tabFromQuery === 'panels' || tabFromQuery === 'moa') {
-    activeTab.value = tabFromQuery;
-  }
+const tabFromQuery = (route.query.tab as string) ?? '';
+if (tabFromQuery === 'overview' || tabFromQuery === 'panels' || tabFromQuery === 'moa') {
+  activeTab.value = tabFromQuery;
 }
 
 watch(activeTab, (tab) => {
-  if (router && route) {
-    router.replace({ query: { ...route.query, tab } }).catch(() => {});
-  }
+  router.replace({ query: { ...route.query, tab } }).catch(() => {});
 });
 
 // ===== MoA 辅助函数 =====
