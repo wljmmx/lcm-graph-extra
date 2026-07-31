@@ -106,39 +106,6 @@ watch(
   { immediate: true },
 );
 
-// ===== P0-强化：Transition JS 钩子 + timeout 安全网 =====
-// 当 CSS transitionend 事件因元素被意外移除而未触发时，
-// mode="out-in" 会永久卡在空白状态。通过 timeout 兜底确保过渡总能完成。
-const TRANSITION_TIMEOUT_MS = 600;
-
-function onPageLeave(el: Element, done: () => void): void {
-  let called = false;
-  const finish = () => {
-    if (called) return;
-    called = true;
-    done();
-  };
-  const timer = setTimeout(finish, TRANSITION_TIMEOUT_MS);
-  el.addEventListener('transitionend', () => {
-    clearTimeout(timer);
-    finish();
-  }, { once: true });
-}
-
-function onPageEnter(el: Element, done: () => void): void {
-  let called = false;
-  const finish = () => {
-    if (called) return;
-    called = true;
-    done();
-  };
-  const timer = setTimeout(finish, TRANSITION_TIMEOUT_MS);
-  el.addEventListener('transitionend', () => {
-    clearTimeout(timer);
-    finish();
-  }, { once: true });
-}
-
 // 渲染带 router-link + icon 的菜单 label（P2-5 导航优化）
 function renderMenuLabel(to: string, label: string, icon: string): Component {
   return () =>
@@ -229,25 +196,13 @@ const menuOptions = computed<MenuOption[]>(() => [
             </div>
             <NLayoutContent id="main" role="main" tabindex="-1" style="padding: 24px;">
               <!--
-                P0 修复：:key 必须使用 slot 的 route，而非 useRoute()。
-                slot 的 route 与 Component 来自同一响应式源，原子同步更新；
-                若用 useRoute().path，它可能先于 Component 更新，导致 Transition
-                两次渲染进入无效状态，最终显示空白页面。
-
-                P0-强化：JS 钩子 + timeout 安全网。
-                当 CSS transitionend 事件因元素被意外移除而未触发时，
-                mode="out-in" 会永久卡在空白状态。通过 @leave/@enter
-                JavaScript 钩子 + 600ms 超时兜底，确保过渡总能完成。
+                直接渲染 RouterView，不使用 Transition 组件。
+                Transition 的 mode="out-in" 与 SettingsView/MonitorView 中
+                NTabs 的 animated 动画存在 DOM 销毁/重建时序冲突，
+                导致从设置页跳转到监控页时出现空白。
               -->
               <RouterView v-slot="{ Component: RouteComponent, route: slotRoute }">
-                <Transition
-                  name="page-fade"
-                  mode="out-in"
-                  @leave="onPageLeave"
-                  @enter="onPageEnter"
-                >
-                  <component :is="RouteComponent" :key="slotRoute.path" />
-                </Transition>
+                <component :is="RouteComponent" :key="slotRoute.path" />
               </RouterView>
             </NLayoutContent>
           </NLayout>
@@ -313,22 +268,6 @@ const menuOptions = computed<MenuOption[]>(() => [
   display: inline-flex;
   align-items: center;
   transition: color var(--motion-fast);
-}
-
-/* P2-2: 页面过渡动画 */
-.page-fade-enter-active {
-  transition: opacity var(--motion-ease-out), transform var(--motion-ease-out);
-}
-.page-fade-leave-active {
-  transition: opacity var(--motion-ease-in), transform var(--motion-ease-in);
-}
-.page-fade-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-.page-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-4px);
 }
 
 /* P2-4: 卡片悬浮微升效果（全局 Naive UI Card 增强） */
