@@ -265,6 +265,20 @@
               "sync"
             ],
             "default": "async"
+          },
+          "schedule": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "dreaming": {
+                "type": "string",
+                "default": "0 3 * * *"
+              },
+              "incremental": {
+                "type": "string",
+                "default": "0 */12 * * *"
+              }
+            }
           }
         }
       },

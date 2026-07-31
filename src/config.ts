@@ -65,7 +65,6 @@ export const ExperienceConfigSchema = Type.Object({
 
 export const CompactionConfigSchema = Type.Object({
   enabled: Type.Boolean({ default: true }),
-  mode: Type.Optional(Type.String()),
   triggerThreshold: Type.Number({ default: 20_000 }),
   softThresholdTokens: Type.Number({ default: 163_840 }),
   keepRecentTokens: Type.Number({ default: 131_072 }),
@@ -113,6 +112,9 @@ export const PluginConfigSchema = Type.Object({
       Type.Literal('compaction'),
       Type.Literal('backup'),
       Type.Literal('error'),
+      Type.Literal('circuit_breaker_trip'),
+      Type.Literal('debt_overflow'),
+      Type.Literal('gm_pro_unavailable'),
     ]), { default: [] }),
   })),
 
@@ -124,7 +126,11 @@ export const PluginConfigSchema = Type.Object({
   })),
 
   cliTimeout: Type.Number({ default: 30_000 }),
-  cliFallbackSearchType: Type.Union([Type.Literal('search'), Type.Literal('query')], { default: 'search' }),
+  cliFallbackSearchType: Type.Union([Type.Literal('search'), Type.Literal('hybrid')], { default: 'hybrid' }),
+
+  // QMD MCP 超时配置（index.ts 中读取并传入 QmdClient 构造函数）
+  qmdMcpTimeout: Type.Number({ default: 3_000, minimum: 500 }),
+  qmdMcpQueryTimeout: Type.Number({ default: 8_000, minimum: 1_000 }),
 
   distillationIntervalMs: Type.Number({ default: 2 * 60 * 60 * 1000 }),
 
@@ -388,7 +394,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   budgetRatio: 0.3,
   experience: { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 },
   cliTimeout: 30_000,
-  cliFallbackSearchType: 'search',
+  cliFallbackSearchType: 'hybrid',
   distillationIntervalMs: 2 * 60 * 60 * 1000,
   tripletTimeoutMs: 60_000,
   experienceTtlIntervalMs: 24 * 60 * 60 * 1000,

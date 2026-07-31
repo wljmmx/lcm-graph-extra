@@ -72,7 +72,7 @@ describe('Config Schema Compatibility — real-world config', () => {
     expect(parsed.maxTokens).toBe(65536);
     expect(parsed.budgetRatio).toBe(0.3);
     expect(parsed.cliTimeout).toBe(30000);
-    expect(parsed.cliFallbackSearchType).toBe('search');
+    expect(parsed.cliFallbackSearchType).toBe('hybrid');
     expect(parsed.distillationIntervalMs).toBe(2 * 60 * 60 * 1000);
     expect(parsed.tripletTimeoutMs).toBe(60_000);
   });
