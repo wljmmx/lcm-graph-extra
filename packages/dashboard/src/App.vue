@@ -96,19 +96,30 @@ const breadcrumbMap: Record<string, string> = {
 };
 const breadcrumbLabel = computed(() => breadcrumbMap[route.path] ?? route.path);
 
-// 渲染带 router-link 的菜单 label
-function renderLinkLabel(to: string, label: string): Component {
-  return () => h(RouterLink, { to }, { default: () => label });
+// 渲染带 router-link + icon 的菜单 label（P2-5 导航优化）
+function renderMenuLabel(to: string, label: string, icon: string): Component {
+  return () =>
+    h(
+      RouterLink,
+      { to },
+      {
+        default: () =>
+          h('span', { class: 'nav-item' }, [
+            h(Icon, { name: icon, size: 16, style: { marginRight: '6px', verticalAlign: 'middle' } }),
+            h('span', label),
+          ]),
+      },
+    );
 }
 
-// 顶部导航 6 项：监控/经验/记忆/维护/测试中心/设置
+// 顶部导航 6 项：监控/经验/记忆/维护/测试中心/设置（P2-5: 添加图标）
 const menuOptions = computed<MenuOption[]>(() => [
-  { label: renderLinkLabel('/', '监控'), key: '/' },
-  { label: renderLinkLabel('/experience', '经验'), key: '/experience' },
-  { label: renderLinkLabel('/memory', '记忆'), key: '/memory' },
-  { label: renderLinkLabel('/maintain', '维护'), key: '/maintain' },
-  { label: renderLinkLabel('/testing', '测试中心'), key: '/testing' },
-  { label: renderLinkLabel('/settings', '设置'), key: '/settings' },
+  { label: renderMenuLabel('/', '监控', 'activity'), key: '/' },
+  { label: renderMenuLabel('/experience', '经验', 'bookOpen'), key: '/experience' },
+  { label: renderMenuLabel('/memory', '记忆', 'database'), key: '/memory' },
+  { label: renderMenuLabel('/maintain', '维护', 'tools'), key: '/maintain' },
+  { label: renderMenuLabel('/testing', '测试中心', 'flask'), key: '/testing' },
+  { label: renderMenuLabel('/settings', '设置', 'settings'), key: '/settings' },
 ]);
 </script>
 
@@ -126,9 +137,9 @@ const menuOptions = computed<MenuOption[]>(() => [
           <NLayout style="min-height: 100vh">
             <NLayoutHeader
               bordered
-              style="padding: 0 24px; display: flex; align-items: center; height: 56px;"
+              class="app-header"
             >
-              <h1 style="font-weight: 600; margin: 0; margin-right: 32px; font-size: var(--fs-body);">
+              <h1 class="app-title">
                 LCM Dashboard
               </h1>
               <!-- H5 修复：窄屏 hamburger，宽屏水平菜单 -->
@@ -174,7 +185,11 @@ const menuOptions = computed<MenuOption[]>(() => [
               </NBreadcrumb>
             </div>
             <NLayoutContent id="main" role="main" tabindex="-1" style="padding: 24px;">
-              <RouterView />
+              <RouterView v-slot="{ Component: RouteComponent }">
+                <Transition name="page-fade" mode="out-in">
+                  <component :is="RouteComponent" />
+                </Transition>
+              </RouterView>
             </NLayoutContent>
           </NLayout>
           <!-- H5 修复：窄屏导航抽屉 -->
@@ -210,5 +225,59 @@ const menuOptions = computed<MenuOption[]>(() => [
 }
 .skip-link:focus {
   top: 0;
+}
+
+/* P2-1/P2-4: Header 品牌渐变背景 */
+.app-header {
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  height: 56px;
+  background: var(--gradient-header);
+}
+
+/* P2-1: 品牌标题 */
+.app-title {
+  font-weight: 700;
+  margin: 0;
+  margin-right: 32px;
+  font-size: var(--fs-body);
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: 0.02em;
+}
+
+/* P2-5: 导航项样式 */
+.nav-item {
+  display: inline-flex;
+  align-items: center;
+  transition: color var(--motion-fast);
+}
+
+/* P2-2: 页面过渡动画 */
+.page-fade-enter-active {
+  transition: opacity var(--motion-ease-out), transform var(--motion-ease-out);
+}
+.page-fade-leave-active {
+  transition: opacity var(--motion-ease-in), transform var(--motion-ease-in);
+}
+.page-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.page-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* P2-4: 卡片悬浮微升效果（全局 Naive UI Card 增强） */
+.n-card {
+  transition: box-shadow var(--motion-base), transform var(--motion-base);
+}
+.n-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
 }
 </style>

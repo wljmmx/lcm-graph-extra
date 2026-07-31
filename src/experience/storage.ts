@@ -345,7 +345,8 @@ export class ExperienceStorage {
       props.tags_techStack = d.tags.techStack?.join(',') || '';
       props.tags_severity = d.tags.severity || '';
       if (d.tags.freeTags?.length) {
-        props.tags_free = d.tags.freeTags.join(',') || '';
+        // P3-4: 归一化 freeTags（去重 + trim + lowercase），防止碎片化
+        props.tags_free = normalizeFreeTags(d.tags.freeTags).join(',') || '';
       }
     }
     await this.adapter.query(UPSERT_DISTILLED, { id: d.id, props });
@@ -861,6 +862,66 @@ export class ExperienceStorage {
     const row = result?.[0] as { decayed?: number } | undefined;
     return typeof row?.decayed === 'number' ? row.decayed : 0;
   }
+
+  /**
+   * P3-4: 获取所有去重后的 freeTags 及其出现次数。
+   * 用于在 Dashboard 中展示标签碎片化情况，辅助用户进行标签合并决策。
+   */
+  async getAllFreeTags(): Promise<Array<{ tag: string; count: number }>> {
+    const result = await this.adapter.query<{ tags_free: string }>(`
+      MATCH (e:${LABEL})
+      WHERE e.status = 'DISTILLED'
+        AND e.tags_free IS NOT NULL
+        AND e.tags_free <> ''
+      RETURN e.tags_free AS tags_free
+    `);
+    if (!result || result.length === 0) return [];
+
+    const countMap = new Map<string, number>();
+    for (const r of result) {
+      const tagsFree = (r as any).tags_free as string | undefined;
+      const tags = (tagsFree || '').split(',').filter(Boolean);
+      for (const t of tags) {
+        const normalized = t.trim().toLowerCase();
+        if (normalized) {
+          countMap.set(normalized, (countMap.get(normalized) ?? 0) + 1);
+        }
+      }
+    }
+    return Array.from(countMap.entries())
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count);
+  }
+
+  /**
+   * P3-4: 合并 freeTags —— 将所有 EXPERIENCE 节点中的 fromTag 替换为 toTag。
+   * 用于治理标签碎片化（如 "react"、"react.js"、"reactjs" 统一为 "react"）。
+   *
+   * @returns 受影响的节点数
+   */
+  async mergeFreeTags(fromTag: string, toTag: string): Promise<number> {
+    const fromNorm = fromTag.trim().toLowerCase();
+    const toNorm = toTag.trim().toLowerCase();
+    if (!fromNorm || !toNorm || fromNorm === toNorm) return 0;
+
+    const result = await this.adapter.query<{ affected: number }>(`
+      MATCH (e:${LABEL})
+      WHERE e.status = 'DISTILLED'
+        AND e.tags_free IS NOT NULL
+        AND e.tags_free <> ''
+      WITH e,
+           [t IN split(e.tags_free, ',') WHERE trim(toLower(t)) = $from] AS matched,
+           [t IN split(e.tags_free, ',') WHERE trim(toLower(t)) <> $from] AS others
+      WHERE size(matched) > 0
+      SET e.tags_free = reduce(
+        s = '', t IN (others + [$to]) | CASE WHEN s = '' THEN t ELSE s + ',' + t END
+      )
+      RETURN count(e) AS affected
+    `, { from: fromNorm, to: toNorm });
+    const row = (result?.[0] as { affected?: unknown } | undefined);
+    const affected = typeof row?.affected === 'number' ? row.affected : 0;
+    return affected;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -897,6 +958,23 @@ interface PendingRow {
   retryCount?: number;
   /** 节点当前状态（PENDING 或 FAILED） */
   status?: string;
+}
+
+/**
+ * P3-4: 归一化 freeTags —— lowercase + trim + 去重，防止同义标签碎片化。
+ * 如 ["React", "react", " React.js "] → ["react", "react.js"]
+ */
+export function normalizeFreeTags(tags: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of tags) {
+    const normalized = raw.trim().toLowerCase();
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result;
 }
 
 /**

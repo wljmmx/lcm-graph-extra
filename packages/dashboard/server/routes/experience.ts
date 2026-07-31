@@ -12,7 +12,7 @@
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
-import { runReadQuery, toNumber, splitTag } from '../lib/neo4j';
+import { runReadQuery, runWriteQuery, toNumber, splitTag } from '../lib/neo4j';
 import { invokeMcpTool } from '../lib/mcp';
 
 // ---------------------------------------------------------------------------
@@ -410,6 +410,82 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
       return {
         error: '详情查询失败，请查看服务端日志（Neo4j 不可达？）',
       } as unknown as ExperienceDetail;
+    }
+  });
+
+  // ===== P3-4: 标签管理 —— 统计所有 freeTags 及其出现次数 =====
+  app.get('/api/experience/tags', async (_req, _reply) => {
+    try {
+      const res = await runReadQuery(`
+        MATCH (e:EXPERIENCE)
+        WHERE e.status = 'DISTILLED'
+          AND e.tags_free IS NOT NULL
+          AND e.tags_free <> ''
+        RETURN e.tags_free AS tags_free
+      `);
+
+      const countMap = new Map<string, number>();
+      for (const rec of res.records) {
+        const row = rec.toObject() as { tags_free: string };
+        const tags = (row.tags_free || '').split(',').filter(Boolean);
+        for (const t of tags) {
+          const normalized = t.trim().toLowerCase();
+          if (normalized) {
+            countMap.set(normalized, (countMap.get(normalized) ?? 0) + 1);
+          }
+        }
+      }
+
+      const items = Array.from(countMap.entries())
+        .map(([tag, count]) => ({ tag, count }))
+        .sort((a, b) => b.count - a.count);
+
+      return { ok: true, items, total: items.length };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg, items: [], total: 0 };
+    }
+  });
+
+  // ===== P3-4: 标签合并 —— 将 fromTag 合并到 toTag =====
+  app.post('/api/experience/tags/merge', async (req, reply) => {
+    const body = (req.body as { from?: string; to?: string }) ?? {};
+    const fromTag = body.from?.trim().toLowerCase();
+    const toTag = body.to?.trim().toLowerCase();
+
+    if (!fromTag || !toTag) {
+      reply.code(400);
+      return { ok: false, error: 'from 和 to 参数不能为空' };
+    }
+    if (fromTag === toTag) {
+      reply.code(400);
+      return { ok: false, error: 'from 和 to 不能相同' };
+    }
+
+    try {
+      const res = await runWriteQuery(`
+        MATCH (e:EXPERIENCE)
+        WHERE e.status = 'DISTILLED'
+          AND e.tags_free IS NOT NULL
+          AND e.tags_free <> ''
+        WITH e,
+             [t IN split(e.tags_free, ',') WHERE trim(toLower(t)) = $from] AS matched,
+             [t IN split(e.tags_free, ',') WHERE trim(toLower(t)) <> $from] AS others
+        WHERE size(matched) > 0
+        SET e.tags_free = reduce(
+          s = '', t IN (others + [$to]) | CASE WHEN s = '' THEN t ELSE s + ',' + t END
+        )
+        RETURN count(e) AS affected
+      `, { from: fromTag, to: toTag });
+
+      const row = res.records[0]?.toObject() as { affected?: unknown } | undefined;
+      const affected = toNumber(row?.affected) ?? 0;
+
+      return { ok: true, affected, message: `已将 ${affected} 个节点中的 "${fromTag}" 合并为 "${toTag}"` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      reply.code(500);
+      return { ok: false, error: msg, affected: 0 };
     }
   });
 

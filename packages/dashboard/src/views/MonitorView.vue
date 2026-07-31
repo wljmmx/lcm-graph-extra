@@ -295,6 +295,60 @@ const circuitBreakerItems = computed<CircuitBreakerItem[]>(() => {
   ];
 });
 
+// ===== P1-2: 熔断器子系统统计（成功率 + 开合次数） =====
+interface CbSubsystemStat {
+  key: string;
+  label: string;
+  available: boolean;
+  failures: number;
+  /** 历史快照中可用的比例（成功率） */
+  successRate: number;
+  /** 历史快照中状态变化的次数（开合次数） */
+  openCloseCount: number;
+  tagType: 'success' | 'error' | 'default';
+}
+
+const cbSubsystemStats = computed<CbSubsystemStat[]>(() => {
+  const d = db.value;
+  if (!d) return [];
+
+  // 从历史快照计算每子系统成功率与开合次数
+  const history = rawHistoryAsc.value;
+  const calc = (key: string, label: string, currentAvailable: boolean, currentFailures: number) => {
+    let availableCount = 0;
+    let totalCount = 0;
+    let transitions = 0;
+    let prevState: boolean | null = null;
+
+    for (const snap of history) {
+      let available: boolean;
+      let failures: number;
+      if (key === 'lcm') { available = snap.cbLcmAvailable; failures = snap.cbLcmFailures; }
+      else if (key === 'qmd') { available = snap.cbQmdAvailable; failures = snap.cbQmdFailures; }
+      else { available = snap.cbNeo4jAvailable; failures = snap.cbNeo4jFailures; }
+
+      if (available) availableCount++;
+      totalCount++;
+
+      if (prevState !== null && prevState !== available) {
+        transitions++;
+      }
+      prevState = available;
+    }
+
+    const successRate = totalCount > 0 ? Math.round((availableCount / totalCount) * 1000) / 10 : 100;
+    const tagType: 'success' | 'error' | 'default' = currentAvailable ? 'success' : currentFailures > 0 ? 'error' : 'default';
+
+    return { key, label, available: currentAvailable, failures: currentFailures, successRate, openCloseCount: transitions, tagType };
+  };
+
+  return [
+    calc('lcm', 'LCM', d.cbLcmAvailable, d.cbLcmFailures),
+    calc('qmd', 'QMD', d.cbQmdAvailable, d.cbQmdFailures),
+    calc('neo4j', 'Neo4j', d.cbNeo4jAvailable, d.cbNeo4jFailures),
+  ];
+});
+
 // ===== P1-6: 当前压力 Tier 徽章 =====
 // 根据 tierLow/tierMedium/tierHigh 值判断当前 tier（值最大的那个即为当前 tier）
 type TierLevel = 'low' | 'medium' | 'high';
@@ -1184,13 +1238,13 @@ const moaLatencyPhaseOption = computed(() => {
 
         <!-- P1-2 / P1-6: 熔断器状态 + 最近 10 次 tier 趋势 -->
         <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen" style="margin-top: 12px">
-          <!-- P1-2: 熔断器状态卡片 -->
+          <!-- P1-2: 熔断器状态卡片（含成功率 + 开合次数） -->
           <NGi>
             <NCard title="熔断器状态" size="small">
-              <template v-if="circuitBreakerItems.length">
+              <template v-if="cbSubsystemStats.length">
                 <NSpace vertical :size="8">
                   <div
-                    v-for="item in circuitBreakerItems"
+                    v-for="item in cbSubsystemStats"
                     :key="item.key"
                     class="cb-row"
                   >
@@ -1199,6 +1253,9 @@ const moaLatencyPhaseOption = computed(() => {
                       {{ item.available ? '可用' : item.failures > 0 ? '熔断' : '未知' }}
                     </NTag>
                     <span class="cb-failures muted mono">失败 {{ item.failures }} 次</span>
+                    <span class="cb-stat muted mono">
+                      成功率 {{ item.successRate }}% · 开合 {{ item.openCloseCount }} 次
+                    </span>
                   </div>
                 </NSpace>
               </template>

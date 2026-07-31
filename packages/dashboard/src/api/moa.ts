@@ -48,6 +48,8 @@ export interface MoaConfigUpdateResponse {
 export interface MoaStatus {
   enabled: boolean;
   mode: string;
+  /** 最近一次实际调度策略（运行时 effective mode），可能不同于配置的 mode */
+  lastEffectiveMode: string;
   complexityThreshold: number;
   enabledTiers: string[];
   referenceModelCount: number;

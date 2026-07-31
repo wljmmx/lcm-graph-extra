@@ -83,3 +83,25 @@ export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   return (await resp.json()) as T;
 }
 
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const resp = await fetch(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      detail = await resp.text();
+    } catch {
+      // 忽略读取错误
+    }
+    throw new ApiError(
+      `PUT ${path} 失败: HTTP ${resp.status}${detail ? ` - ${detail}` : ''}`,
+      resp.status,
+      path,
+    );
+  }
+  return (await resp.json()) as T;
+}
+

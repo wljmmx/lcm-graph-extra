@@ -7,7 +7,7 @@
  * - GET  /api/capability-profile    —— 能力档次查看
  * - POST /api/capability-profile    —— 能力档次切换
  */
-import { apiGet, apiPatch, apiPost } from './client';
+import { apiGet, apiPatch, apiPost, apiPut } from './client';
 
 // ─── 能力档次 ─────────────────────────────────────────────────────────────
 
@@ -76,4 +76,30 @@ export function fetchConfig(): Promise<ConfigResponse> {
 /** 热更新配置（白名单字段） */
 export function updateConfig(updates: Record<string, unknown>): Promise<ConfigUpdateResponse> {
   return apiPatch<ConfigUpdateResponse>('/api/config', { updates });
+}
+
+// P3-3: Raw 配置编辑器 API
+export interface RawConfigResponse {
+  ok: boolean;
+  config?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface ValidateConfigResponse {
+  ok: boolean;
+  message?: string;
+  error?: string;
+  errors?: string[];
+}
+
+export function fetchRawConfig(): Promise<RawConfigResponse> {
+  return apiGet<RawConfigResponse>('/api/config/raw');
+}
+
+export function validateConfig(json: string): Promise<ValidateConfigResponse> {
+  return apiPost<ValidateConfigResponse>('/api/config/validate', { config: JSON.parse(json) });
+}
+
+export function saveRawConfig(json: string): Promise<RawConfigResponse> {
+  return apiPut<RawConfigResponse>('/api/config/raw', { config: JSON.parse(json) });
 }

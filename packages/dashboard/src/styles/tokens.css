@@ -82,8 +82,25 @@
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
     monospace;
 
-  /* ===== 动效（base 用于 transition；fast/slow 当前未引用，删除以避免死代码） ===== */
+  /* ===== 动效 ===== */
+  --motion-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
   --motion-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-ease-out: 250ms cubic-bezier(0, 0, 0.2, 1);
+  --motion-ease-in: 200ms cubic-bezier(0.4, 0, 1, 1);
+
+  /* ===== 品牌渐变（header 背景 / 强调区域） ===== */
+  --gradient-header: linear-gradient(
+    135deg,
+    rgba(32, 128, 240, 0.06) 0%,
+    rgba(32, 128, 240, 0.02) 50%,
+    transparent 100%
+  );
+  --gradient-brand: linear-gradient(
+    135deg,
+    var(--color-primary) 0%,
+    var(--color-primary-hover) 100%
+  );
 }
 
 /* ===== 暗色模式预留（S3 启用） ===== */
@@ -115,6 +132,14 @@
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 4px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+
+  /* 暗色渐变 */
+  --gradient-header: linear-gradient(
+    135deg,
+    rgba(32, 128, 240, 0.10) 0%,
+    rgba(32, 128, 240, 0.04) 50%,
+    transparent 100%
+  );
 }
 
 /* ===== 全局基础样式 ===== */

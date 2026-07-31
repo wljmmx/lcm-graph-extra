@@ -26,23 +26,15 @@ export type LlmProvider = typeof LLM_PROVIDERS[number];
 /**
  * 构建 LLM provider 的 Type.Union schema。
  *
- * 实现说明：不能直接用 `LLM_PROVIDERS.map(p => Type.Literal(p))` 传给
- * Type.Union——typebox 的 `Union<Types>(anyOf: [...Types])` 需要元组类型才能
- * 正确推断 Static，而 .map() 返回普通数组且 Type.Literal(联合类型) 会使
- * Static 退化为 never。因此这里用内联字面量元组（值与 LLM_PROVIDERS 镜像），
- * 借助 Type.Union 的上下文类型推断保留字面量联合类型。
- *
- * 修改 LLM_PROVIDERS 时需同步更新此函数内的 Type.Literal 列表。
+ * 从 LLM_PROVIDERS 常量派生，单一数据源——新增 provider 只需修改 LLM_PROVIDERS。
+ * Type.Union 的 Static 类型推断需要元组而非普通数组，此处用 as 断言绕过；
+ * 运行时枚举值一致性由 schema-consistency.test.ts 覆盖。
  */
 function LlmProviderUnion(options?: TSchemaOptions) {
-  return Type.Union([
-    Type.Literal('openai'),
-    Type.Literal('ollama'),
-    Type.Literal('deepseek'),
-    Type.Literal('unsloth'),
-    Type.Literal('custom'),
-    Type.Literal('openclaw_hooks'),
-  ], options);
+  return Type.Union(
+    LLM_PROVIDERS.map((p) => Type.Literal(p)) as any,
+    options,
+  );
 }
 
 export const BackupConfigSchema = Type.Object({

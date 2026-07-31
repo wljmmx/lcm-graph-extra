@@ -160,3 +160,34 @@ export function invokeMcpTool(
 ): Promise<McpInvokeResponse> {
   return apiPost<McpInvokeResponse>('/api/mcp/invoke', { tool, params });
 }
+
+// P3-4: 标签管理 API
+
+export interface FreeTagItem {
+  tag: string;
+  count: number;
+}
+
+export interface FreeTagStatsResponse {
+  ok: boolean;
+  items: FreeTagItem[];
+  total: number;
+  error?: string;
+}
+
+export interface TagMergeResponse {
+  ok: boolean;
+  affected: number;
+  message?: string;
+  error?: string;
+}
+
+/** 获取所有 freeTags 及其出现次数（用于标签碎片化治理） */
+export function fetchFreeTagStats(): Promise<FreeTagStatsResponse> {
+  return apiGet<FreeTagStatsResponse>('/api/experience/tags');
+}
+
+/** 合并两个 freeTag（fromTag → toTag） */
+export function mergeFreeTags(from: string, to: string): Promise<TagMergeResponse> {
+  return apiPost<TagMergeResponse>('/api/experience/tags/merge', { from, to });
+}

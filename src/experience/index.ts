@@ -9,7 +9,7 @@
  *   - Query-aware 召回: 根据上下文场景推断，过滤匹配的经验
  */
 
-export { ExperienceStorage } from './storage';
+export { ExperienceStorage, normalizeFreeTags } from './storage';
 export { TagRegistry } from './tag-registry';
 export { detectExperienceTrigger, extractRawExperience } from './extractor';
 export type {

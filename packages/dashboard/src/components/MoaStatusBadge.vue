@@ -74,6 +74,17 @@ const successRateType = computed<'success' | 'warning' | 'error' | 'default'>(()
 const fallbackType = computed<'warning' | 'default'>(() =>
   perf.value && perf.value.fallbackCount > 0 ? 'warning' : 'default',
 );
+
+// P0-1b: 最近一次实际调度策略
+const effectiveMode = computed(() => latestRun.value?.mode);
+const effectiveModeLabel = computed(() => {
+  switch (effectiveMode.value) {
+    case 'auto': return '调度: 自动';
+    case 'parallel': return '调度: 并行';
+    case 'serial': return '调度: 串行';
+    default: return effectiveMode.value ? `调度: ${effectiveMode.value}` : '';
+  }
+});
 </script>
 
 <template>
@@ -85,6 +96,16 @@ const fallbackType = computed<'warning' | 'default'>(() =>
       <!-- 最近一次运行状态 -->
       <NTag :type="latestTagType" size="small" round>
         {{ latestTagText }}
+      </NTag>
+
+      <!-- P0-1b: 实际调度策略 -->
+      <NTag
+        v-if="effectiveMode"
+        :type="effectiveMode === 'auto' ? 'success' : 'info'"
+        size="small"
+        :bordered="false"
+      >
+        {{ effectiveModeLabel }}
       </NTag>
 
       <!-- 总运行次数 -->

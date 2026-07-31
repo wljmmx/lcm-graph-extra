@@ -306,6 +306,79 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     }
   });
 
+  // P3-3: GET /api/config/raw —— 返回完整 raw JSON（脱敏），供高级用户编辑器使用
+  app.get('/api/config/raw', async (_req, _reply) => {
+    try {
+      const raw = readRawConfig();
+      const redacted = redactSensitive(raw);
+      return { ok: true, config: redacted };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
+    }
+  });
+
+  // P3-3: POST /api/config/validate —— 校验 raw JSON 是否合法（不写入）
+  app.post('/api/config/validate', async (req, reply) => {
+    const body = req.body as Record<string, unknown> | undefined;
+    if (!body || typeof body !== 'object' || !body.config) {
+      reply.code(400);
+      return { ok: false, error: '请求体缺少 config 字段' };
+    }
+    const config = body.config;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+      reply.code(400);
+      return { ok: false, error: 'config 必须是 JSON 对象' };
+    }
+
+    const errors: string[] = [];
+    // 基本结构校验：检查顶层关键字段类型
+    const checks: Array<{ path: string; type: string }> = [
+      { path: 'neo4j', type: 'object' },
+      { path: 'moa', type: 'object' },
+      { path: 'compaction', type: 'object' },
+      { path: 'experience', type: 'object' },
+      { path: 'ttl', type: 'object' },
+    ];
+    for (const c of checks) {
+      const val = getByPath(config as Record<string, unknown>, c.path);
+      if (val !== undefined && (typeof val !== c.type || Array.isArray(val) || val === null)) {
+        errors.push(`${c.path}: 期望 ${c.type}，实际 ${typeof val === 'object' && Array.isArray(val) ? 'array' : typeof val}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      reply.code(400);
+      return { ok: false, error: '配置校验失败', errors };
+    }
+    return { ok: true, message: '配置结构校验通过' };
+  });
+
+  // P3-3: PUT /api/config/raw —— 写入完整配置（高级用户模式）
+  app.put('/api/config/raw', async (req, reply) => {
+    const body = req.body as Record<string, unknown> | undefined;
+    if (!body || typeof body !== 'object' || !body.config) {
+      reply.code(400);
+      return { ok: false, error: '请求体缺少 config 字段' };
+    }
+    const config = body.config;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+      reply.code(400);
+      return { ok: false, error: 'config 必须是 JSON 对象' };
+    }
+
+    try {
+      writeRawConfig(config as Record<string, unknown>);
+      const raw = readRawConfig();
+      const redacted = redactSensitive(raw);
+      return { ok: true, config: redacted, note: '配置已写入，需重启插件进程生效' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      reply.code(500);
+      return { ok: false, error: msg };
+    }
+  });
+
   // v1.1.0-5: GET /api/capability-profile —— 能力档次查看（代理到插件 snapshot）
   // A1 修复: 插件 GET 返回 { current, profiles } 不含 ok 字段，前端永远走 else 分支
   //          显示"加载失败"。此处包装 ok:true 后透传，与 POST 行为一致

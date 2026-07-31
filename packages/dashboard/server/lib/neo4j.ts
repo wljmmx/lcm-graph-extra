@@ -58,6 +58,28 @@ export async function runReadQuery(
 }
 
 /**
+ * P3-4: 执行写入 Cypher 查询（自动开/关 session，显式事务）。
+ * 用于标签合并等管理操作，区别于 read-only 查询。
+ */
+export async function runWriteQuery(
+  cypher: string,
+  params: Record<string, unknown> = {},
+): Promise<QueryResult> {
+  const session = getNeo4jSession();
+  const tx = session.beginTransaction();
+  try {
+    const result = await tx.run(cypher, params);
+    await tx.commit();
+    return result;
+  } catch (err) {
+    await tx.rollback().catch(() => {});
+    throw err;
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
+/**
  * 把 Neo4j Integer / 普通值安全转成 JS number。
  * neo4j-driver 对大整数返回自定义 Integer 类型，需显式转。
  */

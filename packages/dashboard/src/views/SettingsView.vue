@@ -22,6 +22,7 @@ import { fetchMoaConfig, updateMoaConfig, fetchMoaStatus } from '../api/moa';
 import type { MoaConfig, MoaModelConfig } from '../api/moa';
 import GeneralConfigCard from '../components/GeneralConfigCard.vue';
 import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
+import ConfigRawEditor from '../components/ConfigRawEditor.vue';
 
 const message = useMessage();
 const queryClient = useQueryClient();
@@ -397,6 +398,17 @@ const statusType = computed(() => {
 });
 
 const refModelCount = computed(() => statusData.value?.status?.referenceModelCount ?? 0);
+
+// P0-1b: 最近一次实际调度策略（运行时 effective mode）
+const effectiveMode = computed(() => statusData.value?.status?.lastEffectiveMode);
+const effectiveModeLabel = computed(() => {
+  switch (effectiveMode.value) {
+    case 'auto': return '自动（本地串行+远程并行）';
+    case 'parallel': return '强制并行';
+    case 'serial': return '强制串行';
+    default: return effectiveMode.value ?? '—';
+  }
+});
 </script>
 
 <template>
@@ -410,6 +422,14 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
         <span v-if="statusData" class="muted" style="font-size: var(--fs-caption); margin-left: 8px">
           参考模型 {{ refModelCount }} 个{{ statusData.status?.hasAggregator ? ' · 聚合模型已配置' : '' }}
         </span>
+        <NTag
+          v-if="effectiveMode && statusData?.status?.enabled"
+          :type="effectiveMode === 'auto' ? 'success' : 'info'"
+          size="small"
+          style="margin-left: 8px"
+        >
+          上次调度: {{ effectiveModeLabel }}
+        </NTag>
       </div>
     </div>
 
@@ -724,6 +744,7 @@ const refModelCount = computed(() => statusData.value?.status?.referenceModelCou
           根据硬件资源选择合适的能力档次，影响 MoA 并行度与检索策略。
         </div>
         <CapabilityProfileSwitch />
+        <ConfigRawEditor />
       </NCard>
 
       <!-- 保存按钮置底 -->

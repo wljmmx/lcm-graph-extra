@@ -223,9 +223,30 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
   // GET /api/moa/status —— 查看 MOA 运行时状态
   app.get('/api/moa/status', async (_req, _reply) => {
     const config = readMoaConfig();
+
+    // P0-1b: 从性能追踪器获取最近一次实际调度策略（运行时 effective mode）
+    let lastEffectiveMode: string | undefined;
+    try {
+      const perfResp = await fetch(`${SNAPSHOT_URL}/internal/moa-performance`, {
+        method: 'GET',
+        headers: getOutboundAuthHeader(),
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (perfResp.ok) {
+        const perfData = (await perfResp.json()) as any;
+        const recentRuns: Array<{ mode?: string }> = perfData?.data?.recentRuns ?? [];
+        if (recentRuns.length > 0 && recentRuns[0].mode) {
+          lastEffectiveMode = recentRuns[0].mode;
+        }
+      }
+    } catch {
+      // 性能追踪器不可用，回退到 config.mode
+    }
+
     const status = {
       enabled: config.enabled,
       mode: config.mode,
+      lastEffectiveMode: lastEffectiveMode ?? config.mode,
       complexityThreshold: config.complexityThreshold,
       enabledTiers: config.enabledTiers,
       referenceModelCount: config.referenceModels.length,
