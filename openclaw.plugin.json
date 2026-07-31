@@ -741,6 +741,12 @@
               "enum": ["low", "medium"]
             },
             "default": ["low"]
+          },
+          "syncBudgetMs": {
+            "type": "integer",
+            "default": 240000,
+            "minimum": 30000,
+            "description": "Phase 1 参考模型同步阶段总时间预算（ms），超时则 fallback"
           }
         }
       },
