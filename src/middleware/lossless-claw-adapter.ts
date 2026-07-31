@@ -221,6 +221,8 @@ export class LosslessClawAdapter {
   private _connected = false;
   private _connecting: Promise<boolean> | null = null;
   private _initError: string | null = null;
+  /** 是否已经尝试过连接（无论成功失败），用于防止重复日志 */
+  private _connectionAttempted = false;
 
   /** 日志器 (P3-B2: 类型 any → Logger，缺失时降级到 globalLogger) */
   private logger: Logger;
@@ -254,6 +256,7 @@ export class LosslessClawAdapter {
    */
   async connect(): Promise<boolean> {
     if (this._connected) return true;
+    if (this._connectionAttempted) return false;
     if (this._connecting) return this._connecting;
     this._connecting = this._doConnect();
     return this._connecting;
@@ -264,6 +267,8 @@ export class LosslessClawAdapter {
       const factory = await this._discoverCEFactory();
       if (!factory) {
         this._initError = 'lossless-claw CE factory not found in registry';
+        this._connectionAttempted = true;
+        this._connecting = null;
         return false;
       }
 
@@ -274,14 +279,20 @@ export class LosslessClawAdapter {
       if (!this.engine || typeof this.engine.compact !== 'function') {
         this._initError = 'lossless-claw factory returned invalid engine';
         this.engine = null;
+        this._connectionAttempted = true;
+        this._connecting = null;
         return false;
       }
 
       this._connected = true;
+      this._connectionAttempted = true;
+      this._connecting = null;
       return true;
     } catch (err) {
       this._initError = (err as Error).message;
       this._connected = false;
+      this._connectionAttempted = true;
+      this._connecting = null;
       return false;
     }
   }
@@ -966,4 +977,25 @@ export class LosslessClawAdapter {
     this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FOUND factory");
     return factory as (ctx: any) => Promise<LosslessClawEngine>;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 进程级单例
+// ---------------------------------------------------------------------------
+
+/**
+ * OpenClaw 会为每个 worker/agent 上下文调用一次 register()，
+ * 每个 register() 闭包创建独立的 LosslessClawAdapter 实例，
+ * 导致 "lossless-claw adapter connection failed" 日志重复 4 次。
+ *
+ * 此处提供进程级单例，确保同一进程中只创建一个适配器实例，
+ * connect() 只执行一次，日志只输出一次。
+ */
+let _sharedAdapter: LosslessClawAdapter | null = null;
+
+export function getOrCreateLosslessClawAdapter(logger?: any): LosslessClawAdapter {
+  if (!_sharedAdapter) {
+    _sharedAdapter = new LosslessClawAdapter(logger);
+  }
+  return _sharedAdapter;
 }

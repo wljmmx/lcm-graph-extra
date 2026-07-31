@@ -24,7 +24,7 @@ import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
 import { backgroundTasks } from "./async/task-registry.js"
 import { onCompaction } from "./hooks/compaction";
-import { LosslessClawAdapter } from "./middleware/lossless-claw-adapter";
+import { getOrCreateLosslessClawAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { PluginConfigSchema } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
@@ -308,7 +308,7 @@ const pluginEntry: any = definePluginEntry({
       initPromise = (async () => {
       try {
         tracker = new UsageTracker(logger);
-        _losslessClawAdapter = new LosslessClawAdapter(logger);
+        _losslessClawAdapter = getOrCreateLosslessClawAdapter(logger);
         // P1-2 fix: await connection and log result
         try {
           const adapterConnected = await _losslessClawAdapter.connect();
