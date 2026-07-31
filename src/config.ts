@@ -395,6 +395,8 @@ export const DEFAULT_CONFIG: PluginConfig = {
   experience: { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 },
   cliTimeout: 30_000,
   cliFallbackSearchType: 'hybrid',
+  qmdMcpTimeout: 3_000,
+  qmdMcpQueryTimeout: 8_000,
   distillationIntervalMs: 2 * 60 * 60 * 1000,
   tripletTimeoutMs: 60_000,
   experienceTtlIntervalMs: 24 * 60 * 60 * 1000,
