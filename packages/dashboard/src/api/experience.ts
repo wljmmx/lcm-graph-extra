@@ -56,6 +56,7 @@ export interface ExperienceListParams {
   from?: number;
   to?: number;
   tag?: string;
+  freeTag?: string;
   projectName?: string;
   limit?: number;
   offset?: number;
@@ -119,6 +120,7 @@ function buildListQs(params: ExperienceListParams): string {
   if (params.from !== undefined) sp.set('from', String(params.from));
   if (params.to !== undefined) sp.set('to', String(params.to));
   if (params.tag) sp.set('tag', params.tag);
+  if (params.freeTag) sp.set('freeTag', params.freeTag);
   if (params.projectName) sp.set('projectName', params.projectName);
   if (params.limit !== undefined) sp.set('limit', String(params.limit));
   if (params.offset !== undefined) sp.set('offset', String(params.offset));

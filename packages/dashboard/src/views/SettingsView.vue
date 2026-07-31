@@ -626,6 +626,7 @@ const effectiveModeLabel = computed(() => {
                 size="small"
                 style="width: 280px"
                 placeholder="选择聚合模型"
+                clearable
                 @update:value="onAggregatorPresetChange"
               />
             </div>
@@ -969,7 +970,7 @@ const effectiveModeLabel = computed(() => {
 .save-bar {
   position: sticky;
   bottom: 0;
-  background: var(--color-body);
+  background: var(--color-bg-base);
   border-top: 1px solid var(--color-border);
   padding: 12px 0;
   margin-top: 16px;

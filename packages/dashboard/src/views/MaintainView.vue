@@ -298,6 +298,20 @@ const lastBackupLog = computed<OperationLogRecord | null>(() => {
   return historyByTool.value['lcmg_backup']?.[0] ?? null;
 });
 
+/** TTL 清理专属历史（过滤 lcmg_maintain 中 source=ttl_cleanup 的条目） */
+const ttlCleanupHistory = computed<OperationLogRecord[]>(() => {
+  return (historyByTool.value['lcmg_maintain'] ?? []).filter(
+    (log) => log.params?.source === 'ttl_cleanup',
+  );
+});
+
+/** 图谱维护专属历史（排除 TTL 清理条目，与 TTL 卡片区分） */
+const maintainHistory = computed<OperationLogRecord[]>(() => {
+  return (historyByTool.value['lcmg_maintain'] ?? []).filter(
+    (log) => log.params?.source !== 'ttl_cleanup',
+  );
+});
+
 /** 从备份记录中提取文件路径：优先 params.outputPath */
 function backupFilePath(log: OperationLogRecord | null): string | null {
   if (!log) return null;
@@ -383,7 +397,7 @@ function executeTtlCleanup(): void {
   runMutation({
     cardKey: 'ttl_cleanup',
     tool: 'lcmg_maintain',
-    params: {},
+    params: { source: 'ttl_cleanup' },
     invokeFn: () => invokeMaintain(),
   });
 }
@@ -465,7 +479,7 @@ function executeImport(): void {
             @execute="executeMaintain"
           >
             <template #extra>
-              <OperationRecentHistory :logs="historyOf('lcmg_maintain')" />
+              <OperationRecentHistory :logs="maintainHistory" />
             </template>
           </OperationCard>
         </NGi>
@@ -664,7 +678,7 @@ function executeImport(): void {
             @execute="executeTtlCleanup"
           >
             <template #extra>
-              <OperationRecentHistory :logs="historyOf('lcmg_maintain')" />
+              <OperationRecentHistory :logs="ttlCleanupHistory" />
             </template>
           </OperationCard>
         </NGi>

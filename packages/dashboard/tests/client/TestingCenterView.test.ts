@@ -48,8 +48,6 @@ describe('TestingCenterView', () => {
         },
       },
     });
-    expect(wrapper.text()).toContain('测试中心');
-    // 默认渲染 benchmark tab 内容
     expect(wrapper.find('.stub-benchmark').exists()).toBe(true);
     expect(wrapper.find('.stub-qmd').exists()).toBe(false);
   });

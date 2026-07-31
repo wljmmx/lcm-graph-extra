@@ -157,21 +157,46 @@ function rowClassName(row: ExperienceItem): string {
 </script>
 
 <template>
-  <NDataTable
-    :columns="columns"
-    :data="props.items"
-    :loading="props.loading"
-    :row-props="rowProps"
-    :row-class-name="rowClassName"
-    :bordered="false"
-    :striped="true"
-    :pagination="pagination"
-    :scroll-x="scrollX"
-    size="small"
-  />
+  <div class="exp-table-wrapper">
+    <NDataTable
+      :columns="columns"
+      :data="props.items"
+      :loading="props.loading"
+      :row-props="rowProps"
+      :row-class-name="rowClassName"
+      :bordered="false"
+      :striped="true"
+      :pagination="pagination"
+      :scroll-x="scrollX"
+      size="small"
+    />
+  </div>
 </template>
 
 <style scoped>
+/* P2-10: 窄屏表格横向滚动指示器（右侧渐变阴影提示可滚动） */
+.exp-table-wrapper {
+  position: relative;
+  overflow: hidden;
+}
+.exp-table-wrapper::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 24px;
+  height: 100%;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--color-bg-base));
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+/* 窄屏下显示滚动指示器 */
+@media (max-width: 767px) {
+  .exp-table-wrapper::after {
+    opacity: 1;
+  }
+}
 /* superseded 行：用次要文本色 + 斜体区分，不再用 opacity（过弱） */
 :deep(.row-superseded) {
   color: var(--color-text-tertiary);

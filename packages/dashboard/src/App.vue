@@ -96,6 +96,15 @@ const breadcrumbMap: Record<string, string> = {
 };
 const breadcrumbLabel = computed(() => breadcrumbMap[route.path] ?? route.path);
 
+// P3-12: 页面标题动态更新
+watch(
+  () => breadcrumbLabel.value,
+  (label) => {
+    document.title = label ? `${label} - LCM Dashboard` : 'LCM Dashboard';
+  },
+  { immediate: true },
+);
+
 // 渲染带 router-link + icon 的菜单 label（P2-5 导航优化）
 function renderMenuLabel(to: string, label: string, icon: string): Component {
   return () =>

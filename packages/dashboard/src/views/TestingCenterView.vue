@@ -12,9 +12,9 @@
  *   - 切换 tab 时同步更新 URL query（不触发页面刷新，用 router.replace）
  *   - 旧路由 /benchmark 和 /qmd-test 在 router.ts 中重定向到本页并带上对应 ?tab
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NTabs, NTabPane, NBreadcrumb, NBreadcrumbItem } from 'naive-ui';
+import { NTabs, NTabPane } from 'naive-ui';
 import BenchmarkView from './BenchmarkView.vue';
 import QmdTestView from './QmdTestView.vue';
 
@@ -51,20 +51,10 @@ function onTabChange(name: string | number): void {
   void router.replace({ path: '/testing', query: { tab } });
 }
 
-const tabLabel = computed(() =>
-  activeTab.value === 'benchmark' ? 'CE 引擎压测' : 'QMD MCP 测试',
-);
 </script>
 
 <template>
   <div class="testing-center">
-    <div class="testing-center-header">
-      <NBreadcrumb>
-        <NBreadcrumbItem>测试中心</NBreadcrumbItem>
-        <NBreadcrumbItem>{{ tabLabel }}</NBreadcrumbItem>
-      </NBreadcrumb>
-    </div>
-
     <NTabs
       :value="activeTab"
       type="line"
@@ -88,10 +78,5 @@ const tabLabel = computed(() =>
 .testing-center {
   display: flex;
   flex-direction: column;
-}
-.testing-center-header {
-  display: flex;
-  align-items: baseline;
-  margin-bottom: 4px;
 }
 </style>

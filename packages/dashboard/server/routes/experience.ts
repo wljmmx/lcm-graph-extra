@@ -110,6 +110,7 @@ WHERE ($status = 'all' OR e.status = $status)
   AND ($from IS NULL OR coalesce(e.createdAt, 0) >= $from)
   AND ($to IS NULL OR coalesce(e.createdAt, 0) <= $to)
   AND ($tag IS NULL OR e.communityId = $tag)
+  AND ($freeTag IS NULL OR toLower(e.tags_free) CONTAINS toLower($freeTag))
   AND ($projectName IS NULL OR toLower(e.projectName) = toLower($projectName))
 RETURN e.id AS id, e.title AS title, e.summary AS summary, e.type AS type,
        e.status AS status, e.state AS state, e.relevanceScore AS relevanceScore,
@@ -130,6 +131,7 @@ WHERE ($status = 'all' OR e.status = $status)
   AND ($from IS NULL OR coalesce(e.createdAt, 0) >= $from)
   AND ($to IS NULL OR coalesce(e.createdAt, 0) <= $to)
   AND ($tag IS NULL OR e.communityId = $tag)
+  AND ($freeTag IS NULL OR toLower(e.tags_free) CONTAINS toLower($freeTag))
   AND ($projectName IS NULL OR toLower(e.projectName) = toLower($projectName))
 RETURN count(e) AS total
 `;

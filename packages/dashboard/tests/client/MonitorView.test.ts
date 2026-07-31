@@ -44,6 +44,22 @@ vi.mock('@tanstack/vue-query', async () => {
   return { useQuery, VueQueryPlugin: { install: () => {} } };
 });
 
+// mock useTheme composable（提供 isDark 等 reactive 状态）
+vi.mock('../../src/composables/useTheme', async () => {
+  const { ref } = await import('vue');
+  return {
+    useTheme: () => ({
+      mode: ref('light'),
+      isDark: ref(false),
+      theme: ref(null),
+      themeOverrides: ref({}),
+      setMode: vi.fn(),
+      toggle: vi.fn(),
+    }),
+    _resetThemeSingleton: vi.fn(),
+  };
+});
+
 import { useQuery } from '@tanstack/vue-query';
 import MonitorView from '../../src/views/MonitorView.vue';
 

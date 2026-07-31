@@ -16,7 +16,7 @@
  */
 import { computed, ref } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
-import { NLayout, NLayoutSider, NLayoutContent, NScrollbar, NCard, NSpace, NEmpty, NAlert } from 'naive-ui';
+import { NLayout, NLayoutSider, NLayoutContent, NScrollbar, NCard, NSpace, NEmpty, NAlert, NPagination } from 'naive-ui';
 import ExperienceFilter from '../components/ExperienceFilter.vue';
 import ExperienceTable from '../components/ExperienceTable.vue';
 import ExperienceDetailDrawer from '../components/ExperienceDetailDrawer.vue';
@@ -115,6 +115,21 @@ function handleRowClick(id: string): void {
   opResult.value = null;
 }
 
+// ===== P2-9: 服务端分页 =====
+const currentPage = computed(() => {
+  const limit = filterParams.value.limit ?? 20;
+  const offset = filterParams.value.offset ?? 0;
+  return Math.floor(offset / limit) + 1;
+});
+
+function handlePageChange(page: number): void {
+  const limit = filterParams.value.limit ?? 20;
+  filterParams.value = {
+    ...filterParams.value,
+    offset: (page - 1) * limit,
+  };
+}
+
 // ===== 抽屉内 invoke 事件转发给 mutation =====
 function handleInvoke(tool: string, params: Record<string, unknown>): void {
   invokeMutation.mutate({ tool, params });
@@ -155,8 +170,19 @@ function handleInvoke(tool: string, params: Record<string, unknown>): void {
             <ExperienceTable
               :items="items"
               :loading="listLoading"
+              :page-size="filterParams.limit ?? 20"
               @row-click="handleRowClick"
             />
+            <!-- P2-9: 服务端分页控件 -->
+            <div v-if="total > (filterParams.limit ?? 20)" class="experience-pagination">
+              <NPagination
+                :page="currentPage"
+                :page-size="filterParams.limit ?? 20"
+                :item-count="total"
+                :page-slot="5"
+                @update:page="handlePageChange"
+              />
+            </div>
           </NSpace>
         </NCard>
       </NLayoutContent>
@@ -195,5 +221,10 @@ function handleInvoke(tool: string, params: Record<string, unknown>): void {
 .muted {
   /* color 由 tokens.css 全局 .muted 提供，此处仅追加 caption 字号 */
   font-size: var(--fs-caption);
+}
+.experience-pagination {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
 }
 </style>

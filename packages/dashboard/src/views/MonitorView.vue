@@ -14,8 +14,9 @@
  *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
  *          agent.error → 警告提示。
  */
-import { computed, ref, h } from 'vue';
+import { computed, ref, h, watch } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
+import { useRouter, useRoute } from 'vue-router';
 import {
   NGrid,
   NGi,
@@ -51,17 +52,20 @@ import {
 } from '../api/health';
 import { formatTime, formatTimeWithSeconds, formatBucketLabel, bucketKeyBySize, timeRangeToMs, timeRangeLabel, bucketSizeLabel, type TimeRange, type BucketSize } from '../utils/format';
 import { fetchMoaPerformance, type MoaPerformanceData } from '../api/moa';
+import { useTheme } from '../composables/useTheme';
 
-// ===== 图表颜色语义常量 =====
+const { isDark } = useTheme();
+
+// ===== 图表颜色语义常量（跟随主题切换） =====
 // 统一语义：蓝=主数据，绿=成功/正向，橙=警告/阈值，红=危险/反向，紫=辅助
-const CHART = {
-  primary: '#2080f0',
-  success: '#18a058',
-  warning: '#f0a020',
-  danger:  '#d03050',
-  info:    '#7c3aed',
-  neutral: '#909399',
-} as const;
+const CHART = computed(() => ({
+  primary: isDark.value ? '#4098fc' : '#2080f0',
+  success: isDark.value ? '#36ad6a' : '#18a058',
+  warning: isDark.value ? '#fcb040' : '#f0a020',
+  danger:  isDark.value ? '#de5169' : '#d03050',
+  info:    isDark.value ? '#9270ed' : '#7c3aed',
+  neutral: isDark.value ? '#a8abb2' : '#909399',
+}));
 
 // ===== 时序图：时间范围 + 统计粒度（两个独立维度） =====
 // 时间范围：筛选最近 N 时间内的数据（1h/1d/1w/1m）
@@ -258,6 +262,20 @@ const kpiAssembleMs = computed<number | string>(() =>
 const kpiCbFailures = computed<number | string>(() => {
   if (!db.value) return '—';
   return db.value.cbLcmFailures + db.value.cbQmdFailures + db.value.cbNeo4jFailures;
+});
+
+// ===== P3-13: KPI 趋势对比（较上一次快照的变化量） =====
+const kpiTrend = computed(() => {
+  const prev = historyAsc.value.length >= 2 ? historyAsc.value[historyAsc.value.length - 2] : null;
+  const cur = db.value;
+  if (!prev || !cur) return { pending: 0, tokenRatio: 0, assembleMs: 0, cbFailures: 0 };
+  return {
+    pending: cur.pendingMessages - prev.pendingMessages,
+    tokenRatio: Math.round((cur.maxTokenRatio - prev.maxTokenRatio) * 1000) / 10,
+    assembleMs: cur.lastAssembleMs - prev.lastAssembleMs,
+    cbFailures: (cur.cbLcmFailures + cur.cbQmdFailures + cur.cbNeo4jFailures) -
+      (prev.cbLcmFailures + prev.cbQmdFailures + prev.cbNeo4jFailures),
+  };
 });
 
 // ===== 最近更新时间（HH:mm:ss） =====
@@ -472,8 +490,8 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 0,
       data: historyAsc.value.map((s) => s.pendingMessages),
-      lineStyle: { color: CHART.primary },
-      itemStyle: { color: CHART.primary },
+      lineStyle: { color: CHART.value.primary },
+      itemStyle: { color: CHART.value.primary },
     },
     {
       name: '摘要片段',
@@ -481,8 +499,8 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 0,
       data: historyAsc.value.map((s) => s.summaryFragments),
-      lineStyle: { color: CHART.info },
-      itemStyle: { color: CHART.info },
+      lineStyle: { color: CHART.value.info },
+      itemStyle: { color: CHART.value.info },
     },
     {
       name: 'Token 占用比',
@@ -490,8 +508,8 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 1,
       data: historyAsc.value.map((s) => s.maxTokenRatio),
-      lineStyle: { color: CHART.danger },
-      itemStyle: { color: CHART.danger },
+      lineStyle: { color: CHART.value.danger },
+      itemStyle: { color: CHART.value.danger },
     },
   ],
 }));
@@ -512,8 +530,8 @@ const latencyOption = computed(() => ({
       type: 'line',
       smooth: true,
       data: historyAsc.value.map((s) => s.lastAssembleMs),
-      lineStyle: { width: 2, color: CHART.primary },
-      itemStyle: { color: CHART.primary },
+      lineStyle: { width: 2, color: CHART.value.primary },
+      itemStyle: { color: CHART.value.primary },
       symbol: 'circle',
       symbolSize: 6,
       z: 10,
@@ -522,19 +540,19 @@ const latencyOption = computed(() => ({
       name: 'L2',
       type: 'bar',
       data: historyAsc.value.map((s) => s.lastL2Ms),
-      itemStyle: { color: CHART.info },
+      itemStyle: { color: CHART.value.info },
     },
     {
       name: 'L3',
       type: 'bar',
       data: historyAsc.value.map((s) => s.lastL3Ms),
-      itemStyle: { color: CHART.warning },
+      itemStyle: { color: CHART.value.warning },
     },
     {
       name: 'L4',
       type: 'bar',
       data: historyAsc.value.map((s) => s.lastL4Ms),
-      itemStyle: { color: CHART.success },
+      itemStyle: { color: CHART.value.success },
     },
   ],
 }));
@@ -551,27 +569,27 @@ const tierOption = computed(() => ({
       name: 'Low',
       type: 'line',
       stack: 'tier',
-      areaStyle: { color: CHART.success },
-      lineStyle: { color: CHART.success },
-      itemStyle: { color: CHART.success },
+      areaStyle: { color: CHART.value.success },
+      lineStyle: { color: CHART.value.success },
+      itemStyle: { color: CHART.value.success },
       data: historyAsc.value.map((s) => s.tierLow),
     },
     {
       name: 'Medium',
       type: 'line',
       stack: 'tier',
-      areaStyle: { color: CHART.warning },
-      lineStyle: { color: CHART.warning },
-      itemStyle: { color: CHART.warning },
+      areaStyle: { color: CHART.value.warning },
+      lineStyle: { color: CHART.value.warning },
+      itemStyle: { color: CHART.value.warning },
       data: historyAsc.value.map((s) => s.tierMedium),
     },
     {
       name: 'High',
       type: 'line',
       stack: 'tier',
-      areaStyle: { color: CHART.danger },
-      lineStyle: { color: CHART.danger },
-      itemStyle: { color: CHART.danger },
+      areaStyle: { color: CHART.value.danger },
+      lineStyle: { color: CHART.value.danger },
+      itemStyle: { color: CHART.value.danger },
       data: historyAsc.value.map((s) => s.tierHigh),
     },
   ],
@@ -648,8 +666,8 @@ const betaOption = computed(() => {
     },
     yAxis: { type: 'value' },
     series: [
-      { name: 'alpha', type: 'bar', data: arms.map((a) => a.alpha), itemStyle: { color: CHART.primary } },
-      { name: 'beta', type: 'bar', data: arms.map((a) => a.beta), itemStyle: { color: CHART.info } },
+      { name: 'alpha', type: 'bar', data: arms.map((a) => a.alpha), itemStyle: { color: CHART.value.primary } },
+      { name: 'beta', type: 'bar', data: arms.map((a) => a.beta), itemStyle: { color: CHART.value.info } },
     ],
   };
 });
@@ -696,7 +714,30 @@ const failedPanelSummary = computed(() => {
 
 // S4-2: Tab 分组（KPI / 时序 / 状态面板），降低单屏信息密度
 // 默认激活 KPI tab；display-directive="show" 保持所有面板在 DOM（测试可访问文本）
-const activeTab = ref<'kpi' | 'charts' | 'panels' | 'moa'>('kpi');
+const activeTab = ref<'overview' | 'panels' | 'moa'>('overview');
+
+// P3-14: NTabs 切换路由同步（读取 URL query ?tab=）
+let router: ReturnType<typeof useRouter> | null = null;
+let route: ReturnType<typeof useRoute> | null = null;
+try {
+  router = useRouter();
+  route = useRoute();
+} catch {
+  // 非路由上下文（如测试环境）静默跳过
+}
+
+if (route) {
+  const tabFromQuery = (route.query.tab as string) ?? '';
+  if (tabFromQuery === 'overview' || tabFromQuery === 'panels' || tabFromQuery === 'moa') {
+    activeTab.value = tabFromQuery;
+  }
+}
+
+watch(activeTab, (tab) => {
+  if (router && route) {
+    router.replace({ query: { ...route.query, tab } }).catch(() => {});
+  }
+});
 
 // ===== MoA 辅助函数 =====
 function formatMs(ms: number): string {
@@ -762,14 +803,14 @@ const moaComplexityTrendOption = computed(() => {
       type: 'line',
       data: sorted.map((r, i) => [i, r.score]),
       smooth: true,
-      lineStyle: { color: CHART.primary, width: 2 },
-      itemStyle: { color: CHART.primary },
+      lineStyle: { color: CHART.value.primary, width: 2 },
+      itemStyle: { color: CHART.value.primary },
       symbol: 'circle',
       symbolSize: 6,
       markLine: {
         silent: true,
         symbol: 'none',
-        lineStyle: { color: CHART.warning, type: 'dashed' },
+        lineStyle: { color: CHART.value.warning, type: 'dashed' },
         data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' } }],
       },
     };
@@ -784,7 +825,7 @@ const moaComplexityTrendOption = computed(() => {
       type: 'scatter',
       data: moaPoints,
       symbolSize: 10,
-      itemStyle: { color: CHART.danger },
+      itemStyle: { color: CHART.value.danger },
       symbol: 'diamond',
       z: 10,
     } : undefined;
@@ -837,15 +878,15 @@ const moaComplexityTrendOption = computed(() => {
       type: 'line',
       data: filtered.map((b) => [b.hour, b.avg]),
       smooth: true,
-      lineStyle: { color: CHART.primary, width: 2 },
-      itemStyle: { color: CHART.primary },
+      lineStyle: { color: CHART.value.primary, width: 2 },
+      itemStyle: { color: CHART.value.primary },
       symbol: 'circle',
       symbolSize: 6,
       areaStyle: { color: 'rgba(32,128,240,0.08)' },
       markLine: {
         silent: true,
         symbol: 'none',
-        lineStyle: { color: CHART.warning, type: 'dashed' },
+        lineStyle: { color: CHART.value.warning, type: 'dashed' },
         data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' } }],
       },
     };
@@ -873,8 +914,8 @@ const moaComplexityTrendOption = computed(() => {
       type: 'line',
       data: moaData,
       smooth: true,
-      lineStyle: { color: CHART.danger, width: 2 },
-      itemStyle: { color: CHART.danger },
+      lineStyle: { color: CHART.value.danger, width: 2 },
+      itemStyle: { color: CHART.value.danger },
       symbol: 'diamond',
       symbolSize: 8,
       connectNulls: false,
@@ -914,15 +955,15 @@ const moaComplexityTrendOption = computed(() => {
     type: 'line',
     data: filtered.map((b) => [b.date, b.avg]),
     smooth: true,
-    lineStyle: { color: CHART.primary, width: 2 },
-    itemStyle: { color: CHART.primary },
+    lineStyle: { color: CHART.value.primary, width: 2 },
+    itemStyle: { color: CHART.value.primary },
     symbol: 'circle',
     symbolSize: 8,
     areaStyle: { color: 'rgba(32,128,240,0.08)' },
     markLine: {
       silent: true,
       symbol: 'none',
-      lineStyle: { color: CHART.warning, type: 'dashed' },
+      lineStyle: { color: CHART.value.warning, type: 'dashed' },
       data: [{ yAxis: 0.6, label: { formatter: '阈值 0.6' } }],
     },
   };
@@ -950,8 +991,8 @@ const moaComplexityTrendOption = computed(() => {
     type: 'line',
     data: moaData,
     smooth: true,
-    lineStyle: { color: CHART.danger, width: 2 },
-    itemStyle: { color: CHART.danger },
+    lineStyle: { color: CHART.value.danger, width: 2 },
+    itemStyle: { color: CHART.value.danger },
     symbol: 'diamond',
     symbolSize: 8,
     connectNulls: false,
@@ -1006,14 +1047,14 @@ const moaComplexityDistOption = computed(() => {
         name: '全量',
         type: 'bar',
         data: [allDist.low, allDist.medium, allDist.high],
-        itemStyle: { color: CHART.primary },
+        itemStyle: { color: CHART.value.primary },
         label: { show: true, position: 'top', formatter: '{c}' },
       },
       {
         name: 'MoA 触发',
         type: 'bar',
         data: moaDist ? [moaDist.low, moaDist.medium, moaDist.high] : [0, 0, 0],
-        itemStyle: { color: CHART.danger },
+        itemStyle: { color: CHART.value.danger },
         label: { show: true, position: 'top', formatter: '{c}' },
       },
     ],
@@ -1044,8 +1085,8 @@ const moaLatencyPhaseOption = computed(() => {
     xAxis: { type: 'category', data: data.map((r) => r.queryPreview.slice(0, 16) + (r.queryPreview.length > 16 ? '...' : '')), axisLabel: { fontSize: 10, rotate: 30 } },
     yAxis: { type: 'value', name: '耗时 (ms)' },
     series: [
-      { name: '参考模型', type: 'bar', stack: 'total', data: data.map((r) => r.refMs), itemStyle: { color: CHART.primary } },
-      { name: '聚合模型', type: 'bar', stack: 'total', data: data.map((r) => r.aggMs), itemStyle: { color: CHART.success } },
+      { name: '参考模型', type: 'bar', stack: 'total', data: data.map((r) => r.refMs), itemStyle: { color: CHART.value.primary } },
+      { name: '聚合模型', type: 'bar', stack: 'total', data: data.map((r) => r.aggMs), itemStyle: { color: CHART.value.success } },
     ],
     grid: { left: 60, right: 30, bottom: 60, top: 45 },
   };
@@ -1080,6 +1121,7 @@ const moaLatencyPhaseOption = computed(() => {
               label="待处理消息"
               :value="kpiPending"
               :threshold="100"
+              :trend="kpiTrend.pending"
               :loading="latestLoading"
             />
           </NGi>
@@ -1089,6 +1131,7 @@ const moaLatencyPhaseOption = computed(() => {
               :value="kpiTokenRatio"
               unit="%"
               :threshold="80"
+              :trend="kpiTrend.tokenRatio"
               :loading="latestLoading"
             />
           </NGi>
@@ -1098,6 +1141,7 @@ const moaLatencyPhaseOption = computed(() => {
               :value="kpiAssembleMs"
               unit="ms"
               :threshold="2000"
+              :trend="kpiTrend.assembleMs"
               :loading="latestLoading"
             />
           </NGi>
@@ -1106,6 +1150,7 @@ const moaLatencyPhaseOption = computed(() => {
               label="熔断失败总数"
               :value="kpiCbFailures"
               :threshold="0"
+              :trend="kpiTrend.cbFailures"
               :loading="latestLoading"
             />
           </NGi>
@@ -1202,9 +1247,13 @@ const moaLatencyPhaseOption = computed(() => {
             </div>
             <NEmpty
               v-else
-              :description="historyIsError ? '加载失败，见上方错误提示' : '无历史数据'"
+              :description="historyIsError ? '加载失败，见上方错误提示' : '暂无压力信号数据'"
               style="padding: 24px 0"
-            />
+            >
+              <template v-if="!historyIsError" #extra>
+                <span class="muted" style="font-size: var(--fs-caption)">启动后端 heartbeat 服务后，数据将自动出现。</span>
+              </template>
+            </NEmpty>
           </NCard>
           <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
             <NGi>
@@ -1215,7 +1264,7 @@ const moaLatencyPhaseOption = computed(() => {
                 </div>
                 <NEmpty
                   v-else
-                  :description="historyIsError ? '加载失败，见上方错误提示' : '无历史数据'"
+                  :description="historyIsError ? '加载失败，见上方错误提示' : '暂无检索延迟数据'"
                   style="padding: 24px 0"
                 />
               </NCard>
@@ -1228,7 +1277,7 @@ const moaLatencyPhaseOption = computed(() => {
                 </div>
                 <NEmpty
                   v-else
-                  :description="historyIsError ? '加载失败，见上方错误提示' : '无历史数据'"
+                  :description="historyIsError ? '加载失败，见上方错误提示' : '暂无 tier 分布数据'"
                   style="padding: 24px 0"
                 />
               </NCard>

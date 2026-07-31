@@ -38,6 +38,7 @@ const form = reactive<ExperienceListParams>({
   from: props.modelValue.from,
   to: props.modelValue.to,
   tag: props.modelValue.tag,
+  freeTag: props.modelValue.freeTag,
   projectName: props.modelValue.projectName,
   limit: props.modelValue.limit,
   offset: props.modelValue.offset,
@@ -52,6 +53,7 @@ watch(
     form.from = v.from;
     form.to = v.to;
     form.tag = v.tag;
+    form.freeTag = v.freeTag;
     form.projectName = v.projectName;
     form.limit = v.limit;
     form.offset = v.offset;
@@ -73,6 +75,7 @@ const activeFilterCount = computed(() => {
   if (form.type) count++;
   if (dateRange.value) count++;
   if (form.tag) count++;
+  if (form.freeTag) count++;
   if (form.projectName) count++;
   return count;
 });
@@ -100,6 +103,7 @@ function applyFilter(): void {
     from: dateRange.value ? dateRange.value[0] : undefined,
     to: dateRange.value ? dateRange.value[1] : undefined,
     tag: form.tag || undefined,
+    freeTag: form.freeTag || undefined,
     projectName: form.projectName || undefined,
     limit: form.limit ?? 20,
     offset: 0, // 应用过滤时回到第一页
@@ -111,6 +115,7 @@ function resetFilter(): void {
   form.status = 'all';
   form.type = undefined;
   form.tag = undefined;
+  form.freeTag = undefined;
   form.projectName = undefined;
   form.limit = 20;
   form.offset = 0;
@@ -152,6 +157,14 @@ function resetFilter(): void {
       <NInput
         v-model:value="form.tag"
         placeholder="标签 ID"
+        clearable
+      />
+    </NFormItem>
+
+    <NFormItem label="自由标签 (freeTag)">
+      <NInput
+        v-model:value="form.freeTag"
+        placeholder="自由标签关键词"
         clearable
       />
     </NFormItem>
