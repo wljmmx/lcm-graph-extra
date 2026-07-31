@@ -1,4 +1,4 @@
-import { Type, Static, type TSchemaOptions } from 'typebox';
+import { Type, Static, type TSchemaOptions, type TLiteral, type TUnion } from 'typebox';
 import { Value } from 'typebox/value';
 import { resolve } from 'path';
 import { getGlobalLogger } from './utils/logger.js';
@@ -27,14 +27,14 @@ export type LlmProvider = typeof LLM_PROVIDERS[number];
  * 构建 LLM provider 的 Type.Union schema。
  *
  * 从 LLM_PROVIDERS 常量派生，单一数据源——新增 provider 只需修改 LLM_PROVIDERS。
- * Type.Union 的 Static 类型推断需要元组而非普通数组，此处用 as 断言绕过；
- * 运行时枚举值一致性由 schema-consistency.test.ts 覆盖。
+ * 返回类型声明为 TUnion<TLiteral[]>, 确保 Static 推断出正确的字符串字面量联合类型
+ * 而非 never（运行时枚举值一致性由 schema-consistency.test.ts 覆盖）。
  */
-function LlmProviderUnion(options?: TSchemaOptions) {
+function LlmProviderUnion(options?: TSchemaOptions): TUnion<[TLiteral<string>, ...TLiteral<string>[]]> {
   return Type.Union(
     LLM_PROVIDERS.map((p) => Type.Literal(p)) as any,
     options,
-  );
+  ) as any;
 }
 
 export const BackupConfigSchema = Type.Object({

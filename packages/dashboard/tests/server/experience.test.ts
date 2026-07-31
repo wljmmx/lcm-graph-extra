@@ -11,6 +11,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 // mock neo4j lib（避免真实 driver）
 vi.mock('../../server/lib/neo4j', () => ({
   runReadQuery: vi.fn(),
+  runWriteQuery: vi.fn(),
   toNumber: (v: unknown): number | null => {
     if (v === null || v === undefined) return null;
     if (typeof v === 'number') return v;
@@ -36,11 +37,12 @@ vi.mock('../../server/lib/mcp', () => ({
   invokeMcpTool: vi.fn(),
 }));
 
-import { runReadQuery } from '../../server/lib/neo4j';
+import { runReadQuery, runWriteQuery } from '../../server/lib/neo4j';
 import { invokeMcpTool } from '../../server/lib/mcp';
 import { registerExperienceRoutes } from '../../server/routes/experience';
 
 const mockRunReadQuery = vi.mocked(runReadQuery);
+const mockRunWriteQuery = vi.mocked(runWriteQuery);
 const mockInvokeMcpTool = vi.mocked(invokeMcpTool);
 
 /** 模拟 neo4j-driver record：toObject 返回传入行 */
@@ -330,5 +332,156 @@ describe('POST /api/mcp/invoke', () => {
     const body = res.json();
     expect(body.ok).toBe(false);
     expect(body.error).toBe('host 不可达');
+  });
+});
+
+// ===== P3-4: 标签管理 API 测试 =====
+
+describe('GET /api/experience/tags', () => {
+  it('返回标签统计列表（按出现次数降序）', async () => {
+    mockRunReadQuery.mockResolvedValueOnce(
+      makeResult([
+        { tags_free: 'react,vue' },
+        { tags_free: 'react,typescript' },
+        { tags_free: 'vue' },
+      ]),
+    );
+
+    const res = await app.inject({ method: 'GET', url: '/api/experience/tags' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.items).toHaveLength(3);
+    // react 出现 2 次，应排第一
+    expect(body.items[0]).toEqual({ tag: 'react', count: 2 });
+    expect(body.items[1]).toEqual({ tag: 'vue', count: 2 });
+    expect(body.items[2]).toEqual({ tag: 'typescript', count: 1 });
+    expect(body.total).toBe(3);
+  });
+
+  it('空结果返回空数组', async () => {
+    mockRunReadQuery.mockResolvedValueOnce(makeResult([]));
+
+    const res = await app.inject({ method: 'GET', url: '/api/experience/tags' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.items).toEqual([]);
+    expect(body.total).toBe(0);
+  });
+
+  it('标签自动 trim + lowercase 归一化统计', async () => {
+    mockRunReadQuery.mockResolvedValueOnce(
+      makeResult([
+        { tags_free: ' React , Vue ' },
+        { tags_free: 'react' },
+      ]),
+    );
+
+    const res = await app.inject({ method: 'GET', url: '/api/experience/tags' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    // React/React/Vue 归一化后 react=2, vue=1
+    expect(body.total).toBe(2);
+    const reactItem = body.items.find((i: { tag: string }) => i.tag === 'react');
+    expect(reactItem.count).toBe(2);
+    const vueItem = body.items.find((i: { tag: string }) => i.tag === 'vue');
+    expect(vueItem.count).toBe(1);
+  });
+
+  it('查询异常时降级返回 ok:false', async () => {
+    mockRunReadQuery.mockRejectedValueOnce(new Error('Neo4j 不可达'));
+
+    const res = await app.inject({ method: 'GET', url: '/api/experience/tags' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe('Neo4j 不可达');
+    expect(body.items).toEqual([]);
+    expect(body.total).toBe(0);
+  });
+});
+
+describe('POST /api/experience/tags/merge', () => {
+  it('成功合并标签', async () => {
+    mockRunWriteQuery.mockResolvedValueOnce(
+      makeResult([{ affected: { low: 5, high: 0 } }]),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/experience/tags/merge',
+      payload: { from: 'reactjs', to: 'react' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.affected).toBe(5);
+    expect(body.message).toContain('reactjs');
+    expect(body.message).toContain('react');
+  });
+
+  it('缺少 from 参数返回 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/experience/tags/merge',
+      payload: { to: 'react' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('不能为空');
+  });
+
+  it('缺少 to 参数返回 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/experience/tags/merge',
+      payload: { from: 'reactjs' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('不能为空');
+  });
+
+  it('from 和 to 相同返回 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/experience/tags/merge',
+      payload: { from: 'react', to: 'react' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('不能相同');
+  });
+
+  it('from 和 to 大小写不同但归一化后相同返回 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/experience/tags/merge',
+      payload: { from: 'React', to: 'react' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('不能相同');
+  });
+
+  it('写操作异常时返回 500', async () => {
+    mockRunWriteQuery.mockRejectedValueOnce(new Error('Neo4j 写错误'));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/experience/tags/merge',
+      payload: { from: 'reactjs', to: 'react' },
+    });
+    expect(res.statusCode).toBe(500);
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe('Neo4j 写错误');
+    expect(body.affected).toBe(0);
   });
 });

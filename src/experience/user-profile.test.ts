@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { UserProfileTracker } from './user-profile.js';
+import { normalizeFreeTags } from './storage.js';
 
 describe('UserProfileTracker', () => {
   let tracker: UserProfileTracker;
@@ -291,5 +292,56 @@ describe('UserProfileTracker', () => {
       expect(tracker.getTopScenario()).toHaveLength(0);
       expect(tracker.getLanguage()).toBe('mixed');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P3-4: normalizeFreeTags 标签归一化
+// ---------------------------------------------------------------------------
+
+describe('normalizeFreeTags', () => {
+  it('空数组返回空数组', () => {
+    expect(normalizeFreeTags([])).toEqual([]);
+  });
+
+  it('lowercase 转换', () => {
+    expect(normalizeFreeTags(['React', 'VUE', 'TypeScript'])).toEqual([
+      'react',
+      'vue',
+      'typescript',
+    ]);
+  });
+
+  it('trim 去除两端空格', () => {
+    expect(normalizeFreeTags(['  react  ', ' vue ', 'angular'])).toEqual([
+      'react',
+      'vue',
+      'angular',
+    ]);
+  });
+
+  it('去重：相同 normalize 后的标签只保留第一个', () => {
+    expect(normalizeFreeTags(['React', 'react', '  react  ', 'Vue'])).toEqual([
+      'react',
+      'vue',
+    ]);
+  });
+
+  it('过滤空字符串', () => {
+    expect(normalizeFreeTags(['react', '', '  ', 'vue'])).toEqual(['react', 'vue']);
+  });
+
+  it('混合场景：trim + lowercase + 去重 + 过滤空', () => {
+    expect(
+      normalizeFreeTags(['  React.js ', 'react.js', '', ' Vue ', 'vue', '  Angular  ']),
+    ).toEqual(['react.js', 'vue', 'angular']);
+  });
+
+  it('单个标签原样归一化', () => {
+    expect(normalizeFreeTags(['  Hello-World  '])).toEqual(['hello-world']);
+  });
+
+  it('全部空字符串返回空数组', () => {
+    expect(normalizeFreeTags(['', '  ', '\t'])).toEqual([]);
   });
 });
