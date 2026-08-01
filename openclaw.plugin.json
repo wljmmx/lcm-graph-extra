@@ -19,7 +19,8 @@
       "lcmg_qmd_status",
       "lcmg_get_document",
       "lcmg_batch_get",
-      "lcmg_forget"
+      "lcmg_forget",
+      "lcmg_diagnose"
     ]
   },
   "toolMetadata": {
@@ -46,6 +47,9 @@
     },
     "lcmg_forget": {
       "description": "Actively forget a node/experience (G-10 soft/hard mode)"
+    },
+    "lcmg_diagnose": {
+      "description": "System diagnostics: Neo4j, lossless-claw DB, QMD MCP health, circuit breaker states"
     }
   },
   "configSchema": {
