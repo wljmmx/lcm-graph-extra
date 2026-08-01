@@ -22,7 +22,7 @@
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readdir, readFile, stat, realpath } from 'node:fs/promises';
+import { readdir, readFile, realpath } from 'node:fs/promises';
 import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
@@ -853,7 +853,9 @@ export class LosslessClawAdapter {
     // P0-4 SEC-2: 加路径白名单校验。任何能写入 ~/.openclaw/npm/projects/*/node_modules
     // 的进程可注入任意代码并经 pluginEntry.register(mockApi) 执行。此处严格校验：
     //   1) entry.name 必须是安全的目录名（无路径分隔符、无 ..）
-    //   2) realpath(candidatePath) 必须仍在 projectsDir 之下（防符号链接逃逸）
+    //   2) candidatePath 必须仍在 projectsDir 之下（防路径穿越，使用原始路径而非 realpath，
+    //      因为 npm scoped packages 的 node_modules 常为符号链接，realpath 会解析到
+    //      全局缓存目录，导致误判）
     //   3) 候选路径必须严格匹配预期形状（@martian-engineering/lossless-claw/dist/index.js）
     try {
       const projectsDir = join(homedir(), '.openclaw', 'npm', 'projects');
@@ -872,17 +874,24 @@ export class LosslessClawAdapter {
           'index.js',
         );
         try {
-          // realpath 校验，防止符号链接逃逸到 projectsDir 之外
-          const [realCandidate, realProjectsDir] = await Promise.all([
-            realpath(candidatePath),
-            realpath(projectsDir),
-          ]);
-          if (!realCandidate.startsWith(realProjectsDir + sep) && realCandidate !== realProjectsDir) {
+          // 安全校验：原始路径必须在 projectsDir 内（不使用 realpath，
+          // 因为 node_modules 中的 scoped packages 可能是符号链接）
+          const sep = candidatePath.includes('/') ? '/' : '\\';
+          if (!candidatePath.startsWith(projectsDir + sep) && candidatePath !== projectsDir) {
             this.logger.debug(`[lcm] _discoverCEFactory: reject path escaping projectsDir: ${candidatePath}`);
             continue;
           }
-          await stat(candidatePath);
-          const lcModule = await import(pathToFileURL(candidatePath).href);
+
+          // 使用 realpath 验证文件存在并解析符号链接，获取实际路径用于 import
+          let realCandidatePath: string;
+          try {
+            realCandidatePath = await realpath(candidatePath);
+          } catch {
+            // 文件不存在，跳过
+            continue;
+          }
+
+          const lcModule = await import(pathToFileURL(realCandidatePath).href);
           // dist/index.js default export is the plugin entry with register()
           const pluginEntry = lcModule.default;
           if (pluginEntry && typeof pluginEntry.register === 'function') {
@@ -893,20 +902,24 @@ export class LosslessClawAdapter {
               registerTool: () => {},
               registerCommand: () => {},
               on: () => {},
+              logger: this.logger,
             };
+            // register() 返回 void 但内部会同步设置 shared-init state
             pluginEntry.register(mockApi);
 
             // Re-check shared state after plugin init
             const retryShared: Map<string, any> | undefined =
               (globalThis as any)[SHARED_INIT_STATE];
-            if (retryShared instanceof Map) {
+            if (retryShared instanceof Map && retryShared.size > 0) {
               for (const init of retryShared.values()) {
                 const engine = init.getCachedEngine?.();
                 if (engine) {
+                  this.logger.info("[lcm] path 3/4: found cached engine via shared state");
                   return async () => new MemorySupplementCtxEngine(engine);
                 }
                 const waitFn = init.waitForEngine;
                 if (typeof waitFn === 'function') {
+                  this.logger.info("[lcm] path 3/4: found waitForEngine via shared state");
                   return async () => {
                     const e = await waitFn();
                     return new MemorySupplementCtxEngine(e);
@@ -914,6 +927,7 @@ export class LosslessClawAdapter {
                 }
               }
             }
+            this.logger.debug("[lcm] path 3/4: pluginEntry.register() called but shared state is empty or missing engine");
           }
         } catch (e) {
           // candidate not found or import failed
