@@ -127,6 +127,7 @@ export const PluginConfigSchema = Type.Object({
 
   cliTimeout: Type.Number({ default: 30_000 }),
   cliFallbackSearchType: Type.Union([Type.Literal('search'), Type.Literal('hybrid')], { default: 'hybrid' }),
+  enableCliFallback: Type.Boolean({ default: true, description: "是否启用QMD CLI降级能力。设为false时，MCP和REST均失败后直接抛错，不执行CLI命令（避免CLI卡死）" }),
 
   // QMD MCP 超时配置（index.ts 中读取并传入 QmdClient 构造函数）
   qmdMcpTimeout: Type.Number({ default: 3_000, minimum: 500 }),
@@ -395,6 +396,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   experience: { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 },
   cliTimeout: 30_000,
   cliFallbackSearchType: 'hybrid',
+  enableCliFallback: true,
   qmdMcpTimeout: 3_000,
   qmdMcpQueryTimeout: 8_000,
   distillationIntervalMs: 2 * 60 * 60 * 1000,

@@ -132,6 +132,11 @@
         "default": "hybrid",
         "description": "CLI fallback search type. 'search' = lightweight lex-only (loses vector results); 'hybrid' = full typed query (preserves lex+vec)."
       },
+      "enableCliFallback": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable QMD CLI fallback capability. Set to false to disable CLI commands entirely (prevents CLI hang). When false, if MCP and REST both fail, query will throw error instead of running CLI."
+      },
       "qmdMcpTimeout": {
         "type": "integer",
         "default": 3000,

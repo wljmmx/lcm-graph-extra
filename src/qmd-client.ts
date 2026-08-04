@@ -83,6 +83,8 @@ export interface QmdClientOptions {
   cliTimeout?: number;
   pingInterval?: number;
   cliFallbackSearchType?: 'search' | 'hybrid';
+  /** 是否启用CLI降级能力。设为false时，MCP和REST均失败后直接抛错，不执行CLI命令（避免CLI卡死）。默认true。 */
+  enableCliFallback?: boolean;
   /** P3-B3: 注入统一 logger；未提供时降级到 globalLogger。 */
   logger?: Logger;
 }
@@ -118,6 +120,8 @@ export const QMD_CLIENT_DEFAULTS = {
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。
   cliFallbackSearchType: 'hybrid' as 'hybrid' | 'search',
   pingInterval: 30_000,
+  /** 默认启用CLI降级，保持向后兼容。用户可设为false禁用CLI避免卡死。 */
+  enableCliFallback: true,
 };
 
 /** @deprecated 使用 QMD_CLIENT_DEFAULTS，保留向后兼容 */
@@ -137,6 +141,7 @@ export class QmdClient {
   private readonly cliTimeout: number;
   private readonly cliFallbackSearchType: string;
   private readonly pingInterval: number;
+  private readonly enableCliFallback: boolean;
   /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
   private readonly logger: Logger;
 
@@ -155,6 +160,7 @@ export class QmdClient {
     this.cliTimeout = opts.cliTimeout ?? DEFAULTS.cliTimeout;
     this.cliFallbackSearchType = opts.cliFallbackSearchType ?? DEFAULTS.cliFallbackSearchType;
     this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
+    this.enableCliFallback = opts.enableCliFallback ?? DEFAULTS.enableCliFallback;
     this.logger = resolveLogger(opts.logger);
   }
 
@@ -284,7 +290,12 @@ export class QmdClient {
       }
     }
 
-    // 3. CLI 兜底
+    // 3. CLI 兜底（仅 enableCliFallback 为 true 时启用）
+    if (!this.enableCliFallback) {
+      this.logger.warn("[qmd-client] CLI fallback disabled (enableCliFallback=false), all query paths failed");
+      finalizeBreakdown(Date.now() - qStart);
+      throw new Error("QMD query failed: MCP and REST both unavailable, CLI fallback is disabled");
+    }
     const cliStart = Date.now();
     try {
       const results = await this.queryViaCli(params);
@@ -320,6 +331,8 @@ export class QmdClient {
       }
     }
 
+    if (!this.enableCliFallback) return null;
+
     try {
       const { stdout } = await execFileAsync("qmd", ["get", file], {
         timeout: this.cliTimeout,
@@ -349,6 +362,8 @@ export class QmdClient {
         this.scheduleRecovery();
       }
     }
+
+    if (!this.enableCliFallback) return [];
 
     try {
       const { stdout } = await execFileAsync(
@@ -401,6 +416,8 @@ export class QmdClient {
     }
 
     // v1.1-10: CLI fallback — `qmd status` outputs index info as text
+    if (!this.enableCliFallback) return null;
+
     try {
       const { stdout } = await execFileAsync("qmd", ["status"], {
         timeout: this.cliTimeout,
