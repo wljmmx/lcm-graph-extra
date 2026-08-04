@@ -6,10 +6,23 @@
  * 引用归零时自动关闭 driver。
  *
  * 彻底消除每创建一次 GraphAdapter 就要新建 driver 的连接泄漏风险。
+ *
+ * v2.3.1 稳定性加固：
+ * - 主动连接刷新：在 Neo4j driver 内置 maxConnectionLifetime（30min）到期前
+ *   5 分钟主动关闭并重建连接，避免"session closed"断联错误。
+ * - 将 driver 的 maxConnectionLifetime 提升至 35min，确保主动刷新在 driver
+ *   内部关闭连接之前完成。
  */
 
 import type { Neo4jConfig } from '../types';
 import { DEFAULTS } from '../config/defaults.js';
+
+/** 主动刷新阈值：在 Neo4j driver 内置超时前 5 分钟触发重建 */
+const PROACTIVE_REFRESH_BEFORE_MS = 5 * 60 * 1000;
+/** Neo4j driver 内置 maxConnectionLifetime（略高于主动刷新窗口，确保 driver 不会在我们之前关闭连接） */
+const DRIVER_MAX_CONNECTION_LIFETIME_MS = 35 * 60 * 1000;
+/** 主动刷新阈值：连接存活超过此时间则重建 */
+const PROACTIVE_REFRESH_AGE_MS = DRIVER_MAX_CONNECTION_LIFETIME_MS - PROACTIVE_REFRESH_BEFORE_MS;
 
 /** Driver 引用包 */
 interface PoolEntry {
@@ -46,11 +59,21 @@ export async function acquireDriver(config: Neo4jConfig): Promise<any> {
   const existing = pool.get(key);
 
   if (existing && existing.driver) {
+    // v2.3.1: 主动连接刷新 —— 在 Neo4j driver 内置 maxConnectionLifetime 到期前
+    // 5 分钟主动关闭旧连接并重建，避免"session closed"断联错误。
+    // 修复前：连接池复用不检查连接年龄，driver 在 30min 后内部关闭连接，
+    // 导致 `this.driver.session()` 返回已关闭的 session，触发"session closed"错误。
+    const ageMs = Date.now() - existing.createdAt;
+    if (ageMs >= PROACTIVE_REFRESH_AGE_MS) {
+      try {
+        await existing.driver.close();
+      } catch { /* ignore close errors */ }
+      pool.delete(key);
+      // 回退到新建连接
+      return await acquireDriver(config);
+    }
+
     // 复用连接：先验证连通性，再引用 +1。
-    // 修复前：直接返回 driver，不验证。若 driver 因 maxConnectionLifetime（30min）
-    // 或 Neo4j 服务重启而失效，后续所有查询都会失败，且 health() 的
-    // verifyConnectivity() 反复对同一过期 driver 调用，永远无法自动恢复。
-    // 修复后：先 verifyConnectivity()，失败则关闭旧 driver、从池中移除、新建替换。
     try {
       await existing.driver.verifyConnectivity();
     } catch {
@@ -73,7 +96,7 @@ export async function acquireDriver(config: Neo4jConfig): Promise<any> {
     config.uri,
     neo4j.default.auth.basic(config.user || 'neo4j', config.password || ''),
     {
-      maxConnectionLifetime: 30 * 60 * 1000,
+      maxConnectionLifetime: DRIVER_MAX_CONNECTION_LIFETIME_MS,
       connectionLivenessCheckTimeout: 30 * 1000,
       connectionAcquisitionTimeout: DEFAULTS.connectionPool.acquireTimeoutMs,
     },

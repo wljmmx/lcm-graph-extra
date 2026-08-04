@@ -14,7 +14,7 @@
  *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
  *          agent.error → 警告提示。
  */
-import { computed, ref, h, watch } from 'vue';
+import { computed, ref, h, watch, onMounted } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
 import { useRouter, useRoute } from 'vue-router';
 import {
@@ -429,33 +429,92 @@ interface TierTrendPoint {
   highPct: number;
   dominant: TierLevel | null;
 }
+
+const TIER_TREND_STORAGE_KEY = 'dashboard-tier-trend';
+
+/** 从 localStorage 加载持久化的 tier 趋势数据 */
+function loadPersistedTierTrend(): TierTrendPoint[] {
+  try {
+    const raw = localStorage.getItem(TIER_TREND_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((p: any) => typeof p?.timestamp === 'number');
+  } catch {
+    return [];
+  }
+}
+
+/** 持久化 tier 趋势数据到 localStorage */
+function savePersistedTierTrend(points: TierTrendPoint[]): void {
+  try {
+    localStorage.setItem(TIER_TREND_STORAGE_KEY, JSON.stringify(points));
+  } catch { /* localStorage 不可用或满，静默忽略 */ }
+}
+
+/** 从 historyAsc 快照构建 TierTrendPoint */
+function snapshotToTierPoint(s: HealthSnapshot): TierTrendPoint {
+  const low = s.tierLow ?? 0;
+  const medium = s.tierMedium ?? 0;
+  const high = s.tierHigh ?? 0;
+  const total = low + medium + high;
+  const pct = (v: number): number => (total > 0 ? (v / total) * 100 : 0);
+  let dominant: TierLevel | null = null;
+  if (total > 0) {
+    if (high >= low && high >= medium) dominant = 'high';
+    else if (medium >= low && medium >= high) dominant = 'medium';
+    else dominant = 'low';
+  }
+  return {
+    timestamp: s.timestamp,
+    low,
+    medium,
+    high,
+    total,
+    lowPct: pct(low),
+    mediumPct: pct(medium),
+    highPct: pct(high),
+    dominant,
+  };
+}
+
+// v2.3.1: 持久化 tier 趋势数据，解决"经常只统计到几次就清零重新统计"问题。
+// 修复前：recentTierTrend 是 computed，完全依赖 historyAsc（API 返回的快照）。
+// 当 timeRange='1h' 时 historyN 仅 24 条，且 API 可能返回空或少量数据，
+// 导致图表显示点数不足或清零。修复后：使用 localStorage 持久化，跨轮询周期
+// 累积数据，合并去重（按 timestamp），始终保留最近 10 个唯一点。
+const persistedTierTrend = ref<TierTrendPoint[]>(loadPersistedTierTrend());
+
+// 监听 historyAsc 变化，将新快照合并到持久化存储
+watch(historyAsc, (snaps) => {
+  if (snaps.length === 0) return;
+  // 将当前持久化数据与新快照合并，按 timestamp 去重
+  const existingMap = new Map<number, TierTrendPoint>();
+  for (const p of persistedTierTrend.value) {
+    existingMap.set(p.timestamp, p);
+  }
+  // 用新数据覆盖同 timestamp 的点
+  for (const s of snaps) {
+    // 只保留最近 1 小时内的数据点，避免跨天数据混淆
+    const ageMs = Date.now() - s.timestamp;
+    if (ageMs > 2 * 60 * 60 * 1000) continue; // 超过 2 小时的旧数据丢弃
+    existingMap.set(s.timestamp, snapshotToTierPoint(s));
+  }
+  // 按时间倒序排列，取最近 10 个
+  const merged = [...existingMap.values()]
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 10);
+  persistedTierTrend.value = merged;
+  savePersistedTierTrend(merged);
+}, { immediate: false });
+
+// 模板使用的 tier 趋势（优先持久化，fallback 到 computed）
 const recentTierTrend = computed<TierTrendPoint[]>(() => {
-  // historyAsc 已是 ASC（最旧在前），取最后 10 条（最新 10 次）
+  // 如果有持久化数据，直接使用
+  if (persistedTierTrend.value.length > 0) return persistedTierTrend.value;
+  // fallback：从当前 historyAsc 构建
   const snaps = historyAsc.value.slice(-10);
-  return snaps.map((s) => {
-    const low = s.tierLow ?? 0;
-    const medium = s.tierMedium ?? 0;
-    const high = s.tierHigh ?? 0;
-    const total = low + medium + high;
-    const pct = (v: number): number => (total > 0 ? (v / total) * 100 : 0);
-    let dominant: TierLevel | null = null;
-    if (total > 0) {
-      if (high >= low && high >= medium) dominant = 'high';
-      else if (medium >= low && medium >= high) dominant = 'medium';
-      else dominant = 'low';
-    }
-    return {
-      timestamp: s.timestamp,
-      low,
-      medium,
-      high,
-      total,
-      lowPct: pct(low),
-      mediumPct: pct(medium),
-      highPct: pct(high),
-      dominant,
-    };
-  });
+  return snaps.map(snapshotToTierPoint);
 });
 
 // ===== 时序图 X 轴标签（按统计粒度格式化） =====

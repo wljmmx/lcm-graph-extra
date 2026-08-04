@@ -297,7 +297,7 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'cliTimeout', type: 'number', description: 'CLI 超时（毫秒）', updatable: true, defaultValue: 30000 },
     { path: 'cliFallbackSearchType', type: 'string', description: 'CLI 降级搜索类型：search | hybrid', updatable: true, defaultValue: 'hybrid' },
     { path: 'qmdMcpTimeout', type: 'number', description: 'QMD MCP 初始化握手超时（ms）', updatable: true, defaultValue: 3000 },
-    { path: 'qmdMcpQueryTimeout', type: 'number', description: 'QMD MCP/REST 查询超时（ms）', updatable: true, defaultValue: 8000 },
+    { path: 'qmdMcpQueryTimeout', type: 'number', description: 'QMD MCP/REST 查询超时（ms）', updatable: true, defaultValue: 15000 },
     { path: 'tripletTimeoutMs', type: 'number', description: '三元组提取超时（ms）', updatable: true, defaultValue: 60000 },
     { path: 'experienceTtlIntervalMs', type: 'number', description: '经验 TTL 清理间隔（ms）', updatable: true, defaultValue: 86400000 },
     { path: 'enableCliFallback', type: 'boolean', description: '启用 QMD CLI 降级（关闭可避免 CLI 卡死）', updatable: true, defaultValue: true },

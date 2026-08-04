@@ -479,6 +479,56 @@ export class GraphAdapter {
     }
   }
 
+  /**
+   * v2.3.1: 带会话级重试的 session 操作包装器。
+   *
+   * 修复前：各个方法直接 `this.driver.session()` 后执行操作，若 driver 因
+   * maxConnectionLifetime 到期导致 session 已关闭，操作直接失败且无重试。
+   *
+   * 修复后：先尝试执行操作，若失败且为连接错误，则触发连接恢复 + 新建 session 重试一次。
+   * 这解决了"session closed"错误在 driver verifyConnectivity() 通过但 session 已失效的
+   * 边界情况（连接在 verify 和 session 创建之间过期）。
+   */
+  private async _withSession<T>(
+    context: string,
+    fn: (session: any) => Promise<T>,
+  ): Promise<T> {
+    if (!this.driver) {
+      throw new Error('Neo4j driver not initialized');
+    }
+    let session: any = null;
+    try {
+      session = this.driver.session();
+      return await fn(session);
+    } catch (err) {
+      // 仅对连接类错误触发恢复+重试，非连接错误直接抛出
+      if (this._isConnectionError(err)) {
+        if (session) {
+          try { await session.close(); } catch {}
+          session = null;
+        }
+        const recovered = await this._tryRecoverConnection(`session:${context}`);
+        if (recovered && this.driver) {
+          this.logger?.info?.(`[graph-adapter] session:${context}: retrying after connection recovery`);
+          session = this.driver.session();
+          try {
+            return await fn(session);
+          } catch (retryErr) {
+            this.logger?.warn?.(`[graph-adapter] session:${context}: retry after recovery failed`, { err: String(retryErr) });
+            throw retryErr;
+          } finally {
+            try { await session.close(); } catch {}
+          }
+        }
+      }
+      throw err;
+    } finally {
+      if (session) {
+        try { await session.close(); } catch {}
+      }
+    }
+  }
+
   async search(query: string, limit?: number): Promise<RetrievalResult[]> {
     if (!this.config.enabled) return [];
     if (!this.mod) {
@@ -584,38 +634,29 @@ export class GraphAdapter {
     // Community enrichment — batch findById via raw Cypher (avoids N round-trips)
     const nodeIds = results.map(r => r.metadata?.nodeId).filter(Boolean);
     if (nodeIds.length > 0) {
-      // AUDIT: searchWithCache 虽标记 @deprecated，但仍需防 driver 为 null 时
-      // this.driver.session() 抛 "Cannot read properties of null (reading 'session')"
       if (!this.driver) return results;
-      let session: any = null;
       try {
-        session = this.driver.session();
-        const batchResult = await session.run(
-          `MATCH (n:Task|Skill|Event) WHERE n.id IN $ids RETURN n.id AS id, n.communityId AS communityId`,
-          { ids: nodeIds },
-        );
-        const communityMap = new Map<string, string>();
-        for (const record of batchResult.records) {
-          const idField = record.get('id');
-          const cid = record.get('communityId');
-          if (idField && cid) communityMap.set((idField as any).toString(), (cid as any).toString());
-        }
-        // Apply community info to results
-        for (const r of results) {
-          const nid = String(r.metadata?.nodeId ?? '');
-          if (nid && communityMap.has(nid)) {
-            if (r.metadata) { r.metadata.communityId = communityMap.get(nid)!; }
+        await this._withSession('community-enrichment', async (session) => {
+          const batchResult = await session.run(
+            `MATCH (n:Task|Skill|Event) WHERE n.id IN $ids RETURN n.id AS id, n.communityId AS communityId`,
+            { ids: nodeIds },
+          );
+          const communityMap = new Map<string, string>();
+          for (const record of batchResult.records) {
+            const idField = record.get('id');
+            const cid = record.get('communityId');
+            if (idField && cid) communityMap.set((idField as any).toString(), (cid as any).toString());
           }
-        }
+          // Apply community info to results
+          for (const r of results) {
+            const nid = String(r.metadata?.nodeId ?? '');
+            if (nid && communityMap.has(nid)) {
+              if (r.metadata) { r.metadata.communityId = communityMap.get(nid)!; }
+            }
+          }
+        });
       } catch (err) {
-        if (this._isConnectionError(err)) {
-          this.logger?.warn?.('[graph-adapter] community enrichment: connection error, triggering recovery');
-          this._tryRecoverConnection('community-enrichment').catch(() => {});
-        } else {
-          this.logger?.warn?.('[graph-adapter] community enrichment failed', { err: String(err) });
-        }
-      } finally {
-        if (session) { try { await session.close(); } catch {} }
+        this.logger?.warn?.('[graph-adapter] community enrichment failed', { err: String(err) });
       }
     }
     this.searchCache.set(key, results);
@@ -692,31 +733,29 @@ export class GraphAdapter {
       if (typeof mod.getEdgesForNodes === 'function') {
         rawEdges = await mod.getEdgesForNodes(this.driver, topIds);
       } else {
-        let session: any = null;
         try {
-          session = this.driver.session();
-          const placeholders = topIds.map((_: string, i: number) => `$id${i}`).join(',');
-          const params: Record<string, any> = {};
-          topIds.forEach((id: string, i: number) => { params[`id${i}`] = id; });
-          const result = await session.run(
-            `MATCH (a)-[r]->(b) WHERE a.id IN [${placeholders}] OR b.id IN [${placeholders}]
-               RETURN a.id AS fromId, b.id AS toId, type(r) AS type,
-                      coalesce(r.instruction, '') AS instruction,
-                      coalesce(r.name, '') AS targetName`,
-            params,
-          );
-          rawEdges = result.records.map((rec: any) => ({
-            fromId: rec.get('fromId'),
-            toId: rec.get('toId'),
-            type: rec.get('type'),
-            instruction: rec.get('instruction'),
-            targetName: rec.get('targetName'),
-          }));
+          rawEdges = await this._withSession('searchExperience-edges', async (session) => {
+            const placeholders = topIds.map((_: string, i: number) => `$id${i}`).join(',');
+            const params: Record<string, any> = {};
+            topIds.forEach((id: string, i: number) => { params[`id${i}`] = id; });
+            const result = await session.run(
+              `MATCH (a)-[r]->(b) WHERE a.id IN [${placeholders}] OR b.id IN [${placeholders}]
+                 RETURN a.id AS fromId, b.id AS toId, type(r) AS type,
+                        coalesce(r.instruction, '') AS instruction,
+                        coalesce(r.name, '') AS targetName`,
+              params,
+            );
+            return result.records.map((rec: any) => ({
+              fromId: rec.get('fromId'),
+              toId: rec.get('toId'),
+              type: rec.get('type'),
+              instruction: rec.get('instruction'),
+              targetName: rec.get('targetName'),
+            }));
+          });
         } catch (err) {
           rawEdges = [];
           this.logger?.warn?.('[graph-adapter] edges batch query failed', { err: String(err) });
-        } finally {
-          if (session) { try { await session.close(); } catch {} }
         }
       }
     }
@@ -767,11 +806,10 @@ export class GraphAdapter {
       return { upserted: 0, conflicts: 0 };
     }
 
-    const session = this.driver.session();
-    let uc = 0;
-    let cc = 0;
-
     try {
+      return await this._withSession('batchUpsert', async (session) => {
+        let uc = 0;
+        let cc = 0;
       // N-1: Sync 算法升级 —— updatedAt 对比 + 增量 MERGE
       // 输入实体可选携带 updatedAt（毫秒时间戳）：
       //   - 若存在且大于现有节点：更新属性并刷新 updatedAt
@@ -876,13 +914,12 @@ export class GraphAdapter {
       // P2-AUDIT: 关系计数不再混入 uc（upserted 节点数），
       // 避免调用方收到虚高的节点数。关系仍正常 upsert。
       // uc += validRelations.length;
+        return { upserted: uc, conflicts: cc };
+      });
     } catch (err) {
       this.logger?.warn?.(`[lcm-graph-extra] batchUpsert error: ${err}`);
-    } finally {
-      await session.close();
+      return { upserted: 0, conflicts: 0 };
     }
-
-    return { upserted: uc, conflicts: cc };
   }
 
   // P1-10: upsertEntities 已移除 —— per-entity N+1 死代码（零调用方），
@@ -926,14 +963,11 @@ export class GraphAdapter {
   }
 
   private async _doQuery(cypher: string, params?: Record<string, unknown>): Promise<Record<string, unknown>[]> {
-    const session = this.driver.session();
-    try {
+    return this._withSession('query', async (session) => {
       const safeParams = params ? sanitizeNeo4jParams(params) : {};
       const result = await session.run(cypher, safeParams);
       return result.records.map((r: any) => convertNeo4jIntegers(r.toObject()) as Record<string, unknown>);
-    } finally {
-      await session.close();
-    }
+    });
   }
 
 
@@ -974,8 +1008,7 @@ export class GraphAdapter {
    */
   private async fallbackPageRank(nodeIds: string[]): Promise<Map<string, number>> {
     if (!this.driver) return new Map();
-    const session = this.driver.session();
-    try {
+    return this._withSession('fallbackPageRank', async (session) => {
       // 尝试 GDS PageRank（如果 Neo4j 安装了 GDS 插件）
       const gdsResult = await session.run(
         `
@@ -1028,9 +1061,7 @@ export class GraphAdapter {
         if (!scores.has(id)) scores.set(id, 0.1);
       }
       return scores;
-    } finally {
-      await session.close().catch(() => {});
-    }
+    });
   }
 
   /**
