@@ -52,9 +52,17 @@ function poolKey(uri: string, user: string): string {
  * 如果已有复用连接则引用计数 +1，否则新建。
  *
  * @param config Neo4j 连接配置
+ * @param _depth 内部递归深度限制（调用方不传此参数）
  * @returns driver 实例
  */
-export async function acquireDriver(config: Neo4jConfig): Promise<any> {
+export async function acquireDriver(config: Neo4jConfig, _depth = 0): Promise<any> {
+  // M4: 递归深度限制 —— 防止主动刷新或验证失败后无限递归。
+  // 修复前：acquireDriver 在连接过期/失效时递归调用自身，无深度限制，
+  // 若新连接也立即触发刷新条件（时钟偏差等），可能导致栈溢出。
+  const MAX_REFRESH_DEPTH = 3;
+  if (_depth >= MAX_REFRESH_DEPTH) {
+    throw new Error(`Neo4j connection pool: max refresh depth (${MAX_REFRESH_DEPTH}) exceeded`);
+  }
   const key = poolKey(config.uri, config.user || 'neo4j');
   const existing = pool.get(key);
 
@@ -69,8 +77,8 @@ export async function acquireDriver(config: Neo4jConfig): Promise<any> {
         await existing.driver.close();
       } catch { /* ignore close errors */ }
       pool.delete(key);
-      // 回退到新建连接
-      return await acquireDriver(config);
+      // 回退到新建连接（传递递归深度 +1）
+      return await acquireDriver(config, _depth + 1);
     }
 
     // 复用连接：先验证连通性，再引用 +1。
@@ -82,8 +90,8 @@ export async function acquireDriver(config: Neo4jConfig): Promise<any> {
         await existing.driver.close();
       } catch { /* ignore close errors */ }
       pool.delete(key);
-      // 回退到新建连接逻辑
-      return await acquireDriver(config);
+      // 回退到新建连接逻辑（传递递归深度 +1）
+      return await acquireDriver(config, _depth + 1);
     }
     existing.refCount++;
     existing.lastUsed = Date.now();

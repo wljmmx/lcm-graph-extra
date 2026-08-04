@@ -65,10 +65,12 @@ export class HealthMetricsCollector {
 
   /** 收集一次指标快照 */
   collect(snapshot: Partial<HealthSnapshot>): void {
-    // 不允许调用方覆盖 timestamp（主键语义）
-    const { timestamp: _ignored, ...rest } = snapshot as any;
+    // M1: 修复前 `const { timestamp: _ignored, ...rest } = snapshot as any;` 总是忽略传入的 timestamp，
+    // 导致调用方传入的精确时间戳被丢弃，统一使用 Date.now() 作为主键。
+    // 修复后：若传入 timestamp 则使用传入值，否则使用当前时间。
+    const { timestamp: providedTs, ...rest } = snapshot as any;
     const full: HealthSnapshot = {
-      timestamp: Date.now(),
+      timestamp: typeof providedTs === 'number' && providedTs > 0 ? providedTs : Date.now(),
       pendingMessages: 0,
       summaryFragments: 0,
       maxTokenRatio: 0,
@@ -429,16 +431,23 @@ export class LatencyHistogram {
     if (this.samples.length === 0) {
       return { count: 0, avg: 0, p50: 0, p90: 0, p95: 0, p99: 0, min: 0, max: 0 };
     }
-    const sum = this.samples.reduce((a, b) => a + b, 0);
+    // H5: 一次性排序 + 计算所有百分位，避免 percentile() 被调用 4 次导致 4 次 O(n log n) 排序。
+    // 修复前：getStats() 调用 this.percentile(50)、this.percentile(90) 等，每次内部做 [...samples].sort()。
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    const sum = sorted.reduce((a, b) => a + b, 0);
+    const getP = (p: number) => {
+      const idx = Math.ceil((p / 100) * sorted.length) - 1;
+      return sorted[Math.max(0, Math.min(idx, sorted.length - 1))];
+    };
     return {
-      count: this.samples.length,
-      avg: sum / this.samples.length,
-      p50: this.percentile(50),
-      p90: this.percentile(90),
-      p95: this.percentile(95),
-      p99: this.percentile(99),
-      min: Math.min(...this.samples),
-      max: Math.max(...this.samples),
+      count: sorted.length,
+      avg: sum / sorted.length,
+      p50: getP(50),
+      p90: getP(90),
+      p95: getP(95),
+      p99: getP(99),
+      min: sorted[0],
+      max: sorted[sorted.length - 1],
     };
   }
 

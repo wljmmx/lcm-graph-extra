@@ -5,6 +5,25 @@ import type { Neo4jConfig } from '../types';
 const nc: Neo4jConfig = { uri: 'bolt://x:7687', user: 'neo4j', password: 'p' };
 const ac: GraphAdapterConfig = { enabled: true, searchLimit: 5 };
 
+// Mock neo4j-driver
+vi.mock('neo4j-driver', () => {
+  const isInt = (v: any) => typeof v === 'object' && v !== null && 'toNumber' in v;
+  return {
+    default: {
+      driver: vi.fn(),
+      auth: { basic: vi.fn().mockReturnValue({}) },
+    },
+    isInt,
+    int: (v: number) => ({ toNumber: () => v }),
+  };
+});
+
+// Mock connection-pool
+vi.mock('./connection-pool', () => ({
+  acquireDriver: vi.fn().mockResolvedValue(null),
+  releaseDriver: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe('GraphAdapter', () => {
   it('returns empty when disabled', async () => {
     const a = new GraphAdapter(nc, { ...ac, enabled: false });
@@ -136,6 +155,118 @@ describe('GraphAdapter', () => {
       expect((a as any).driver).toBe(fakeDriver);
       expect((a as any)._connectFailed).toBe(false);
       expect((a as any)._connectRetryCount).toBe(0);
+    });
+  });
+
+  // ===================== _withSession 重试机制 ========================
+
+  describe('_withSession: session 重试机制', () => {
+    it('session 操作成功时正常返回结果', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const mockSession = {
+        run: vi.fn().mockResolvedValue({ records: [] }),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockDriver = {
+        session: vi.fn().mockReturnValue(mockSession),
+        verifyConnectivity: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      (a as any).driver = mockDriver;
+
+      const result = await (a as any)._withSession('test', async (session: any) => {
+        return await session.run('RETURN 1');
+      });
+
+      expect(result).toEqual({ records: [] });
+      expect(mockSession.close).toHaveBeenCalled();
+    });
+
+    it('连接错误时触发恢复并重试一次', async () => {
+      const a = new GraphAdapter(nc, ac);
+
+      const mockSessionFail = {
+        run: vi.fn().mockRejectedValue(new Error('session closed')),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const mockSessionSuccess = {
+        run: vi.fn().mockResolvedValue({ records: [{ toObject: () => ({ n: 1 }) }] }),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const mockDriver = {
+        session: vi.fn()
+          .mockReturnValueOnce(mockSessionFail)
+          .mockReturnValueOnce(mockSessionSuccess),
+        verifyConnectivity: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      (a as any).driver = mockDriver;
+      // Mock _tryRecoverConnection 返回 true 以触发重试
+      (a as any)._tryRecoverConnection = vi.fn().mockResolvedValue(true);
+
+      const result = await (a as any)._withSession('test-retry', async (session: any) => {
+        return await session.run('RETURN 1');
+      });
+
+      expect(result).toBeDefined();
+      // 应调用了两次 session()（第一次失败 + 重试）
+      expect(mockDriver.session).toHaveBeenCalledTimes(2);
+    });
+
+    it('重试后仍失败则抛出错误', async () => {
+      const a = new GraphAdapter(nc, ac);
+
+      const mockSession = {
+        run: vi.fn().mockRejectedValue(new Error('session closed')),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const mockDriver = {
+        session: vi.fn().mockReturnValue(mockSession),
+        verifyConnectivity: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      (a as any).driver = mockDriver;
+
+      await expect(
+        (a as any)._withSession('test-fail', async (session: any) => {
+          return await session.run('RETURN 1');
+        }),
+      ).rejects.toThrow('session closed');
+    });
+
+    it('driver 未初始化时抛出错误', async () => {
+      const a = new GraphAdapter(nc, ac);
+      (a as any).driver = null;
+
+      await expect(
+        (a as any)._withSession('test-no-driver', async () => {}),
+      ).rejects.toThrow('Neo4j driver not initialized');
+    });
+
+    it('异常时 session 被正确关闭', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const mockSession = {
+        run: vi.fn().mockRejectedValue(new Error('query failed')),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockDriver = {
+        session: vi.fn().mockReturnValue(mockSession),
+        verifyConnectivity: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+      (a as any).driver = mockDriver;
+
+      await expect(
+        (a as any)._withSession('test-close', async (session: any) => {
+          return await session.run('RETURN 1');
+        }),
+      ).rejects.toThrow('query failed');
+
+      // session.close() 在 finally 块中被调用
+      expect(mockSession.close).toHaveBeenCalled();
     });
   });
 });

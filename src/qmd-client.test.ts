@@ -805,6 +805,64 @@ describe("QmdClient", () => {
     });
   });
 
+  // ===================== H1: AbortSignal.timeout() 替换 ===================
+
+  describe("H1: AbortSignal.timeout() 替换为显式 setTimeout+clearTimeout", () => {
+    it("MCP 超时后定时器被正确释放，后续请求不受影响", async () => {
+      // 第一次：MCP 超时（模拟初始化超时）
+      mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
+      // REST 降级成功
+      mockRestOk({
+        results: [{ docid: "#rest", file: "r.md", title: "R", score: 0.7, snippet: "", line: 1, context: null }],
+      });
+
+      const results1 = await client.query({ searches: [{ type: "lex", query: "test1" }] });
+      expect(results1).toHaveLength(1);
+      expect(results1[0].docid).toBe("#rest");
+
+      // 第二次：MCP 恢复（定时器未被泄漏，新请求正常）
+      mockMcpOk({
+        results: [{ docid: "#mcp2", file: "m.md", title: "M", score: 0.9, snippet: "", line: 1, context: null }],
+      });
+
+      // 手动标记 MCP 可用（模拟 auto-recovery）
+      (client as any).mcpAvailable = null;
+
+      const results2 = await client.query({ searches: [{ type: "lex", query: "test2" }] });
+      expect(results2).toHaveLength(1);
+      expect(results2[0].docid).toBe("#mcp2");
+    });
+
+    it("MCP 工具调用超时后定时器被正确释放", async () => {
+      // MCP initialize 成功，但 tools/call 超时
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
+        json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
+      } as Response);
+      // tools/call 超时 → 抛 AbortError
+      mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
+      // REST 降级
+      mockRestOk({
+        results: [{ docid: "#after-timeout", file: "t.md", title: "T", score: 0.6, snippet: "", line: 1, context: null }],
+      });
+
+      const results = await client.query({ searches: [{ type: "lex", query: "timeout" }] });
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#after-timeout");
+    });
+
+    it("REST 超时后定时器被正确释放，继续走 CLI 降级", async () => {
+      mockMcpFail(500);
+      mockRestTimeout();
+      mockCliOk(JSON.stringify([{ docid: "#cli", file: "c.md", title: "C", score: 0.5, snippet: "", line: 1, context: null }]));
+
+      const results = await client.query({ searches: [{ type: "lex", query: "test" }] });
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#cli");
+    });
+  });
+
   // ===================== mcpInitialize failures ==========================
 
   describe("mcpInitialize failures", () => {

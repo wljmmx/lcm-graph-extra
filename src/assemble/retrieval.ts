@@ -27,13 +27,16 @@ const QUERY_CACHE_TTL_MS = 300 * 1000;
 /** P2-1: L2/L4 缓存 LRU 容量上限 */
 const QUERY_CACHE_MAX = 50;
 
-/** P2-1: 简单字符串 hash（djb2 变体），用于缓存 key */
+import { createHash } from 'node:crypto';
+
+/**
+ * M6: 使用 SHA-256 替代 djb2 哈希算法。
+ * 修复前：djb2 变体对中文查询碰撞概率较高（32-bit 输出空间 ~4e9），
+ * 同一进程内不同中文查询可能产生相同 hash，导致缓存错误命中。
+ * 修复后：SHA-256 取前 16 字符 hex（64-bit 空间），碰撞概率可忽略。
+ */
 function hashKey(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(36);
+  return createHash('sha256').update(s).digest('hex').slice(0, 16);
 }
 
 /** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */

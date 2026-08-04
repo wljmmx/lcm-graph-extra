@@ -7,7 +7,8 @@
  */
 
 import type { MoaPipelineResult, LlmCallResult } from './types.js';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -179,6 +180,8 @@ export function recordAllComplexity(score: number): void {
   if (allComplexityRecords.length > MAX_ALL_COMPLEXITY) {
     allComplexityRecords.shift();
   }
+  // H4: 新数据写入时清除缓存
+  clearPerformanceCache();
   // 持久化全量复杂度数据，确保进程重启后不丢失
   // 使用节流避免高频写入：每 5 秒最多写一次
   persistThrottled();
@@ -221,6 +224,9 @@ export function recordMoaRun(
   if (runRecords.length > MAX_RECORDS) {
     runRecords.shift();
   }
+
+  // H4: 新数据写入时清除缓存，确保下次 getMoaPerformance() 返回最新结果
+  clearPerformanceCache();
 
   // 异步持久化到文件（不阻塞管道）
   persistAsync();
@@ -297,8 +303,21 @@ function buildDailyBuckets(
 
 /**
  * 获取 MoA 性能摘要（含增强指标）。
+ *
+ * H4: 添加 5 秒结果缓存，避免 persistAsync 和 API 端点高频调用时重复全量排序计算。
+ * 清除缓存的条件：recordMoaRun / recordAllComplexity 写入新数据时。
  */
+let performanceCache: { timestamp: number; data: MoaPerformanceSummary } | null = null;
+
+function clearPerformanceCache(): void {
+  performanceCache = null;
+}
+
 export function getMoaPerformance(): MoaPerformanceSummary {
+  const now = Date.now();
+  if (performanceCache && now - performanceCache.timestamp < 5000) {
+    return performanceCache.data;
+  }
   const successRecords = runRecords.filter((r) => r.success);
   const failedRecords = runRecords.filter((r) => !r.success);
 
@@ -385,7 +404,7 @@ export function getMoaPerformance(): MoaPerformanceSummary {
   // 降级回退次数：MoA 触发但最终没有结果（失败）
   const fallbackCount = failedRecords.length;
 
-  return {
+  const result = {
     totalRuns: runRecords.length,
     successRuns: successRecords.length,
     failedRuns: failedRecords.length,
@@ -415,6 +434,9 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     complexityHourlyBuckets,
     complexityDailyBuckets,
   };
+
+  performanceCache = { timestamp: Date.now(), data: result };
+  return result;
 }
 
 /**
@@ -503,14 +525,15 @@ function persistThrottled(): void {
 }
 
 function persistAsync(): void {
-  // 使用 setImmediate 确保不阻塞当前管道
-  setImmediate(() => {
+  // H2: 使用 setImmediate + fs.promises.writeFile 异步写入，避免阻塞事件循环。
+  // 修复前：writeFileSync 同步写入 + getMoaPerformance() 全量排序，高并发下阻塞管道。
+  setImmediate(async () => {
     try {
       const dir = join(homedir(), '.openclaw');
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      writeFileSync(PERF_FILE, JSON.stringify(getMoaPerformance(), null, 2), 'utf-8');
+      await writeFile(PERF_FILE, JSON.stringify(getMoaPerformance(), null, 2), 'utf-8');
     } catch {
       // 静默失败，不影响主流程
     }

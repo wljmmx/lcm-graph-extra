@@ -478,16 +478,27 @@ export class QmdClient {
       // 服务端处理包含: lex(BM25) + vec(embedding+ANN) + RRF + rerank(LLM)
       // 超时多发生在此环节（rerank LLM 调用慢 或 embedding 冷启动）
       const fetchStart = Date.now();
-      const resp = await fetch(`${this.mcpBaseUrl}/mcp`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-          "mcp-session-id": sessionId,
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.mcpQueryTimeout),
+      // H1: 替换 AbortSignal.timeout() 为显式 setTimeout + clearTimeout，
+      // 避免 AbortSignal.timeout() 创建的定时器在 Promise settle 后无法及时释放。
+      let mcpFetchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const mcpFetchTimeoutPromise = new Promise<never>((_, reject) => {
+        mcpFetchTimeoutHandle = setTimeout(() => reject(new Error(`MCP fetch timeout (${this.mcpQueryTimeout}ms)`)), this.mcpQueryTimeout);
       });
+      // 确保 timeout promise 的 rejection 被消费（避免 unhandled rejection）
+      mcpFetchTimeoutPromise.catch(() => {});
+      const resp = await Promise.race([
+        fetch(`${this.mcpBaseUrl}/mcp`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "mcp-session-id": sessionId,
+          },
+          body: JSON.stringify(body),
+        }),
+        mcpFetchTimeoutPromise,
+      ]) as Response;
+      if (mcpFetchTimeoutHandle !== undefined) clearTimeout(mcpFetchTimeoutHandle);
       fetchMs = Date.now() - fetchStart;
 
       this.logger?.debug?.(`[qmd-client] mcpCall response: status=${resp.status}, statusText=${resp.statusText}, contentType=${resp.headers?.get('content-type')}, initMs=${initMs}ms, fetchMs=${fetchMs}ms`);
@@ -622,24 +633,33 @@ export class QmdClient {
     const initStart = Date.now();
     let resp: Response;
     try {
-      resp = await fetch(initUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/event-stream",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "init",
-          method: "initialize",
-          params: {
-            protocolVersion: "2025-11-25",
-            capabilities: { tools: {}, resources: {} },
-            clientInfo: { name: "qmd-client", version: "1.0" },
-          },
-        }),
-        signal: AbortSignal.timeout(this.mcpTimeout),
+      // H1: 替换 AbortSignal.timeout() 为显式 setTimeout + clearTimeout
+      let initTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const initTimeoutPromise = new Promise<never>((_, reject) => {
+        initTimeoutHandle = setTimeout(() => reject(new Error(`MCP initialize timeout (${this.mcpTimeout}ms)`)), this.mcpTimeout);
       });
+      initTimeoutPromise.catch(() => {});
+      resp = await Promise.race([
+        fetch(initUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "init",
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-11-25",
+              capabilities: { tools: {}, resources: {} },
+              clientInfo: { name: "qmd-client", version: "1.0" },
+            },
+          }),
+        }),
+        initTimeoutPromise,
+      ]) as Response;
+      if (initTimeoutHandle !== undefined) clearTimeout(initTimeoutHandle);
     } catch (err) {
       // initialize 阶段失败（含超时）输出连接地址+端口，便于核实
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -720,15 +740,24 @@ export class QmdClient {
     try {
       // === 环节 1: fetch (REST /query, 服务端处理) ===
       const fetchStart = Date.now();
-      const resp = await fetch(`${this.mcpBaseUrl}/query`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.mcpQueryTimeout),
+      // H1: 替换 AbortSignal.timeout() 为显式 setTimeout + clearTimeout
+      let restFetchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const restFetchTimeoutPromise = new Promise<never>((_, reject) => {
+        restFetchTimeoutHandle = setTimeout(() => reject(new Error(`REST fetch timeout (${this.mcpQueryTimeout}ms)`)), this.mcpQueryTimeout);
       });
+      restFetchTimeoutPromise.catch(() => {});
+      const resp = await Promise.race([
+        fetch(`${this.mcpBaseUrl}/query`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(body),
+        }),
+        restFetchTimeoutPromise,
+      ]) as Response;
+      if (restFetchTimeoutHandle !== undefined) clearTimeout(restFetchTimeoutHandle);
       fetchMs = Date.now() - fetchStart;
 
       if (!resp.ok) {

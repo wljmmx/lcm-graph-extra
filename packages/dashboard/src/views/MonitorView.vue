@@ -617,6 +617,7 @@ const latencyOption = computed(() => ({
 }));
 
 // 时序图3：tier 分布（堆叠面积图，Y 轴次数）
+// M7: 使用半透明渐变填充替代纯色填充，提升暗色主题下的视觉层次感。
 const tierOption = computed(() => ({
   tooltip: { trigger: 'axis' },
   legend: { data: ['Low', 'Medium', 'High'] },
@@ -628,7 +629,7 @@ const tierOption = computed(() => ({
       name: 'Low',
       type: 'line',
       stack: 'tier',
-      areaStyle: { color: CHART.value.success },
+      areaStyle: { color: isDark.value ? 'rgba(54,173,106,0.25)' : 'rgba(24,160,88,0.15)' },
       lineStyle: { color: CHART.value.success },
       itemStyle: { color: CHART.value.success },
       data: historyAsc.value.map((s) => s.tierLow),
@@ -637,7 +638,7 @@ const tierOption = computed(() => ({
       name: 'Medium',
       type: 'line',
       stack: 'tier',
-      areaStyle: { color: CHART.value.warning },
+      areaStyle: { color: isDark.value ? 'rgba(252,176,64,0.25)' : 'rgba(240,160,32,0.15)' },
       lineStyle: { color: CHART.value.warning },
       itemStyle: { color: CHART.value.warning },
       data: historyAsc.value.map((s) => s.tierMedium),
@@ -646,7 +647,7 @@ const tierOption = computed(() => ({
       name: 'High',
       type: 'line',
       stack: 'tier',
-      areaStyle: { color: CHART.value.danger },
+      areaStyle: { color: isDark.value ? 'rgba(222,81,105,0.25)' : 'rgba(208,48,80,0.15)' },
       lineStyle: { color: CHART.value.danger },
       itemStyle: { color: CHART.value.danger },
       data: historyAsc.value.map((s) => s.tierHigh),

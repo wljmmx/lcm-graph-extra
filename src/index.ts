@@ -2533,6 +2533,27 @@ const pluginEntry: any = definePluginEntry({
           if (cleanedExpIds > 0 || cleanedWarmup > 0) {
             logger?.debug?.("heartbeat: session metadata cleanup", { cleanedExpIds, cleanedWarmup });
           }
+          // M3: 清理 sessionQualityScores —— 长时间未访问的 session 质量评分
+          // 修复前：sessionQualityScores 仅在 assemble/afterTurn 中读取，无清理机制，
+          // 长生命周期进程下废弃 session 的评分数据永久驻留。
+          let cleanedQuality = 0;
+          for (const [key] of sessionQualityScores) {
+            // 如果该 session 在 lastAssembleExpIdsBySession 中已过期，说明对话已结束
+            if (!lastAssembleExpIdsBySession.has(key)) {
+              sessionQualityScores.delete(key);
+              cleanedQuality++;
+            }
+          }
+          if (sessionQualityScores.size > 200) {
+            const firstKey = sessionQualityScores.keys().next().value;
+            if (firstKey) {
+              sessionQualityScores.delete(firstKey);
+              cleanedQuality++;
+            }
+          }
+          if (cleanedQuality > 0) {
+            logger?.debug?.("heartbeat: session quality scores cleanup", { cleanedQuality });
+          }
           // P0-1: 清理过期 LLM Rerank 缓存
           let cleanedRerank = 0;
           for (const [key, val] of llmRerankCache) {

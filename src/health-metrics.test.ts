@@ -12,7 +12,14 @@
  * 测试环境可能不可用，故仅测试内存逻辑，DB 失败应静默不影响主流程。
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { HealthMetricsCollector, healthMetrics } from './health-metrics.js';
+import {
+  HealthMetricsCollector,
+  LatencyHistogram,
+  BusinessMetricsCollector,
+  healthMetrics,
+  latencyHistograms,
+  businessMetrics,
+} from './health-metrics.js';
 
 describe('HealthMetricsCollector', () => {
   let collector: HealthMetricsCollector;
@@ -45,12 +52,12 @@ describe('HealthMetricsCollector', () => {
       expect(again!.pendingMessages).toBe(3); // 内部未被修改
     });
 
-    it('不允许调用方覆盖 timestamp', () => {
+    it('M1 修复: 允许传入有效 timestamp', () => {
       const before = Date.now();
       collector.collect({ timestamp: 12345 } as any);
       const latest = collector.getLatest();
-      expect(latest!.timestamp).not.toBe(12345);
-      expect(latest!.timestamp).toBeGreaterThanOrEqual(before);
+      // M1 修复后：传入的有效 timestamp 应被保留
+      expect(latest!.timestamp).toBe(12345);
     });
   });
 
@@ -215,5 +222,268 @@ describe('HealthMetricsCollector', () => {
     it('healthMetrics 是 HealthMetricsCollector 实例', () => {
       expect(healthMetrics).toBeInstanceOf(HealthMetricsCollector);
     });
+  });
+});
+
+// ============================================================================
+// H5: LatencyHistogram 优化测试
+// ============================================================================
+
+describe('LatencyHistogram (H5: 一次性排序优化)', () => {
+  let hist: LatencyHistogram;
+
+  beforeEach(() => {
+    hist = new LatencyHistogram();
+  });
+
+  describe('observe', () => {
+    it('记录正常延迟值', () => {
+      hist.observe(100);
+      hist.observe(200);
+      hist.observe(300);
+      const stats = hist.getStats();
+      expect(stats.count).toBe(3);
+      expect(stats.min).toBe(100);
+      expect(stats.max).toBe(300);
+    });
+
+    it('忽略负数', () => {
+      hist.observe(-1);
+      expect(hist.getStats().count).toBe(0);
+    });
+
+    it('忽略 NaN', () => {
+      hist.observe(NaN);
+      expect(hist.getStats().count).toBe(0);
+    });
+
+    it('忽略 Infinity', () => {
+      hist.observe(Infinity);
+      expect(hist.getStats().count).toBe(0);
+    });
+  });
+
+  describe('getStats (H5: 一次性排序)', () => {
+    it('空直方图返回全零', () => {
+      const stats = hist.getStats();
+      expect(stats.count).toBe(0);
+      expect(stats.avg).toBe(0);
+      expect(stats.p50).toBe(0);
+      expect(stats.p90).toBe(0);
+      expect(stats.p95).toBe(0);
+      expect(stats.p99).toBe(0);
+      expect(stats.min).toBe(0);
+      expect(stats.max).toBe(0);
+    });
+
+    it('单样本时所有百分位相同', () => {
+      hist.observe(100);
+      const stats = hist.getStats();
+      expect(stats.p50).toBe(100);
+      expect(stats.p90).toBe(100);
+      expect(stats.p95).toBe(100);
+      expect(stats.p99).toBe(100);
+    });
+
+    it('多样本时正确计算百分位', () => {
+      // 1-100 的延迟值
+      for (let i = 1; i <= 100; i++) {
+        hist.observe(i);
+      }
+      const stats = hist.getStats();
+      expect(stats.count).toBe(100);
+      expect(stats.p50).toBe(50);
+      expect(stats.p90).toBe(90);
+      expect(stats.p95).toBe(95);
+      expect(stats.p99).toBe(99);
+      expect(stats.min).toBe(1);
+      expect(stats.max).toBe(100);
+    });
+
+    it('getStats 多次调用返回一致结果（幂等）', () => {
+      for (let i = 1; i <= 50; i++) {
+        hist.observe(i * 10);
+      }
+      const stats1 = hist.getStats();
+      const stats2 = hist.getStats();
+      expect(stats1).toEqual(stats2);
+    });
+
+    it('滑动窗口丢弃最旧样本', () => {
+      const smallHist = new LatencyHistogram(10); // maxSamples = 10
+      for (let i = 1; i <= 15; i++) {
+        smallHist.observe(i * 100);
+      }
+      const stats = smallHist.getStats();
+      expect(stats.count).toBe(10);
+      // 最旧的 5 个被丢弃，保留 600-1500
+      expect(stats.min).toBe(600);
+      expect(stats.max).toBe(1500);
+    });
+  });
+
+  describe('percentile (单独调用)', () => {
+    it('单独 percentile 也可用', () => {
+      for (let i = 1; i <= 100; i++) {
+        hist.observe(i);
+      }
+      expect(hist.percentile(50)).toBe(50);
+      expect(hist.percentile(99)).toBe(99);
+    });
+
+    it('空直方图 percentile 返回 0', () => {
+      expect(hist.percentile(50)).toBe(0);
+    });
+  });
+
+  describe('reset', () => {
+    it('reset 清空所有样本', () => {
+      hist.observe(100);
+      hist.observe(200);
+      hist.reset();
+      expect(hist.getStats().count).toBe(0);
+    });
+  });
+});
+
+// ============================================================================
+// BusinessMetricsCollector 测试
+// ============================================================================
+
+describe('BusinessMetricsCollector', () => {
+  let bm: BusinessMetricsCollector;
+
+  beforeEach(() => {
+    bm = new BusinessMetricsCollector();
+  });
+
+  describe('recordExperienceQuality', () => {
+    it('低质量分归入 low 桶', () => {
+      bm.recordExperienceQuality(0.2);
+      expect(bm.getExpQualityDistribution().low).toBe(1);
+    });
+
+    it('中等质量分归入 medium 桶', () => {
+      bm.recordExperienceQuality(0.5);
+      expect(bm.getExpQualityDistribution().medium).toBe(1);
+    });
+
+    it('高质量分归入 high 桶', () => {
+      bm.recordExperienceQuality(0.8);
+      expect(bm.getExpQualityDistribution().high).toBe(1);
+    });
+
+    it('忽略 NaN 分数', () => {
+      bm.recordExperienceQuality(NaN);
+      const dist = bm.getExpQualityDistribution();
+      expect(dist.low + dist.medium + dist.high).toBe(0);
+    });
+  });
+
+  describe('recordTtlAccess', () => {
+    it('TTL 命中率正确计算', () => {
+      bm.recordTtlAccess(true);
+      bm.recordTtlAccess(true);
+      bm.recordTtlAccess(false);
+      expect(bm.getTtlHitRate()).toBe(2 / 3);
+    });
+
+    it('无记录时 TTL 命中率为 0', () => {
+      expect(bm.getTtlHitRate()).toBe(0);
+    });
+  });
+
+  describe('recordDistill', () => {
+    it('蒸馏成功率正确计算', () => {
+      bm.recordDistill(true);
+      bm.recordDistill(true);
+      bm.recordDistill(false);
+      expect(bm.getDistillSuccessRate()).toBe(2 / 3);
+    });
+  });
+
+  describe('getSummary', () => {
+    it('返回完整摘要', () => {
+      bm.recordExperienceQuality(0.3);
+      bm.recordTtlAccess(true);
+      bm.recordDistill(true);
+
+      const summary = bm.getSummary();
+      expect(summary.expQuality.low).toBe(1);
+      expect(summary.ttlHits).toBe(1);
+      expect(summary.distillSuccess).toBe(1);
+    });
+  });
+
+  describe('reset', () => {
+    it('reset 清空所有计数', () => {
+      bm.recordExperienceQuality(0.5);
+      bm.recordTtlAccess(true);
+      bm.reset();
+      expect(bm.getExpQualityDistribution().medium).toBe(0);
+      expect(bm.getTtlHitRate()).toBe(0);
+    });
+  });
+});
+
+// ============================================================================
+// 全局单例延迟直方图
+// ============================================================================
+
+describe('全局 latencyHistograms', () => {
+  it('latencyHistograms.assemble 是 LatencyHistogram 实例', () => {
+    expect(latencyHistograms.assemble).toBeInstanceOf(LatencyHistogram);
+  });
+
+  it('latencyHistograms.l2_qmd 是 LatencyHistogram 实例', () => {
+    expect(latencyHistograms.l2_qmd).toBeInstanceOf(LatencyHistogram);
+  });
+
+  it('latencyHistograms.l3_graph 是 LatencyHistogram 实例', () => {
+    expect(latencyHistograms.l3_graph).toBeInstanceOf(LatencyHistogram);
+  });
+
+  it('latencyHistograms.l4_experience 是 LatencyHistogram 实例', () => {
+    expect(latencyHistograms.l4_experience).toBeInstanceOf(LatencyHistogram);
+  });
+});
+
+// ============================================================================
+// M1: collect() 接受外部 timestamp 测试
+// ============================================================================
+
+describe('HealthMetricsCollector M1: collect() 接受外部 timestamp', () => {
+  let collector: HealthMetricsCollector;
+
+  beforeEach(() => {
+    collector = new HealthMetricsCollector();
+  });
+
+  it('传入有效 timestamp 时使用传入值', () => {
+    const customTs = 1700000000000;
+    collector.collect({ pendingMessages: 5, timestamp: customTs });
+    const latest = collector.getLatest();
+    expect(latest!.timestamp).toBe(customTs);
+  });
+
+  it('不传 timestamp 时使用 Date.now()', () => {
+    const before = Date.now();
+    collector.collect({ pendingMessages: 5 });
+    const latest = collector.getLatest();
+    expect(latest!.timestamp).toBeGreaterThanOrEqual(before);
+  });
+
+  it('传入 0 时使用 Date.now()（无效值回退）', () => {
+    const before = Date.now();
+    collector.collect({ pendingMessages: 5, timestamp: 0 });
+    const latest = collector.getLatest();
+    expect(latest!.timestamp).toBeGreaterThanOrEqual(before);
+  });
+
+  it('传入负数时使用 Date.now()（无效值回退）', () => {
+    const before = Date.now();
+    collector.collect({ pendingMessages: 5, timestamp: -1 });
+    const latest = collector.getLatest();
+    expect(latest!.timestamp).toBeGreaterThanOrEqual(before);
   });
 });
