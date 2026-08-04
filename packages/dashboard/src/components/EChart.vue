@@ -55,8 +55,10 @@ const props = withDefaults(
     height?: string;
     /** 跳过主题注入（少数图表如 Graph 自定义颜色时使用） */
     skipTheme?: boolean;
+    /** UX-11: 无障碍 aria-label，描述图表内容 */
+    ariaLabel?: string;
   }>(),
-  { height: '300px', skipTheme: false },
+  { height: '300px', skipTheme: false, ariaLabel: '' },
 );
 
 // 转发 echarts click 事件（节点点击等交互）
@@ -114,6 +116,8 @@ onBeforeUnmount(() => {
     :option="mergedOption"
     autoresize
     :style="{ width: '100%', height }"
+    :aria-label="ariaLabel || undefined"
+    role="img"
     @click="(e: unknown) => $emit('click', e)"
   />
 </template>

@@ -31,6 +31,8 @@ export interface AssembleContext {
   l2QueryCache: Map<string, { results: any[]; ts: number }>;
   /** P2-1: L4 experience 检索结果 LRU 缓存（经验写入时整体失效） */
   l4QueryCache: Map<string, { results: any[]; ts: number }>;
+  /** BUG-6: L2/L4 查询缓存大小上限（原硬编码 QUERY_CACHE_MAX = 50） */
+  cacheSize: number;
 }
 
 /**

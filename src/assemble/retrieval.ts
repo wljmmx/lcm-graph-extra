@@ -27,7 +27,7 @@ const QUERY_CACHE_TTL_MS = 300 * 1000;
 /** P2-1: L2/L4 缓存 LRU 容量上限 */
 const QUERY_CACHE_MAX = 50;
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 /**
  * M6: 使用 SHA-256 替代 djb2 哈希算法。
@@ -42,7 +42,7 @@ function hashKey(s: string): string {
 /** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */
 function toRetrievalResult(r: any): RetrievalResult {
   return {
-    id: typeof r.docid === 'string' && r.docid ? r.docid : `qmd_${Math.random().toString(36).slice(2, 10)}`,
+    id: typeof r.docid === 'string' && r.docid ? r.docid : `qmd_${randomUUID().slice(0, 8)}`,
     content: `File: ${r.file ?? '?'}:${r.line ?? 0}\nTitle: ${r.title ?? ''}\n${r.snippet ?? ''}`,
     source: 'qmd' as const,
     type: 'raw' as const,
@@ -129,7 +129,8 @@ export async function performRetrieval(
             rerank: true
           }));
           // P2-1: 写入缓存（LRU 上限保护）
-          if (ctx.l2QueryCache.size >= QUERY_CACHE_MAX) {
+          // BUG-6: 使用 ctx.cacheSize 替代硬编码 QUERY_CACHE_MAX
+          if (ctx.l2QueryCache.size >= ctx.cacheSize) {
             const oldest = ctx.l2QueryCache.keys().next().value;
             if (oldest !== undefined) ctx.l2QueryCache.delete(oldest);
           }
@@ -237,7 +238,8 @@ export async function performRetrieval(
             });
           });
           // P2-1: 写入缓存（LRU 上限保护）
-          if (ctx.l4QueryCache.size >= QUERY_CACHE_MAX) {
+          // BUG-6: 使用 ctx.cacheSize 替代硬编码 QUERY_CACHE_MAX
+          if (ctx.l4QueryCache.size >= ctx.cacheSize) {
             const oldest = ctx.l4QueryCache.keys().next().value;
             if (oldest !== undefined) ctx.l4QueryCache.delete(oldest);
           }

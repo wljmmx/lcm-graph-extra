@@ -11,6 +11,7 @@
  */
 
 import type { RetrievalResult } from './types.js';
+import { randomUUID } from 'node:crypto';
 
 export interface EntityGroup {
   /** Normalized entity name */
@@ -101,7 +102,7 @@ function extractEntityName(r: RetrievalResult): string {
   }
 
   // Last resort: use result id (with fallback for undefined)
-  const id = typeof r.id === 'string' && r.id.length > 0 ? r.id : `unknown_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const id = typeof r.id === 'string' && r.id.length > 0 ? r.id : `unknown_${Date.now()}_${randomUUID().slice(0, 8)}`;
   return `entity_${id.slice(0, 8)}`;
 }
 

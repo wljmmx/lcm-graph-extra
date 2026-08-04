@@ -352,7 +352,12 @@ const pluginEntry: any = definePluginEntry({
         });
         graphAdapter = new GraphAdapter(
           resolveNeo4jConfig(pluginConfig),
-          { enabled: true, searchLimit: 5, embedding: resolveEmbeddingConfig(pluginConfig) ?? undefined },
+          {
+            enabled: true,
+            searchLimit: pluginConfig.retrieval?.graph?.searchLimit ?? 5,
+            searchCacheSize: pluginConfig.retrieval?.graph?.searchCacheSize ?? 50,
+            embedding: resolveEmbeddingConfig(pluginConfig) ?? undefined,
+          },
           logger,
         );
 
@@ -681,6 +686,8 @@ const pluginEntry: any = definePluginEntry({
           llmRerankCache,
           l2QueryCache,
           l4QueryCache,
+          // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
+          cacheSize: pluginConfig.retrieval?.cacheSize ?? 50,
           userProfile,
           setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
         };

@@ -134,6 +134,9 @@ const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' |
     { type: 'string', description: 'QMD MCP 端点地址', path: 'retrieval.qmd.mcpEndpoint' },
     { type: 'boolean', description: '启用图谱检索', path: 'retrieval.graph.enabled' },
     { type: 'number', description: '图谱检索条数上限', path: 'retrieval.graph.searchLimit' },
+    // BUG-6: 缓存容量可配置（原硬编码 50）
+    { type: 'number', description: '图谱检索缓存大小', path: 'retrieval.graph.searchCacheSize' },
+    { type: 'number', description: 'L2/L4 查询缓存大小', path: 'retrieval.cacheSize' },
   ],
 
   // ─── 上下文监控 ─────────────────────────────────────────────────────────
@@ -283,7 +286,11 @@ interface SchemaFieldDoc {
   defaultValue?: unknown;
 }
 
+// PERF-7: 缓存 schema 文档，避免每次请求重新构建（静态文档不变）
+let _schemaDocCache: SchemaFieldDoc[] | null = null;
+
 function buildSchemaDoc(): SchemaFieldDoc[] {
+  if (_schemaDocCache) return _schemaDocCache;
   const docs: SchemaFieldDoc[] = [
     // ─── 顶层字段 ─────────────────────────────────────────────────────────
     { path: 'summaryStrategy', type: 'string', description: '摘要策略：strategy | hybrid | full', updatable: true, defaultValue: 'strategy' },
@@ -329,6 +336,9 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'retrieval.qmd.mcpEndpoint', type: 'string', description: 'QMD MCP 端点地址', updatable: true, defaultValue: 'http://127.0.0.1:8081' },
     { path: 'retrieval.graph.enabled', type: 'boolean', description: '启用图谱检索', updatable: true, defaultValue: true },
     { path: 'retrieval.graph.searchLimit', type: 'number', description: '图谱检索条数上限', updatable: true, defaultValue: 5 },
+    // BUG-6: 缓存容量可配置（原硬编码 50）
+    { path: 'retrieval.graph.searchCacheSize', type: 'number', description: '图谱检索缓存大小', updatable: true, defaultValue: 50 },
+    { path: 'retrieval.cacheSize', type: 'number', description: 'L2/L4 查询缓存大小', updatable: true, defaultValue: 50 },
 
     // ─── 上下文监控 ──────────────────────────────────────────────────────
     { path: 'lcmMonitor.enabled', type: 'boolean', description: '是否启用上下文监控', updatable: true, defaultValue: true },
@@ -415,6 +425,7 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'neo4j.user', type: 'string', description: 'Neo4j 用户名', updatable: false, defaultValue: 'neo4j' },
     { path: 'neo4j.password', type: 'string', description: 'Neo4j 密码（脱敏）', updatable: false, defaultValue: '***' },
   ];
+  _schemaDocCache = docs;
   return docs;
 }
 

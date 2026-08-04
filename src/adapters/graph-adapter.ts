@@ -105,6 +105,8 @@ export interface GraphAdapterConfig {
   enabled: boolean;
   searchLimit: number;
   embedding?: EmbeddingConfig;
+  /** BUG-6: 图谱检索缓存大小可配置（原硬编码 DEFAULTS.graph.searchCacheSize = 50） */
+  searchCacheSize?: number;
 }
 
 const _gmpRequire = createRequire(import.meta.url);
@@ -263,12 +265,14 @@ export class GraphAdapter {
   private _llm?: (system: string, user: string) => Promise<string>;
 
   // P2-3 H-16: searchWithCache 的 LRU 容量与 TTL 改为引用 DEFAULTS.graph
-  private searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+  private searchCache!: LRUCache<string, { value: any; expiresAt: number }>;
 
   constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: Logger) {
     this.neo4jConfig = neo4jConfig;
     this.config = config;
     this.logger = resolveLogger(logger);
+    // BUG-6: 使用 config.searchCacheSize 替代硬编码 DEFAULTS.graph.searchCacheSize
+    this.searchCache = new LRUCache(config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
   }
 
   get isConnected(): boolean {
@@ -441,7 +445,7 @@ export class GraphAdapter {
       }
       this._recaller = null;
       this._embedFn = null;
-      this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+      this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
 
       if (this.mod && typeof this.mod.getDriver === 'function') {
         try {
@@ -1222,13 +1226,13 @@ export class GraphAdapter {
               try {
                 await this._ensureRecaller();
               } catch { /* recaller init non-fatal */ }
-              this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+              this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
               return true;
             }
           }
           const reconnected = await this.connect();
           if (reconnected) {
-            this.searchCache = new LRUCache(DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+            this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
             this.logger?.info?.('[graph-adapter] health check: reconnected successfully, search cache cleared');
             this._lastError = null;
           } else if (this._lastError) {

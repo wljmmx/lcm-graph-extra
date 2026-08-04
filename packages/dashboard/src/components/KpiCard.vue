@@ -19,8 +19,11 @@ const props = withDefaults(
     trend?: number;
     /** 骨架屏：loading=true 时显示占位 */
     loading?: boolean;
+    /** UX-4: 反向指标模式。当为 true 时，趋势箭头颜色反转：
+     *  上升=绿色(好)，下降=红色(坏)。适用于熔断失败数、延迟等"越低越好"的指标。 */
+    reverseIndicator?: boolean;
   }>(),
-  { loading: false },
+  { loading: false, reverseIndicator: false },
 );
 
 const emit = defineEmits<{
@@ -41,10 +44,11 @@ const valueColor = computed(() =>
 );
 
 // 趋势箭头颜色：上升红 / 下降绿 / 持平灰
+// UX-4: reverseIndicator 为 true 时反转颜色语义（上升=好=绿，下降=坏=红）
 const trendColor = computed(() => {
   if (props.trend === undefined) return 'var(--color-text-secondary)';
-  if (props.trend > 0) return 'var(--color-danger)';
-  if (props.trend < 0) return 'var(--color-success)';
+  if (props.trend > 0) return props.reverseIndicator ? 'var(--color-success)' : 'var(--color-danger)';
+  if (props.trend < 0) return props.reverseIndicator ? 'var(--color-danger)' : 'var(--color-success)';
   return 'var(--color-text-secondary)';
 });
 const trendArrow = computed(() => {

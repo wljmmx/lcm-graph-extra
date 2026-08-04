@@ -14,7 +14,7 @@
  *          db 为 null / 历史空 → KPI与时序图显示"无历史数据"；
  *          agent.error → 警告提示。
  */
-import { computed, ref, h, watch, onMounted } from 'vue';
+import { computed, ref, h, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
 import { useRouter, useRoute } from 'vue-router';
 import {
@@ -35,6 +35,8 @@ import {
   NTable,
   NDivider,
   NButton,
+  NPopconfirm,
+  useMessage,
 } from 'naive-ui';
 import EChart from '../components/EChart.vue';
 import KpiCard from '../components/KpiCard.vue';
@@ -52,9 +54,17 @@ import {
 } from '../api/health';
 import { formatTime, formatTimeWithSeconds, formatBucketLabel, bucketKeyBySize, timeRangeToMs, timeRangeLabel, bucketSizeLabel, type TimeRange, type BucketSize } from '../utils/format';
 import { fetchMoaPerformance, type MoaPerformanceData } from '../api/moa';
+import { invokeResetBreaker } from '../api/maintain';
 import { useTheme } from '../composables/useTheme';
 
 const { isDark } = useTheme();
+const message = useMessage();
+
+// UX-14: 窄屏检测，用于自适应图表 X 轴标签旋转
+const windowWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1024);
+function onResize() { windowWidth.value = window.innerWidth; }
+onMounted(() => { window.addEventListener('resize', onResize); });
+onBeforeUnmount(() => { window.removeEventListener('resize', onResize); });
 
 // ===== 图表颜色语义常量（跟随主题切换） =====
 // 统一语义：蓝=主数据，绿=成功/正向，橙=警告/阈值，红=危险/反向，紫=辅助
@@ -119,22 +129,26 @@ const { data: latestData, isLoading: latestLoading, isError: latestIsError } = u
   queryKey: ['health-latest'],
   queryFn: fetchHealthLatest,
   refetchInterval: 10_000,
+  staleTime: 5_000, // PERF-8: 5s 内数据视为新鲜，避免重复请求
 });
 const { data: historyData, isLoading: historyLoading, isError: historyIsError } = useQuery({
   queryKey: ['health-history', historyN], // 粒度变化时重新拉取
   queryFn: () => fetchHealthHistory(historyN.value),
   refetchInterval: 60_000,
+  staleTime: 30_000, // PERF-8: 30s 内数据视为新鲜
 });
 const { data: agentData, isLoading: agentLoading, isError: agentIsError } = useQuery({
   queryKey: ['agent-status'],
   queryFn: fetchAgentStatus,
   refetchInterval: 30_000,
+  staleTime: 15_000, // PERF-8: 15s 内数据视为新鲜
 });
 // G-5: 图谱健康（gm-pro getGraphHealth，降级到本地 graphAdapter 推断）
 const { data: graphHealthData, isLoading: graphHealthLoading, isError: graphHealthIsError } = useQuery({
   queryKey: ['graph-health'],
   queryFn: fetchGraphHealth,
   refetchInterval: 30_000,
+  staleTime: 15_000, // PERF-8: 15s 内数据视为新鲜
 });
 
 // MoA 性能数据（30s 轮询）
@@ -142,6 +156,7 @@ const { data: moaPerfData, isLoading: moaPerfLoading } = useQuery({
   queryKey: ['moa-performance'],
   queryFn: fetchMoaPerformance,
   refetchInterval: 30_000,
+  staleTime: 15_000, // PERF-8: 15s 内数据视为新鲜
 });
 
 const moaPerf = computed<MoaPerformanceData | null>(() => moaPerfData.value?.data ?? null);
@@ -278,8 +293,18 @@ const kpiTrend = computed(() => {
   };
 });
 
-// ===== 最近更新时间（HH:mm:ss） =====
+// =====// 最近更新时间（HH:mm:ss）
 const lastUpdated = computed(() => formatTimeWithSeconds(db.value?.timestamp));
+
+// UX-2: 全局刷新状态指示器
+const isAnyLoading = computed(() => latestLoading.value || historyLoading.value || agentLoading.value || graphHealthLoading.value || moaPerfLoading.value);
+const isAnyError = computed(() => latestIsError.value || historyIsError.value || agentIsError.value || graphHealthIsError.value);
+const refreshStatus = computed(() => {
+  if (isAnyError.value) return { label: '部分服务异常', type: 'error' as const };
+  if (isAnyLoading.value && !latestData.value) return { label: '正在加载…', type: 'info' as const };
+  if (isAnyLoading.value) return { label: '刷新中…', type: 'default' as const };
+  return { label: '就绪', type: 'success' as const };
+});
 
 // ===== P1-2: 熔断器状态（来自 healthLatest，NTag 颜色标记） =====
 // 颜色规则：available=绿 / failures>0=红 / 否则灰
@@ -330,8 +355,28 @@ const cbSubsystemStats = computed<CbSubsystemStat[]>(() => {
   const d = db.value;
   if (!d) return [];
 
-  // 从历史快照计算每子系统成功率与开合次数
+  // PERF-4: 缓存熔断器统计结果，仅在历史快照数量或最新时间戳变化时重新计算。
+  // 修复前：每次 rawHistoryAsc 变化都全量遍历历史快照计算成功率和开合次数。
   const history = rawHistoryAsc.value;
+  const cacheKey = `${history.length}:${history.length > 0 ? history[history.length - 1].timestamp : 0}`;
+  if (_cbStatsCache && _cbStatsCache.key === cacheKey) {
+    // 更新 current 状态（db 已变化但历史未变，仅刷新 available/failures/tagType）
+    return _cbStatsCache.data.map((item) => {
+      const key = item.key;
+      let currentAvailable: boolean;
+      let currentFailures: number;
+      if (key === 'lcm') { currentAvailable = d.cbLcmAvailable; currentFailures = d.cbLcmFailures; }
+      else if (key === 'qmd') { currentAvailable = d.cbQmdAvailable; currentFailures = d.cbQmdFailures; }
+      else { currentAvailable = d.cbNeo4jAvailable; currentFailures = d.cbNeo4jFailures; }
+      return {
+        ...item,
+        available: currentAvailable,
+        failures: currentFailures,
+        tagType: (currentAvailable ? 'success' : currentFailures > 0 ? 'error' : 'default') as 'success' | 'error' | 'default',
+      };
+    });
+  }
+
   const calc = (key: string, label: string, currentAvailable: boolean, currentFailures: number) => {
     let availableCount = 0;
     let totalCount = 0;
@@ -340,10 +385,9 @@ const cbSubsystemStats = computed<CbSubsystemStat[]>(() => {
 
     for (const snap of history) {
       let available: boolean;
-      let failures: number;
-      if (key === 'lcm') { available = snap.cbLcmAvailable; failures = snap.cbLcmFailures; }
-      else if (key === 'qmd') { available = snap.cbQmdAvailable; failures = snap.cbQmdFailures; }
-      else { available = snap.cbNeo4jAvailable; failures = snap.cbNeo4jFailures; }
+      if (key === 'lcm') available = snap.cbLcmAvailable;
+      else if (key === 'qmd') available = snap.cbQmdAvailable;
+      else available = snap.cbNeo4jAvailable;
 
       if (available) availableCount++;
       totalCount++;
@@ -360,12 +404,36 @@ const cbSubsystemStats = computed<CbSubsystemStat[]>(() => {
     return { key, label, available: currentAvailable, failures: currentFailures, successRate, openCloseCount: transitions, tagType };
   };
 
-  return [
+  const result = [
     calc('lcm', 'LCM', d.cbLcmAvailable, d.cbLcmFailures),
     calc('qmd', 'QMD', d.cbQmdAvailable, d.cbQmdFailures),
     calc('neo4j', 'Neo4j', d.cbNeo4jAvailable, d.cbNeo4jFailures),
   ];
+  _cbStatsCache = { key: cacheKey, data: result };
+  return result;
 });
+
+// PERF-4: 熔断器统计缓存
+let _cbStatsCache: { key: string; data: CbSubsystemStat[] } | null = null;
+
+// UX-7: 熔断器重置（带二次确认）
+const resettingBreaker = ref<string | null>(null);
+async function handleResetBreaker(name: string): Promise<void> {
+  if (resettingBreaker.value) return;
+  resettingBreaker.value = name;
+  try {
+    const res = await invokeResetBreaker(name);
+    if (res.success) {
+      message.success(`熔断器 ${name.toUpperCase()} 已重置`);
+    } else {
+      message.error(`重置失败: ${res.error || '未知错误'}`);
+    }
+  } catch (err: any) {
+    message.error(`重置失败: ${err?.message || String(err)}`);
+  } finally {
+    resettingBreaker.value = null;
+  }
+}
 
 // ===== P1-6: 当前压力 Tier 徽章 =====
 // 根据 tierLow/tierMedium/tierHigh 值判断当前 tier（值最大的那个即为当前 tier）
@@ -532,12 +600,15 @@ const rangeBucketHint = computed(() => {
   return hint;
 });
 
+// UX-14: 窄屏图表 X 轴标签自适应旋转角度
+const xAxisLabelRotate = computed(() => windowWidth.value < 768 ? 45 : 0);
+
 // 时序图1：压力信号（双 Y 轴，左：数量，右：比率 0-1）
 const pressureOption = computed(() => ({
   tooltip: { trigger: 'axis' },
   legend: { data: ['待处理消息', '摘要片段', 'Token 占用比'] },
   grid: { left: 56, right: 64, top: 36, bottom: 28 },
-  xAxis: { type: 'category', data: timeLabels.value, boundaryGap: false },
+  xAxis: { type: 'category', data: timeLabels.value, boundaryGap: false, axisLabel: { rotate: xAxisLabelRotate.value } },
   yAxis: [
     { type: 'value', name: '数量', position: 'left' },
     { type: 'value', name: '比率', position: 'right', min: 0, max: 1 },
@@ -551,6 +622,8 @@ const pressureOption = computed(() => ({
       data: historyAsc.value.map((s) => s.pendingMessages),
       lineStyle: { color: CHART.value.primary },
       itemStyle: { color: CHART.value.primary },
+      symbol: 'circle',
+      symbolSize: 4,
     },
     {
       name: '摘要片段',
@@ -558,8 +631,10 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 0,
       data: historyAsc.value.map((s) => s.summaryFragments),
-      lineStyle: { color: CHART.value.info },
+      lineStyle: { color: CHART.value.info, type: 'dashed' },
       itemStyle: { color: CHART.value.info },
+      symbol: 'diamond',
+      symbolSize: 4,
     },
     {
       name: 'Token 占用比',
@@ -567,8 +642,10 @@ const pressureOption = computed(() => ({
       smooth: true,
       yAxisIndex: 1,
       data: historyAsc.value.map((s) => s.maxTokenRatio),
-      lineStyle: { color: CHART.value.danger },
+      lineStyle: { color: CHART.value.danger, type: 'dotted' },
       itemStyle: { color: CHART.value.danger },
+      symbol: 'triangle',
+      symbolSize: 4,
     },
   ],
 }));
@@ -581,7 +658,7 @@ const latencyOption = computed(() => ({
   tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
   legend: { data: ['Assemble', 'L2', 'L3', 'L4'] },
   grid: { left: 56, right: 20, top: 36, bottom: 28 },
-  xAxis: { type: 'category', data: timeLabels.value },
+  xAxis: { type: 'category', data: timeLabels.value, axisLabel: { rotate: xAxisLabelRotate.value } },
   yAxis: { type: 'value', name: 'ms' },
   series: [
     {
@@ -622,7 +699,7 @@ const tierOption = computed(() => ({
   tooltip: { trigger: 'axis' },
   legend: { data: ['Low', 'Medium', 'High'] },
   grid: { left: 56, right: 20, top: 36, bottom: 28 },
-  xAxis: { type: 'category', data: timeLabels.value, boundaryGap: false },
+  xAxis: { type: 'category', data: timeLabels.value, boundaryGap: false, axisLabel: { rotate: xAxisLabelRotate.value } },
   yAxis: { type: 'value', name: '次数' },
   series: [
     {
@@ -632,6 +709,8 @@ const tierOption = computed(() => ({
       areaStyle: { color: isDark.value ? 'rgba(54,173,106,0.25)' : 'rgba(24,160,88,0.15)' },
       lineStyle: { color: CHART.value.success },
       itemStyle: { color: CHART.value.success },
+      symbol: 'circle',
+      symbolSize: 3,
       data: historyAsc.value.map((s) => s.tierLow),
     },
     {
@@ -639,8 +718,10 @@ const tierOption = computed(() => ({
       type: 'line',
       stack: 'tier',
       areaStyle: { color: isDark.value ? 'rgba(252,176,64,0.25)' : 'rgba(240,160,32,0.15)' },
-      lineStyle: { color: CHART.value.warning },
+      lineStyle: { color: CHART.value.warning, type: 'dashed' },
       itemStyle: { color: CHART.value.warning },
+      symbol: 'diamond',
+      symbolSize: 3,
       data: historyAsc.value.map((s) => s.tierMedium),
     },
     {
@@ -648,8 +729,10 @@ const tierOption = computed(() => ({
       type: 'line',
       stack: 'tier',
       areaStyle: { color: isDark.value ? 'rgba(222,81,105,0.25)' : 'rgba(208,48,80,0.15)' },
-      lineStyle: { color: CHART.value.danger },
+      lineStyle: { color: CHART.value.danger, type: 'dotted' },
       itemStyle: { color: CHART.value.danger },
+      symbol: 'triangle',
+      symbolSize: 3,
       data: historyAsc.value.map((s) => s.tierHigh),
     },
   ],
@@ -866,9 +949,12 @@ const moaComplexityTrendOption = computed(() => {
     };
 
     const moaTimestamps = new Set((moaHistory ?? []).map((r) => r.timestamp));
+    // PERF-6: 使用 Map 预建索引，避免 sorted.indexOf(r) 的 O(n²) 查找。
+    // 修复前：moaPoints 中 .map((r) => [sorted.indexOf(r), r.score]) 每次遍历 sorted 查找。
+    const sortedIndexMap = new Map(sorted.map((r, i) => [r.timestamp, i]));
     const moaPoints = sorted
       .filter((r) => moaTimestamps.has(r.timestamp))
-      .map((r) => [sorted.indexOf(r), r.score]);
+      .map((r) => [sortedIndexMap.get(r.timestamp) ?? 0, r.score]);
 
     const moaSeries = moaPoints.length > 0 ? {
       name: 'MoA 触发',
@@ -1148,7 +1234,13 @@ const moaLatencyPhaseOption = computed(() => {
     <!-- 标题行 -->
     <div class="monitor-header">
       <h2 style="margin: 0">性能监控</h2>
-      <span class="last-updated">最近更新: {{ lastUpdated }}</span>
+      <div class="header-right">
+        <!-- UX-2: 全局刷新状态指示器 -->
+        <NTag :type="refreshStatus.type" size="small" :bordered="false">
+          {{ refreshStatus.label }}
+        </NTag>
+        <span class="last-updated">最近更新: {{ lastUpdated }}</span>
+      </div>
     </div>
 
     <NTabs
@@ -1162,7 +1254,7 @@ const moaLatencyPhaseOption = computed(() => {
       <!-- ===== Tab 1: 总览（KPI + 时序图） ===== -->
       <NTabPane
         name="overview"
-        tab="总览"
+        tab="📊 总览"
         display-directive="show"
       >
         <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
@@ -1173,6 +1265,7 @@ const moaLatencyPhaseOption = computed(() => {
               :threshold="100"
               :trend="kpiTrend.pending"
               :loading="latestLoading"
+              reverse-indicator
             />
           </NGi>
           <NGi>
@@ -1183,6 +1276,7 @@ const moaLatencyPhaseOption = computed(() => {
               :threshold="80"
               :trend="kpiTrend.tokenRatio"
               :loading="latestLoading"
+              reverse-indicator
             />
           </NGi>
           <NGi>
@@ -1193,6 +1287,7 @@ const moaLatencyPhaseOption = computed(() => {
               :threshold="2000"
               :trend="kpiTrend.assembleMs"
               :loading="latestLoading"
+              reverse-indicator
             />
           </NGi>
           <NGi>
@@ -1202,6 +1297,7 @@ const moaLatencyPhaseOption = computed(() => {
               :threshold="0"
               :trend="kpiTrend.cbFailures"
               :loading="latestLoading"
+              reverse-indicator
             />
           </NGi>
         </NGrid>
@@ -1277,6 +1373,7 @@ const moaLatencyPhaseOption = computed(() => {
             :options="timeRangeOptions"
             size="small"
             style="width: 140px"
+            aria-label="选择时间范围"
           />
           <span class="granularity-label" style="margin-left: 12px">统计粒度：</span>
           <NSelect
@@ -1284,6 +1381,7 @@ const moaLatencyPhaseOption = computed(() => {
             :options="bucketSizeOptions"
             size="small"
             style="width: 120px"
+            aria-label="选择统计粒度"
           />
           <span class="granularity-hint">
             {{ rangeBucketHint }}
@@ -1291,7 +1389,7 @@ const moaLatencyPhaseOption = computed(() => {
         </div>
         <NSpace vertical :size="12">
           <NCard title="压力信号（待处理消息 / 摘要片段 / Token 占用比）" size="small">
-            <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" />
+            <EChart v-if="historyAsc.length" :option="pressureOption" height="280px" aria-label="压力信号时序图：待处理消息、摘要片段和 Token 占用比随时间变化" />
             <div v-else-if="historyLoading" class="chart-loading">
               <NSpin size="small" />
             </div>
@@ -1308,7 +1406,7 @@ const moaLatencyPhaseOption = computed(() => {
           <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
             <NGi>
               <NCard title="检索延迟（Assemble 折线 + L2/L3/L4 独立柱）" size="small">
-                <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" />
+                <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" aria-label="检索延迟图：Assemble 总耗时折线和 L2/L3/L4 各层耗时柱状图" />
                 <div v-else-if="historyLoading" class="chart-loading">
                   <NSpin size="small" />
                 </div>
@@ -1321,7 +1419,7 @@ const moaLatencyPhaseOption = computed(() => {
             </NGi>
             <NGi>
               <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
-                <EChart v-if="historyAsc.length" :option="tierOption" height="280px" />
+                <EChart v-if="historyAsc.length" :option="tierOption" height="280px" aria-label="Tier 分布堆叠面积图：Low、Medium、High 三级压力分布随时间变化" />
                 <div v-else-if="historyLoading" class="chart-loading">
                   <NSpin size="small" />
                 </div>
@@ -1337,7 +1435,7 @@ const moaLatencyPhaseOption = computed(() => {
 
         <!-- P1-2 / P1-6: 熔断器状态 + 最近 10 次 tier 趋势 -->
         <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen" style="margin-top: 12px">
-          <!-- P1-2: 熔断器状态卡片（含成功率 + 开合次数） -->
+          <!-- P1-2: 熔断器状态卡片（含成功率 + 开合次数 + 重置按钮） -->
           <NGi>
             <NCard title="熔断器状态" size="small">
               <template v-if="cbSubsystemStats.length">
@@ -1355,6 +1453,22 @@ const moaLatencyPhaseOption = computed(() => {
                     <span class="cb-stat muted mono">
                       成功率 {{ item.successRate }}% · 开合 {{ item.openCloseCount }} 次
                     </span>
+                    <!-- UX-7: 熔断器重置按钮添加二次确认 -->
+                    <NPopconfirm
+                      @positive-click="handleResetBreaker(item.key)"
+                    >
+                      <template #trigger>
+                        <NButton
+                          size="tiny"
+                          :type="item.available ? 'default' : 'warning'"
+                          :loading="resettingBreaker === item.key"
+                          :disabled="resettingBreaker !== null && resettingBreaker !== item.key"
+                        >
+                          重置
+                        </NButton>
+                      </template>
+                      确定要重置 {{ item.label }} 熔断器吗？这将清零失败计数并关闭熔断状态。
+                    </NPopconfirm>
                   </div>
                 </NSpace>
               </template>
@@ -1459,7 +1573,7 @@ const moaLatencyPhaseOption = computed(() => {
       
       <NTabPane
         name="panels"
-        tab="状态面板"
+        tab="🔧 服务状态"
         display-directive="show"
       >
         <!-- 错误态穿透（H2 修复）：聚合错误条，替代把错误误显示为"插件未响应" -->
@@ -1593,6 +1707,7 @@ const moaLatencyPhaseOption = computed(() => {
                 v-if="cascadeTopArms.length"
                 :option="betaOption"
                 height="220px"
+                aria-label="Cascade Top 10 臂分布柱状图：各臂的 alpha 和 beta 权重"
               />
               <NEmpty
                 v-else
@@ -1806,7 +1921,7 @@ const moaLatencyPhaseOption = computed(() => {
       <!-- ===== Tab 3: MoA 性能 ===== -->
       <NTabPane
         name="moa"
-        tab="MoA 性能"
+        tab="🤖 MoA 多模型"
         display-directive="show"
       >
         <div v-if="moaPerfLoading && !moaPerf" class="chart-loading">
@@ -1945,6 +2060,7 @@ const moaLatencyPhaseOption = computed(() => {
                         size="tiny"
                         style="width: 90px"
                         placeholder="聚合"
+                        aria-label="选择复杂度聚合维度"
                       />
                       <NSelect
                         v-model:value="complexityTimeRange"
@@ -1952,16 +2068,17 @@ const moaLatencyPhaseOption = computed(() => {
                         size="tiny"
                         style="width: 110px"
                         placeholder="时间范围"
+                        aria-label="选择复杂度时间范围"
                       />
                     </div>
                   </div>
                 </template>
-                <EChart :option="moaComplexityTrendOption" height="300px" :skip-theme="true" />
+                <EChart :option="moaComplexityTrendOption" height="300px" :skip-theme="true" aria-label="MoA 复杂度趋势图：全量查询复杂度和 MoA 触发点随时间变化" />
               </NCard>
             </NGi>
             <NGi>
               <NCard title="复杂度分布（全量 vs MoA 触发）" size="small" :bordered="true">
-                <EChart :option="moaComplexityDistOption" height="300px" :skip-theme="true" />
+                <EChart :option="moaComplexityDistOption" height="300px" :skip-theme="true" aria-label="MoA 复杂度分布对比柱状图：全量查询与 MoA 触发在低中高三个复杂度区间的分布" />
               </NCard>
             </NGi>
           </NGrid>
@@ -2010,7 +2127,7 @@ const moaLatencyPhaseOption = computed(() => {
             <!-- 延迟阶段分解图 -->
             <NGi>
               <NCard title="最近 10 次延迟阶段分解" size="small" :bordered="true">
-                <EChart :option="moaLatencyPhaseOption" height="300px" :skip-theme="true" />
+                <EChart :option="moaLatencyPhaseOption" height="300px" :skip-theme="true" aria-label="MoA 最近 10 次延迟阶段分解堆叠柱状图：参考模型和聚合模型耗时对比" />
               </NCard>
             </NGi>
           </NGrid>
@@ -2117,6 +2234,11 @@ const moaLatencyPhaseOption = computed(() => {
   align-items: baseline;
   justify-content: space-between;
 }
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .last-updated {
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
@@ -2199,6 +2321,12 @@ const moaLatencyPhaseOption = computed(() => {
   font-size: var(--fs-caption);
   color: var(--color-text-secondary);
   opacity: 0.8;
+  /* UX-5: 防止选择器提示文字溢出 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+  flex-shrink: 1;
 }
 
 /* ===== P1-6: 当前压力 Tier 徽章 ===== */
@@ -2503,5 +2631,31 @@ const moaLatencyPhaseOption = computed(() => {
 
 .num {
   font-variant-numeric: tabular-nums;
+}
+
+/* UX-14: 窄屏图表 X 轴标签自适应 */
+@media (max-width: 768px) {
+  .granularity-bar {
+    flex-wrap: wrap;
+  }
+  .trend-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .trend-selectors {
+    width: 100%;
+  }
+  /* UX-15: 窄屏 MoA 趋势图文字重叠 */
+  .model-table-wrap {
+    font-size: var(--fs-caption);
+  }
+  .model-table th,
+  .model-table td {
+    padding: 4px 4px;
+  }
+  .model-name-cell {
+    max-width: 80px;
+  }
 }
 </style>

@@ -240,7 +240,11 @@ export const PluginConfigSchema = Type.Object({
     graph: Type.Optional(Type.Object({
       enabled: Type.Boolean({ default: true }),
       searchLimit: Type.Number({ default: 5, minimum: 1 }),
+      // BUG-6: 图谱检索缓存大小可配置（原硬编码 DEFAULTS.graph.searchCacheSize = 50）
+      searchCacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),
     })),
+    // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
+    cacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),
   })),
 
   lcmMonitor: Type.Optional(Type.Object({

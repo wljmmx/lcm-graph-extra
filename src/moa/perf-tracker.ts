@@ -11,6 +11,7 @@ import { mkdirSync, existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 // ============================================================================
 // 类型定义
@@ -547,7 +548,8 @@ export { PERF_FILE };
 // ============================================================================
 
 function generateId(): string {
-  return `moa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  // BUG-8: 使用 crypto.randomUUID() 替代 Math.random()，避免非加密安全随机数碰撞风险。
+  return `moa-${Date.now()}-${randomUUID().slice(0, 8)}`;
 }
 
 function avg(arr: number[]): number {
