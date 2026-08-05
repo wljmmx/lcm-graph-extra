@@ -245,6 +245,9 @@ export const PluginConfigSchema = Type.Object({
     })),
     // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
     cacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),
+    // BUG-7: QMD vec/hyde 查询文本最大字符数，超过则截断（embedding 模型 context window 限制）
+    // qwen3-embed 支持 32768 tokens，中英文约 1-2 chars/token，默认 8000 chars 安全余量充足
+    qmdQueryMaxChars: Type.Optional(Type.Number({ default: 8000, minimum: 500 })),
   })),
 
   lcmMonitor: Type.Optional(Type.Object({

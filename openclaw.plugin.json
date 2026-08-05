@@ -244,6 +244,12 @@
             "default": 50,
             "minimum": 10,
             "description": "L2/L4查询缓存大小"
+          },
+          "qmdQueryMaxChars": {
+            "type": "integer",
+            "default": 8000,
+            "minimum": 500,
+            "description": "QMD vec/hyde查询文本最大字符数，超过则截断（embedding模型context window限制）。qwen3-embed支持32768 tokens，默认8000 chars安全余量充足"
           }
         }
       },

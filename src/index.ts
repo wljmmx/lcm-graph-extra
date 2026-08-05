@@ -349,6 +349,7 @@ const pluginEntry: any = definePluginEntry({
           cliTimeout: cliTimeout,
           cliFallbackSearchType: cliFallbackSearchType,
           enableCliFallback: pluginConfig.enableCliFallback,
+          qmdQueryMaxChars: pluginConfig.retrieval?.qmdQueryMaxChars,
         });
         graphAdapter = new GraphAdapter(
           resolveNeo4jConfig(pluginConfig),

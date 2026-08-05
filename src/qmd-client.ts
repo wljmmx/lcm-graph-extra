@@ -87,6 +87,8 @@ export interface QmdClientOptions {
   enableCliFallback?: boolean;
   /** P3-B3: 注入统一 logger；未提供时降级到 globalLogger。 */
   logger?: Logger;
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数，超过则截断。默认 8000（适配 qwen3-embed 32768 tokens）。 */
+  qmdQueryMaxChars?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +124,8 @@ export const QMD_CLIENT_DEFAULTS = {
   pingInterval: 30_000,
   /** 默认启用CLI降级，保持向后兼容。用户可设为false禁用CLI避免卡死。 */
   enableCliFallback: true,
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数。默认 8000（适配 qwen3-embed 32768 tokens）。 */
+  qmdQueryMaxChars: 8000,
 };
 
 /** @deprecated 使用 QMD_CLIENT_DEFAULTS，保留向后兼容 */
@@ -144,6 +148,8 @@ export class QmdClient {
   private readonly enableCliFallback: boolean;
   /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
   private readonly logger: Logger;
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数，超过则截断。 */
+  private readonly qmdQueryMaxChars: number;
 
   /** null = undetermined, true = REST可用, false = REST不可用 */
   private restAvailable: boolean | null = null;
@@ -162,6 +168,7 @@ export class QmdClient {
     this.pingInterval = opts.pingInterval ?? DEFAULTS.pingInterval;
     this.enableCliFallback = opts.enableCliFallback ?? DEFAULTS.enableCliFallback;
     this.logger = resolveLogger(opts.logger);
+    this.qmdQueryMaxChars = opts.qmdQueryMaxChars ?? DEFAULTS.qmdQueryMaxChars;
   }
 
   // ===================== public API =======================================
@@ -223,6 +230,31 @@ export class QmdClient {
           return { ...s, query: q };
         }),
       };
+    }
+    // BUG-7: vec/hyde 查询文本截断，防止超过 embedding 模型 context window
+    // lex (BM25) 不受 token 限制，不截断；仅 vec/hyde 受 embedding 模型 context window 限制
+    if (Array.isArray(params.searches)) {
+      const maxChars = this.qmdQueryMaxChars;
+      let anyTruncated = false;
+      params = {
+        ...params,
+        searches: params.searches.map((s) => {
+          if ((s.type === 'vec' || s.type === 'hyde') && typeof s.query === 'string' && s.query.length > maxChars) {
+            anyTruncated = true;
+            // 保留前70%和后30%，兼顾开头语义和结尾关键信息
+            const headLen = Math.floor(maxChars * 0.7);
+            const tailLen = maxChars - headLen;
+            return { ...s, query: s.query.slice(0, headLen) + s.query.slice(-tailLen) };
+          }
+          return s;
+        }),
+      };
+      if (anyTruncated) {
+        this.logger?.warn?.(
+          `[qmd-client] vec/hyde query truncated to ${maxChars} chars (embedding model context window limit)`,
+          { maxChars, searchesCount: params.searches.length },
+        );
+      }
     }
     // 1. MCP 优先 — 完整 hybrid 搜索能力（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
     if (this.mcpAvailable !== false) {
