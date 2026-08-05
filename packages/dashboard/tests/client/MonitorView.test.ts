@@ -60,6 +60,21 @@ vi.mock('../../src/composables/useTheme', async () => {
   };
 });
 
+// mock naive-ui useMessage（MonitorView 使用 useMessage 显示操作反馈）
+vi.mock('naive-ui', async () => {
+  const actual = await vi.importActual('naive-ui');
+  return {
+    ...(actual as object),
+    useMessage: () => ({
+      success: vi.fn(),
+      error: vi.fn(),
+      warning: vi.fn(),
+      info: vi.fn(),
+      loading: vi.fn(),
+    }),
+  };
+});
+
 // mock vue-router（MonitorView 使用 useRouter/useRoute 同步 tab）
 vi.mock('vue-router', async () => {
   const { ref } = await import('vue');
