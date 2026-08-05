@@ -274,8 +274,11 @@ export class QmdClient {
         this.scheduleRecovery();
         const _mcpErr = (err as Error).message;
         const _mcpStack = (err as Error).stack;
-        // 判断是否 embed 维度错误（REST 降级时需避开 vec）
-        const isEmbedError = /dimension|embedding|mismatch/i.test(_mcpErr);
+        // 判断是否 embed 相关错误（REST 降级时需避开 vec，切为 lex-only）
+        // 覆盖场景：
+        //   - dimension/embedding/mismatch：模型维度不匹配
+        //   - context size / exceed the context：文档超过 embedding 模型 context window
+        const isEmbedError = /dimension|embedding|mismatch|context.?size/i.test(_mcpErr);
         this.lastMcpErrorIsEmbed = isEmbedError;
         if (isEmbedError) {
           this.logger.warn("[qmd-client] MCP embed error (likely model dim mismatch), falling back to REST lex-only", { err: _mcpErr });
