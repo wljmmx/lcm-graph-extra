@@ -20,7 +20,19 @@
       "lcmg_get_document",
       "lcmg_batch_get",
       "lcmg_forget",
-      "lcmg_diagnose"
+      "lcmg_diagnose",
+      "lcmg_backup",
+      "lcmg_restore",
+      "lcmg_sync",
+      "lcmg_maintain",
+      "lcmg_distill",
+      "lcmg_distill_retry",
+      "lcmg_backfill",
+      "lcmg_compact",
+      "lcmg_reset_breaker",
+      "lcmg_config_get",
+      "lcmg_config_set",
+      "lcmg_moa_reply"
     ]
   },
   "toolMetadata": {
@@ -50,6 +62,42 @@
     },
     "lcmg_diagnose": {
       "description": "System diagnostics: Neo4j, lossless-claw DB, QMD MCP health, circuit breaker states"
+    },
+    "lcmg_backup": {
+      "description": "Full backup: export Neo4j nodes/relationships, lossless-claw conversations, and workspace memory files to JSON"
+    },
+    "lcmg_restore": {
+      "description": "Restore from backup JSON to Neo4j, lossless-claw, and memory files"
+    },
+    "lcmg_sync": {
+      "description": "Three-way data consistency check and repair (lossless-claw ↔ Neo4j ↔ files), detect orphan nodes and timestamp drift"
+    },
+    "lcmg_maintain": {
+      "description": "Trigger knowledge graph maintenance: dedup, PageRank, community detection, and debt table cleanup"
+    },
+    "lcmg_distill": {
+      "description": "Manually trigger experience distillation: extract PENDING experiences into DISTILLED structured experiences via LLM"
+    },
+    "lcmg_distill_retry": {
+      "description": "Reset failed distillation experiences from FAILED back to PENDING so they can be re-distilled"
+    },
+    "lcmg_backfill": {
+      "description": "Re-extract experiences from historical conversations into the PENDING queue, for backfilling lost experiences after repair"
+    },
+    "lcmg_compact": {
+      "description": "Manually trigger session context compaction, processing the most urgent compaction debt"
+    },
+    "lcmg_reset_breaker": {
+      "description": "Reset circuit breaker state for a specific subsystem (lcm/qmd/neo4j)"
+    },
+    "lcmg_config_get": {
+      "description": "View runtime configuration (sensitive fields masked), supports dot-path queries for specific fields"
+    },
+    "lcmg_config_set": {
+      "description": "Update runtime configuration (whitelist-controlled), writes to openclaw.json, some fields require restart"
+    },
+    "lcmg_moa_reply": {
+      "description": "Retrieve MoA multi-model pre-computed aggregated reply, returns pending status while aggregation is in progress"
     }
   },
   "configSchema": {
