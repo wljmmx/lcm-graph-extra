@@ -52,6 +52,7 @@ export interface ConfigSchemaResponse {
 
 export interface ConfigResponse {
   ok: boolean;
+  configExists?: boolean;
   config?: Record<string, unknown>;
   error?: string;
 }

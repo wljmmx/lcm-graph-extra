@@ -79,9 +79,10 @@ function getByPath(obj: Record<string, unknown>, path: string): unknown {
 }
 
 // 同时监听 configData 和 schemaData，确保两者都加载后才填充编辑值
+// 优先使用 schema 默认值填充，config 加载后覆盖实际值
 watch([configData, schemaData], ([configVal, schemaVal]) => {
-  if (configVal?.config && schemaVal?.fields) {
-    const cfg = configVal.config as Record<string, unknown>;
+  if (schemaVal?.fields) {
+    const cfg = (configVal?.config as Record<string, unknown>) ?? {};
     for (const f of schemaVal.fields) {
       editValues[f.path] = getByPath(cfg, f.path) ?? f.defaultValue;
     }

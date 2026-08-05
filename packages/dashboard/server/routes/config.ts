@@ -14,8 +14,8 @@
  * - capability-profile 代理到插件 snapshot server（内存态，非 openclaw.json）
  */
 import type { FastifyInstance } from 'fastify';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { redactSensitive } from '../lib/operation-logs';
 import { getOutboundAuthHeader } from '../lib/auth';
@@ -47,6 +47,12 @@ export function readRawConfig(): Record<string, unknown> {
   }
 }
 
+/** 确保配置文件目录存在 */
+function ensureConfigDir(): void {
+  const dir = dirname(getConfigPath());
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
 /** 写回 openclaw.json（保留其他字段，仅更新 lcm-graph-extra 配置段） */
 export function writeRawConfig(updates: Record<string, unknown>): void {
   const path = getConfigPath();
@@ -74,6 +80,7 @@ export function writeRawConfig(updates: Record<string, unknown>): void {
     config[key] = value;
   }
 
+  ensureConfigDir();
   writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
 }
 
@@ -748,6 +755,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       config[key] = value;
     }
 
+    ensureConfigDir();
     writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
   }
 
