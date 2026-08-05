@@ -407,7 +407,7 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     // ─── LLM Provider ────────────────────────────────────────────────────
     { path: 'llmProvider.provider', type: 'string', description: 'LLM Provider 类型', updatable: true, defaultValue: 'openclaw_hooks' },
     { path: 'llmProvider.model', type: 'string', description: 'LLM 模型名', updatable: true, defaultValue: 'default' },
-    { path: 'llmProvider.maxTokens', type: 'number', description: 'LLM 最大 token 数', updatable: true, defaultValue: 4096 },
+    { path: 'llmProvider.maxTokens', type: 'number', description: 'LLM 最大 token 数（8k/16k/24k/32k，根据模型上下文窗口自动匹配）', updatable: true, defaultValue: 32768 },
 
     // ─── 蒸馏 LLM ────────────────────────────────────────────────────────
     { path: 'distillationLlm.provider', type: 'string', description: '蒸馏 LLM Provider 类型', updatable: true, defaultValue: 'openclaw_hooks' },

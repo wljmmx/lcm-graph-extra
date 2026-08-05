@@ -44,7 +44,7 @@
   "llmProvider": {
     "provider": "openclaw_hooks",
     "model": "default",
-    "maxTokens": 4096
+    "maxTokens": 32768
   }
 }
 ```
@@ -53,7 +53,7 @@
 |--------|------|--------|------|
 | `llmProvider.provider` | `"openclaw_hooks" \| "openai" \| "ollama" \| "custom"` | `"openclaw_hooks"` | LLM 提供商 |
 | `llmProvider.model` | `string` | `"default"` | 模型名称 |
-| `llmProvider.maxTokens` | `number` | `4096` | 最大输出 token |
+| `llmProvider.maxTokens` | `number` | `32768` | 最大输出 token。可选档位：8192(8k) / 16384(16k) / 24576(24k) / 32768(32k)。启动时根据模型上下文窗口自动匹配（128k→32k, 64k→24k, 32k→16k, <32k→8k） |
 
 ### 2.2 LLM 超时配置
 

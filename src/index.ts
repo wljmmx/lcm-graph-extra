@@ -26,7 +26,7 @@ import { backgroundTasks } from "./async/task-registry.js"
 import { onCompaction } from "./hooks/compaction";
 import { getOrCreateLosslessClawAdapter, resetSharedAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
-import { PluginConfigSchema } from "./config.js";
+import { PluginConfigSchema, autoMatchMaxTokens } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
 import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
 
@@ -441,6 +441,34 @@ const pluginEntry: any = definePluginEntry({
           }
           _modelRegistry = modelRegistry;
           logger?.debug?.("cached " + Object.keys(modelRegistry).length + " model context window(s)");
+
+          // Auto-match llmProvider.maxTokens based on model context window
+          const llmProvider = (api as any).pluginConfig?.llmProvider;
+          if (llmProvider?.model && llmProvider.model !== 'default') {
+            let ctxWindow = _modelRegistry[llmProvider.model];
+            if (ctxWindow === undefined) {
+              const shortId = llmProvider.model.includes('/') ? llmProvider.model.split('/').pop() : llmProvider.model;
+              for (const [key, val] of Object.entries(_modelRegistry)) {
+                if (key.endsWith(shortId!)) { ctxWindow = val; break; }
+              }
+            }
+            if (ctxWindow) {
+              const recommended = autoMatchMaxTokens(ctxWindow);
+              const current = llmProvider.maxTokens;
+              // Only auto-match if user hasn't explicitly set a non-default value
+              if (current === 4096 || current === 32_768) {
+                if (current !== recommended) {
+                  llmProvider.maxTokens = recommended;
+                  logger?.info?.('[auto-match] llmProvider.maxTokens auto-matched', {
+                    model: llmProvider.model,
+                    contextWindow: ctxWindow,
+                    oldMaxTokens: current,
+                    newMaxTokens: recommended,
+                  });
+                }
+              }
+            }
+          }
         } catch (e) { /* non-fatal, will use defaults */
           logger?.debug?.("model registry loading failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }

@@ -122,7 +122,7 @@ export const PluginConfigSchema = Type.Object({
   llmProvider: Type.Optional(Type.Object({
     provider: LlmProviderUnion({ default: 'openclaw_hooks', description: 'LLM provider 类型，见 LLM_PROVIDERS 常量' }),
     model: Type.String({ default: 'default' }),
-    maxTokens: Type.Number({ default: 4096, minimum: 1 }),
+    maxTokens: Type.Number({ default: 32_768, minimum: 1, description: '最大输出 token 数。推荐：8k(8192) / 16k(16384) / 24k(24576) / 32k(32768)，根据模型上下文窗口自动匹配' }),
   })),
 
   cliTimeout: Type.Number({ default: 30_000 }),
@@ -417,7 +417,7 @@ export function validateConfig(input: unknown): PluginConfig {
   if (!config.ttl) config.ttl = { enabled: true, retentionDays: 90, cleanupIntervalHours: 24 };
   if (!config.webhook) config.webhook = { enabled: false, events: [] };
   if (!config.dashboardSnapshot) config.dashboardSnapshot = { enabled: true, port: 7423, host: '127.0.0.1' };
-  if (!config.llmProvider) config.llmProvider = { provider: 'openclaw_hooks', model: 'default', maxTokens: 4096 };
+  if (!config.llmProvider) config.llmProvider = { provider: 'openclaw_hooks', model: 'default', maxTokens: 32_768 };
   if (!config.embedding) config.embedding = {};
   if (!config.experience) config.experience = { enabled: true, triggers: ['correction', 'failure', 'fix_success', 'explicit_save'], summaryMode: 'async', relevanceThreshold: 0.6 };
   if (!config.logging) config.logging = { level: 'info' };
@@ -460,6 +460,28 @@ function isValidUrl(url: string): boolean {
     return false;
   }
 }
+
+/**
+ * 根据模型上下文窗口自动匹配推荐的最大输出 token 数。
+ *
+ * 映射规则（按 128k 模型建议 32k 输出）：
+ *   contextWindow >= 128k → 32,768 (32k)
+ *   contextWindow >= 64k  → 24,576 (24k)
+ *   contextWindow >= 32k  → 16,384 (16k)
+ *   contextWindow < 32k   →  8,192  (8k)
+ *
+ * @param contextWindow 模型的上下文窗口大小（token 数）
+ * @returns 推荐的 maxTokens 值
+ */
+export function autoMatchMaxTokens(contextWindow: number): number {
+  if (contextWindow >= 128_000) return 32_768;
+  if (contextWindow >= 64_000) return 24_576;
+  if (contextWindow >= 32_000) return 16_384;
+  return 8_192;
+}
+
+/** maxTokens 可选档位，供 dashboard 下拉选择 */
+export const MAX_TOKENS_TIERS = [8_192, 16_384, 24_576, 32_768] as const;
 
 /**
  * 深拷贝 DEFAULT_CONFIG。P3-4: 原先使用 `{ ...DEFAULT_CONFIG }` 浅拷贝，

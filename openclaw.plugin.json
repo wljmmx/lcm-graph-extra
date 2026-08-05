@@ -520,7 +520,9 @@
           },
           "maxTokens": {
             "type": "integer",
-            "default": 4096
+            "default": 32768,
+            "enum": [8192, 16384, 24576, 32768],
+            "description": "最大输出 token 数。根据模型上下文窗口自动匹配：8k(32k以下) / 16k(32k-64k) / 24k(64k-128k) / 32k(128k以上)"
           }
         }
       },
