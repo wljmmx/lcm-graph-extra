@@ -145,9 +145,9 @@
       },
       "qmdMcpQueryTimeout": {
         "type": "integer",
-        "default": 8000,
+        "default": 15000,
         "minimum": 1000,
-        "description": "QMD MCP/REST query timeout (ms). First query needs embedding model cold-start (4-5s), later queries ~300-400ms. Default 8s covers cold-start."
+        "description": "QMD MCP/REST query timeout (ms). First query needs embedding model cold-start (4-5s), later queries ~300-400ms. Default 15s covers cold-start and queuing scenarios."
       },
       "distillationIntervalMs": {
         "type": "integer",

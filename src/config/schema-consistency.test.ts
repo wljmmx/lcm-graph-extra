@@ -93,6 +93,8 @@ describe('openclaw.plugin.json ↔ src/config.ts Schema 一致性', () => {
       { name: 'experience.enabled', path: 'experience.enabled', expected: true },
       { name: 'ttl.enabled', path: 'ttl.enabled', expected: true },
       { name: 'backupConfig.enabled', path: 'backupConfig.enabled', expected: true },
+      { name: 'qmdMcpQueryTimeout', path: 'qmdMcpQueryTimeout', expected: 15000 },
+      { name: 'qmdMcpTimeout', path: 'qmdMcpTimeout', expected: 3000 },
     ];
 
     for (const c of cases) {

@@ -113,8 +113,8 @@ export const QMD_CLIENT_DEFAULTS = {
   mcpTimeout: 3000,
   // MCP 工具调用（查询）超时。
   // 首次查询需要 embedding 模型冷启动（4-5s），后续查询仅 300-400ms。
-  // 设为 8000ms 覆盖冷启动场景，避免首次查询永远超时 → 降级 REST。
-  mcpQueryTimeout: 8000,
+  // 设为 15000ms 覆盖冷启动 + 排队场景。用户可通过 qmdMcpQueryTimeout 配置覆盖。
+  mcpQueryTimeout: 15000,
   cliTimeout: 30_000,
   // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。

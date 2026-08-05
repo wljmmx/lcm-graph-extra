@@ -339,7 +339,7 @@ const pluginEntry: any = definePluginEntry({
         const cliTimeout = pluginConfig.cliTimeout ?? QMD_CLIENT_DEFAULTS.cliTimeout;
         // MCP 初始化握手超时（JSON-RPC handshake，通常 < 500ms）
         const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? QMD_CLIENT_DEFAULTS.mcpTimeout;
-        // MCP/REST 查询超时（首次 embedding 冷启动需 4-5s，默认 8000ms 覆盖冷启动）
+        // MCP/REST 查询超时（首次 embedding 冷启动需 4-5s，默认 15000ms 覆盖冷启动+排队）
         const qmdMcpQueryTimeout = pluginConfig.qmdMcpQueryTimeout ?? QMD_CLIENT_DEFAULTS.mcpQueryTimeout;
 
         qmdClient = new QmdClient({
