@@ -26,7 +26,7 @@ import { backgroundTasks } from "./async/task-registry.js"
 import { onCompaction } from "./hooks/compaction";
 import { getOrCreateLosslessClawAdapter, resetSharedAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
-import { PluginConfigSchema, autoMatchMaxTokens } from "./config.js";
+import { PluginConfigSchema, autoMatchMaxTokens, DEFAULT_CONFIG } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
 import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
 
@@ -334,13 +334,13 @@ const pluginEntry: any = definePluginEntry({
         // 原问题：api.pluginConfig 可能不包含 entries 中的 neo4j 配置，
         // 导致 graphAdapter 连接失败但 getNeo4jDriver()（tools.ts）连接成功。
         const pluginConfig: any = mergeEntriesNeo4jConfig(api) ?? api.pluginConfig ?? {};
-        // 统一从 QMD_CLIENT_DEFAULTS 取默认值，避免硬编码导致默认值不一致
-        const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? QMD_CLIENT_DEFAULTS.cliFallbackSearchType;
-        const cliTimeout = pluginConfig.cliTimeout ?? QMD_CLIENT_DEFAULTS.cliTimeout;
+        // 统一从 DEFAULT_CONFIG 取默认值（config.ts 为唯一真相来源），避免 QMD_CLIENT_DEFAULTS 硬编码不一致
+        const cliFallbackSearchType = pluginConfig.cliFallbackSearchType ?? DEFAULT_CONFIG.cliFallbackSearchType;
+        const cliTimeout = pluginConfig.cliTimeout ?? DEFAULT_CONFIG.cliTimeout;
         // MCP 初始化握手超时（JSON-RPC handshake，通常 < 500ms）
-        const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? QMD_CLIENT_DEFAULTS.mcpTimeout;
-        // MCP/REST 查询超时（首次 embedding 冷启动需 4-5s，默认 15000ms 覆盖冷启动+排队）
-        const qmdMcpQueryTimeout = pluginConfig.qmdMcpQueryTimeout ?? QMD_CLIENT_DEFAULTS.mcpQueryTimeout;
+        const qmdMcpTimeout = pluginConfig.qmdMcpTimeout ?? DEFAULT_CONFIG.qmdMcpTimeout;
+        // MCP/REST 查询超时（首次 embedding 冷启动需 4-5s，默认 15s 覆盖冷启动+排队）
+        const qmdMcpQueryTimeout = pluginConfig.qmdMcpQueryTimeout ?? DEFAULT_CONFIG.qmdMcpQueryTimeout;
 
         qmdClient = new QmdClient({
           mcpBaseUrl: qmdBaseUrl,
