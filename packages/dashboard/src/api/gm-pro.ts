@@ -22,11 +22,16 @@ export interface GmProProxyResponse<T = unknown> {
 
 // ─── 状态 ──────────────────────────────────────────────────────────────────
 
+/**
+ * graph-memory-pro /api/status 响应体。
+ *
+ * 实际返回格式（来自 graph-memory-pro src/routes/crud.ts handleStatus）：
+ *   { status: "connected" | "disconnected", version: "2.3.2" }
+ */
 export interface GmProStatus {
-  ok?: boolean;
+  status?: 'connected' | 'disconnected';
   version?: string;
-  uptime?: number;
-  neo4j?: { connected: boolean; uri?: string };
+  error?: string;
   [key: string]: unknown;
 }
 
@@ -36,11 +41,15 @@ export function fetchGmProStatus(): Promise<GmProProxyResponse<GmProStatus>> {
 
 // ─── 统计 ──────────────────────────────────────────────────────────────────
 
+/**
+ * graph-memory-pro /api/stats 响应体。
+ *
+ * 实际返回格式（来自 graph-memory-pro src/routes/crud.ts handleStats）：
+ *   { nodeCount: number, edgeCount: number }
+ */
 export interface GmProStats {
   nodeCount?: number;
   edgeCount?: number;
-  pendingExperienceCount?: number;
-  distilledExperienceCount?: number;
   [key: string]: unknown;
 }
 
@@ -50,9 +59,24 @@ export function fetchGmProStats(): Promise<GmProProxyResponse<GmProStats>> {
 
 // ─── 健康 ──────────────────────────────────────────────────────────────────
 
+/**
+ * graph-memory-pro /api/health 响应体（GraphHealthReport）。
+ *
+ * 来自 graph-memory-pro src/graph/maintenance/health.ts healthCheck()。
+ * 路由层额外追加 connectionPool 和 circuitBreakers 字段。
+ */
 export interface GmProHealth {
-  status?: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
-  checks?: Record<string, { ok: boolean; message?: string }>;
+  timestamp?: number;
+  nodes?: { total: number; active: number; superseded: number; transitional: number };
+  edges?: { total: number; byType: Record<string, number> };
+  isolatedNodes?: number;
+  highStaleNodes?: number;
+  communities?: number;
+  avgPageRank?: number;
+  topNodes?: Array<{ id: string; name: string; pagerank: number }>;
+  anomalies?: string[];
+  connectionPool?: unknown;
+  circuitBreakers?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -63,10 +87,10 @@ export function fetchGmProHealth(): Promise<GmProProxyResponse<GmProHealth>> {
 // ─── 图谱搜索 ──────────────────────────────────────────────────────────────
 
 export interface GmProSearchParams {
-  q?: string;
-  type?: string;
+  /** 搜索关键词（对应 graph-memory-pro 的 query 参数） */
+  query?: string;
+  /** 返回条数上限（默认 10，最大 50） */
   limit?: number;
-  offset?: number;
 }
 
 export interface GmProSearchResult {
@@ -77,15 +101,19 @@ export interface GmProSearchResult {
     description?: string;
     [key: string]: unknown;
   }>;
+  edges?: Array<{
+    source: string;
+    target: string;
+    type?: string;
+    [key: string]: unknown;
+  }>;
   total?: number;
 }
 
 export function fetchGmProSearch(params: GmProSearchParams = {}): Promise<GmProProxyResponse<GmProSearchResult>> {
   const qs = new URLSearchParams();
-  if (params.q) qs.set('q', params.q);
-  if (params.type) qs.set('type', params.type);
+  if (params.query) qs.set('query', params.query);
   if (params.limit != null) qs.set('limit', String(params.limit));
-  if (params.offset != null) qs.set('offset', String(params.offset));
   const query = qs.toString();
   return apiGet<GmProProxyResponse<GmProSearchResult>>(`/api/gm-pro/proxy/search${query ? `?${query}` : ''}`);
 }
@@ -128,12 +156,27 @@ export function fetchGmProTop(limit?: number): Promise<GmProProxyResponse<GmProT
 
 // ─── 按类型查节点 ──────────────────────────────────────────────────────────
 
+/** graph-memory-pro 支持的节点类型（仅 TASK / SKILL / EVENT） */
+export type GmProNodeType = 'TASK' | 'SKILL' | 'EVENT';
+
+/** graph-memory-pro /api/nodes-by-type/:type 响应体 */
+export interface GmProNodesByTypeResult {
+  type?: string;
+  nodes?: Array<{
+    id: string;
+    type?: string;
+    name?: string;
+    description?: string;
+    [key: string]: unknown;
+  }>;
+}
+
 export function fetchGmProNodesByType(
-  type: string,
+  type: GmProNodeType,
   limit?: number,
-): Promise<GmProProxyResponse<GmProSearchResult>> {
+): Promise<GmProProxyResponse<GmProNodesByTypeResult>> {
   const qs = limit != null ? `?limit=${limit}` : '';
-  return apiGet<GmProProxyResponse<GmProSearchResult>>(
+  return apiGet<GmProProxyResponse<GmProNodesByTypeResult>>(
     `/api/gm-pro/proxy/nodes-by-type/${encodeURIComponent(type)}${qs}`,
   );
 }
@@ -150,8 +193,14 @@ export function fetchGmProMetrics(): Promise<GmProProxyResponse<GmProMetrics>> {
 
 // ─── Dirty Nodes ───────────────────────────────────────────────────────────
 
-export function fetchGmProDirtyNodes(): Promise<GmProProxyResponse<GmProSearchResult>> {
-  return apiGet<GmProProxyResponse<GmProSearchResult>>('/api/gm-pro/proxy/maintain/dirty-nodes');
+/** graph-memory-pro /api/maintain/dirty-nodes 响应体 */
+export interface GmProDirtyNodesResult {
+  count?: number;
+  nodeIds?: string[];
+}
+
+export function fetchGmProDirtyNodes(): Promise<GmProProxyResponse<GmProDirtyNodesResult>> {
+  return apiGet<GmProProxyResponse<GmProDirtyNodesResult>>('/api/gm-pro/proxy/maintain/dirty-nodes');
 }
 
 // ─── Auto Tuner 状态 ───────────────────────────────────────────────────────

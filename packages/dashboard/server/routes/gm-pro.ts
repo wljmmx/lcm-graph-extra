@@ -25,6 +25,7 @@ import { getOutboundAuthHeader } from '../lib/auth';
 
 const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL ?? 'http://127.0.0.1:7424';
 const GM_PRO_HTTP_TIMEOUT = Number(process.env.GM_PRO_HTTP_TIMEOUT ?? 10_000);
+const GM_PRO_AUTH_TOKEN = process.env.GM_PRO_AUTH_TOKEN ?? '';
 
 /** graph-memory-pro 已知的只读 API 路径白名单 */
 const ALLOWED_GM_PRO_PATHS = new Set([
@@ -41,6 +42,20 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/association-matrix/state',
   '/api/doctor',
   '/api/usage',
+]);
+
+/**
+ * graph-memory-pro 敏感只读路径（需要 x-auth-token 鉴权）。
+ *
+ * 对应 graph-memory-pro index.ts 中 SENSITIVE_READ_PATHS 的定义，
+ * 当 graph-memory-pro 配置了 mcp.authToken 时，这些路径需要 x-auth-token 头。
+ * 未配置 mcp.authToken 时 graph-memory-pro 允许本地无鉴权访问。
+ */
+const GM_PRO_SENSITIVE_PATHS = new Set([
+  '/api/health',
+  '/api/metrics',
+  '/api/usage',
+  '/api/doctor',
 ]);
 
 export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
@@ -73,13 +88,20 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GM_PRO_HTTP_TIMEOUT);
 
+    // 构建出站请求头
+    const headers: Record<string, string> = {
+      ...getOutboundAuthHeader(),
+      'Accept': 'application/json',
+    };
+    // 敏感路径需要 x-auth-token（graph-memory-pro 的 plugin auth 机制）
+    if (GM_PRO_AUTH_TOKEN && GM_PRO_SENSITIVE_PATHS.has(proxyPath)) {
+      headers['x-auth-token'] = GM_PRO_AUTH_TOKEN;
+    }
+
     try {
       const resp = await fetch(targetUrl, {
         method: 'GET',
-        headers: {
-          ...getOutboundAuthHeader(),
-          'Accept': 'application/json',
-        },
+        headers,
         signal: controller.signal,
       });
 
