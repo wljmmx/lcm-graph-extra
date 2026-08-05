@@ -782,6 +782,8 @@ export class LosslessClawAdapter {
     this.engine = null;
     this._connected = false;
     this._connecting = null;
+    this._connectionAttempted = false;
+    this._initError = null;
   }
 
   // ── 内部：发现 CE Factory ──
@@ -1012,4 +1014,12 @@ export function getOrCreateLosslessClawAdapter(logger?: any): LosslessClawAdapte
     _sharedAdapter = new LosslessClawAdapter(logger);
   }
   return _sharedAdapter;
+}
+
+/**
+ * 重置进程级单例，允许 dispose 后重新创建 adapter 实例。
+ * 应在 index.ts 的 dispose 闭包中调用，确保热重载后能重新连接。
+ */
+export function resetSharedAdapter(): void {
+  _sharedAdapter = null;
 }

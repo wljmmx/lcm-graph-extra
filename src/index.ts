@@ -24,7 +24,7 @@ import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
 import { backgroundTasks } from "./async/task-registry.js"
 import { onCompaction } from "./hooks/compaction";
-import { getOrCreateLosslessClawAdapter } from "./middleware/lossless-claw-adapter";
+import { getOrCreateLosslessClawAdapter, resetSharedAdapter } from "./middleware/lossless-claw-adapter";
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { PluginConfigSchema } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
@@ -1557,6 +1557,7 @@ const pluginEntry: any = definePluginEntry({
           logger?.debug?.("lossless-claw adapter dispose failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }
         _losslessClawAdapter = null;
+        resetSharedAdapter();
 
         // 6. Dispose QmdClient（清理 recoveryTimer，避免 timer 泄漏）
         try { qmdClient?.dispose?.(); } catch {}
