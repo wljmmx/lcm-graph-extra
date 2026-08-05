@@ -262,39 +262,76 @@ export class LosslessClawAdapter {
     return this._connecting;
   }
 
+  /**
+   * 指数退避重试连接 lossless-claw。
+   *
+   * 问题：lcm-graph-extra 的 ensureInitialized() 在 register() 阶段被
+   * fire-and-forget 调用，此时 lossless-claw 插件可能尚未完成引擎初始化
+   * （DB 迁移、引擎启动等），导致 shared state Map 为空，所有发现路径失败。
+   *
+   * 修复：在 _doConnect 内部以 1s/2s/4s/8s 指数退避重试最多 4 次，
+   * 总耗时约 15s，给 lossless-claw 引擎初始化留出时间窗口。
+   * 重试间隔远小于 5min 心跳间隔，不会影响用户体验。
+   */
   private async _doConnect(): Promise<boolean> {
-    try {
-      const factory = await this._discoverCEFactory();
-      if (!factory) {
-        this._initError = 'lossless-claw CE factory not found in registry';
+    const maxRetries = 4;
+    const baseDelayMs = 1000;
+
+    let lastError: string | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const factory = await this._discoverCEFactory();
+        if (!factory) {
+          lastError = 'lossless-claw CE factory not found in registry';
+          if (attempt < maxRetries) {
+            const delay = baseDelayMs * Math.pow(2, attempt);
+            this.logger?.debug?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${delay}ms`);
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          break;
+        }
+
+        // 调用工厂获取已初始化的 engine 实例
+        // factory 接收 factoryCtx: { config?, agentDir?, workspaceDir? }
+        // lossless-claw 内部: () => shared.waitForEngine() 返回已初始化的单例
+        this.engine = await factory({});
+        if (!this.engine || typeof this.engine.compact !== 'function') {
+          lastError = 'lossless-claw factory returned invalid engine';
+          this.engine = null;
+          if (attempt < maxRetries) {
+            const delay = baseDelayMs * Math.pow(2, attempt);
+            this.logger?.debug?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1} factory returned invalid engine, retrying in ${delay}ms`);
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+          break;
+        }
+
+        this._connected = true;
         this._connectionAttempted = true;
         this._connecting = null;
-        return false;
+        this.logger?.info?.('[lcm] lossless-claw adapter connected successfully');
+        return true;
+      } catch (err) {
+        lastError = (err as Error).message;
+        if (attempt < maxRetries) {
+          const delay = baseDelayMs * Math.pow(2, attempt);
+          this.logger?.debug?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1} threw, retrying in ${delay}ms`, { err: lastError });
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        break;
       }
-
-      // 调用工厂获取已初始化的 engine 实例
-      // factory 接收 factoryCtx: { config?, agentDir?, workspaceDir? }
-      // lossless-claw 内部: () => shared.waitForEngine() 返回已初始化的单例
-      this.engine = await factory({});
-      if (!this.engine || typeof this.engine.compact !== 'function') {
-        this._initError = 'lossless-claw factory returned invalid engine';
-        this.engine = null;
-        this._connectionAttempted = true;
-        this._connecting = null;
-        return false;
-      }
-
-      this._connected = true;
-      this._connectionAttempted = true;
-      this._connecting = null;
-      return true;
-    } catch (err) {
-      this._initError = (err as Error).message;
-      this._connected = false;
-      this._connectionAttempted = true;
-      this._connecting = null;
-      return false;
     }
+
+    this._initError = lastError ?? 'lossless-claw CE factory not found in registry';
+    this._connected = false;
+    this._connectionAttempted = true;
+    this._connecting = null;
+    this.logger?.warn?.('[lcm] lossless-claw adapter connection failed after all retries', { err: this._initError });
+    return false;
   }
 
   // ── CE 生命周期代理 ──
@@ -811,6 +848,7 @@ export class LosslessClawAdapter {
       if (state?.engines instanceof Map) {
         const entry = state.engines.get('lossless-claw');
         if (entry && typeof entry.factory === 'function') {
+          this.logger.info("[lcm] _discoverCEFactory: path 1/4 SUCCESS (Symbol registry)");
           return entry.factory as (ctx: any) => Promise<LosslessClawEngine>;
         }
       }
@@ -832,11 +870,13 @@ export class LosslessClawAdapter {
         for (const init of sharedStore.values()) {
           const engine = init.getCachedEngine?.();
           if (engine) {
+            this.logger.info("[lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, cached engine)");
             return async () => new MemorySupplementCtxEngine(engine);
           }
           // Engine not ready yet, try waitForEngine
           const waitFn = init.waitForEngine;
           if (typeof waitFn === 'function') {
+            this.logger.info("[lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, waitForEngine)");
             return async () => {
               const e = await waitFn();
               return new MemorySupplementCtxEngine(e);
@@ -897,9 +937,25 @@ export class LosslessClawAdapter {
           // dist/index.js default export is the plugin entry with register()
           const pluginEntry = lcModule.default;
           if (pluginEntry && typeof pluginEntry.register === 'function') {
+            // 构建更完整的 mockApi，让 lossless-claw 能正确初始化 DB 和引擎。
+            // 修复前：getConfig() 返回 {} 导致 DB path 无法解析，引擎初始化失败。
+            // 修复后：从环境变量和常见路径推断 workspace/agent 目录，提供合理的默认配置。
+            const home = homedir();
+            const openclawDir = process.env.OPENCLAW_DIR || join(home, '.openclaw');
             const mockApi: Record<string, any> = {
-              getConfig: () => ({}),
-              getRuntimeInfo: () => ({ version: 'mock', mode: 'direct-fs' }),
+              getConfig: () => ({
+                // 默认 DB 路径：~/.openclaw/data/lossless-claw.db
+                dbPath: join(openclawDir, 'data', 'lossless-claw.db'),
+              }),
+              getRuntimeInfo: () => ({
+                version: process.env.OPENCLAW_VERSION || '2026.5.28',
+                mode: 'direct-fs',
+                workspaceDir: process.env.OPENCLAW_WORKSPACE || home,
+                agentDir: process.env.OPENCLAW_AGENT_DIR || join(openclawDir, 'agent'),
+                dataDir: join(openclawDir, 'data'),
+              }),
+              // pluginConfig 供 lossless-claw 读取自身配置
+              pluginConfig: {},
               registerContextEngine: (_id: string, _fn: Function) => {},
               registerTool: () => {},
               registerCommand: () => {},
@@ -939,8 +995,8 @@ export class LosslessClawAdapter {
     } catch (e) {
       // projects dir scan failed, fall through to Fallback
       this.logger?.debug?.("[lcm] _discoverCEFactory: path 3/4 projects dir scan failed", { err: e instanceof Error ? e.message : String(e) });
-    this.logger.debug("[lcm] path 4/4: Fallback registry");
     }
+    this.logger.debug("[lcm] path 4/4: Fallback registry");
 
     // ── Fallback: 文件系统 Registry 发现 ──
 
@@ -987,10 +1043,11 @@ export class LosslessClawAdapter {
 
     if (typeof factory !== 'function') {
       this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FAILED, factory not a function");
+      this.logger.info("[lcm] _discoverCEFactory: all 4 discovery paths exhausted, lossless-claw not reachable (will retry if configured)");
       return null;
     }
 
-    this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FOUND factory");
+    this.logger.info("[lcm] _discoverCEFactory: path 4/4 SUCCESS, found factory via fallback registry");
     return factory as (ctx: any) => Promise<LosslessClawEngine>;
   }
 }
