@@ -494,7 +494,7 @@ const pluginEntry: any = definePluginEntry({
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.1.11",
+        version: "2.1.12",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         // SDK ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn"
@@ -2818,4 +2818,4 @@ export type {
 } from './experience/types.js';
 
 
-export const VERSION = '2.1.11';
+export const VERSION = '2.1.12';
