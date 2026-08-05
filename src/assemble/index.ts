@@ -834,7 +834,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               : [];
             const _fallbackKeep = Math.min(_msgCountForFallback, 8);
             finalMessages = [..._goalAnchorMsgs, ...messages.slice(-_fallbackKeep)];
-            markDegraded('low_tier_no_summary_fallback');
+            // BUGFIX: low_tier_no_summary_fallback 是低压力路径的正常行为
+            // （summaries 尚未生成时采用消息裁剪兜底），不应计入降级率。
+            // 修复前 markDegraded 导致每次无 summary 的 assemble 都被计为降级，
+            // 多轮对话中降级率恒为 100%。
             ctx.logger?.warn?.('[assemble:low-tier] no summaries available, applying message trimming fallback', {
               originalMsgCount: _msgCountForFallback,
               keptMsgCount: _fallbackKeep,
