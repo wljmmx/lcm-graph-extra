@@ -813,6 +813,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     properties: Record<string, GmProSchemaProperty>,
     prefix: string,
     uiHints: Record<string, { label?: string; sensitive?: boolean; help?: string }> | undefined,
+    parentContext?: string,
   ): SchemaFieldDoc[] {
     const docs: SchemaFieldDoc[] = [];
     for (const [key, prop] of Object.entries(properties)) {
@@ -821,8 +822,9 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       const isSensitive = hint?.sensitive === true || prop.sensitive === true;
 
       if (prop.properties && typeof prop.properties === 'object') {
-        // 嵌套对象 → 递归展平
-        docs.push(...flattenGmProSchema(prop.properties, path, uiHints));
+        // 嵌套对象 → 递归展平，传递父级描述作为子字段上下文
+        const childContext = prop.description ?? parentContext;
+        docs.push(...flattenGmProSchema(prop.properties, path, uiHints, childContext));
       } else if (prop.oneOf && Array.isArray(prop.oneOf)) {
         // oneOf → 取第一个选项的类型和默认值
         const first = prop.oneOf[0];
@@ -830,7 +832,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         docs.push({
           path,
           type: mapJsonSchemaType(type),
-          description: hint?.label ?? prop.description ?? key,
+          description: buildFieldDescription(key, path, prop.description, parentContext, hint),
           updatable: !isSensitive,
           defaultValue: first?.default ?? prop.default,
         });
@@ -839,7 +841,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         docs.push({
           path,
           type: mapJsonSchemaType(type),
-          description: hint?.label ?? prop.description ?? key,
+          description: buildFieldDescription(key, path, prop.description, parentContext, hint),
           updatable: !isSensitive,
           defaultValue: prop.default,
         });
@@ -847,6 +849,98 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     }
     return docs;
   }
+
+  /**
+   * 智能生成字段描述，优先级：
+   * 1. uiHints.label（用户显式标注）
+   * 2. schema 中的 description（插件作者提供）
+   * 3. 父级上下文 + 路径推断（如 "llm.apiKey" → "LLM API Key"）
+   * 4. 字段 key 名兜底
+   */
+  function buildFieldDescription(
+    key: string,
+    path: string,
+    schemaDesc: string | undefined,
+    parentContext: string | undefined,
+    hint: { label?: string } | undefined,
+  ): string {
+    if (hint?.label) return hint.label;
+    if (schemaDesc) return schemaDesc;
+
+    // 无 schema 描述时，从路径生成有意义的描述
+    const parts = path.split('.');
+    // 父级上下文（如父对象 description）提供能力定位
+    const contextPrefix = parentContext
+      ? parentContext.split('。')[0].split('：')[0] + ' - '
+      : '';
+
+    // 根据 key 名生成中文描述
+    const keyLabel = KEY_LABEL_MAP[key] ?? key;
+    return contextPrefix + keyLabel;
+  }
+
+  /** 常见字段名 → 中文描述映射 */
+  const KEY_LABEL_MAP: Record<string, string> = {
+    apiKey: 'API Key',
+    baseURL: 'API 地址',
+    model: '模型名',
+    dimensions: '向量维度',
+    keepAlive: 'Keep Alive（模型内存驻留时间）',
+    provider: 'Provider 类型',
+    maxTokens: '最大 Token 数',
+    enabled: '是否启用',
+    uri: '连接地址',
+    user: '用户名',
+    password: '密码',
+    host: '监听地址',
+    port: '端口号',
+    level: '日志级别',
+    file: '日志文件路径',
+    url: 'URL 地址',
+    events: '触发事件列表',
+    mode: '协作模式',
+    temperature: '温度参数',
+    systemPrompt: 'System Prompt',
+    timeoutMs: '超时时间（ms）',
+    syncBudgetMs: '同步阶段预算（ms）',
+    complexityThreshold: '复杂度阈值',
+    referenceModels: '参考模型列表',
+    aggregatorModel: '聚合模型配置',
+    enabledTiers: '启用层级',
+    triggers: '触发条件',
+    summaryMode: '摘要模式',
+    schedule: '定时调度',
+    dreaming: 'Dreaming 定时',
+    incremental: '增量定时',
+    retentionDays: '保留天数',
+    cleanupIntervalHours: '清理间隔（小时）',
+    maxBackups: '最大备份数',
+    intervalHours: '备份间隔（小时）',
+    backupDir: '备份目录',
+    triggerThreshold: '触发阈值',
+    softThresholdTokens: '软阈值 Token 数',
+    keepRecentTokens: '保留近期 Token 数',
+    relevanceThreshold: '相关性阈值',
+    qmd: 'QMD 检索',
+    graph: '图谱检索',
+    exp: '经验检索',
+    searchLimit: '检索条数上限',
+    searchCacheSize: '检索缓存大小',
+    cacheSize: '缓存大小',
+    mcpEndpoint: 'MCP 端点地址',
+    contextWindow: '上下文窗口大小',
+    dedupRounds: '去重轮数',
+    highPressureThreshold: '高压阈值',
+    mediumPressureThreshold: '中压阈值',
+    proactiveThreshold: '主动触发阈值',
+    systemPromptOverheadTokens: '系统提示词开销（Tokens）',
+    compactTokenBudget: '压缩 Token 预算',
+    compactTimeout: '压缩超时（ms）',
+    maxSummaryTokenRatio: '最大摘要 Token 占比',
+    low: '低压',
+    medium: '中压',
+    high: '高压',
+  };
 
   function buildGmProSchemaDoc(): SchemaFieldDoc[] {
     if (_gmProSchemaDocCache) return _gmProSchemaDocCache;
