@@ -78,11 +78,11 @@ function getByPath(obj: Record<string, unknown>, path: string): unknown {
   return cur;
 }
 
-watch(configData, (data) => {
-  if (data?.config) {
-    const cfg = data.config;
-    const fields = schemaData.value?.fields ?? [];
-    for (const f of fields) {
+// 同时监听 configData 和 schemaData，确保两者都加载后才填充编辑值
+watch([configData, schemaData], ([configVal, schemaVal]) => {
+  if (configVal?.config && schemaVal?.fields) {
+    const cfg = configVal.config as Record<string, unknown>;
+    for (const f of schemaVal.fields) {
       editValues[f.path] = getByPath(cfg, f.path) ?? f.defaultValue;
     }
   }
