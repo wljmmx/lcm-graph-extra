@@ -245,8 +245,12 @@ export const PluginConfigSchema = Type.Object({
     })),
     // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
     cacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),
-    // BUG-7: QMD vec/hyde 查询文本最大字符数，超过则截断（embedding 模型 context window 限制）
-    // qwen3-embed 支持 32768 tokens，中英文约 1-2 chars/token，默认 8000 chars 安全余量充足
+    // BUG-7: QMD vec/hyde 查询文本分片阈值（字符数），超过则拆分为多个分片独立查询。
+    // 分片策略：保留完整语义（不截断丢弃），每个分片作为独立 vec/hyde 子查询发送，
+    // 检索后端通过 RRF 合并结果。分片更短 → 与索引文档拼接后更易落在 embedding 模型
+    // context window 内 → 解决 "documents exceed the context size" 错误。
+    // qwen3-embed 支持 32768 tokens，默认 8000 chars 安全余量充足。
+    // 若遇到 context size 错误，可降低此值（如 3000）以给索引文档腾出更多空间。
     qmdQueryMaxChars: Type.Optional(Type.Number({ default: 8000, minimum: 500 })),
   })),
 

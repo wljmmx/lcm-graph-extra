@@ -249,7 +249,7 @@
             "type": "integer",
             "default": 8000,
             "minimum": 500,
-            "description": "QMD vec/hyde查询文本最大字符数，超过则截断（embedding模型context window限制）。qwen3-embed支持32768 tokens，默认8000 chars安全余量充足"
+            "description": "QMD vec/hyde查询文本分片阈值（字符数），超过则拆分为多个分片独立查询（保留完整语义，不截断）。检索后端通过RRF合并分片结果。若遇到'documents exceed the context size'错误，可降低此值（如3000）以给索引文档腾出更多空间。"
           }
         }
       },

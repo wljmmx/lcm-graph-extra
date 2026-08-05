@@ -41,6 +41,59 @@ function stripVecNegation(q: string): string {
   return out.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * 将文本按 maxChars 拆分为多个分片，尽量在句子边界处断开。
+ * 分片之间无重叠（检索后端通过 RRF 合并多子查询结果，无需客户端去重）。
+ *
+ * 拆分策略：
+ *   1. 若文本 <= maxChars，直接返回单元素数组
+ *   2. 否则按 maxChars 切分，每段尽量在句号/换行/空格处断开
+ *   3. 无法找到合适断点时，硬切在 maxChars 处
+ */
+function splitTextIntoChunks(text: string, maxChars: number): string[] {
+  if (text.length <= maxChars) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxChars) {
+      chunks.push(remaining.trim());
+      break;
+    }
+
+    // 在 maxChars 范围内寻找最佳断点
+    let cutPoint = maxChars;
+    const searchWindow = remaining.slice(0, maxChars);
+
+    // 优先级：句号 > 换行 > 空格 > 硬切
+    const sentenceEnd = searchWindow.lastIndexOf('。');
+    const periodEnd = searchWindow.lastIndexOf('.');
+    const newlineEnd = Math.max(
+      searchWindow.lastIndexOf('\n'),
+      searchWindow.lastIndexOf('\r'),
+    );
+    const spaceEnd = searchWindow.lastIndexOf(' ');
+
+    // 句号优先（在最后 30% 范围内才算有效断点）
+    const minValidCut = Math.floor(maxChars * 0.5);
+    if (sentenceEnd >= minValidCut) {
+      cutPoint = sentenceEnd + 1; // 包含句号
+    } else if (periodEnd >= minValidCut) {
+      cutPoint = periodEnd + 1;
+    } else if (newlineEnd >= minValidCut) {
+      cutPoint = newlineEnd + 1;
+    } else if (spaceEnd >= minValidCut) {
+      cutPoint = spaceEnd + 1;
+    }
+
+    chunks.push(remaining.slice(0, cutPoint).trim());
+    remaining = remaining.slice(cutPoint);
+  }
+
+  return chunks.filter((c) => c.length > 0);
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -231,28 +284,37 @@ export class QmdClient {
         }),
       };
     }
-    // BUG-7: vec/hyde 查询文本截断，防止超过 embedding 模型 context window
-    // lex (BM25) 不受 token 限制，不截断；仅 vec/hyde 受 embedding 模型 context window 限制
+    // BUG-7: vec/hyde 查询文本分片（chunking），防止超过 embedding 模型 context window。
+    // 当查询文本超过 qmdQueryMaxChars 时，不再截断丢弃信息，而是拆分为多个分片，
+    // 每个分片作为独立的 vec/hyde 子查询发送。检索后端（MCP/REST）通过 RRF 合并
+    // 多子查询结果，无需客户端手动去重。
+    //
+    // 分片的好处：
+    //   1. 保留完整语义信息（不丢失任何查询内容）
+    //   2. 每个分片更短，与索引文档拼接后更易落在 embedding 模型 context window 内
+    //   3. 解决 "documents exceed the context size" 错误（索引文档过长时，缩短查询侧腾出空间）
+    //
+    // lex (BM25) 不受 token 限制，不参与分片。
     if (Array.isArray(params.searches)) {
       const maxChars = this.qmdQueryMaxChars;
-      let anyTruncated = false;
-      params = {
-        ...params,
-        searches: params.searches.map((s) => {
-          if ((s.type === 'vec' || s.type === 'hyde') && typeof s.query === 'string' && s.query.length > maxChars) {
-            anyTruncated = true;
-            // 保留前70%和后30%，兼顾开头语义和结尾关键信息
-            const headLen = Math.floor(maxChars * 0.7);
-            const tailLen = maxChars - headLen;
-            return { ...s, query: s.query.slice(0, headLen) + s.query.slice(-tailLen) };
+      let anyChunked = false;
+      const newSearches: SubSearch[] = [];
+      for (const s of params.searches) {
+        if ((s.type === 'vec' || s.type === 'hyde') && typeof s.query === 'string' && s.query.length > maxChars) {
+          anyChunked = true;
+          const chunks = splitTextIntoChunks(s.query, maxChars);
+          for (const chunk of chunks) {
+            newSearches.push({ ...s, query: chunk });
           }
-          return s;
-        }),
-      };
-      if (anyTruncated) {
+        } else {
+          newSearches.push(s);
+        }
+      }
+      params = { ...params, searches: newSearches };
+      if (anyChunked) {
         this.logger?.warn?.(
-          `[qmd-client] vec/hyde query truncated to ${maxChars} chars (embedding model context window limit)`,
-          { maxChars, searchesCount: params.searches.length },
+          `[qmd-client] vec/hyde query chunked into ${newSearches.length} total searches (chunkSize=${maxChars} chars)`,
+          { maxChars, totalSearches: newSearches.length },
         );
       }
     }
