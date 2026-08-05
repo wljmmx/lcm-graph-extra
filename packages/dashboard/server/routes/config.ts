@@ -15,7 +15,8 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { createRequire } from 'node:module';
+import { resolve, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { redactSensitive } from '../lib/operation-logs';
 import { getOutboundAuthHeader } from '../lib/auth';
@@ -759,52 +760,135 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
   }
 
-  // graph-memory-pro 可热更新字段白名单
-  const GM_PRO_UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' | 'object'; description: string; path: string }[]> = {
-    general: [
-      { type: 'string', description: 'SQLite 图谱数据库路径', path: 'dbPath' },
-      { type: 'number', description: '知识提取触发间隔（轮数）', path: 'compactTurnCount' },
-      { type: 'number', description: '跨对话召回最大节点数', path: 'recallMaxNodes' },
-      { type: 'number', description: '图遍历深度（跳数）', path: 'recallMaxDepth' },
-      { type: 'number', description: '向量去重阈值（0-1）', path: 'dedupThreshold' },
-      { type: 'number', description: 'PageRank 阻尼系数', path: 'pagerankDamping' },
-      { type: 'number', description: 'PageRank 迭代次数', path: 'pagerankIterations' },
-    ],
-    embedding: [
-      { type: 'string', description: 'Embedding 模型名', path: 'embedding.model' },
-      { type: 'string', description: 'Embedding Base URL', path: 'embedding.baseURL' },
-      { type: 'number', description: '向量维度', path: 'embedding.dimensions' },
-    ],
-    llm: [
-      { type: 'string', description: 'LLM 模型名', path: 'llm.model' },
-      { type: 'string', description: 'LLM Base URL', path: 'llm.baseURL' },
-    ],
-  };
-
   // graph-memory-pro 配置 schema 文档（缓存，避免每次请求重建）
   let _gmProSchemaDocCache: SchemaFieldDoc[] | null = null;
 
+  /** 尝试定位 graph-memory-pro 插件的 openclaw.plugin.json */
+  function resolveGmProPluginJson(): string | null {
+    // 1. 环境变量 GM_PRO_PATH
+    if (process.env.GM_PRO_PATH) {
+      const p = join(process.env.GM_PRO_PATH, 'openclaw.plugin.json');
+      if (existsSync(p)) return p;
+    }
+    // 2. global extensions: ~/.openclaw/extensions/graph-memory-pro
+    const globalPath = join(homedir(), '.openclaw', 'extensions', GM_PRO_PLUGIN_ID, 'openclaw.plugin.json');
+    if (existsSync(globalPath)) return globalPath;
+    // 3. workspace extensions: <cwd>/.openclaw/extensions/graph-memory-pro
+    const workspacePath = join(process.cwd(), '.openclaw', 'extensions', GM_PRO_PLUGIN_ID, 'openclaw.plugin.json');
+    if (existsSync(workspacePath)) return workspacePath;
+    // 4. stock extensions: <openclaw>/dist/extensions/graph-memory-pro
+    try {
+      const req = createRequire(import.meta.url);
+      const openclawPkgRoot = dirname(req.resolve('openclaw/package.json'));
+      const stockPath = join(openclawPkgRoot, 'dist', 'extensions', GM_PRO_PLUGIN_ID, 'openclaw.plugin.json');
+      if (existsSync(stockPath)) return stockPath;
+    } catch { /* openclaw package not found */ }
+    return null;
+  }
+
+  /** JSON Schema 属性定义 */
+  interface GmProSchemaProperty {
+    type?: string;
+    default?: unknown;
+    description?: string;
+    minimum?: number;
+    maximum?: number;
+    enum?: unknown[];
+    properties?: Record<string, GmProSchemaProperty>;
+    additionalProperties?: boolean;
+    required?: string[];
+    sensitive?: boolean;
+    oneOf?: Array<{ type: string; default?: unknown }>;
+  }
+
+  /** 将 JSON Schema type 映射为 dashboard 字段类型 */
+  function mapJsonSchemaType(type: string): string {
+    if (type === 'integer' || type === 'number') return 'number';
+    if (type === 'boolean') return 'boolean';
+    return 'string';
+  }
+
+  /** 递归展平 configSchema.properties 为 SchemaFieldDoc 列表 */
+  function flattenGmProSchema(
+    properties: Record<string, GmProSchemaProperty>,
+    prefix: string,
+    uiHints: Record<string, { label?: string; sensitive?: boolean; help?: string }> | undefined,
+  ): SchemaFieldDoc[] {
+    const docs: SchemaFieldDoc[] = [];
+    for (const [key, prop] of Object.entries(properties)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      const hint = uiHints?.[path] ?? uiHints?.[key];
+      const isSensitive = hint?.sensitive === true || prop.sensitive === true;
+
+      if (prop.properties && typeof prop.properties === 'object') {
+        // 嵌套对象 → 递归展平
+        docs.push(...flattenGmProSchema(prop.properties, path, uiHints));
+      } else if (prop.oneOf && Array.isArray(prop.oneOf)) {
+        // oneOf → 取第一个选项的类型和默认值
+        const first = prop.oneOf[0];
+        const type = first?.type ?? 'string';
+        docs.push({
+          path,
+          type: mapJsonSchemaType(type),
+          description: hint?.label ?? prop.description ?? key,
+          updatable: !isSensitive,
+          defaultValue: first?.default ?? prop.default,
+        });
+      } else {
+        const type = prop.type ?? 'string';
+        docs.push({
+          path,
+          type: mapJsonSchemaType(type),
+          description: hint?.label ?? prop.description ?? key,
+          updatable: !isSensitive,
+          defaultValue: prop.default,
+        });
+      }
+    }
+    return docs;
+  }
+
   function buildGmProSchemaDoc(): SchemaFieldDoc[] {
     if (_gmProSchemaDocCache) return _gmProSchemaDocCache;
-    const docs: SchemaFieldDoc[] = [
-      // ─── 通用 ─────────────────────────────────────────────────────────────
-      { path: 'dbPath', type: 'string', description: 'SQLite 图谱数据库路径', updatable: true, defaultValue: '~/.openclaw/graph-memory.db' },
-      { path: 'compactTurnCount', type: 'number', description: '知识提取触发间隔（轮数）', updatable: true, defaultValue: 7 },
-      { path: 'recallMaxNodes', type: 'number', description: '跨对话召回最大节点数', updatable: true, defaultValue: 6 },
-      { path: 'recallMaxDepth', type: 'number', description: '图遍历深度（跳数）', updatable: true, defaultValue: 2 },
-      { path: 'dedupThreshold', type: 'number', description: '向量去重阈值（0-1）', updatable: true, defaultValue: 0.90 },
-      { path: 'pagerankDamping', type: 'number', description: 'PageRank 阻尼系数', updatable: true, defaultValue: 0.85 },
-      { path: 'pagerankIterations', type: 'number', description: 'PageRank 迭代次数', updatable: true, defaultValue: 20 },
-      // ─── Embedding ─────────────────────────────────────────────────────────
-      { path: 'embedding.model', type: 'string', description: 'Embedding 模型名', updatable: true, defaultValue: 'text-embedding-3-small' },
-      { path: 'embedding.baseURL', type: 'string', description: 'Embedding Base URL', updatable: true, defaultValue: 'https://api.openai.com/v1' },
-      { path: 'embedding.dimensions', type: 'number', description: '向量维度', updatable: true, defaultValue: 512 },
-      // ─── LLM ──────────────────────────────────────────────────────────────
-      { path: 'llm.model', type: 'string', description: 'LLM 模型名', updatable: true, defaultValue: '' },
-      { path: 'llm.baseURL', type: 'string', description: 'LLM Base URL', updatable: true, defaultValue: '' },
-    ];
-    _gmProSchemaDocCache = docs;
-    return docs;
+
+    const pluginJsonPath = resolveGmProPluginJson();
+    if (!pluginJsonPath) {
+      _gmProSchemaDocCache = [];
+      return _gmProSchemaDocCache;
+    }
+
+    try {
+      const raw = readFileSync(pluginJsonPath, 'utf-8');
+      const manifest = JSON.parse(raw);
+      const configSchema = manifest?.configSchema;
+      if (!configSchema?.properties) {
+        _gmProSchemaDocCache = [];
+        return _gmProSchemaDocCache;
+      }
+
+      const docs = flattenGmProSchema(
+        configSchema.properties as Record<string, GmProSchemaProperty>,
+        '',
+        manifest?.uiHints as Record<string, { label?: string; sensitive?: boolean; help?: string }> | undefined,
+      );
+      _gmProSchemaDocCache = docs;
+      return docs;
+    } catch {
+      _gmProSchemaDocCache = [];
+      return _gmProSchemaDocCache;
+    }
+  }
+
+  /** 从 schema 动态生成可更新字段白名单 */
+  function getGmProUpdatableFields(): Array<{ type: 'number' | 'boolean' | 'string' | 'object'; description: string; path: string }> {
+    const docs = buildGmProSchemaDoc();
+    return docs
+      .filter((f) => f.updatable)
+      .map((f) => ({
+        type: (f.type === 'number' ? 'number' : f.type === 'boolean' ? 'boolean' : 'string') as 'number' | 'boolean' | 'string',
+        description: f.description,
+        path: f.path,
+      }));
   }
 
   // GET /api/gm-pro/config —— 读取 graph-memory-pro 运行时配置（脱敏）
@@ -845,10 +929,9 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       return { ok: false, error: 'body.updates must be an object of { path: value }' };
     }
 
+    const updatableFields = getGmProUpdatableFields();
     const allowedPaths = new Set<string>();
-    for (const fields of Object.values(GM_PRO_UPDATABLE_FIELDS)) {
-      for (const f of fields) allowedPaths.add(f.path);
-    }
+    for (const f of updatableFields) allowedPaths.add(f.path);
 
     const applied: string[] = [];
     const rejected: Array<{ path: string; reason: string }> = [];
@@ -859,11 +942,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         rejected.push({ path: key, reason: 'field not in updatable whitelist' });
         continue;
       }
-      let fieldDef: { type: 'number' | 'boolean' | 'string' | 'object'; description: string; path: string } | undefined;
-      for (const fields of Object.values(GM_PRO_UPDATABLE_FIELDS)) {
-        fieldDef = fields.find((f) => f.path === key);
-        if (fieldDef) break;
-      }
+      const fieldDef = updatableFields.find((f) => f.path === key);
       if (!fieldDef) {
         rejected.push({ path: key, reason: 'field definition not found' });
         continue;
