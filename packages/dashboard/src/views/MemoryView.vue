@@ -19,6 +19,7 @@ import MemorySearchBar, { type MemorySearchParams } from '../components/MemorySe
 import MemoryResultList from '../components/MemoryResultList.vue';
 import MemoryGraphView from '../components/MemoryGraphView.vue';
 import NodeDetailDrawer from '../components/NodeDetailDrawer.vue';
+import GmProGraphPanel from '../components/GmProGraphPanel.vue';
 import { fetchMemorySearch, fetchMemoryGraph } from '../api/memory';
 
 // ===== P2-7: 搜索历史（localStorage 持久化，最近 10 条） =====
@@ -82,7 +83,7 @@ const committedSearch = ref<MemorySearchParams>({
 });
 
 // ===== Tab 切换 =====
-const activeTab = ref<'list' | 'graph'>('list');
+const activeTab = ref<'list' | 'graph' | 'gm-pro'>('list');
 
 // ===== 节点详情抽屉 =====
 const selectedNodeId = ref<string | null>(null);
@@ -244,6 +245,11 @@ const showEmptyPrompt = computed(
           :selected-id="selectedNodeId"
           @node-click="handleNodeClick"
         />
+      </NTabPane>
+
+      <!-- Tab 3: 图谱管理（graph-memory-pro） -->
+      <NTabPane name="gm-pro" tab="图谱管理">
+        <GmProGraphPanel />
       </NTabPane>
     </NTabs>
 
