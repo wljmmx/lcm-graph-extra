@@ -699,4 +699,266 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       };
     }
   });
+
+  // =========================================================================
+  // v2.1.13: graph-memory-pro 插件配置管理
+  // =========================================================================
+
+  const GM_PRO_PLUGIN_ID = 'graph-memory-pro';
+
+  /** 读取 openclaw.json 中 graph-memory-pro 插件配置段 */
+  function readGmProRawConfig(): Record<string, unknown> {
+    const path = getConfigPath();
+    if (!existsSync(path)) return {};
+    try {
+      const raw = readFileSync(path, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const entriesConfig = parsed?.plugins?.entries?.[GM_PRO_PLUGIN_ID]?.config;
+      if (entriesConfig && typeof entriesConfig === 'object') {
+        return entriesConfig as Record<string, unknown>;
+      }
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** 写回 openclaw.json（保留其他字段，仅更新 graph-memory-pro 配置段） */
+  function writeGmProRawConfig(updates: Record<string, unknown>): void {
+    const path = getConfigPath();
+    let root: Record<string, unknown> = {};
+    if (existsSync(path)) {
+      try {
+        root = JSON.parse(readFileSync(path, 'utf-8'));
+      } catch {
+        root = {};
+      }
+    }
+    if (!root.plugins) root.plugins = {};
+    if (!(root.plugins as Record<string, unknown>).entries) {
+      (root.plugins as Record<string, unknown>).entries = {};
+    }
+    const entries = (root.plugins as Record<string, unknown>).entries as Record<string, unknown>;
+    if (!entries[GM_PRO_PLUGIN_ID]) entries[GM_PRO_PLUGIN_ID] = {};
+    const pluginEntry = entries[GM_PRO_PLUGIN_ID] as Record<string, unknown>;
+    if (!pluginEntry.config) pluginEntry.config = {};
+    const config = pluginEntry.config as Record<string, unknown>;
+
+    for (const [key, value] of Object.entries(updates)) {
+      config[key] = value;
+    }
+
+    writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
+  }
+
+  // graph-memory-pro 可热更新字段白名单
+  const GM_PRO_UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' | 'object'; description: string; path: string }[]> = {
+    general: [
+      { type: 'string', description: 'SQLite 图谱数据库路径', path: 'dbPath' },
+      { type: 'number', description: '知识提取触发间隔（轮数）', path: 'compactTurnCount' },
+      { type: 'number', description: '跨对话召回最大节点数', path: 'recallMaxNodes' },
+      { type: 'number', description: '图遍历深度（跳数）', path: 'recallMaxDepth' },
+      { type: 'number', description: '向量去重阈值（0-1）', path: 'dedupThreshold' },
+      { type: 'number', description: 'PageRank 阻尼系数', path: 'pagerankDamping' },
+      { type: 'number', description: 'PageRank 迭代次数', path: 'pagerankIterations' },
+    ],
+    embedding: [
+      { type: 'string', description: 'Embedding 模型名', path: 'embedding.model' },
+      { type: 'string', description: 'Embedding Base URL', path: 'embedding.baseURL' },
+      { type: 'number', description: '向量维度', path: 'embedding.dimensions' },
+    ],
+    llm: [
+      { type: 'string', description: 'LLM 模型名', path: 'llm.model' },
+      { type: 'string', description: 'LLM Base URL', path: 'llm.baseURL' },
+    ],
+  };
+
+  // graph-memory-pro 配置 schema 文档（缓存，避免每次请求重建）
+  let _gmProSchemaDocCache: SchemaFieldDoc[] | null = null;
+
+  function buildGmProSchemaDoc(): SchemaFieldDoc[] {
+    if (_gmProSchemaDocCache) return _gmProSchemaDocCache;
+    const docs: SchemaFieldDoc[] = [
+      // ─── 通用 ─────────────────────────────────────────────────────────────
+      { path: 'dbPath', type: 'string', description: 'SQLite 图谱数据库路径', updatable: true, defaultValue: '~/.openclaw/graph-memory.db' },
+      { path: 'compactTurnCount', type: 'number', description: '知识提取触发间隔（轮数）', updatable: true, defaultValue: 7 },
+      { path: 'recallMaxNodes', type: 'number', description: '跨对话召回最大节点数', updatable: true, defaultValue: 6 },
+      { path: 'recallMaxDepth', type: 'number', description: '图遍历深度（跳数）', updatable: true, defaultValue: 2 },
+      { path: 'dedupThreshold', type: 'number', description: '向量去重阈值（0-1）', updatable: true, defaultValue: 0.90 },
+      { path: 'pagerankDamping', type: 'number', description: 'PageRank 阻尼系数', updatable: true, defaultValue: 0.85 },
+      { path: 'pagerankIterations', type: 'number', description: 'PageRank 迭代次数', updatable: true, defaultValue: 20 },
+      // ─── Embedding ─────────────────────────────────────────────────────────
+      { path: 'embedding.model', type: 'string', description: 'Embedding 模型名', updatable: true, defaultValue: 'text-embedding-3-small' },
+      { path: 'embedding.baseURL', type: 'string', description: 'Embedding Base URL', updatable: true, defaultValue: 'https://api.openai.com/v1' },
+      { path: 'embedding.dimensions', type: 'number', description: '向量维度', updatable: true, defaultValue: 512 },
+      // ─── LLM ──────────────────────────────────────────────────────────────
+      { path: 'llm.model', type: 'string', description: 'LLM 模型名', updatable: true, defaultValue: '' },
+      { path: 'llm.baseURL', type: 'string', description: 'LLM Base URL', updatable: true, defaultValue: '' },
+    ];
+    _gmProSchemaDocCache = docs;
+    return docs;
+  }
+
+  // GET /api/gm-pro/config —— 读取 graph-memory-pro 运行时配置（脱敏）
+  app.get('/api/gm-pro/config', async (req, _reply) => {
+    try {
+      const raw = readGmProRawConfig();
+      const redacted = redactSensitive(raw);
+      // 检测 GM Pro 插件配置段是否存在（而非仅检测主配置文件）
+      const configExists = Object.keys(raw).length > 0;
+      return {
+        ok: true,
+        configExists,
+        config: redacted,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, '/api/gm-pro/config 读取失败');
+      return { ok: false, error: '配置读取失败，请查看服务端日志', config: {} };
+    }
+  });
+
+  // GET /api/gm-pro/config/schema —— graph-memory-pro 配置 schema 文档
+  app.get('/api/gm-pro/config/schema', async (_req, _reply) => {
+    const fields = buildGmProSchemaDoc();
+    return {
+      ok: true,
+      fields,
+      updatablePaths: fields.filter((f) => f.updatable).map((f) => f.path),
+    };
+  });
+
+  // PATCH /api/gm-pro/config —— 白名单字段热更新
+  app.patch('/api/gm-pro/config', async (req, reply) => {
+    const body = (req.body as { updates?: Record<string, unknown> }) ?? {};
+    const updates = body.updates ?? {};
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+      reply.code(400);
+      return { ok: false, error: 'body.updates must be an object of { path: value }' };
+    }
+
+    const allowedPaths = new Set<string>();
+    for (const fields of Object.values(GM_PRO_UPDATABLE_FIELDS)) {
+      for (const f of fields) allowedPaths.add(f.path);
+    }
+
+    const applied: string[] = [];
+    const rejected: Array<{ path: string; reason: string }> = [];
+    const mergedUpdates: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(updates)) {
+      if (!allowedPaths.has(key)) {
+        rejected.push({ path: key, reason: 'field not in updatable whitelist' });
+        continue;
+      }
+      let fieldDef: { type: 'number' | 'boolean' | 'string' | 'object'; description: string; path: string } | undefined;
+      for (const fields of Object.values(GM_PRO_UPDATABLE_FIELDS)) {
+        fieldDef = fields.find((f) => f.path === key);
+        if (fieldDef) break;
+      }
+      if (!fieldDef) {
+        rejected.push({ path: key, reason: 'field definition not found' });
+        continue;
+      }
+      if (!validateType(value, fieldDef.type)) {
+        rejected.push({ path: key, reason: `expected ${fieldDef.type}, got ${typeof value}` });
+        continue;
+      }
+      setByPath(mergedUpdates, key, value);
+      applied.push(key);
+    }
+
+    if (applied.length === 0) {
+      reply.code(400);
+      return { ok: false, error: 'no valid updates provided', rejected };
+    }
+
+    try {
+      writeGmProRawConfig(mergedUpdates);
+      const raw = readGmProRawConfig();
+      const redacted = redactSensitive(raw);
+      return {
+        ok: true,
+        applied,
+        rejected,
+        config: redacted,
+        note: '配置已写入 openclaw.json，需重启 graph-memory-pro 插件进程生效',
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.error({ err: msg }, '/api/gm-pro/config PATCH 写入失败');
+      reply.code(500);
+      return { ok: false, error: '配置写入失败，请查看服务端日志', applied, rejected };
+    }
+  });
+
+  // GET /api/gm-pro/config/raw —— 返回完整 raw JSON（脱敏），供高级用户编辑器使用
+  app.get('/api/gm-pro/config/raw', async (_req, _reply) => {
+    try {
+      const raw = readGmProRawConfig();
+      const redacted = redactSensitive(raw);
+      return { ok: true, config: redacted };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
+    }
+  });
+
+  // POST /api/gm-pro/config/validate —— 校验 raw JSON 是否合法（不写入）
+  app.post('/api/gm-pro/config/validate', async (req, reply) => {
+    const body = req.body as Record<string, unknown> | undefined;
+    if (!body || typeof body !== 'object' || !body.config) {
+      reply.code(400);
+      return { ok: false, error: '请求体缺少 config 字段' };
+    }
+    const config = body.config;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+      reply.code(400);
+      return { ok: false, error: 'config 必须是 JSON 对象' };
+    }
+
+    const errors: string[] = [];
+    // 基本结构校验：检查嵌套字段类型
+    const checks: Array<{ path: string; type: string }> = [
+      { path: 'embedding', type: 'object' },
+      { path: 'llm', type: 'object' },
+    ];
+    for (const c of checks) {
+      const val = getByPath(config as Record<string, unknown>, c.path);
+      if (val !== undefined && (typeof val !== c.type || Array.isArray(val) || val === null)) {
+        errors.push(`${c.path}: 期望 ${c.type}，实际 ${typeof val === 'object' && Array.isArray(val) ? 'array' : typeof val}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      reply.code(400);
+      return { ok: false, error: '配置校验失败', errors };
+    }
+    return { ok: true, message: '配置结构校验通过' };
+  });
+
+  // PUT /api/gm-pro/config/raw —— 写入完整配置（高级用户模式）
+  app.put('/api/gm-pro/config/raw', async (req, reply) => {
+    const body = req.body as Record<string, unknown> | undefined;
+    if (!body || typeof body !== 'object' || !body.config) {
+      reply.code(400);
+      return { ok: false, error: '请求体缺少 config 字段' };
+    }
+    const config = body.config;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+      reply.code(400);
+      return { ok: false, error: 'config 必须是 JSON 对象' };
+    }
+
+    try {
+      writeGmProRawConfig(config as Record<string, unknown>);
+      const raw = readGmProRawConfig();
+      const redacted = redactSensitive(raw);
+      return { ok: true, config: redacted, note: '配置已写入，需重启 graph-memory-pro 插件进程生效' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      reply.code(500);
+      return { ok: false, error: msg };
+    }
+  });
 }

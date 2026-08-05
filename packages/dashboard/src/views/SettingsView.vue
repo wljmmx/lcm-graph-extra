@@ -21,6 +21,7 @@ import {
 import { fetchMoaConfig, updateMoaConfig, fetchMoaStatus } from '../api/moa';
 import type { MoaConfig, MoaModelConfig } from '../api/moa';
 import GeneralConfigCard from '../components/GeneralConfigCard.vue';
+import GmProConfigCard from '../components/GmProConfigCard.vue';
 import CapabilityProfileSwitch from '../components/CapabilityProfileSwitch.vue';
 import ConfigRawEditor from '../components/ConfigRawEditor.vue';
 
@@ -767,6 +768,11 @@ const effectiveModeLabel = computed(() => {
         <!-- P1-1: 通用配置 tab -->
         <NTabPane name="general" tab="通用配置">
           <GeneralConfigCard />
+        </NTabPane>
+
+        <!-- v2.1.13: Graph Memory Pro 配置 tab -->
+        <NTabPane name="gm-pro" tab="Graph Memory Pro">
+          <GmProConfigCard />
         </NTabPane>
       </NTabs>
     </template>

@@ -103,3 +103,35 @@ export function validateConfig(json: string): Promise<ValidateConfigResponse> {
 export function saveRawConfig(json: string): Promise<RawConfigResponse> {
   return apiPut<RawConfigResponse>('/api/config/raw', { config: JSON.parse(json) });
 }
+
+// =========================================================================
+// v2.1.13: graph-memory-pro 插件配置管理
+// =========================================================================
+
+/** 获取 graph-memory-pro 配置 schema 文档 */
+export function fetchGmProConfigSchema(): Promise<ConfigSchemaResponse> {
+  return apiGet<ConfigSchemaResponse>('/api/gm-pro/config/schema');
+}
+
+/** 获取 graph-memory-pro 运行时配置（脱敏后） */
+export function fetchGmProConfig(): Promise<ConfigResponse> {
+  return apiGet<ConfigResponse>('/api/gm-pro/config');
+}
+
+/** 热更新 graph-memory-pro 配置（白名单字段） */
+export function updateGmProConfig(updates: Record<string, unknown>): Promise<ConfigUpdateResponse> {
+  return apiPatch<ConfigUpdateResponse>('/api/gm-pro/config', { updates });
+}
+
+// GM Pro raw config 编辑器 API
+export function fetchGmProRawConfig(): Promise<RawConfigResponse> {
+  return apiGet<RawConfigResponse>('/api/gm-pro/config/raw');
+}
+
+export function validateGmProConfig(json: string): Promise<ValidateConfigResponse> {
+  return apiPost<ValidateConfigResponse>('/api/gm-pro/config/validate', { config: JSON.parse(json) });
+}
+
+export function saveGmProRawConfig(json: string): Promise<RawConfigResponse> {
+  return apiPut<RawConfigResponse>('/api/gm-pro/config/raw', { config: JSON.parse(json) });
+}
