@@ -87,9 +87,10 @@ const { invokeMcpToolMock } = vi.hoisted(() => ({
   ),
 }));
 
-// ===== mock @tanstack/vue-query：useMutation 同步执行 mutationFn =====
+// ===== mock @tanstack/vue-query：useMutation 同步执行 mutationFn，useQuery 返回空数据 =====
 // 测试需要 mutate() 实际触发 onMutate → mutationFn → onSuccess 链路，
 // 才能验证日志记录与 invokeMcpTool 调用。
+// useQuery 由 gm-pro 运维卡片（P2）使用，测试中只需返回空数据避免报错。
 vi.mock('@tanstack/vue-query', async () => {
   const { ref } = await import('vue');
   const useMutation = vi.fn((opts: {
@@ -113,7 +114,13 @@ vi.mock('@tanstack/vue-query', async () => {
       error: ref<unknown>(null),
     };
   });
-  return { useMutation, VueQueryPlugin: { install: () => {} } };
+  const useQuery = vi.fn(() => ({
+    data: ref(null),
+    isLoading: ref(false),
+    isError: ref(false),
+    error: ref(null),
+  }));
+  return { useMutation, useQuery, VueQueryPlugin: { install: () => {} } };
 });
 
 // ===== mock ../../src/api/experience：捕获 invokeMcpTool 调用 =====
@@ -152,10 +159,10 @@ beforeEach(() => {
 });
 
 describe('MaintainView', () => {
-  it('挂载并渲染 9 张操作卡片标题', () => {
+  it('挂载并渲染操作卡片标题', () => {
     const wrapper = mountView();
     const text = wrapper.text();
-    // 9 张卡片标题
+    // 操作卡片标题（OperationCard 组件）
     expect(text).toContain('图谱维护');
     expect(text).toContain('触发蒸馏');
     expect(text).toContain('触发 compact');
@@ -165,6 +172,11 @@ describe('MaintainView', () => {
     expect(text).toContain('恢复');
     expect(text).toContain('同步修复');
     expect(text).toContain('历史导入');
+    // gm-pro 运维卡片（NCard 组件）
+    expect(text).toContain('Auto Tuner');
+    expect(text).toContain('系统诊断 (Doctor)');
+    expect(text).toContain('关联矩阵 M');
+    expect(text).toContain('Token 用量');
     // 日志区
     expect(text).toContain('操作日志');
     // 初始空日志
