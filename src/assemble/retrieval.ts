@@ -264,6 +264,44 @@ export async function performRetrieval(
     const rawGraph = Array.isArray(l3?.results) ? l3.results : [];
     expResults = Array.isArray(l4?.results) ? l4.results : [];
 
+    // 同步更新 RetrievalGateway.stats，确保 Dashboard 检索性能摘要反映真实数据
+    const gw = ctx.retrievalGateway;
+    if (gw?.stats) {
+      if (l2_ms > 0) {
+        const s = gw.stats.qmd;
+        if (s) {
+          s.searches++;
+          s.totalDurationMs += l2_ms;
+          if (l2_ms > s.maxDurationMs) s.maxDurationMs = l2_ms;
+          s.lastQueryTime = l2_ms;
+          if (rawQmd.length === 0) s.failures++;
+        }
+      }
+      if (l3_ms > 0) {
+        const s = gw.stats.graph;
+        if (s) {
+          s.searches++;
+          s.totalDurationMs += l3_ms;
+          if (l3_ms > s.maxDurationMs) s.maxDurationMs = l3_ms;
+          s.lastQueryTime = l3_ms;
+          if (rawGraph.length === 0) s.failures++;
+        }
+      }
+      if (l4_ms > 0) {
+        // L4 is distilled experience search; also update experience bucket for backward compat
+        for (const key of ['experience', 'distilledExp'] as const) {
+          const s = gw.stats[key];
+          if (s) {
+            s.searches++;
+            s.totalDurationMs += l4_ms;
+            if (l4_ms > s.maxDurationMs) s.maxDurationMs = l4_ms;
+            s.lastQueryTime = l4_ms;
+            if (expResults.length === 0) s.failures++;
+          }
+        }
+      }
+    }
+
     // H-6: 上下文预热
     if (tier === 'low' && expResults.length === 0) {
       const sk = typeof params.sessionKey === 'string' ? params.sessionKey : (typeof params.session_id === 'string' ? params.session_id : '');
