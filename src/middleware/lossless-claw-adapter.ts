@@ -278,15 +278,17 @@ export class LosslessClawAdapter {
     const baseDelayMs = 1000;
 
     let lastError: string | null = null;
+    let lastErrorDetail: string | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const factory = await this._discoverCEFactory();
         if (!factory) {
           lastError = 'lossless-claw CE factory not found in registry';
+          lastErrorDetail = 'all discovery paths exhausted';
           if (attempt < maxRetries) {
             const delay = baseDelayMs * Math.pow(2, attempt);
-            this.logger?.debug?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${delay}ms`);
+            this.logger?.info?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory not found, retrying in ${delay}ms`);
             await new Promise((r) => setTimeout(r, delay));
             continue;
           }
@@ -296,41 +298,74 @@ export class LosslessClawAdapter {
         // 调用工厂获取已初始化的 engine 实例
         // factory 接收 factoryCtx: { config?, agentDir?, workspaceDir? }
         // lossless-claw 内部: () => shared.waitForEngine() 返回已初始化的单例
-        this.engine = await factory({});
-        if (!this.engine || typeof this.engine.compact !== 'function') {
-          lastError = 'lossless-claw factory returned invalid engine';
-          this.engine = null;
-          if (attempt < maxRetries) {
-            const delay = baseDelayMs * Math.pow(2, attempt);
-            this.logger?.debug?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1} factory returned invalid engine, retrying in ${delay}ms`);
-            await new Promise((r) => setTimeout(r, delay));
-            continue;
-          }
-          break;
+        // 加 60s 超时兜底，防止 waitForEngine() 永不 resolve 导致挂死
+        const FACTORY_TIMEOUT_MS = 60_000;
+        let factoryTimer: ReturnType<typeof setTimeout> | null = null;
+        let engine: any;
+        try {
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            factoryTimer = setTimeout(
+              () => reject(new Error(`factory({}) timed out after ${FACTORY_TIMEOUT_MS}ms`)),
+              FACTORY_TIMEOUT_MS,
+            );
+          });
+          engine = await Promise.race([factory({}), timeoutPromise]);
+        } finally {
+          if (factoryTimer) clearTimeout(factoryTimer);
         }
 
-        this._connected = true;
-        this._connectionAttempted = true;
-        this._connecting = null;
-        this.logger?.info?.('[lcm] lossless-claw adapter connected successfully');
-        return true;
+        if (!engine) {
+          lastError = 'lossless-claw factory returned null/undefined engine';
+          lastErrorDetail = 'engine is null or undefined';
+          this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory returned null/undefined engine`);
+        } else if (typeof engine.compact !== 'function') {
+          // 诊断：列出 engine 上实际有哪些 key，帮助定位为何 compact 缺失
+          const keys = Object.keys(engine).concat(Object.getOwnPropertyNames(Object.getPrototypeOf(engine)));
+          const uniqueKeys = [...new Set(keys)].filter(k => k !== 'constructor');
+          lastError = 'lossless-claw factory returned invalid engine (missing compact)';
+          lastErrorDetail = `engine keys: [${uniqueKeys.join(', ')}]`;
+          this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: engine missing compact method`, {
+            engineType: typeof engine,
+            engineKeys: uniqueKeys,
+            hasCompact: typeof engine.compact,
+            isPromise: engine instanceof Promise,
+          });
+          this.engine = null;
+        } else {
+          // 成功
+          this.engine = engine;
+          this._connected = true;
+          this._connectionAttempted = true;
+          this._connecting = null;
+          this.logger?.info?.('[lcm] lossless-claw adapter connected successfully');
+          return true;
+        }
       } catch (err) {
         lastError = (err as Error).message;
-        if (attempt < maxRetries) {
-          const delay = baseDelayMs * Math.pow(2, attempt);
-          this.logger?.debug?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1} threw, retrying in ${delay}ms`, { err: lastError });
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-        break;
+        lastErrorDetail = `stack: ${(err as Error).stack?.substring(0, 200) ?? 'N/A'}`;
+        this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory({}) threw`, {
+          err: lastError,
+          errName: (err as Error).name,
+        });
       }
+
+      // 走到这里说明本次尝试失败，若还有重试机会则等待后重试
+      if (attempt < maxRetries) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      break;
     }
 
     this._initError = lastError ?? 'lossless-claw CE factory not found in registry';
     this._connected = false;
     this._connectionAttempted = true;
     this._connecting = null;
-    this.logger?.warn?.('[lcm] lossless-claw adapter connection failed after all retries', { err: this._initError });
+    this.logger?.warn?.('[lcm] lossless-claw adapter connection failed after all retries', {
+      err: this._initError,
+      detail: lastErrorDetail,
+    });
     return false;
   }
 
