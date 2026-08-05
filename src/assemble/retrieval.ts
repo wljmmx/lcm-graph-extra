@@ -266,6 +266,16 @@ export async function performRetrieval(
 
     // 同步更新 RetrievalGateway.stats，确保 Dashboard 检索性能摘要反映真实数据
     const gw = ctx.retrievalGateway;
+    ctx.logger?.info?.('[perf-stats] performRetrieval stats update check', {
+      hasGateway: !!gw,
+      hasStats: !!gw?.stats,
+      l2_ms,
+      l3_ms,
+      l4_ms,
+      qmdResults: rawQmd.length,
+      graphResults: rawGraph.length,
+      expResults: expResults.length,
+    });
     if (gw?.stats) {
       if (l2_ms > 0) {
         const s = gw.stats.qmd;
@@ -300,6 +310,17 @@ export async function performRetrieval(
           }
         }
       }
+      ctx.logger?.info?.('[perf-stats] after update', {
+        qmd: gw.stats.qmd,
+        graph: gw.stats.graph,
+        experience: gw.stats.experience,
+        distilledExp: gw.stats.distilledExp,
+      });
+    } else {
+      ctx.logger?.warn?.('[perf-stats] stats update skipped - no gateway or no stats', {
+        hasGateway: !!gw,
+        hasStats: !!gw?.stats,
+      });
     }
 
     // H-6: 上下文预热

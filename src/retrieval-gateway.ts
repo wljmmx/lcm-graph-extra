@@ -264,6 +264,12 @@ export class RetrievalGateway {
 
   /** Get performance summary */
   getPerfSummary(): string {
+    this.logger.info('[perf-stats] getPerfSummary called', {
+      qmd: this.stats.qmd,
+      graph: this.stats.graph,
+      experience: this.stats.experience,
+      distilledExp: this.stats.distilledExp,
+    });
     const lines: string[] = ['Performance:'];
     for (const [engine, s] of Object.entries(this.stats)) {
       const avg = s.searches > 0 ? (s.totalDurationMs / s.searches).toFixed(0) : '-';

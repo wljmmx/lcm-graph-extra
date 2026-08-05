@@ -1881,9 +1881,22 @@ const pluginEntry: any = definePluginEntry({
               return { running: 0, pendingCount: 0, pollIntervalMs: 60000, maxConcurrent: 2 };
             }
           },
-          getRetrievalState: () => ({
-            lastQuery: lastRetrievalQuery,
-            perfSummary: _retrievalGateway?.getPerfSummary?.() ?? 'gateway not initialized',
+          getRetrievalState: () => {
+            const summary = _retrievalGateway?.getPerfSummary?.() ?? 'gateway not initialized';
+            logger?.info?.('[perf-stats] getRetrievalState called', {
+              hasGateway: !!_retrievalGateway,
+              hasGetPerfSummary: typeof _retrievalGateway?.getPerfSummary === 'function',
+              summary,
+              stats: _retrievalGateway?.stats ? {
+                qmd: _retrievalGateway.stats.qmd,
+                graph: _retrievalGateway.stats.graph,
+                experience: _retrievalGateway.stats.experience,
+                distilledExp: _retrievalGateway.stats.distilledExp,
+              } : null,
+            });
+            return {
+              lastQuery: lastRetrievalQuery,
+              perfSummary: summary,
             // P-CB-6: 暴露 qmd 熔断器实时状态，dashboard 不再依赖心跳缓存
             qmdCircuitBreaker: (() => {
               const snap = getHealthSnapshot();
@@ -1895,7 +1908,8 @@ const pluginEntry: any = definePluginEntry({
               recoveryAttempts: _retrievalGatewayRecoveryAttempts,
               lastRecoveryError: _retrievalGatewayLastRecoveryError,
             },
-          }),
+            };
+          },
           getHealthLatest: () => {
             const base = healthMetrics.getLatest();
             if (!base) return base;
