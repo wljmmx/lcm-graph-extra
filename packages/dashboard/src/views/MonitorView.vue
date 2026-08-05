@@ -55,6 +55,11 @@ import {
 import { formatTime, formatTimeWithSeconds, formatBucketLabel, bucketKeyBySize, timeRangeToMs, timeRangeLabel, bucketSizeLabel, type TimeRange, type BucketSize } from '../utils/format';
 import { fetchMoaPerformance, type MoaPerformanceData } from '../api/moa';
 import { invokeResetBreaker } from '../api/maintain';
+import {
+  fetchGmProHealth,
+  fetchGmProTop,
+  fetchGmProDirtyNodes,
+} from '../api/gm-pro';
 import { useTheme } from '../composables/useTheme';
 
 const { isDark } = useTheme();
@@ -150,6 +155,33 @@ const { data: graphHealthData, isLoading: graphHealthLoading, isError: graphHeal
   refetchInterval: 30_000,
   staleTime: 15_000, // PERF-8: 15s 内数据视为新鲜
 });
+
+// G-5.1: gm-pro 健康报告（增强图谱健康卡片）
+const { data: gmProHealthRes } = useQuery({
+  queryKey: ['gm-pro-health'],
+  queryFn: fetchGmProHealth,
+  refetchInterval: 30_000,
+  staleTime: 15_000,
+});
+const gmProHealth = computed(() => gmProHealthRes.value?.data ?? null);
+
+// G-5.2: gm-pro Top 10 节点（用于柱状图）
+const { data: gmProTop10Res } = useQuery({
+  queryKey: ['gm-pro-top10'],
+  queryFn: () => fetchGmProTop(10),
+  refetchInterval: 60_000,
+  staleTime: 30_000,
+});
+const gmProTop10 = computed(() => gmProTop10Res.value?.data?.nodes ?? []);
+
+// G-5.3: gm-pro 脏节点监控
+const { data: gmProDirtyRes } = useQuery({
+  queryKey: ['gm-pro-dirty-nodes'],
+  queryFn: fetchGmProDirtyNodes,
+  refetchInterval: 60_000,
+  staleTime: 30_000,
+});
+const gmProDirty = computed(() => gmProDirtyRes.value?.data ?? null);
 
 // MoA 性能数据（30s 轮询）
 const { data: moaPerfData, isLoading: moaPerfLoading } = useQuery({
@@ -262,6 +294,36 @@ const graphHealthSourceTagType = computed<'success' | 'warning' | 'default'>(() 
   if (s === 'gm-pro') return 'success';
   if (s === 'local') return 'warning';
   return 'default';
+});
+
+// G-5.1: Top 10 PageRank 柱状图 ECharts option
+const top10ChartOption = computed(() => {
+  const nodes = gmProTop10.value;
+  if (!nodes.length) return null;
+  return {
+    tooltip: { trigger: 'axis' as const, axisPointer: { type: 'shadow' as const } },
+    grid: { left: 12, right: 24, top: 8, bottom: 4, containLabel: true },
+    xAxis: {
+      type: 'value' as const,
+      axisLabel: { fontSize: 10, color: isDark.value ? '#aaa' : '#666' },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: 'category' as const,
+      data: nodes.map((n: any) => n.name?.slice(0, 20) ?? n.id?.slice(0, 12) ?? '—').reverse(),
+      axisLabel: { fontSize: 10, color: isDark.value ? '#ccc' : '#333' },
+      inverse: true,
+    },
+    series: [{
+      type: 'bar',
+      data: nodes.map((n: any) => n.pagerank ?? 0).reverse(),
+      barWidth: 14,
+      itemStyle: {
+        borderRadius: [0, 3, 3, 0],
+        color: isDark.value ? '#66b1ff' : '#409eff',
+      },
+    }],
+  };
 });
 
 // ===== KPI 值（db 为 null 时显示 "—"） =====
@@ -1827,25 +1889,26 @@ const moaLatencyPhaseOption = computed(() => {
           </NCard>
         </NGi>
 
-        <!-- G-5: 图谱健康卡片（gm-pro getGraphHealth，降级到本地 graphAdapter） -->
+        <!-- G-5: 图谱健康卡片（增强：gm-pro 双层数据源 + Top10 柱状图 + 脏节点监控） -->
         <NGi>
           <NCard title="图谱健康" size="small">
+            <!-- 基础层：内部 graphHealth（降级到本地 graphAdapter） -->
             <div v-if="graphHealthLoading && !graphHealth" class="card-loading">
               <NSpin size="small" />
             </div>
-            <template v-else-if="graphHealth">
-              <div class="profile-section">
+            <NEmpty v-else-if="!graphHealth" description="无图谱健康数据" style="padding: 12px 0" />
+
+            <template v-else>
+              <!-- 数据源标签 -->
+              <div class="profile-section" style="margin-bottom: 8px">
                 <NTag :type="graphHealthTagType" size="small">
                   {{ graphHealth.status }}
                 </NTag>
-                <NTag
-                  :type="graphHealthSourceTagType"
-                  size="small"
-                  style="margin-left: 6px"
-                >
+                <NTag :type="graphHealthSourceTagType" size="small" style="margin-left: 6px">
                   source: {{ graphHealth.source }}
                 </NTag>
               </div>
+
               <NDescriptions :column="1" size="small" label-placement="left" bordered>
                 <NDescriptionsItem label="nodeCount">
                   {{ graphHealth.nodeCount ?? '—' }}
@@ -1872,7 +1935,95 @@ const moaLatencyPhaseOption = computed(() => {
                 {{ graphHealth.error }}
               </div>
             </template>
-            <NEmpty v-else description="无图谱健康数据" style="padding: 12px 0" />
+
+            <!-- gm-pro 增强层：健康概览 -->
+            <NDivider v-if="gmProHealth" style="margin: 8px 0" />
+            <template v-if="gmProHealth">
+              <div class="profile-section" style="margin-bottom: 4px">
+                <NTag type="success" size="small">gm-pro 健康概览</NTag>
+              </div>
+              <NGrid :cols="'2 s:2 m:3'" :x-gap="8" :y-gap="4" responsive="screen">
+                <NGi>
+                  <div class="health-stat">
+                    <span class="health-stat-label">活跃节点</span>
+                    <span class="health-stat-value">{{ gmProHealth.nodes?.active ?? '—' }} / {{ gmProHealth.nodes?.total ?? '—' }}</span>
+                  </div>
+                </NGi>
+                <NGi>
+                  <div class="health-stat">
+                    <span class="health-stat-label">孤立节点</span>
+                    <span class="health-stat-value" :class="{ 'text-warning': (gmProHealth.isolatedNodes ?? 0) > 0 }">{{ gmProHealth.isolatedNodes ?? '—' }}</span>
+                  </div>
+                </NGi>
+                <NGi>
+                  <div class="health-stat">
+                    <span class="health-stat-label">高过时节点</span>
+                    <span class="health-stat-value" :class="{ 'text-danger': (gmProHealth.highStaleNodes ?? 0) > 0 }">{{ gmProHealth.highStaleNodes ?? '—' }}</span>
+                  </div>
+                </NGi>
+                <NGi>
+                  <div class="health-stat">
+                    <span class="health-stat-label">社区数</span>
+                    <span class="health-stat-value">{{ gmProHealth.communities ?? '—' }}</span>
+                  </div>
+                </NGi>
+                <NGi>
+                  <div class="health-stat">
+                    <span class="health-stat-label">平均 PageRank</span>
+                    <span class="health-stat-value mono">{{ gmProHealth.avgPageRank?.toFixed(4) ?? '—' }}</span>
+                  </div>
+                </NGi>
+                <NGi v-if="gmProHealth.anomalies?.length">
+                  <div class="health-stat">
+                    <span class="health-stat-label">异常</span>
+                    <span class="health-stat-value text-warning">{{ gmProHealth.anomalies.length }} 项</span>
+                  </div>
+                </NGi>
+              </NGrid>
+              <!-- 异常详情 -->
+              <div v-if="gmProHealth.anomalies?.length" style="margin-top: 6px">
+                <NSpace :size="4">
+                  <NTag v-for="a in gmProHealth.anomalies" :key="a" size="small" type="warning">{{ a }}</NTag>
+                </NSpace>
+              </div>
+            </template>
+
+            <!-- gm-pro 增强层：熔断器状态 -->
+            <template v-if="gmProHealth?.circuitBreakers">
+              <NDivider style="margin: 8px 0">熔断器</NDivider>
+              <div v-for="(cb, name) in gmProHealth.circuitBreakers" :key="name" style="display:flex;align-items:center;gap:8px;padding:2px 0">
+                <span class="mono" style="font-size:var(--fs-caption);min-width:56px">{{ name }}</span>
+                <NTag :type="(cb as any).open ? 'error' : 'success'" size="tiny">
+                  {{ (cb as any).open ? 'OPEN' : 'CLOSED' }}
+                </NTag>
+                <span class="muted" style="font-size:var(--fs-caption)">failures: {{ (cb as any).failures ?? 0 }}</span>
+              </div>
+            </template>
+
+            <!-- gm-pro 增强层：Top 10 PageRank 柱状图 -->
+            <template v-if="gmProTop10.length">
+              <NDivider style="margin: 8px 0">Top 10 PageRank</NDivider>
+              <EChart
+                v-if="top10ChartOption"
+                :option="top10ChartOption"
+                :height="200"
+                :loading="false"
+              />
+              <NEmpty v-else description="无图表数据" style="padding: 8px 0" />
+            </template>
+
+            <!-- gm-pro 增强层：脏节点监控 -->
+            <template v-if="gmProDirty">
+              <NDivider style="margin: 8px 0">增量维护</NDivider>
+              <div style="display:flex;align-items:center;gap:8px">
+                <NTag :type="(gmProDirty.count ?? 0) > 0 ? 'warning' : 'success'" size="small">
+                  脏节点: {{ gmProDirty.count ?? 0 }} 个
+                </NTag>
+                <span v-if="(gmProDirty.nodeIds as string[])?.length" class="muted" style="font-size:var(--fs-caption)">
+                  {{ (gmProDirty.nodeIds as string[]).slice(0, 3).join(', ') }}{{ (gmProDirty.nodeIds as string[]).length > 3 ? '…' : '' }}
+                </span>
+              </div>
+            </template>
           </NCard>
         </NGi>
 
@@ -2657,5 +2808,27 @@ const moaLatencyPhaseOption = computed(() => {
   .model-name-cell {
     max-width: 80px;
   }
+}
+
+/* G-5.1: gm-pro 健康概览统计单元 */
+.health-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+.health-stat-label {
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
+}
+.health-stat-value {
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+.text-warning {
+  color: var(--color-warning);
+}
+.text-danger {
+  color: var(--color-danger);
 }
 </style>
