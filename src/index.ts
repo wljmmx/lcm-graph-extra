@@ -687,7 +687,7 @@ const pluginEntry: any = definePluginEntry({
           l2QueryCache,
           l4QueryCache,
           // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
-          cacheSize: pluginConfig.retrieval?.cacheSize ?? 50,
+          cacheSize: api.pluginConfig.retrieval?.cacheSize ?? 50,
           userProfile,
           setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
         };

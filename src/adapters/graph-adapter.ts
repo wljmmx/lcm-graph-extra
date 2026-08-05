@@ -265,7 +265,7 @@ export class GraphAdapter {
   private _llm?: (system: string, user: string) => Promise<string>;
 
   // P2-3 H-16: searchWithCache 的 LRU 容量与 TTL 改为引用 DEFAULTS.graph
-  private searchCache!: LRUCache<string, { value: any; expiresAt: number }>;
+  private searchCache!: LRUCache<string, RetrievalResult[]>;
 
   constructor(neo4jConfig: Neo4jConfig, config: GraphAdapterConfig, logger?: Logger) {
     this.neo4jConfig = neo4jConfig;
