@@ -1,11 +1,11 @@
 /**
  * graph-memory-pro HTTP API 代理路由。
  *
- * 将 dashboard 前端的请求代理到 graph-memory-pro 插件注册的 HTTP 端点。
+ * 将 dashboard 前端的请求代理到 graph-memory-pro 的独立 HTTP API 服务器。
  *
- * **重要：graph-memory-pro 不启动独立 HTTP 服务器。**
- * 它通过 api.registerHttpRoute() 将路由注册到 OpenClaw Gateway 的 HTTP 服务器
- * （默认 http://127.0.0.1:18789），与 OPENCLAW_MCP_URL 指向同一 Gateway。
+ * **重要：graph-memory-pro v2.3.3+ 使用独立 HTTP 服务器（node:http），
+ * 不再通过 api.registerHttpRoute() 注册到 OpenClaw Gateway。**
+ * 默认监听 http://127.0.0.1:7850（与 MCP :7800 区分）。
  *
  * 代理路径映射：
  *   GET  /api/gm-pro/proxy/status       → {GM_PRO_HTTP_URL}/api/status
@@ -15,23 +15,20 @@
  *   ... 等所有 graph-memory-pro HTTP API 路由
  *
  * 配置：
- *   GM_PRO_HTTP_URL —— Gateway HTTP 地址（默认 http://127.0.0.1:18789，与 OPENCLAW_MCP_URL 一致）
+ *   GM_PRO_HTTP_URL —— graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850）
  *   GM_PRO_HTTP_TIMEOUT —— 代理超时（ms），默认 10s
- *   GM_PRO_AUTH_TOKEN —— graph-memory-pro mcp.authToken，用于插件级鉴权
+ *   GM_PRO_AUTH_TOKEN —— graph-memory-pro apiServer.authToken，用于 X-Auth-Token 鉴权
  *
  * 安全：
  *   - 仅允许 GET 请求（只读），拒绝 POST/PATCH/PUT/DELETE 写操作
- *   - 出站请求携带 Gateway 凭据（DASHBOARD_AUTH Basic Auth）
  *   - 路径白名单校验，防止 SSRF 遍历
- *   - v2.9.0: graph-memory-pro 所有路由已升级为 auth: "plugin"（SDK 必填），
- *     全部请求统一携带 x-auth-token 头（若配置了 GM_PRO_AUTH_TOKEN）
+ *   - 携带 X-Auth-Token 头（若配置了 GM_PRO_AUTH_TOKEN），对应 graph-memory-pro 的 authToken 配置
+ *   - 独立服务器自带 CORS 支持，不依赖 Gateway 的 Basic Auth
  */
 import type { FastifyInstance } from 'fastify';
-import { getOutboundAuthHeader } from '../lib/auth';
 
-const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL
-  ?? process.env.OPENCLAW_MCP_URL
-  ?? 'http://127.0.0.1:18789';
+/** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
+const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL ?? 'http://127.0.0.1:7850';
 const GM_PRO_HTTP_TIMEOUT = Number(process.env.GM_PRO_HTTP_TIMEOUT ?? 10_000);
 const GM_PRO_AUTH_TOKEN = process.env.GM_PRO_AUTH_TOKEN ?? '';
 
@@ -81,11 +78,9 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
 
     // 构建出站请求头
     const headers: Record<string, string> = {
-      ...getOutboundAuthHeader(),
       'Accept': 'application/json',
     };
-    // v2.9.0: graph-memory-pro 所有路由已升级为 auth: "plugin"（SDK 必填），
-    // 全部请求统一携带 x-auth-token 头（若配置了 GM_PRO_AUTH_TOKEN）
+    // graph-memory-pro 独立服务器使用 X-Auth-Token 鉴权（对应 apiServer.authToken 配置）
     if (GM_PRO_AUTH_TOKEN) {
       headers['x-auth-token'] = GM_PRO_AUTH_TOKEN;
     }
