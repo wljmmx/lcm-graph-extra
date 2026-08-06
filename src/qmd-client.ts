@@ -331,19 +331,36 @@ export class QmdClient {
         return results;
       } catch (err) {
         mcpMs = Date.now() - mcpStart;
+        const _mcpErr = (err as Error).message;
+        const _mcpStack = (err as Error).stack;
+        const isContextSizeError = /context.?size|exceed.*(?:context|length)/i.test(_mcpErr);
+        const isEmbedError = /dimension|embedding|mismatch/i.test(_mcpErr) || isContextSizeError;
+
+        // v2.5.0: context size 错误时渐进降级重试，避免直接丢弃 MCP 路径。
+        // 核心原因：服务端 embedding 模型在 rerank / vec 检索时需要将查询+文档拼接嵌入，
+        // 若索引文档过长则超出 context window。客户端无法修复服务端文档分片，但可通过以下
+        // 渐进策略在 MCP 内尝试恢复：
+        //   1. rerank=false — 跳过最可能嵌入全文的 rerank 步骤
+        //   2. lex-only    — 纯 BM25 检索，不触发 embedding
+        // 仅当以上均失败时才标记 MCP 不可用、降级到 REST。
+        if (isContextSizeError) {
+          const retryResult = await this._retryMcpContextSize(params, _mcpErr);
+          if (retryResult !== null) {
+            this.mcpAvailable = true;
+            this.clearRecovery();
+            mcpStatus = 'ok';
+            finalizeBreakdown(Date.now() - qStart);
+            return retryResult;
+          }
+        }
+
         mcpStatus = 'fail';
         this.mcpAvailable = false;
         this.scheduleRecovery();
-        const _mcpErr = (err as Error).message;
-        const _mcpStack = (err as Error).stack;
-        // 判断是否 embed 相关错误（REST 降级时需避开 vec，切为 lex-only）
-        // 覆盖场景：
-        //   - dimension/embedding/mismatch：模型维度不匹配
-        //   - context size / exceed the context：文档超过 embedding 模型 context window
-        const isEmbedError = /dimension|embedding|mismatch|context.?size/i.test(_mcpErr);
         this.lastMcpErrorIsEmbed = isEmbedError;
         if (isEmbedError) {
-          this.logger.warn("[qmd-client] MCP embed error (likely model dim mismatch), falling back to REST lex-only", { err: _mcpErr });
+          const reason = isContextSizeError ? "context size exceeded" : "model dim mismatch";
+          this.logger.warn(`[qmd-client] MCP embed error (${reason}), falling back to REST lex-only`, { err: _mcpErr });
         } else if (_mcpErr.includes("circuit breaker")) {
           this.logger.warn("[qmd-client] MCP circuit breaker OPEN, falling back to REST");
         } else if (_mcpErr.includes("HTTP")) {
@@ -999,6 +1016,77 @@ export class QmdClient {
       line: r.line ?? 0,
       context: r.context ?? null,
     }));
+  }
+
+  /**
+   * v2.5.0: MCP context size 错误的渐进降级重试。
+   *
+   * 当服务端返回 "documents exceed the context size" 时，说明 embedding 模型在拼接
+   * 查询+文档时超出了 context window。此时分两步渐进尝试（不标记 MCP 不可用）：
+   *
+   *   1. rerank=false — rerank 步骤最可能将全文文档与查询拼接嵌入，跳过它可能避开超限
+   *   2. lex-only    — 纯 BM25 检索完全不走 embedding，不受 context size 限制
+   *
+   * 返回 null 表示所有重试均失败，调用方应继续降级到 REST。
+   */
+  private async _retryMcpContextSize(
+    params: SearchParams,
+    originalErr: string,
+  ): Promise<QmdSearchResult[] | null> {
+    const hasLex = params.searches.some((s) => s.type === "lex");
+    const hasVecOrHyde = params.searches.some((s) => s.type === "vec" || s.type === "hyde");
+
+    // Step 1: 重试 rerank=false（仅当有 vec/hyde 查询且原请求开启了 rerank 时才有意义）
+    if (hasVecOrHyde && params.rerank !== false) {
+      this.logger.warn(
+        "[qmd-client] MCP context size exceeded, retrying with rerank=false",
+        { err: originalErr.slice(0, 120) },
+      );
+      try {
+        const noRerankParams = { ...params, rerank: false };
+        const results = await this.queryViaMcp(noRerankParams);
+        this.logger.info("[qmd-client] MCP retry with rerank=false succeeded");
+        return results;
+      } catch (retryErr) {
+        const retryMsg = (retryErr as Error).message;
+        if (/context.?size|exceed.*(?:context|length)/i.test(retryMsg)) {
+          this.logger.warn(
+            "[qmd-client] MCP rerank=false still context size exceeded, trying lex-only",
+            { err: retryMsg.slice(0, 120) },
+          );
+        } else {
+          // 非 context size 错误（如超时），不再继续重试
+          this.logger.warn(
+            "[qmd-client] MCP rerank=false retry failed with non-context-size error, aborting retries",
+            { err: retryMsg.slice(0, 120) },
+          );
+          return null;
+        }
+      }
+    }
+
+    // Step 2: 重试 lex-only（纯 BM25，不需要 embedding）
+    if (hasLex) {
+      this.logger.warn("[qmd-client] MCP retrying lex-only (BM25, no embedding)");
+      try {
+        const lexOnly = params.searches.filter((s) => s.type === "lex");
+        const lexParams: SearchParams = {
+          ...params,
+          searches: lexOnly,
+          rerank: false,
+        };
+        const results = await this.queryViaMcp(lexParams);
+        this.logger.info("[qmd-client] MCP lex-only retry succeeded");
+        return results;
+      } catch (retryErr) {
+        this.logger.warn(
+          "[qmd-client] MCP lex-only retry also failed, falling back to REST",
+          { err: (retryErr as Error).message.slice(0, 120) },
+        );
+      }
+    }
+
+    return null;
   }
 
   // ===================== internal — CLI path ==============================
