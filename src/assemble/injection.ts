@@ -22,6 +22,29 @@ import { detectConflicts } from '../merger.js';
 import { getGoal, buildGoalAnchor } from '../plugin/goal-cache.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
+/** v2.7.0 P3: SDK guidance 缓存 —— 同 tools + citations 组合短期复用，避免每次重新构建（50-100ms） */
+const sdkGuidanceCache = new Map<string, { guidance: string; ts: number }>();
+const SDK_GUIDANCE_CACHE_TTL_MS = 900 * 1000; // 15min
+const SDK_GUIDANCE_CACHE_MAX = 10;
+
+function getCachedSdkGuidance(availableTools: string[], citationsMode: string): string | null {
+  const key = `${availableTools.sort().join(',')}|${citationsMode}`;
+  const cached = sdkGuidanceCache.get(key);
+  if (cached && Date.now() - cached.ts < SDK_GUIDANCE_CACHE_TTL_MS) {
+    return cached.guidance;
+  }
+  return null;
+}
+
+function setCachedSdkGuidance(availableTools: string[], citationsMode: string, guidance: string): void {
+  const key = `${availableTools.sort().join(',')}|${citationsMode}`;
+  if (sdkGuidanceCache.size >= SDK_GUIDANCE_CACHE_MAX) {
+    const oldest = sdkGuidanceCache.keys().next().value;
+    if (oldest !== undefined) sdkGuidanceCache.delete(oldest);
+  }
+  sdkGuidanceCache.set(key, { guidance, ts: Date.now() });
+}
+
 export async function injectContext(
   ctx: AssembleContext,
   params: any,
@@ -216,21 +239,41 @@ export async function injectContext(
     }
   }
 
-  // H-4: 上下文冲突检测
-  try {
-    // P1-1: 已改为静态导入，直接使用 detectConflicts
-    const expForConflict = finalExpResults.map((e: any) => ({ content: e.experience?.summary ?? e.experience?.detail ?? '', source: 'experience' as const, type: 'raw' as const, id: e.experience?.id ?? '', score: e.score ?? 0 }));
-    const graphForConflict = (Array.isArray(graphResults) ? graphResults : []).map((r: any) => ({ ...r, source: 'graph' as const }));
-    const qmdForConflict = (Array.isArray(qmdResults) ? qmdResults : []).map((r: any) => ({ ...r, source: 'qmd' as const }));
-    const conflicts = detectConflicts(expForConflict as any, graphForConflict as any, qmdForConflict as any);
-    if (conflicts.length > 0) {
-      const conflictText = conflicts.map((c: any, i: number) =>
+  // H-4: 上下文冲突检测 — v2.7.0 P4: 异步化，当前轮使用上一轮缓存结果，避免阻塞 200-400ms
+  // 冲突检测不依赖最新 results 的精确性，延迟一轮不影响用户体验
+  const sessionKey = typeof params.sessionKey === 'string'
+    ? params.sessionKey
+    : typeof params.session_id === 'string'
+      ? params.session_id
+      : '';
+
+  // 注入上一轮异步检测的冲突结果
+  if (sessionKey) {
+    const cachedConflicts = ctx.conflictCache?.get(sessionKey);
+    if (cachedConflicts && cachedConflicts.conflicts.length > 0) {
+      const conflictText = cachedConflicts.conflicts.map((c: any, i: number) =>
         `⚠️ 冲突 ${i + 1} [${c.severity === 'high' ? '严重' : '中等'}]: ${c.description}`
       ).join('\n');
       addSection('## ⚠️ 内容冲突提示', conflictText, 6);
-      ctx.logger?.debug?.("[assemble] H-4: detected content conflicts", { count: conflicts.length });
+      ctx.logger?.debug?.("[assemble] H-4: injected cached conflict results", { count: cachedConflicts.conflicts.length });
     }
-  } catch { /* non-fatal */ }
+  }
+
+  // 启动异步冲突检测，结果缓存供下一轮使用
+  if (sessionKey && ctx.conflictCache) {
+    const expForConflict = finalExpResults.map((e: any) => ({ content: e.experience?.summary ?? e.experience?.detail ?? '', source: 'experience' as const, type: 'raw' as const, id: e.experience?.id ?? '', score: e.score ?? 0 }));
+    const graphForConflict = (Array.isArray(graphResults) ? graphResults : []).map((r: any) => ({ ...r, source: 'graph' as const }));
+    const qmdForConflict = (Array.isArray(qmdResults) ? qmdResults : []).map((r: any) => ({ ...r, source: 'qmd' as const }));
+    backgroundTasks.register('h4:conflict-detection', (async () => {
+      try {
+        const conflicts = detectConflicts(expForConflict as any, graphForConflict as any, qmdForConflict as any);
+        ctx.conflictCache.set(sessionKey, { conflicts, ts: Date.now() });
+        if (conflicts.length > 0) {
+          ctx.logger?.debug?.("[assemble] H-4: async conflict detection completed", { count: conflicts.length });
+        }
+      } catch { /* non-fatal */ }
+    })().then(() => {}, () => {}));
+  }
 
   // Build systemPromptAddition
   let systemPromptAddition = '';
@@ -245,10 +288,15 @@ export async function injectContext(
         : '';
     const goalAnchor = buildGoalAnchor(getGoal(sessionKey));
 
-    const sdkGuidance = buildMemorySystemPromptAddition({
-      availableTools: new Set(availableTools),
-      citationsMode: citationsMode as any,
-    });
+    // v2.7.0 P3: SDK guidance 缓存 —— 同 tools + citations 组合复用，避免每次重建
+    let sdkGuidance = getCachedSdkGuidance(availableTools, citationsMode);
+    if (sdkGuidance === null) {
+      sdkGuidance = buildMemorySystemPromptAddition({
+        availableTools: new Set(availableTools),
+        citationsMode: citationsMode as any,
+      });
+      setCachedSdkGuidance(availableTools, citationsMode, sdkGuidance ?? '');
+    }
     let addition = goalAnchor ? goalAnchor + '\n' : '';
     if (sdkGuidance) {
       addition += '\n# Tool Guidance\n' + sdkGuidance;
@@ -269,7 +317,8 @@ export async function injectContext(
   const wm = ctx.api.pluginConfig?.lcmMonitor;
   if (wm && sections.length > 0) {
     const finalMsgTokens = estimateTokensFromMessages(finalMessages);
-    const sdkGuidance2 = buildMemorySystemPromptAddition({
+    // v2.7.0 P3: 复用缓存的 SDK guidance，避免重复构建
+    const sdkGuidance2 = getCachedSdkGuidance(availableTools, citationsMode) ?? buildMemorySystemPromptAddition({
       availableTools: new Set(availableTools),
       citationsMode: citationsMode as any,
     });

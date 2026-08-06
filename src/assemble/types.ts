@@ -33,6 +33,8 @@ export interface AssembleContext {
   l4QueryCache: Map<string, { results: any[]; ts: number }>;
   /** BUG-6: L2/L4 查询缓存大小上限（原硬编码 QUERY_CACHE_MAX = 50） */
   cacheSize: number;
+  /** v2.7.0 P4: 冲突检测异步缓存，当前轮注入上一轮检测结果 */
+  conflictCache: Map<string, { conflicts: any[]; ts: number }>;
 }
 
 /**

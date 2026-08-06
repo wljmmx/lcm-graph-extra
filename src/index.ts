@@ -95,6 +95,37 @@ const l2QueryCache = new Map<string, { results: any[]; ts: number }>();
 const l4QueryCache = new Map<string, { results: any[]; ts: number }>();
 const QUERY_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
 
+// v2.7.0 P4: 冲突检测异步缓存 — 当前轮注入上一轮检测结果
+const conflictCache = new Map<string, { conflicts: any[]; ts: number }>();
+const CONFLICT_CACHE_MAX = 50;
+const CONFLICT_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
+
+// v2.7.0 P6: Token 估算缓存 —— 同 messages 数组短期复用，避免重复计算（200-400ms/次）
+const tokenEstimateCache = new Map<string, { tokens: number; ts: number }>();
+const TOKEN_ESTIMATE_CACHE_TTL_MS = 30 * 1000; // 30s TTL（短 TTL 确保一致性）
+const TOKEN_ESTIMATE_CACHE_MAX = 100;
+
+function cachedEstimateTokens(messages: any[]): number {
+  if (!Array.isArray(messages) || messages.length === 0) return 0;
+  // 用消息数 + 首尾消息内容 hash 作为 key
+  const first = messages[0];
+  const last = messages[messages.length - 1];
+  const firstContent = typeof first?.content === 'string' ? first.content.slice(0, 100) : '';
+  const lastContent = typeof last?.content === 'string' ? last.content.slice(0, 100) : '';
+  const key = `${messages.length}:${firstContent}:${lastContent}`;
+  const cached = tokenEstimateCache.get(key);
+  if (cached && Date.now() - cached.ts < TOKEN_ESTIMATE_CACHE_TTL_MS) {
+    return cached.tokens;
+  }
+  const tokens = estimateTokensFromMessages(messages);
+  if (tokenEstimateCache.size >= TOKEN_ESTIMATE_CACHE_MAX) {
+    const oldest = tokenEstimateCache.keys().next().value;
+    if (oldest !== undefined) tokenEstimateCache.delete(oldest);
+  }
+  tokenEstimateCache.set(key, { tokens, ts: Date.now() });
+  return tokens;
+}
+
 // P2-2: heartbeat 文件 mtimeMs 缓存 —— 仅读取修改时间变化的文件
 // session 文件缓存完整解析结果（供 pendingMessages + debt 写入复用）
 const sessionFileCache = new Map<string, { mtimeMs: number; data: any; msgCount: number }>();
@@ -140,6 +171,8 @@ const pluginEntry: any = definePluginEntry({
     // 存储 RetrievalGateway 初始化配置，供 heartbeat 中恢复重试
     let _retrievalGatewayConfig: { maxResults: number; fuzzyMatchThreshold: number; decayHalfLifeDays: number } | null = null;
     let _lastEmbedHealth: boolean = true;
+    /** v2.7.0 P1: graph quickHealth 连续失败计数，≥3 次触发 health() 完整恢复 */
+    let _graphQuickHealthFailCount = 0;
     let _modelRegistry: Record<string, number> | undefined;
     // 从 assemble 中捕获活跃模型 ID，供 compact 回查模型上下文窗口
     let _activeModelId: string | undefined;
@@ -717,6 +750,8 @@ const pluginEntry: any = definePluginEntry({
           l4QueryCache,
           // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
           cacheSize: api.pluginConfig.retrieval?.cacheSize ?? 50,
+          // v2.7.0 P4: 冲突检测异步缓存
+          conflictCache,
           userProfile,
           setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
         };
@@ -943,7 +978,7 @@ const pluginEntry: any = definePluginEntry({
             const _sk = typeof params.sessionKey === 'string' ? params.sessionKey
               : (typeof params.session_id === 'string' ? params.session_id : '');
             if (_sk && _currentTokens > 0) {
-              const _msgTokens = estimateTokensFromMessages(params.messages ?? []);
+              const _msgTokens = cachedEstimateTokens(params.messages ?? []);
               updateSdkOverhead(_sk, _currentTokens, _msgTokens, 0);
             }
           }
@@ -959,7 +994,7 @@ const pluginEntry: any = definePluginEntry({
             // 优先使用 SDK 传入的 currentTokenCount，回退到 sessionFile 估算
             const est = _currentTokens > 0
               ? _currentTokens
-              : (_sessionFileMsgs.length > 0 ? estimateTokensFromMessages(_sessionFileMsgs) : 0);
+              : (_sessionFileMsgs.length > 0 ? cachedEstimateTokens(_sessionFileMsgs) : 0);
             if (est > 0) {
               const budget = Math.max(5000, Math.floor(est * 0.5));
               logger?.debug?.('[compact] force compact budget calculated', {
@@ -1285,7 +1320,7 @@ const pluginEntry: any = definePluginEntry({
           if (_currentTokens > 0) {
             _estimatedSessionTokens = _currentTokens;
           } else if (_sessionFileMsgs.length > 0) {
-            _estimatedSessionTokens = estimateTokensFromMessages(_sessionFileMsgs);
+            _estimatedSessionTokens = cachedEstimateTokens(_sessionFileMsgs);
           }
 
           // tokensBefore 优先级：
@@ -2180,9 +2215,6 @@ const pluginEntry: any = definePluginEntry({
           // --- 2b. Graph / Neo4j health check + 内存重建验证 ---
           (async () => {
             // 如果 graphAdapter 尚未初始化，尝试通过 ensureInitialized() 创建它
-            // 修复：graphAdapter 是懒加载的，首次 assemble 才会创建。
-            // 如果用户还没发起过对话，heartbeat 中 graphAdapter 始终为 null，
-            // 导致永远无法进行健康检查和自动重连。
             if (!graphAdapter) {
               try {
                 await ensureInitialized();
@@ -2191,16 +2223,14 @@ const pluginEntry: any = definePluginEntry({
                 return;
               }
             }
-            if (graphAdapter && typeof graphAdapter.health === "function") {
+            if (graphAdapter && typeof graphAdapter.quickHealth === "function") {
               try {
-                const graphOk = await graphAdapter.health();
-                if (!graphOk) {
-                  logger?.warn?.("heartbeat: graph/neo4j unavailable, health() returned false (driver expired or connect failed)");
-                } else {
-                  // 健康检查通过 → 验证 Recaller / embedFn 是否已重建
-                  // 修复前：仅检查 driver 连通性，不验证 Recaller 和 embedFn 是否有效。
-                  // 若 connect() 中 Recaller 初始化失败（静默降级），后续所有 L3 检索
-                  // 都会 fallback 到 searchNodes，丢失 dual-path recall 能力。
+                // v2.7.0 P1: 使用 quickHealth() 轻量检查，避免 releaseDriver + reconnect 的昂贵重建。
+                // 仅验证 driver 连通性，不释放资源。仅当熔断器 OPEN 或连续失败时才触发完整 health() 恢复。
+                const graphOk = await graphAdapter.quickHealth();
+                if (graphOk) {
+                  _graphQuickHealthFailCount = 0;
+                  // 验证 Recaller / embedFn 是否已重建
                   const hasRecaller = !!(graphAdapter as any)._recaller;
                   const hasEmbedFn = !!(graphAdapter as any)._embedFn;
                   const hasDriver = !!(graphAdapter as any).driver;
@@ -2213,25 +2243,13 @@ const pluginEntry: any = definePluginEntry({
                   if (hasRecaller && hasEmbedFn) {
                     logger?.debug?.("heartbeat: graph/neo4j healthy, Recaller + embedFn verified");
                   }
-                  // P-CB-7: 健康检查通过后立即关闭 neo4j 熔断器。
-                  // 修复前：熔断器关闭依赖 200 行之后的 P-CB-4 探针，但探针的
-                  // isAvailable() 半开探测位是全局单例，业务请求的 withCircuitBreaker
-                  // 会在步骤 1 和步骤 2 之间消耗探测位，导致探针被跳过、熔断器永远不恢复。
-                  // 修复后：health() 恢复 driver 成功即同步关闭熔断器，不等探针。
-                  try {
-                    const { getHealthSnapshot, recordSuccess } = await import('./circuit-breaker.js');
-                    const cbSnap = getHealthSnapshot();
-                    if (cbSnap?.neo4j?.open) {
-                      recordSuccess('neo4j');
-                      logger?.info?.("heartbeat: P-CB-7 neo4j circuit breaker closed (health check passed, driver recovered)");
-                    }
-                  } catch (cbErr) {
-                    // 熔断器恢复失败不影响主流程
-                    logger?.debug?.("heartbeat: P-CB-7 circuit breaker recovery failed (non-fatal)", { err: String(cbErr) });
-                  }
+                } else {
+                  _graphQuickHealthFailCount++;
+                  logger?.warn?.(`heartbeat: graph/neo4j quickHealth failed (${_graphQuickHealthFailCount} consecutive), driver unavailable`);
                 }
               } catch (e) {
-                logger?.debug?.("heartbeat: graph health check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+                _graphQuickHealthFailCount++;
+                logger?.debug?.("heartbeat: graph quickHealth check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e), failCount: _graphQuickHealthFailCount });
               }
             }
           })(),
@@ -2301,7 +2319,61 @@ const pluginEntry: any = definePluginEntry({
           }
         }
 
-        // --- 2e. RetrievalGateway 延迟恢复：初始化失败时每轮 heartbeat 重试 ---
+        // --- 2e. v2.7.0 P1: Graph 熔断恢复判断 —— 仅当熔断器 OPEN 或 quickHealth 连续失败时触发完整 health() ---
+        // 设计原则：
+        //   1. 常规 heartbeat 用 quickHealth()（轻量级，仅 verifyConnectivity，不释放资源）
+        //   2. 仅当熔断器 OPEN（neo4j 被标记不可用）或 quickHealth 连续失败 ≥3 次时，
+        //      才调用 health() 触发完整 releaseDriver + reconnect + 重建 Recaller/embedFn
+        //   3. 恢复成功后同步关闭熔断器，不等 P-CB-4 探针（避免探针被业务请求消耗）
+        if (graphAdapter && typeof graphAdapter.health === "function") {
+          let needsFullRecovery = false;
+          let recoveryReason = '';
+
+          // 检查熔断器状态
+          try {
+            const { getHealthSnapshot } = await import('./circuit-breaker.js');
+            const cbSnap = getHealthSnapshot();
+            if (cbSnap?.neo4j?.open) {
+              needsFullRecovery = true;
+              recoveryReason = `circuit breaker OPEN (failures=${cbSnap.neo4j.failures})`;
+            }
+          } catch { /* 熔断器模块不可用，跳过 */ }
+
+          // 检查 quickHealth 连续失败
+          if (!needsFullRecovery && _graphQuickHealthFailCount >= 3) {
+            needsFullRecovery = true;
+            recoveryReason = `quickHealth failed ${_graphQuickHealthFailCount} consecutive times`;
+          }
+
+          if (needsFullRecovery) {
+            logger?.warn?.(`heartbeat: triggering full graph health() recovery — ${recoveryReason}`);
+            try {
+              const recovered = await graphAdapter.health();
+              if (recovered) {
+                _graphQuickHealthFailCount = 0;
+                logger?.info?.("heartbeat: graph full recovery succeeded (driver + Recaller + embedFn rebuilt)");
+
+                // P-CB-7: 恢复成功后同步关闭 neo4j 熔断器
+                try {
+                  const { getHealthSnapshot: getCb, recordSuccess } = await import('./circuit-breaker.js');
+                  const cbSnap = getCb();
+                  if (cbSnap?.neo4j?.open) {
+                    recordSuccess('neo4j');
+                    logger?.info?.("heartbeat: P-CB-7 neo4j circuit breaker closed (health() recovery succeeded)");
+                  }
+                } catch (cbErr) {
+                  logger?.debug?.("heartbeat: P-CB-7 circuit breaker recovery failed (non-fatal)", { err: String(cbErr) });
+                }
+              } else {
+                logger?.warn?.("heartbeat: graph full recovery failed, will retry next cycle");
+              }
+            } catch (healthErr) {
+              logger?.warn?.("heartbeat: graph health() recovery threw error", { err: healthErr instanceof Error ? healthErr.message : String(healthErr) });
+            }
+          }
+        }
+
+        // --- 2f. RetrievalGateway 延迟恢复：初始化失败时每轮 heartbeat 重试 ---
         // 时序说明：此代码在 await Promise.all([...健康检查...]) 之后执行，
         // 因此 graphAdapter.health() 已先完成（可能恢复了 Neo4j driver），
         // 确保 RetrievalGateway 构造时 graphAdapter 的 driver 已就绪。
@@ -2528,11 +2600,13 @@ const pluginEntry: any = definePluginEntry({
           }
           if (cbStates?.neo4j && !cbStates.neo4j.open && cbStates.neo4j.failures > 0) {
             try {
-              const ok = graphAdapter && typeof graphAdapter.health === 'function'
-                ? await graphAdapter.health()
+              // v2.7.0 P1: P-CB-5 清除 stale failures 用 quickHealth() 轻量检查，避免不必要的 driver 重建
+              const ok = graphAdapter && typeof graphAdapter.quickHealth === 'function'
+                ? await graphAdapter.quickHealth()
                 : (graphAdapter?.isConnected ?? false);
               if (ok) {
                 recordSuccess('neo4j');
+                _graphQuickHealthFailCount = 0;
                 logger?.info?.("heartbeat: P-CB-5 neo4j healthy, cleared stale failures=" + String(cbStates.neo4j.failures));
               }
             } catch { /* 探测失败保持原状 */ }
@@ -2654,6 +2728,17 @@ const pluginEntry: any = definePluginEntry({
           }
           if (cleanedQueryCache > 0) {
             logger?.debug?.("heartbeat: L2/L4 query cache cleanup", { cleanedQueryCache });
+          }
+          // v2.7.0 P4: 冲突检测异步缓存 TTL 清理
+          let cleanedConflictCache = 0;
+          for (const [key, val] of conflictCache) {
+            if (now - val.ts > CONFLICT_CACHE_TTL_MS) {
+              conflictCache.delete(key);
+              cleanedConflictCache++;
+            }
+          }
+          if (cleanedConflictCache > 0) {
+            logger?.debug?.("heartbeat: conflict cache cleanup", { cleanedConflictCache });
           }
           hbSessionCleanupCounter = 0;
         }

@@ -1156,6 +1156,36 @@ export class GraphAdapter {
     }
   }
 /**
+   * v2.7.0 P1: 轻量级健康检查 —— 仅验证 driver 连通性，不释放/重建资源。
+   *
+   * 与 health() 的区别：
+   *   - health() 失败时会 releaseDriver + reconnect + 重建 Recaller/embedFn + 清空 searchCache，
+   *     是重量级恢复操作，每次 heartbeat 都调用会导致不必要的 driver 释放与重建。
+   *   - quickHealth() 仅做 verifyConnectivity()，失败时只返回 false，不触发任何资源释放。
+   *     用于 heartbeat 常规检查，避免 expensive 重建。
+   *
+   * 使用策略：
+   *   - heartbeat 常规周期：调用 quickHealth()，失败时仅记录日志
+   *   - 熔断器 OPEN 或连续 quickHealth 失败：调用 health() 触发完整恢复
+   */
+  async quickHealth(): Promise<boolean> {
+    this._healthCheckCount++;
+    if (this._healthCheckInProgress) {
+      this.logger?.debug?.('[graph-adapter] quickHealth skipped (health check in progress)');
+      return this.isConnected;
+    }
+    try {
+      if (this.driver) {
+        await this.driver.verifyConnectivity();
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * 健康检查 —— 验证 Neo4j 连接可用性。
    *
    * 修复前：verifyConnectivity() 失败时仅返回 false，不清理过期 driver，
@@ -1170,6 +1200,10 @@ export class GraphAdapter {
    *   connect()/releaseDriver() 交替调用引发 refCount 失衡。
    * - 重连成功后清空 searchCache：旧 driver 下的缓存结果可能已失效，
    *   不清空会导致后续 searchWithCache 命中过期数据。
+   *
+   * v2.7.0 P1: 新增 quickHealth() 轻量检查，health() 仅用于熔断恢复场景。
+   *   调用方（heartbeat）应先用 quickHealth() 做常规检查，仅当熔断器 OPEN
+   *   或连续多次 quickHealth 失败时才调用 health() 触发完整恢复。
    */
   async health(): Promise<boolean> {
     this._healthCheckCount++;

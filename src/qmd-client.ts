@@ -221,6 +221,13 @@ export class QmdClient {
   private static readonly VEC_CONTEXT_ERROR_DISABLE_THRESHOLD = 3;
   /** 是否已自动禁用 vec 搜索 */
   private _vecAutoDisabled = false;
+  /**
+   * v2.6.0: 连续空结果计数器。
+   * 当 MCP 连续返回空结果 ≥ 阈值时，自动标记 MCP 不可用，跳过后续检索。
+   * 与 context size 错误不同：空结果表示 MCP 调通但索引无数据，继续调用纯属浪费。
+   */
+  private _emptyResultCount = 0;
+  private static readonly EMPTY_RESULT_DISABLE_THRESHOLD = 3;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: QmdClientOptions = {}) {
@@ -345,12 +352,32 @@ export class QmdClient {
       const mcpStart = Date.now();
       try {
         const results = await this.queryViaMcp(effectiveParams);
-        this.mcpAvailable = true;
-        this.clearRecovery();
         mcpMs = Date.now() - mcpStart;
-        mcpStatus = 'ok';
-        finalizeBreakdown(Date.now() - qStart);
-        return results;
+        // v2.6.0: 连续空结果检测 — MCP 调通但返回空结果时，累计计数器。
+        // 连续 3 次空结果后标记 MCP 不可用，跳过后续检索（避免浪费 4-5s/次）。
+        if (Array.isArray(results) && results.length === 0) {
+          this._emptyResultCount++;
+          if (this._emptyResultCount >= QmdClient.EMPTY_RESULT_DISABLE_THRESHOLD) {
+            this.logger?.warn?.(
+              `[qmd-client] MCP auto-disabled after ${this._emptyResultCount} consecutive empty results`,
+            );
+            this.mcpAvailable = false;
+            this.scheduleRecovery();
+            // 继续走 REST/CLI 降级链，不标记 mcpAvailable=true
+          } else {
+            this.mcpAvailable = true;
+          }
+        } else {
+          this._emptyResultCount = 0;
+          this.mcpAvailable = true;
+        }
+        if (this.mcpAvailable !== false) {
+          this.clearRecovery();
+          mcpStatus = 'ok';
+          finalizeBreakdown(Date.now() - qStart);
+          return results;
+        }
+        // mcpAvailable 被设为 false，继续走 REST/CLI 降级链
       } catch (err) {
         mcpMs = Date.now() - mcpStart;
         const _mcpErr = (err as Error).message;
