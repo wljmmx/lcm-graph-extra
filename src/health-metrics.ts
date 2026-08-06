@@ -32,7 +32,7 @@ export interface HealthSnapshot {
   // Experience stats
   pendingExperienceCount: number;
   distilledExperienceCount: number;
-  // Tier distribution
+  // Tier distribution (per-window，用于时序图)
   tierLow: number;
   tierMedium: number;
   tierHigh: number;
@@ -47,6 +47,21 @@ export interface HealthSnapshot {
   experienceQueryCount: number;
   // v1.1-7: 最近一次 assemble 的降级原因（用于 Dashboard 实时展示链路状态）
   lastDegradedReasons?: string[];
+  // v2.4.0: 熔断器全局累计计数器（跨窗口持久化，不随 snapshot 重置）
+  cbLcmTotalChecks: number;
+  cbLcmSuccessCount: number;
+  cbLcmTransitions: number;
+  cbQmdTotalChecks: number;
+  cbQmdSuccessCount: number;
+  cbQmdTransitions: number;
+  cbNeo4jTotalChecks: number;
+  cbNeo4jSuccessCount: number;
+  cbNeo4jTransitions: number;
+  // v2.4.0: UX 指标全局累计（跨窗口持久化）
+  globalDegradedCount: number;
+  globalTotalAssembleCount: number;
+  globalExperienceHitCount: number;
+  globalExperienceQueryCount: number;
 }
 
 const MAX_SNAPSHOTS = 144; // ~12h of 5min heartbeats
@@ -63,12 +78,63 @@ export class HealthMetricsCollector {
   private initPromise: Promise<void> | null = null;
   // assemble 指标更新后标记 dirty，下次 persist 时连同最新快照一起写入
 
+  // v2.4.0: 熔断器全局累计计数器（跨窗口持久化，不随 snapshot 重置）
+  private _cbCumulative: {
+    lcm: { totalChecks: number; successCount: number; transitions: number; prevAvailable: boolean | null };
+    qmd: { totalChecks: number; successCount: number; transitions: number; prevAvailable: boolean | null };
+    neo4j: { totalChecks: number; successCount: number; transitions: number; prevAvailable: boolean | null };
+  } = {
+    lcm: { totalChecks: 0, successCount: 0, transitions: 0, prevAvailable: null },
+    qmd: { totalChecks: 0, successCount: 0, transitions: 0, prevAvailable: null },
+    neo4j: { totalChecks: 0, successCount: 0, transitions: 0, prevAvailable: null },
+  };
+
+  // v2.4.0: UX 指标全局累计（跨窗口持久化）
+  private _globalUx: {
+    degradedCount: number;
+    totalAssembleCount: number;
+    experienceHitCount: number;
+    experienceQueryCount: number;
+  } = { degradedCount: 0, totalAssembleCount: 0, experienceHitCount: 0, experienceQueryCount: 0 };
+
+  /** v2.4.0: 从 lcm.db 加载全局累计计数器（启动时调用） */
+  async loadCumulativeCounters(): Promise<void> {
+    try {
+      await this.ensureDbInitialized();
+      if (!this.db) return;
+      const row = this.db.prepare(
+        'SELECT * FROM health_cumulative ORDER BY id DESC LIMIT 1'
+      ).get() as any;
+      if (row) {
+        this._cbCumulative = {
+          lcm: { totalChecks: row.cb_lcm_total ?? 0, successCount: row.cb_lcm_ok ?? 0, transitions: row.cb_lcm_trans ?? 0, prevAvailable: null },
+          qmd: { totalChecks: row.cb_qmd_total ?? 0, successCount: row.cb_qmd_ok ?? 0, transitions: row.cb_qmd_trans ?? 0, prevAvailable: null },
+          neo4j: { totalChecks: row.cb_neo4j_total ?? 0, successCount: row.cb_neo4j_ok ?? 0, transitions: row.cb_neo4j_trans ?? 0, prevAvailable: null },
+        };
+        this._globalUx = {
+          degradedCount: row.ux_degraded ?? 0,
+          totalAssembleCount: row.ux_total_assembles ?? 0,
+          experienceHitCount: row.ux_exp_hits ?? 0,
+          experienceQueryCount: row.ux_exp_queries ?? 0,
+        };
+      }
+    } catch {
+      // 首次启动时表可能不存在，静默降级
+    }
+  }
+
   /** 收集一次指标快照 */
   collect(snapshot: Partial<HealthSnapshot>): void {
     // M1: 修复前 `const { timestamp: _ignored, ...rest } = snapshot as any;` 总是忽略传入的 timestamp，
     // 导致调用方传入的精确时间戳被丢弃，统一使用 Date.now() 作为主键。
     // 修复后：若传入 timestamp 则使用传入值，否则使用当前时间。
     const { timestamp: providedTs, ...rest } = snapshot as any;
+
+    // v2.4.0: 更新熔断器全局累计计数器
+    this._updateCbCumulative('lcm', rest.cbLcmAvailable ?? true);
+    this._updateCbCumulative('qmd', rest.cbQmdAvailable ?? true);
+    this._updateCbCumulative('neo4j', rest.cbNeo4jAvailable ?? true);
+
     const full: HealthSnapshot = {
       timestamp: typeof providedTs === 'number' && providedTs > 0 ? providedTs : Date.now(),
       pendingMessages: 0,
@@ -94,6 +160,20 @@ export class HealthMetricsCollector {
       tokenSavedRatio: 0,
       experienceHitCount: 0,
       experienceQueryCount: 0,
+      // v2.4.0: 全局累计计数器
+      cbLcmTotalChecks: this._cbCumulative.lcm.totalChecks,
+      cbLcmSuccessCount: this._cbCumulative.lcm.successCount,
+      cbLcmTransitions: this._cbCumulative.lcm.transitions,
+      cbQmdTotalChecks: this._cbCumulative.qmd.totalChecks,
+      cbQmdSuccessCount: this._cbCumulative.qmd.successCount,
+      cbQmdTransitions: this._cbCumulative.qmd.transitions,
+      cbNeo4jTotalChecks: this._cbCumulative.neo4j.totalChecks,
+      cbNeo4jSuccessCount: this._cbCumulative.neo4j.successCount,
+      cbNeo4jTransitions: this._cbCumulative.neo4j.transitions,
+      globalDegradedCount: this._globalUx.degradedCount,
+      globalTotalAssembleCount: this._globalUx.totalAssembleCount,
+      globalExperienceHitCount: this._globalUx.experienceHitCount,
+      globalExperienceQueryCount: this._globalUx.experienceQueryCount,
       ...rest,
     };
 
@@ -105,6 +185,17 @@ export class HealthMetricsCollector {
 
     // 异步写入 lcm.db（非阻塞）
     this.persistToDb(full).catch(() => { /* non-fatal */ });
+  }
+
+  /** v2.4.0: 更新单个熔断器的全局累计计数 */
+  private _updateCbCumulative(engine: 'lcm' | 'qmd' | 'neo4j', available: boolean): void {
+    const c = this._cbCumulative[engine];
+    c.totalChecks++;
+    if (available) c.successCount++;
+    if (c.prevAvailable !== null && c.prevAvailable !== available) {
+      c.transitions++;
+    }
+    c.prevAvailable = available;
   }
 
   /** 获取最新快照（返回副本，防止外部 mutate 内部状态） */
@@ -129,17 +220,7 @@ export class HealthMetricsCollector {
     // 首次 heartbeat 前调用时 getLatest() 可能为 null —— 创建占位快照
     let latest = this.snapshots[this.snapshots.length - 1];
     if (!latest) {
-      latest = {
-        timestamp: Date.now(),
-        pendingMessages: 0, summaryFragments: 0, maxTokenRatio: 0,
-        cbLcmAvailable: true, cbQmdAvailable: true, cbNeo4jAvailable: true,
-        cbLcmFailures: 0, cbQmdFailures: 0, cbNeo4jFailures: 0,
-        lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
-        pendingExperienceCount: 0, distilledExperienceCount: 0,
-        tierLow: 0, tierMedium: 0, tierHigh: 0,
-        degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
-        experienceHitCount: 0, experienceQueryCount: 0,
-      };
+      latest = this._createPlaceholderSnapshot();
       this.snapshots.push(latest);
     }
     latest.lastAssembleMs = assembleMs;
@@ -177,17 +258,7 @@ export class HealthMetricsCollector {
   }): void {
     let latest = this.snapshots[this.snapshots.length - 1];
     if (!latest) {
-      latest = {
-        timestamp: Date.now(),
-        pendingMessages: 0, summaryFragments: 0, maxTokenRatio: 0,
-        cbLcmAvailable: true, cbQmdAvailable: true, cbNeo4jAvailable: true,
-        cbLcmFailures: 0, cbQmdFailures: 0, cbNeo4jFailures: 0,
-        lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
-        pendingExperienceCount: 0, distilledExperienceCount: 0,
-        tierLow: 0, tierMedium: 0, tierHigh: 0,
-        degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
-        experienceHitCount: 0, experienceQueryCount: 0,
-      };
+      latest = this._createPlaceholderSnapshot();
       this.snapshots.push(latest);
     }
     latest.totalAssembleCount++;
@@ -208,6 +279,44 @@ export class HealthMetricsCollector {
         ? saved
         : latest.tokenSavedRatio * 0.8 + saved * 0.2;
     }
+
+    // v2.4.0: 更新全局累计 UX 计数器
+    this._globalUx.totalAssembleCount++;
+    if (opts.degraded) this._globalUx.degradedCount++;
+    if (opts.experienceQueried) {
+      this._globalUx.experienceQueryCount++;
+      if (opts.experienceHit) this._globalUx.experienceHitCount++;
+    }
+  }
+
+  /**
+   * v2.4.0: 创建占位快照，包含所有必需字段。
+   */
+  private _createPlaceholderSnapshot(): HealthSnapshot {
+    return {
+      timestamp: Date.now(),
+      pendingMessages: 0, summaryFragments: 0, maxTokenRatio: 0,
+      cbLcmAvailable: true, cbQmdAvailable: true, cbNeo4jAvailable: true,
+      cbLcmFailures: 0, cbQmdFailures: 0, cbNeo4jFailures: 0,
+      lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
+      pendingExperienceCount: 0, distilledExperienceCount: 0,
+      tierLow: 0, tierMedium: 0, tierHigh: 0,
+      degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
+      experienceHitCount: 0, experienceQueryCount: 0,
+      cbLcmTotalChecks: this._cbCumulative.lcm.totalChecks,
+      cbLcmSuccessCount: this._cbCumulative.lcm.successCount,
+      cbLcmTransitions: this._cbCumulative.lcm.transitions,
+      cbQmdTotalChecks: this._cbCumulative.qmd.totalChecks,
+      cbQmdSuccessCount: this._cbCumulative.qmd.successCount,
+      cbQmdTransitions: this._cbCumulative.qmd.transitions,
+      cbNeo4jTotalChecks: this._cbCumulative.neo4j.totalChecks,
+      cbNeo4jSuccessCount: this._cbCumulative.neo4j.successCount,
+      cbNeo4jTransitions: this._cbCumulative.neo4j.transitions,
+      globalDegradedCount: this._globalUx.degradedCount,
+      globalTotalAssembleCount: this._globalUx.totalAssembleCount,
+      globalExperienceHitCount: this._globalUx.experienceHitCount,
+      globalExperienceQueryCount: this._globalUx.experienceQueryCount,
+    };
   }
 
   /**
@@ -220,18 +329,20 @@ export class HealthMetricsCollector {
     totalAssembles: number;
     degradedCount: number;
   } {
-    const latest = this.snapshots[this.snapshots.length - 1];
-    if (!latest || latest.totalAssembleCount === 0) {
+    // v2.4.0: 使用全局累计计数器，而非 per-window 快照值
+    const total = this._globalUx.totalAssembleCount;
+    if (total === 0) {
       return { degradationRate: 0, avgTokenSavedRatio: 0, experienceHitRate: 0, totalAssembles: 0, degradedCount: 0 };
     }
+    const latest = this.snapshots[this.snapshots.length - 1];
     return {
-      degradationRate: latest.degradedCount / latest.totalAssembleCount,
-      avgTokenSavedRatio: latest.tokenSavedRatio,
-      experienceHitRate: latest.experienceQueryCount > 0
-        ? latest.experienceHitCount / latest.experienceQueryCount
+      degradationRate: this._globalUx.degradedCount / total,
+      avgTokenSavedRatio: latest?.tokenSavedRatio ?? 0,
+      experienceHitRate: this._globalUx.experienceQueryCount > 0
+        ? this._globalUx.experienceHitCount / this._globalUx.experienceQueryCount
         : 0,
-      totalAssembles: latest.totalAssembleCount,
-      degradedCount: latest.degradedCount,
+      totalAssembles: total,
+      degradedCount: this._globalUx.degradedCount,
     };
   }
 
@@ -244,17 +355,7 @@ export class HealthMetricsCollector {
   recordCascadeConfidence(confidence: number, source: 'gm-pro' | 'local'): void {
     let latest = this.snapshots[this.snapshots.length - 1];
     if (!latest) {
-      latest = {
-        timestamp: Date.now(),
-        pendingMessages: 0, summaryFragments: 0, maxTokenRatio: 0,
-        cbLcmAvailable: true, cbQmdAvailable: true, cbNeo4jAvailable: true,
-        cbLcmFailures: 0, cbQmdFailures: 0, cbNeo4jFailures: 0,
-        lastAssembleMs: 0, lastL2Ms: 0, lastL3Ms: 0, lastL4Ms: 0,
-        pendingExperienceCount: 0, distilledExperienceCount: 0,
-        tierLow: 0, tierMedium: 0, tierHigh: 0,
-        degradedCount: 0, totalAssembleCount: 0, tokenSavedRatio: 0,
-        experienceHitCount: 0, experienceQueryCount: 0,
-      };
+      latest = this._createPlaceholderSnapshot();
       this.snapshots.push(latest);
     }
     latest.cascadeTier1Confidence = confidence;
@@ -305,6 +406,25 @@ export class HealthMetricsCollector {
               tier_high INTEGER
             )
           `);
+          // v2.4.0: 全局累计计数器表（单行，UPSERT 更新）
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS health_cumulative (
+              id INTEGER PRIMARY KEY DEFAULT 1,
+              cb_lcm_total INTEGER DEFAULT 0,
+              cb_lcm_ok INTEGER DEFAULT 0,
+              cb_lcm_trans INTEGER DEFAULT 0,
+              cb_qmd_total INTEGER DEFAULT 0,
+              cb_qmd_ok INTEGER DEFAULT 0,
+              cb_qmd_trans INTEGER DEFAULT 0,
+              cb_neo4j_total INTEGER DEFAULT 0,
+              cb_neo4j_ok INTEGER DEFAULT 0,
+              cb_neo4j_trans INTEGER DEFAULT 0,
+              ux_degraded INTEGER DEFAULT 0,
+              ux_total_assembles INTEGER DEFAULT 0,
+              ux_exp_hits INTEGER DEFAULT 0,
+              ux_exp_queries INTEGER DEFAULT 0
+            )
+          `);
           this.dbInitialized = true;
         } finally {
           this.initPromise = null; // 清理 promise 引用，失败后允许重试
@@ -348,6 +468,9 @@ export class HealthMetricsCollector {
         snapshot.tierHigh,
       );
 
+      // v2.4.0: 同步持久化全局累计计数器
+      this.persistCumulative();
+
       // v1.2.0-2: 健康历史保留期可配置（默认 30 天）
       const retentionDays = Number(process.env.HEALTH_METRICS_RETENTION_DAYS) || 30;
       const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
@@ -355,6 +478,36 @@ export class HealthMetricsCollector {
     } catch (e) {
       // DB 写入失败不影响主流程
       getGlobalLogger()?.debug?.("health metrics persistToDb failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /** v2.4.0: 持久化全局累计计数器到 health_cumulative 表 */
+  private persistCumulative(): void {
+    if (!this.db) return;
+    try {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO health_cumulative
+        (id, cb_lcm_total, cb_lcm_ok, cb_lcm_trans, cb_qmd_total, cb_qmd_ok, cb_qmd_trans,
+         cb_neo4j_total, cb_neo4j_ok, cb_neo4j_trans, ux_degraded, ux_total_assembles,
+         ux_exp_hits, ux_exp_queries)
+        VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        this._cbCumulative.lcm.totalChecks,
+        this._cbCumulative.lcm.successCount,
+        this._cbCumulative.lcm.transitions,
+        this._cbCumulative.qmd.totalChecks,
+        this._cbCumulative.qmd.successCount,
+        this._cbCumulative.qmd.transitions,
+        this._cbCumulative.neo4j.totalChecks,
+        this._cbCumulative.neo4j.successCount,
+        this._cbCumulative.neo4j.transitions,
+        this._globalUx.degradedCount,
+        this._globalUx.totalAssembleCount,
+        this._globalUx.experienceHitCount,
+        this._globalUx.experienceQueryCount,
+      );
+    } catch {
+      // 非致命
     }
   }
 
@@ -386,6 +539,12 @@ export class HealthMetricsCollector {
   /** 重置（测试用）—— 清空内存快照并关闭 DB */
   reset(): void {
     this.snapshots = [];
+    this._cbCumulative = {
+      lcm: { totalChecks: 0, successCount: 0, transitions: 0, prevAvailable: null },
+      qmd: { totalChecks: 0, successCount: 0, transitions: 0, prevAvailable: null },
+      neo4j: { totalChecks: 0, successCount: 0, transitions: 0, prevAvailable: null },
+    };
+    this._globalUx = { degradedCount: 0, totalAssembleCount: 0, experienceHitCount: 0, experienceQueryCount: 0 };
     this.close();
   }
 }
@@ -472,6 +631,8 @@ export const latencyHistograms = {
 /**
  * 业务指标收集器 —— 跟踪经验质量分布和 TTL 命中率。
  * 仅内存态，通过 Prometheus /metrics 端点暴露。
+ *
+ * v2.4.0: 持久化到 lcm.db business_metrics 表，解决重启后数据清零问题。
  */
 export class BusinessMetricsCollector {
   // 经验质量分布：低/中/高三个区间的计数
@@ -483,24 +644,128 @@ export class BusinessMetricsCollector {
   private distillSuccess = 0;
   private distillFailure = 0;
 
+  private db: any = null;
+  private dbInitialized = false;
+  private initPromise: Promise<void> | null = null;
+  private dirty = false;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** v2.4.0: 初始化数据库连接 */
+  private async ensureDbInitialized(): Promise<void> {
+    if (this.dbInitialized) return;
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        try {
+          const { createRequire } = await import('node:module');
+          const req = createRequire(import.meta.url);
+          const { DatabaseSync } = req('node:sqlite');
+          const { resolve } = await import('node:path');
+          const { homedir } = await import('node:os');
+          const dbPath = resolve(homedir(), '.openclaw', 'lcm.db');
+          this.db = new DatabaseSync(dbPath);
+          try {
+            this.db.exec('PRAGMA journal_mode = WAL');
+            this.db.exec('PRAGMA synchronous = NORMAL');
+          } catch { /* PRAGMA 失败不阻塞 */ }
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS business_metrics (
+              id INTEGER PRIMARY KEY DEFAULT 1,
+              exp_quality_low INTEGER DEFAULT 0,
+              exp_quality_medium INTEGER DEFAULT 0,
+              exp_quality_high INTEGER DEFAULT 0,
+              ttl_hits INTEGER DEFAULT 0,
+              ttl_misses INTEGER DEFAULT 0,
+              distill_success INTEGER DEFAULT 0,
+              distill_failure INTEGER DEFAULT 0
+            )
+          `);
+          this.dbInitialized = true;
+        } finally {
+          this.initPromise = null;
+        }
+      })();
+    }
+    await this.initPromise;
+  }
+
+  /** v2.4.0: 从 lcm.db 加载持久化的业务指标 */
+  async loadFromDb(): Promise<void> {
+    try {
+      await this.ensureDbInitialized();
+      if (!this.db) return;
+      const row = this.db.prepare(
+        'SELECT * FROM business_metrics ORDER BY id DESC LIMIT 1'
+      ).get() as any;
+      if (row) {
+        this.expQualityBuckets = {
+          low: row.exp_quality_low ?? 0,
+          medium: row.exp_quality_medium ?? 0,
+          high: row.exp_quality_high ?? 0,
+        };
+        this.ttlHits = row.ttl_hits ?? 0;
+        this.ttlMisses = row.ttl_misses ?? 0;
+        this.distillSuccess = row.distill_success ?? 0;
+        this.distillFailure = row.distill_failure ?? 0;
+      }
+    } catch {
+      // 首次启动时表可能不存在，静默降级
+    }
+  }
+
+  /** v2.4.0: 防抖持久化 */
+  private persistToDb(): void {
+    this.dirty = true;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this._doPersist();
+    }, 500);
+  }
+
+  private _doPersist(): void {
+    if (!this.dirty || !this.dbInitialized || !this.db) return;
+    this.dirty = false;
+    try {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO business_metrics
+        (id, exp_quality_low, exp_quality_medium, exp_quality_high,
+         ttl_hits, ttl_misses, distill_success, distill_failure)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        this.expQualityBuckets.low,
+        this.expQualityBuckets.medium,
+        this.expQualityBuckets.high,
+        this.ttlHits,
+        this.ttlMisses,
+        this.distillSuccess,
+        this.distillFailure,
+      );
+    } catch {
+      // 非致命
+    }
+  }
+
   /** 记录经验质量分（0-1） */
   recordExperienceQuality(score: number): void {
     if (!Number.isFinite(score)) return;
     if (score < 0.4) this.expQualityBuckets.low++;
     else if (score < 0.7) this.expQualityBuckets.medium++;
     else this.expQualityBuckets.high++;
+    this.persistToDb();
   }
 
   /** 记录 TTL 命中/未命中 */
   recordTtlAccess(hit: boolean): void {
     if (hit) this.ttlHits++;
     else this.ttlMisses++;
+    this.persistToDb();
   }
 
   /** 记录蒸馏结果 */
   recordDistill(success: boolean): void {
     if (success) this.distillSuccess++;
     else this.distillFailure++;
+    this.persistToDb();
   }
 
   /** 获取经验质量分布 */
@@ -548,6 +813,22 @@ export class BusinessMetricsCollector {
     this.ttlMisses = 0;
     this.distillSuccess = 0;
     this.distillFailure = 0;
+    this.dirty = false;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.close();
+  }
+
+  /** v2.4.0: 关闭 DB 连接 */
+  close(): void {
+    if (this.db) {
+      try { this.db.close(); } catch { /* ignore */ }
+      this.db = null;
+      this.dbInitialized = false;
+      this.initPromise = null;
+    }
   }
 }
 

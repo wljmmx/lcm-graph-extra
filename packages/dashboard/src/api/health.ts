@@ -37,6 +37,21 @@ export interface HealthSnapshot {
   experienceQueryCount?: number;
   // v1.1-7: 最近一次 assemble 的降级原因（用于链路状态可视化）
   lastDegradedReasons?: string[];
+  // v2.4.0: 熔断器全局累计计数器（跨窗口持久化，仅内存快照）
+  cbLcmTotalChecks?: number;
+  cbLcmSuccessCount?: number;
+  cbLcmTransitions?: number;
+  cbQmdTotalChecks?: number;
+  cbQmdSuccessCount?: number;
+  cbQmdTransitions?: number;
+  cbNeo4jTotalChecks?: number;
+  cbNeo4jSuccessCount?: number;
+  cbNeo4jTransitions?: number;
+  // v2.4.0: UX 指标全局累计（跨窗口持久化，仅内存快照）
+  globalDegradedCount?: number;
+  globalTotalAssembleCount?: number;
+  globalExperienceHitCount?: number;
+  globalExperienceQueryCount?: number;
 }
 
 export interface CascadeSnapshot {

@@ -56,7 +56,7 @@ import { getAllConversations, getBackfillState, markConversationsBackfilled } fr
 const userProfile = new UserProfileTracker();
 
 // N-4: 健康指标收集器 —— 全局单例
-import { healthMetrics } from './health-metrics.js';
+import { healthMetrics, businessMetrics } from './health-metrics.js';
 import { getHealthSnapshot } from './circuit-breaker.js';
 
 // G-8: 记录最近一轮 assemble 返回的经验 ID + query，供 afterTurn 异步验证
@@ -1574,9 +1574,11 @@ const pluginEntry: any = definePluginEntry({
         // 3. 停止 debt scheduler（等待活跃任务完成）
         try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {}
 
-        // 4. Close SQLite DB 连接（healthMetrics / debt-manager / lcm-bridge / tools sharedDb）
+        // 4. Close SQLite DB 连接（healthMetrics / userProfile / businessMetrics / debt-manager / lcm-bridge / tools sharedDb）
         //    必须在 Neo4j driver 之前或同时关闭，避免 dispose 后被 fire-and-forget 写入
         try { healthMetrics.close(); } catch {}
+        try { userProfile.close(); } catch {}
+        try { businessMetrics.close(); } catch {}
         try { const { closeDebtDb } = await import('./core/debt-manager.js'); closeDebtDb(); } catch {}
         try { const { closeLcmDb } = await import('./lcm-bridge.js'); closeLcmDb(); } catch {}
         try { const { closeSharedDb } = await import('./tools.js'); closeSharedDb(); } catch {}
@@ -1917,6 +1919,19 @@ const pluginEntry: any = definePluginEntry({
             return { ...base, embedAvailable: _lastEmbedHealth };
           },
         };
+        // v2.4.0: 从 lcm.db 恢复全局累计计数器（熔断器成功率/开合次数 + UX 全局指标）
+        healthMetrics.loadCumulativeCounters().catch((e) => {
+          logger?.debug?.('[lcm-graph-extra] loadCumulativeCounters failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) });
+        });
+        // v2.4.0: 从 lcm.db 恢复用户画像（技术栈/场景/语言偏好）
+        userProfile.loadFromDb().catch((e) => {
+          logger?.debug?.('[lcm-graph-extra] userProfile.loadFromDb failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) });
+        });
+        // v2.4.0: 从 lcm.db 恢复业务指标（经验质量分布/TTL命中率/蒸馏成功率）
+        businessMetrics.loadFromDb().catch((e) => {
+          logger?.debug?.('[lcm-graph-extra] businessMetrics.loadFromDb failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) });
+        });
+
         snapshotHandle = startDashboardSnapshotServer({ port, host, providers, onClose: onSnapshotClose });
         snapshotConfig = { port, host, providers };
         snapshotServerStop = snapshotHandle.stop;

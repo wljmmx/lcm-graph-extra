@@ -294,6 +294,21 @@ export interface HealthSnapshotLite {
   experienceQueryCount?: number;
   // v1.1-7: 最近一次 assemble 的降级原因（用于 Dashboard 链路状态展示）
   lastDegradedReasons?: string[];
+  // v2.4.0: 熔断器全局累计计数器（跨窗口持久化）
+  cbLcmTotalChecks?: number;
+  cbLcmSuccessCount?: number;
+  cbLcmTransitions?: number;
+  cbQmdTotalChecks?: number;
+  cbQmdSuccessCount?: number;
+  cbQmdTransitions?: number;
+  cbNeo4jTotalChecks?: number;
+  cbNeo4jSuccessCount?: number;
+  cbNeo4jTransitions?: number;
+  // v2.4.0: UX 指标全局累计（跨窗口持久化）
+  globalDegradedCount?: number;
+  globalTotalAssembleCount?: number;
+  globalExperienceHitCount?: number;
+  globalExperienceQueryCount?: number;
 }
 
 /**

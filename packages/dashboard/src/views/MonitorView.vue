@@ -417,52 +417,64 @@ const cbSubsystemStats = computed<CbSubsystemStat[]>(() => {
   const d = db.value;
   if (!d) return [];
 
-  // PERF-4: 缓存熔断器统计结果，仅在历史快照数量或最新时间戳变化时重新计算。
-  // 修复前：每次 rawHistoryAsc 变化都全量遍历历史快照计算成功率和开合次数。
-  const history = rawHistoryAsc.value;
-  const cacheKey = `${history.length}:${history.length > 0 ? history[history.length - 1].timestamp : 0}`;
-  if (_cbStatsCache && _cbStatsCache.key === cacheKey) {
-    // 更新 current 状态（db 已变化但历史未变，仅刷新 available/failures/tagType）
-    return _cbStatsCache.data.map((item) => {
-      const key = item.key;
-      let currentAvailable: boolean;
-      let currentFailures: number;
-      if (key === 'lcm') { currentAvailable = d.cbLcmAvailable; currentFailures = d.cbLcmFailures; }
-      else if (key === 'qmd') { currentAvailable = d.cbQmdAvailable; currentFailures = d.cbQmdFailures; }
-      else { currentAvailable = d.cbNeo4jAvailable; currentFailures = d.cbNeo4jFailures; }
-      return {
-        ...item,
-        available: currentAvailable,
-        failures: currentFailures,
-        tagType: (currentAvailable ? 'success' : currentFailures > 0 ? 'error' : 'default') as 'success' | 'error' | 'default',
-      };
-    });
-  }
+  // v2.4.0: 优先使用全局累计计数器（跨窗口持久化），fallback 到历史快照计算。
+  // 全局累计计数器来自 memory.health.latest，包含 cbLcmTotalChecks/cbLcmSuccessCount 等字段。
+  const memSnapshot = memory.value?.health?.latest;
+  const hasGlobalCumulative = memSnapshot != null
+    && typeof memSnapshot.cbLcmTotalChecks === 'number'
+    && typeof memSnapshot.cbLcmSuccessCount === 'number';
 
   const calc = (key: string, label: string, currentAvailable: boolean, currentFailures: number) => {
-    let availableCount = 0;
-    let totalCount = 0;
-    let transitions = 0;
-    let prevState: boolean | null = null;
+    let successRate: number;
+    let transitions: number;
 
-    for (const snap of history) {
-      let available: boolean;
-      if (key === 'lcm') available = snap.cbLcmAvailable;
-      else if (key === 'qmd') available = snap.cbQmdAvailable;
-      else available = snap.cbNeo4jAvailable;
-
-      if (available) availableCount++;
-      totalCount++;
-
-      if (prevState !== null && prevState !== available) {
-        transitions++;
+    if (hasGlobalCumulative) {
+      // 使用全局累计计数器
+      let totalChecks: number;
+      let successCount: number;
+      let transCount: number;
+      if (key === 'lcm') {
+        totalChecks = memSnapshot!.cbLcmTotalChecks ?? 0;
+        successCount = memSnapshot!.cbLcmSuccessCount ?? 0;
+        transCount = memSnapshot!.cbLcmTransitions ?? 0;
+      } else if (key === 'qmd') {
+        totalChecks = memSnapshot!.cbQmdTotalChecks ?? 0;
+        successCount = memSnapshot!.cbQmdSuccessCount ?? 0;
+        transCount = memSnapshot!.cbQmdTransitions ?? 0;
+      } else {
+        totalChecks = memSnapshot!.cbNeo4jTotalChecks ?? 0;
+        successCount = memSnapshot!.cbNeo4jSuccessCount ?? 0;
+        transCount = memSnapshot!.cbNeo4jTransitions ?? 0;
       }
-      prevState = available;
+      successRate = totalChecks > 0 ? Math.round((successCount / totalChecks) * 1000) / 10 : 100;
+      transitions = transCount;
+    } else {
+      // Fallback: 从历史快照计算（原有逻辑）
+      const history = rawHistoryAsc.value;
+      let availableCount = 0;
+      let totalCount = 0;
+      let trans = 0;
+      let prevState: boolean | null = null;
+
+      for (const snap of history) {
+        let available: boolean;
+        if (key === 'lcm') available = snap.cbLcmAvailable;
+        else if (key === 'qmd') available = snap.cbQmdAvailable;
+        else available = snap.cbNeo4jAvailable;
+
+        if (available) availableCount++;
+        totalCount++;
+
+        if (prevState !== null && prevState !== available) {
+          trans++;
+        }
+        prevState = available;
+      }
+      successRate = totalCount > 0 ? Math.round((availableCount / totalCount) * 1000) / 10 : 100;
+      transitions = trans;
     }
 
-    const successRate = totalCount > 0 ? Math.round((availableCount / totalCount) * 1000) / 10 : 100;
     const tagType: 'success' | 'error' | 'default' = currentAvailable ? 'success' : currentFailures > 0 ? 'error' : 'default';
-
     return { key, label, available: currentAvailable, failures: currentFailures, successRate, openCloseCount: transitions, tagType };
   };
 
@@ -471,7 +483,7 @@ const cbSubsystemStats = computed<CbSubsystemStat[]>(() => {
     calc('qmd', 'QMD', d.cbQmdAvailable, d.cbQmdFailures),
     calc('neo4j', 'Neo4j', d.cbNeo4jAvailable, d.cbNeo4jFailures),
   ];
-  _cbStatsCache = { key: cacheKey, data: result };
+  _cbStatsCache = { key: `${d.timestamp}:${hasGlobalCumulative ? 'global' : 'history'}`, data: result };
   return result;
 });
 
@@ -824,10 +836,12 @@ const uxSummary = computed(() => {
   if (!s) {
     return { degradationRate: 0, tokenSavedRatio: 0, experienceHitRate: 0, totalAssembles: 0, degradedCount: 0 };
   }
-  const total = s.totalAssembleCount ?? 0;
-  const degraded = s.degradedCount ?? 0;
-  const expQuery = s.experienceQueryCount ?? 0;
-  const expHit = s.experienceHitCount ?? 0;
+  // v2.4.0: 优先使用全局累计计数器（跨窗口持久化），fallback 到 per-window 值
+  const hasGlobalUx = typeof s.globalTotalAssembleCount === 'number' && s.globalTotalAssembleCount > 0;
+  const total = hasGlobalUx ? (s.globalTotalAssembleCount ?? 0) : (s.totalAssembleCount ?? 0);
+  const degraded = hasGlobalUx ? (s.globalDegradedCount ?? 0) : (s.degradedCount ?? 0);
+  const expQuery = hasGlobalUx ? (s.globalExperienceQueryCount ?? 0) : (s.experienceQueryCount ?? 0);
+  const expHit = hasGlobalUx ? (s.globalExperienceHitCount ?? 0) : (s.experienceHitCount ?? 0);
   return {
     degradationRate: total > 0 ? degraded / total : 0,
     tokenSavedRatio: s.tokenSavedRatio ?? 0,

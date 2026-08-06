@@ -40,6 +40,9 @@ export interface UserPreferences {
  *
  * 从用户消息中累积偏好信号，带指数衰减（半衰期约 24h）。
  * 用于经验搜索时的个性化加权，不参与核心召回逻辑。
+ *
+ * v2.4.0: techStack/scenario/language 持久化到 lcm.db user_profile 表，
+ * 解决服务重启后画像清零问题。
  */
 export class UserProfileTracker {
   private prefs: UserPreferences = {
@@ -50,6 +53,101 @@ export class UserProfileTracker {
   };
 
   private decayHalfLifeMs = 24 * 60 * 60 * 1000;
+  private db: any = null;
+  private dbInitialized = false;
+  private initPromise: Promise<void> | null = null;
+  /** 标记是否有未持久化的变更，用于批量写入 */
+  private dirty = false;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** v2.4.0: 初始化数据库连接并加载持久化数据 */
+  private async ensureDbInitialized(): Promise<void> {
+    if (this.dbInitialized) return;
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        try {
+          const { createRequire } = await import('node:module');
+          const req = createRequire(import.meta.url);
+          const { DatabaseSync } = req('node:sqlite');
+          const { resolve } = await import('node:path');
+          const { homedir } = await import('node:os');
+          const dbPath = resolve(homedir(), '.openclaw', 'lcm.db');
+          this.db = new DatabaseSync(dbPath);
+          try {
+            this.db.exec('PRAGMA journal_mode = WAL');
+            this.db.exec('PRAGMA synchronous = NORMAL');
+          } catch { /* PRAGMA 失败不阻塞 */ }
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS user_profile (
+              id INTEGER PRIMARY KEY DEFAULT 1,
+              tech_stack TEXT DEFAULT '[]',
+              scenario TEXT DEFAULT '[]',
+              language TEXT DEFAULT 'mixed',
+              last_update INTEGER DEFAULT 0
+            )
+          `);
+          this.dbInitialized = true;
+        } finally {
+          this.initPromise = null;
+        }
+      })();
+    }
+    await this.initPromise;
+  }
+
+  /** v2.4.0: 从 lcm.db 加载持久化的用户画像 */
+  async loadFromDb(): Promise<void> {
+    try {
+      await this.ensureDbInitialized();
+      if (!this.db) return;
+      const row = this.db.prepare(
+        'SELECT * FROM user_profile ORDER BY id DESC LIMIT 1'
+      ).get() as any;
+      if (row) {
+        // 反序列化 techStack 和 scenario
+        try {
+          const techStackArr: Array<[string, number]> = JSON.parse(row.tech_stack ?? '[]');
+          this.prefs.techStack = new Map(techStackArr);
+        } catch { /* 解析失败则保持空 Map */ }
+        try {
+          const scenarioArr: Array<[string, number]> = JSON.parse(row.scenario ?? '[]');
+          this.prefs.scenario = new Map(scenarioArr);
+        } catch { /* 解析失败则保持空 Map */ }
+        if (row.language === 'zh' || row.language === 'en' || row.language === 'mixed') {
+          this.prefs.language = row.language;
+        }
+        this.prefs.lastUpdate = row.last_update ?? 0;
+      }
+    } catch {
+      // 首次启动时表可能不存在，静默降级
+    }
+  }
+
+  /** v2.4.0: 持久化用户画像到 lcm.db（防抖：500ms 内多次调用只写一次） */
+  private persistToDb(): void {
+    this.dirty = true;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this._doPersist();
+    }, 500);
+  }
+
+  private _doPersist(): void {
+    if (!this.dirty || !this.dbInitialized || !this.db) return;
+    this.dirty = false;
+    try {
+      const techStackJson = JSON.stringify([...this.prefs.techStack.entries()]);
+      const scenarioJson = JSON.stringify([...this.prefs.scenario.entries()]);
+      this.db.prepare(`
+        INSERT OR REPLACE INTO user_profile
+        (id, tech_stack, scenario, language, last_update)
+        VALUES (1, ?, ?, ?, ?)
+      `).run(techStackJson, scenarioJson, this.prefs.language, this.prefs.lastUpdate);
+    } catch {
+      // 非致命
+    }
+  }
 
   /** 从用户文本中提取偏好信号并累积 */
   observe(text: string): void {
@@ -99,6 +197,8 @@ export class UserProfileTracker {
     }
 
     this.prefs.lastUpdate = now;
+    // v2.4.0: 标记 dirty，防抖持久化
+    this.persistToDb();
   }
 
   /**
@@ -200,5 +300,21 @@ export class UserProfileTracker {
       language: 'mixed',
       lastUpdate: 0,
     };
+    this.dirty = false;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.close();
+  }
+
+  /** v2.4.0: 关闭 DB 连接 */
+  close(): void {
+    if (this.db) {
+      try { this.db.close(); } catch { /* ignore */ }
+      this.db = null;
+      this.dbInitialized = false;
+      this.initPromise = null;
+    }
   }
 }
