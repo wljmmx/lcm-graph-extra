@@ -227,7 +227,7 @@ export class QmdClient {
    * 与 context size 错误不同：空结果表示 MCP 调通但索引无数据，继续调用纯属浪费。
    */
   private _emptyResultCount = 0;
-  private static readonly EMPTY_RESULT_DISABLE_THRESHOLD = 3;
+  private static readonly EMPTY_RESULT_DISABLE_THRESHOLD = 2;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: QmdClientOptions = {}) {
@@ -354,7 +354,7 @@ export class QmdClient {
         const results = await this.queryViaMcp(effectiveParams);
         mcpMs = Date.now() - mcpStart;
         // v2.6.0: 连续空结果检测 — MCP 调通但返回空结果时，累计计数器。
-        // 连续 3 次空结果后标记 MCP 不可用，跳过后续检索（避免浪费 4-5s/次）。
+        // O6: 连续 2 次空结果后标记 MCP 不可用（原 3 次），避免浪费 2-7s/次。
         if (Array.isArray(results) && results.length === 0) {
           this._emptyResultCount++;
           if (this._emptyResultCount >= QmdClient.EMPTY_RESULT_DISABLE_THRESHOLD) {
@@ -415,6 +415,8 @@ export class QmdClient {
         }
 
         mcpStatus = 'fail';
+        // O6: MCP 失败时也累加空结果计数器，timeout/error 是比空结果更强的不可用信号
+        this._emptyResultCount++;
         this.mcpAvailable = false;
         this.scheduleRecovery();
         this.lastMcpErrorIsEmbed = isEmbedError;
@@ -1238,6 +1240,7 @@ export class QmdClient {
           this.lastMcpErrorIsEmbed = false; // 恢复 MCP 时清除 embed 错误标记
           this._vecContextErrorCount = 0;   // v2.5.0: 恢复时重置 context size 计数器
           this._vecAutoDisabled = false;    // v2.5.0: 恢复时重新启用 vec 搜索
+          this._emptyResultCount = 0;       // O6: 恢复时重置空结果计数器
           this.mcpSessionId = null;
           this.clearRecovery();
           this.logger.info("[qmd-client] QMD MCP service recovered, switching back to MCP");

@@ -216,11 +216,29 @@ export async function performRetrieval(
             ctx.logger?.debug?.("[lcm-graph-extra] L3 graph search skipped (no graph tool)");
             return { results: [], ms: 0 };
           }
-          const res = await withCircuitBreaker("neo4j", "L3 graphAdapter.search", () => ctx.graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph));
+          // O5: L3 graph 搜索超时保护。graph-memory-pro 的 vec_embed 冷启动 9-18s，
+          // 远超 lex 查询的 50-200ms。5s 超时截断后走降级路径，避免阻塞整个 assemble。
+          const L3_GRAPH_TIMEOUT_MS = 5000;
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error(`L3 graph search timeout (${L3_GRAPH_TIMEOUT_MS}ms)`)), L3_GRAPH_TIMEOUT_MS);
+          });
+          timeoutPromise.catch(() => {}); // 消费 rejection，避免 unhandled rejection
+          const res = await Promise.race([
+            withCircuitBreaker("neo4j", "L3 graphAdapter.search", () => ctx.graphAdapter.searchWithCache(qmdQuery, retrievalLimits.graph)),
+            timeoutPromise,
+          ]);
+          if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
           return { results: res, ms: Date.now() - t0 };
         } catch (e) {
-          ctx.logger?.warn?.("L3 graph search failed", { err: (e as Error).message });
-          markDegraded("L3_graph_search_failed");
+          const errMsg = (e as Error).message;
+          if (errMsg.includes('timeout')) {
+            ctx.logger?.warn?.("L3 graph search timed out (5s), marking degraded", { err: errMsg });
+            markDegraded("L3_graph_search_timeout");
+          } else {
+            ctx.logger?.warn?.("L3 graph search failed", { err: errMsg });
+            markDegraded("L3_graph_search_failed");
+          }
           return { results: [], ms: Date.now() - t0 };
         }
       })(),
