@@ -305,7 +305,7 @@ function formatToolOutputReference(
     'Exploration Summary:',
     explorationSummary.trim() || '(no summary available)',
     '',
-    'Call lcm_describe(id="<file_id above>", expandFile=true) to fetch the full output content from disk.
+    'Call lcm_describe(id="<file_id above>", expandFile=true) to fetch the full output content from disk.',
   ].join('\n');
 }
 

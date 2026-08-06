@@ -232,6 +232,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   let systemPromptAddition = "";
 
   let estimatedTokens = 0;
+  // O2: 缓存 finalMessages token 估算，避免在同一 assemble 内重复计算（节省 2 次 O(n) 遍历）
+  let cachedMsgTokens = 0;
   let tier: PressureTier = 'low';
   let retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
   let maxContextChars = 12000;
@@ -877,8 +879,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     const parallelMs = retrievalOutput.parallelMs;
 
     // ---- Metrics log ----
-    const finalEstimate = estimateTokensFromMessages(finalMessages);
-    ctx.logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${finalEstimate}/${contextWindow}(${(finalEstimate/contextWindow*100).toFixed(1)}%) | overhead=${overheadTokens} | effectiveTokenCount=${effectiveTokenCount} | msgCount=${msgCount} | uncomp=${uncompressedMsgs} | tier=${tier}`, {
+    // O2: 缓存 finalMessages token 估算，后续步骤复用（节省 2 次 O(n) 遍历，各 30-50ms）
+    cachedMsgTokens = estimateTokensFromMessages(finalMessages);
+    ctx.logger?.info?.(`⚡ assemble=${Date.now()-assembleStart}ms | init=${initMs}ms | parallel=${parallelMs}(L2_qmd=${l2_ms},L3_graph=${l3_ms},L4_exp=${l4_ms}) | mg=${mgMs}ms | estimatedTokens=${cachedMsgTokens}/${contextWindow}(${(cachedMsgTokens/contextWindow*100).toFixed(1)}%) | overhead=${overheadTokens} | effectiveTokenCount=${effectiveTokenCount} | msgCount=${msgCount} | uncomp=${uncompressedMsgs} | tier=${tier}`, {
       elapsed: Date.now() - assembleStart,
       init_ms: initMs,
       parallel_ms: parallelMs,
@@ -895,7 +898,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       overheadTokens,
       effectiveTokenCount,
       msgCount,
-      finalEstimate,
+      finalEstimate: cachedMsgTokens,
       contextWindow,
       tier: tier,
       retrieval_limits: JSON.stringify(retrievalLimits),
@@ -1206,7 +1209,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
     // Smart Tool Guidance: 仅当上下文有足够余量时才注入
     // SDK 的 compact prompt surface 已占用 ~55K tok，额外注入会加剧溢出风险
-    const _msgTokens = estimateTokensFromMessages(finalMessages);
+    // O2: 复用 cachedMsgTokens（cleanup 仅移除 reasoning 字段，token 差异 <1%）
+    const _msgTokens = cachedMsgTokens;
     const _hasBudgetForGuidance = _msgTokens < (contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.50;
 
     if (_hasBudgetForGuidance && typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
@@ -1259,8 +1263,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   // Final return block
   // ==================================================================
   try {
-    // P0-5: 缓存 messageTokens，避免对同一 finalMessages 数组重复计算
-    let messageTokens = estimateTokensFromMessages(finalMessages);
+    // O2: 复用 cachedMsgTokens（cleanup 仅移除 reasoning 字段，token 差异 <1%）
+    let messageTokens = cachedMsgTokens;
     let additionTokens = 0;
     if (typeof systemPromptAddition === "string" && systemPromptAddition.length > 0) {
       additionTokens = estimateTokensFromText(systemPromptAddition);

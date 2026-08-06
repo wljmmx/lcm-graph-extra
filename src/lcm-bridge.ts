@@ -44,6 +44,29 @@ export interface MaxContextChars {
   high: number;
 }
 
+// O4: 短生命周期 SQLite 查询结果缓存（5s TTL），避免同一 assemble() 内重复查询
+// getUncompressedMessageCount 和 hasUncompressedMessages 在单次 assemble 中被调用 2-3 次，
+// 数据在 5s 内不会变化，缓存后可节省 30-80ms/轮。
+const _sqliteResultCache = new Map<string, { value: any; ts: number }>();
+const SQLITE_RESULT_CACHE_TTL_MS = 5000;
+const SQLITE_RESULT_CACHE_MAX = 100;
+
+function _getCachedSqliteResult(key: string): { hit: boolean; value: any } {
+  const cached = _sqliteResultCache.get(key);
+  if (cached && Date.now() - cached.ts < SQLITE_RESULT_CACHE_TTL_MS) {
+    return { hit: true, value: cached.value };
+  }
+  return { hit: false, value: undefined };
+}
+
+function _setCachedSqliteResult(key: string, value: any): void {
+  if (_sqliteResultCache.size >= SQLITE_RESULT_CACHE_MAX) {
+    const firstKey = _sqliteResultCache.keys().next().value;
+    if (firstKey !== undefined) _sqliteResultCache.delete(firstKey);
+  }
+  _sqliteResultCache.set(key, { value, ts: Date.now() });
+}
+
 // ---------------------------------------------------------------------------
 // Internal — 单例 DB 连接 + prepared statement 缓存（P0-2 H-1）
 // ---------------------------------------------------------------------------
@@ -109,6 +132,7 @@ export function closeLcmDb(): void {
   _lcmDb = null;
   _lcmStmts.clear();
   _convIdCache.clear();
+  _sqliteResultCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +639,11 @@ export function getConversationSummaries(conversationId: number): Array<{
  * Returns the number of uncompressed (pending compaction) messages.
  */
 export function getUncompressedMessageCount(conversationId: number): number {
+  // O4: 短生命周期缓存，避免同一 assemble() 内重复查询
+  const cacheKey = `uncomp:${conversationId}`;
+  const cached = _getCachedSqliteResult(cacheKey);
+  if (cached.hit) return cached.value as number;
+
   // P3-8: 统一 fail-open 语义 —— db.close 移入 finally
   // P0-2 H-1: 复用单例 DB + 预编译 statement（不再每次 open/close）
   try {
@@ -623,7 +652,9 @@ export function getUncompressedMessageCount(conversationId: number): number {
       "AND created_at > (SELECT COALESCE(MAX(latest_at),0) FROM summaries WHERE conversation_id = ?)");
     if (!stmt) return -1;
     const row = stmt.get(conversationId, conversationId) as { cnt: number } | undefined;
-    return row?.cnt ?? 0;
+    const result = row?.cnt ?? 0;
+    _setCachedSqliteResult(cacheKey, result);
+    return result;
   } catch {
     return -1;
   }
@@ -634,6 +665,11 @@ export function getUncompressedMessageCount(conversationId: number): number {
  * Returns true if there appear to be uncompressed messages.
  */
 export function hasUncompressedMessages(conversationId: number): boolean {
+  // O4: 短生命周期缓存，避免同一 assemble() 内重复查询
+  const cacheKey = `hasUncomp:${conversationId}`;
+  const cached = _getCachedSqliteResult(cacheKey);
+  if (cached.hit) return cached.value as boolean;
+
   // P3-8: 统一 fail-open 语义 —— db.close 移入 finally
   // P0-2 H-1: 复用单例 DB + 预编译 statement，用 2 个独立 statement 分别统计
   try {
@@ -647,7 +683,9 @@ export function hasUncompressedMessages(conversationId: number): boolean {
     if (!sumStmt) return true;
     const sumRow = sumStmt.get(conversationId) as { t: number } | undefined;
     const summaryTokens = sumRow?.t ?? 0;
-    return msgTokens > 0 && summaryTokens < msgTokens * 0.3;
+    const result = msgTokens > 0 && summaryTokens < msgTokens * 0.3;
+    _setCachedSqliteResult(cacheKey, result);
+    return result;
   } catch {
     return true;
   }

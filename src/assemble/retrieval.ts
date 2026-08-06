@@ -123,41 +123,43 @@ export async function performRetrieval(
 
           // P5: L2 检索分级 — lex 优先返回（BM25, 50-200ms），vec 异步补入（embedding, 500-1000ms）
           // 当前轮使用 lex 结果 + 上一轮缓存的 vec 结果（如果有），确保首轮不因 vec 延迟而卡顿
+          //
+          // O1: vec 查询不阻塞主路径。Promise.all 导致 lex 必须等待 vec 完成（500-1000ms）
+          // 才能返回，实际当前轮仅用 lex 结果。改为 lex 单独 await，vec 异步 fire-and-forget
+          // 结果存入缓存供下一轮使用，节省 500-1000ms/轮。
           const vecCacheKey = `vec:${l2CacheKey}`;
           const vecCached = ctx.l2QueryCache.get(vecCacheKey);
 
-          // 并行启动 lex 和 vec 查询，但 lex 结果优先返回
-          const [lexRes, vecPromise] = await Promise.all([
-            // lex 查询：快速返回，当前轮使用
-            withCircuitBreaker("qmd", "L2 qmdClient.query(lex)", () => ctx.qmdClient.query({
-              searches: [{ type: "lex", query: qmdQuery }],
-              limit: retrievalLimits.qmd,
-              rerank: true,
-            })),
-            // vec 查询：异步启动，结果存入缓存供下一轮使用
-            (async () => {
-              try {
-                const vecRes = await withCircuitBreaker("qmd", "L2 qmdClient.query(vec)", () => ctx.qmdClient.query({
-                  searches: [{ type: "vec", query: qmdQuery }],
-                  limit: retrievalLimits.qmd,
-                  rerank: false, // vec 不 rerank，减少耗时
-                }));
-                if (vecRes && vecRes.length > 0) {
-                  // BUG-6: 使用 ctx.cacheSize 替代硬编码
-                  if (ctx.l2QueryCache.size >= ctx.cacheSize) {
-                    const oldest = ctx.l2QueryCache.keys().next().value;
-                    if (oldest !== undefined) ctx.l2QueryCache.delete(oldest);
-                  }
-                  ctx.l2QueryCache.set(vecCacheKey, { results: vecRes as any[], ts: Date.now() });
-                  ctx.logger?.debug?.("P5: L2 vec results cached for next turn", { count: vecRes.length });
+          // 启动 vec 查询作为独立异步任务（不阻塞主路径）
+          const vecPromise = (async () => {
+            try {
+              const vecRes = await withCircuitBreaker("qmd", "L2 qmdClient.query(vec)", () => ctx.qmdClient.query({
+                searches: [{ type: "vec", query: qmdQuery }],
+                limit: retrievalLimits.qmd,
+                rerank: false, // vec 不 rerank，减少耗时
+              }));
+              if (vecRes && vecRes.length > 0) {
+                // BUG-6: 使用 ctx.cacheSize 替代硬编码
+                if (ctx.l2QueryCache.size >= ctx.cacheSize) {
+                  const oldest = ctx.l2QueryCache.keys().next().value;
+                  if (oldest !== undefined) ctx.l2QueryCache.delete(oldest);
                 }
-                return vecRes;
-              } catch (vecErr) {
-                ctx.logger?.debug?.("P5: L2 vec async query failed (non-fatal)", { err: (vecErr as Error).message });
-                return [];
+                ctx.l2QueryCache.set(vecCacheKey, { results: vecRes as any[], ts: Date.now() });
+                ctx.logger?.debug?.("P5: L2 vec results cached for next turn", { count: vecRes.length });
               }
-            })(),
-          ]);
+            } catch (vecErr) {
+              ctx.logger?.debug?.("P5: L2 vec async query failed (non-fatal)", { err: (vecErr as Error).message });
+            }
+          })();
+          // 确保 vecPromise rejection 被消费，避免 unhandled rejection
+          vecPromise.catch(() => {});
+
+          // 仅 await lex 查询（快速，50-200ms），不等待 vec
+          const lexRes = await withCircuitBreaker("qmd", "L2 qmdClient.query(lex)", () => ctx.qmdClient.query({
+            searches: [{ type: "lex", query: qmdQuery }],
+            limit: retrievalLimits.qmd,
+            rerank: true,
+          }));
 
           // 合并 lex 结果 + 上一轮缓存的 vec 结果（去重）
           const lexResults = Array.isArray(lexRes) ? lexRes : [];
@@ -182,10 +184,6 @@ export async function performRetrieval(
             if (oldest !== undefined) ctx.l2QueryCache.delete(oldest);
           }
           ctx.l2QueryCache.set(l2CacheKey, { results: merged, ts: Date.now() });
-
-          // 异步等待 vec 结果完成（fire-and-forget），确保下一轮缓存已写入
-          // 不阻塞当前轮返回
-          vecPromise.catch(() => {});
 
           return { results: merged, ms: Date.now() - t0 };
         } catch (e) {

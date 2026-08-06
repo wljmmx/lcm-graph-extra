@@ -507,6 +507,16 @@ const pluginEntry: any = definePluginEntry({
           logger?.debug?.("model registry loading failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }
 
+        // O3: MCP 连接预热 — 异步 ping MCP 健康端点，预建立 TCP 连接 + DNS 解析
+        // 确保首次查询时不需要 TCP 握手（~50ms），连接池已就绪
+        if (qmdClient) {
+          qmdClient.ping().then((ok: boolean) => {
+            if (ok) {
+              logger?.debug?.('[ensureInitialized] MCP connection pre-warmed');
+            }
+          }).catch(() => { /* non-fatal */ });
+        }
+
         initialized = true;
         logger?.debug?.('[ensureInitialized] completed, graphAdapter=' + (graphAdapter ? 'set' : 'NULL') + ', driver=' + ((graphAdapter as any)?.driver ? 'set' : 'NULL'));
       } catch (err) {

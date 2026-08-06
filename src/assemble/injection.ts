@@ -241,11 +241,7 @@ export async function injectContext(
 
   // H-4: 上下文冲突检测 — v2.7.0 P4: 异步化，当前轮使用上一轮缓存结果，避免阻塞 200-400ms
   // 冲突检测不依赖最新 results 的精确性，延迟一轮不影响用户体验
-  const sessionKey = typeof params.sessionKey === 'string'
-    ? params.sessionKey
-    : typeof params.session_id === 'string'
-      ? params.session_id
-      : '';
+  // 复用上方已声明的 sessionKey
 
   // 注入上一轮异步检测的冲突结果
   if (sessionKey) {
