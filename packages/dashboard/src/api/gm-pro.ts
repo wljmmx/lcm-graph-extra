@@ -2,7 +2,10 @@
  * graph-memory-pro HTTP API 代理 —— 前端 API 封装与类型定义。
  *
  * 所有调用通过 dashboard 后端的 /api/gm-pro/proxy/* 代理到 graph-memory-pro 的 HTTP 服务器。
- * 后端代理负责鉴权、路径白名单、超时控制，前端仅需调用此模块的薄封装函数。
+ * 后端代理负责鉴权（x-auth-token + Basic Auth）、路径白名单、超时控制，前端仅需调用此模块的薄封装函数。
+ *
+ * v2.9.0: graph-memory-pro 所有路由已升级为 auth: "plugin"（SDK 必填），
+ * 后端代理对所有路径统一携带 x-auth-token 头。
  *
  * 代理路径映射：
  *   前端调用           → 后端代理                      → graph-memory-pro

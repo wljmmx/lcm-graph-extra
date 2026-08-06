@@ -17,13 +17,14 @@
  * 配置：
  *   GM_PRO_HTTP_URL —— Gateway HTTP 地址（默认 http://127.0.0.1:18789，与 OPENCLAW_MCP_URL 一致）
  *   GM_PRO_HTTP_TIMEOUT —— 代理超时（ms），默认 10s
- *   GM_PRO_AUTH_TOKEN —— graph-memory-pro mcp.authToken，用于敏感路径鉴权
+ *   GM_PRO_AUTH_TOKEN —— graph-memory-pro mcp.authToken，用于插件级鉴权
  *
  * 安全：
  *   - 仅允许 GET 请求（只读），拒绝 POST/PATCH/PUT/DELETE 写操作
  *   - 出站请求携带 Gateway 凭据（DASHBOARD_AUTH Basic Auth）
  *   - 路径白名单校验，防止 SSRF 遍历
- *   - 敏感路径（health/metrics/usage/doctor）自动附加 x-auth-token 头
+ *   - v2.9.0: graph-memory-pro 所有路由已升级为 auth: "plugin"（SDK 必填），
+ *     全部请求统一携带 x-auth-token 头（若配置了 GM_PRO_AUTH_TOKEN）
  */
 import type { FastifyInstance } from 'fastify';
 import { getOutboundAuthHeader } from '../lib/auth';
@@ -49,20 +50,6 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/association-matrix/state',
   '/api/doctor',
   '/api/usage',
-]);
-
-/**
- * graph-memory-pro 敏感只读路径（需要 x-auth-token 鉴权）。
- *
- * 对应 graph-memory-pro index.ts 中 SENSITIVE_READ_PATHS 的定义，
- * 当 graph-memory-pro 配置了 mcp.authToken 时，这些路径需要 x-auth-token 头。
- * 未配置 mcp.authToken 时 graph-memory-pro 允许本地无鉴权访问。
- */
-const GM_PRO_SENSITIVE_PATHS = new Set([
-  '/api/health',
-  '/api/metrics',
-  '/api/usage',
-  '/api/doctor',
 ]);
 
 export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
@@ -97,8 +84,9 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       ...getOutboundAuthHeader(),
       'Accept': 'application/json',
     };
-    // 敏感路径需要 x-auth-token（graph-memory-pro 的 plugin auth 机制）
-    if (GM_PRO_AUTH_TOKEN && GM_PRO_SENSITIVE_PATHS.has(proxyPath)) {
+    // v2.9.0: graph-memory-pro 所有路由已升级为 auth: "plugin"（SDK 必填），
+    // 全部请求统一携带 x-auth-token 头（若配置了 GM_PRO_AUTH_TOKEN）
+    if (GM_PRO_AUTH_TOKEN) {
       headers['x-auth-token'] = GM_PRO_AUTH_TOKEN;
     }
 
