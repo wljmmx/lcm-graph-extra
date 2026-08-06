@@ -177,8 +177,8 @@ export const QMD_CLIENT_DEFAULTS = {
   pingInterval: 30_000,
   /** 默认启用CLI降级，保持向后兼容。用户可设为false禁用CLI避免卡死。 */
   enableCliFallback: true,
-  /** BUG-7: QMD vec/hyde 查询文本最大字符数。默认 8000（适配 qwen3-embed 32768 tokens）。 */
-  qmdQueryMaxChars: 8000,
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数。默认 4000（适配 qwen3-embed 32768 tokens，给服务端文档侧留出足够 context window 空间，减少 "documents exceed the context size" 错误）。 */
+  qmdQueryMaxChars: 4000,
 };
 
 /** @deprecated 使用 QMD_CLIENT_DEFAULTS，保留向后兼容 */
@@ -201,7 +201,7 @@ export class QmdClient {
   private readonly enableCliFallback: boolean;
   /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
   private readonly logger: Logger;
-  /** BUG-7: QMD vec/hyde 查询文本最大字符数，超过则截断。 */
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数，超过则分片。默认 4000（给服务端文档侧留出 context window 空间）。 */
   private readonly qmdQueryMaxChars: number;
 
   /** null = undetermined, true = REST可用, false = REST不可用 */
