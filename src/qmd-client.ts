@@ -177,8 +177,8 @@ export const QMD_CLIENT_DEFAULTS = {
   pingInterval: 30_000,
   /** 默认启用CLI降级，保持向后兼容。用户可设为false禁用CLI避免卡死。 */
   enableCliFallback: true,
-  /** BUG-7: QMD vec/hyde 查询文本最大字符数。默认 4000（适配 qwen3-embed 32768 tokens，给服务端文档侧留出足够 context window 空间，减少 "documents exceed the context size" 错误）。 */
-  qmdQueryMaxChars: 4000,
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数。默认 2000（适配 Qwen3.5-Embedding-0.6B num_ctx=8192 tokens，每 chunk ~1000 tokens，给文档侧留 7000+ tokens 空间）。 */
+  qmdQueryMaxChars: 2000,
 };
 
 /** @deprecated 使用 QMD_CLIENT_DEFAULTS，保留向后兼容 */
@@ -201,7 +201,7 @@ export class QmdClient {
   private readonly enableCliFallback: boolean;
   /** P3-B3: 统一 logger，替换散落的 console.* 调用 */
   private readonly logger: Logger;
-  /** BUG-7: QMD vec/hyde 查询文本最大字符数，超过则分片。默认 4000（给服务端文档侧留出 context window 空间）。 */
+  /** BUG-7: QMD vec/hyde 查询文本最大字符数，超过则分片。默认 2000（适配 Qwen3.5-Embedding-0.6B num_ctx=8192）。 */
   private readonly qmdQueryMaxChars: number;
 
   /** null = undetermined, true = REST可用, false = REST不可用 */
@@ -210,6 +210,17 @@ export class QmdClient {
   private mcpAvailable: boolean | null = null;
   /** 最近一次 MCP 失败是否为 embed 维度错误（用于决定 REST 降级是否避开 vec） */
   private lastMcpErrorIsEmbed = false;
+  /**
+   * v2.5.0: 连续 context size 错误计数器。
+   * 当 MCP 连续返回 context size 错误 ≥ 阈值时，自动禁用 vec/hyde 搜索（仅用 lex），
+   * 避免反复触发 embedding 模型超限，减少 MCP 服务崩溃风险。
+   * 在 MCP 恢复后重置。
+   */
+  private _vecContextErrorCount = 0;
+  /** 连续 context size 错误阈值，超过后自动禁用 vec */
+  private static readonly VEC_CONTEXT_ERROR_DISABLE_THRESHOLD = 3;
+  /** 是否已自动禁用 vec 搜索 */
+  private _vecAutoDisabled = false;
   private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: QmdClientOptions = {}) {
@@ -320,9 +331,20 @@ export class QmdClient {
     }
     // 1. MCP 优先 — 完整 hybrid 搜索能力（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
     if (this.mcpAvailable !== false) {
+      // v2.5.0: 连续 context size 错误过多时自动禁用 vec，避免反复触发 MCP 崩溃
+      let effectiveParams = params;
+      if (this._vecAutoDisabled && Array.isArray(params.searches)) {
+        const lexOnly = params.searches.filter((s) => s.type === "lex");
+        if (lexOnly.length > 0) {
+          this.logger?.warn?.(
+            `[qmd-client] vec auto-disabled (${this._vecContextErrorCount} consecutive context size errors), using lex-only`,
+          );
+          effectiveParams = { ...params, searches: lexOnly, rerank: false };
+        }
+      }
       const mcpStart = Date.now();
       try {
-        const results = await this.queryViaMcp(params);
+        const results = await this.queryViaMcp(effectiveParams);
         this.mcpAvailable = true;
         this.clearRecovery();
         mcpMs = Date.now() - mcpStart;
@@ -344,6 +366,14 @@ export class QmdClient {
         //   2. lex-only    — 纯 BM25 检索，不触发 embedding
         // 仅当以上均失败时才标记 MCP 不可用、降级到 REST。
         if (isContextSizeError) {
+          this._vecContextErrorCount++;
+          if (this._vecContextErrorCount >= QmdClient.VEC_CONTEXT_ERROR_DISABLE_THRESHOLD && !this._vecAutoDisabled) {
+            this._vecAutoDisabled = true;
+            this.logger?.warn?.(
+              `[qmd-client] vec auto-disabled after ${this._vecContextErrorCount} consecutive context size errors`,
+              { err: _mcpErr.slice(0, 120) },
+            );
+          }
           const retryResult = await this._retryMcpContextSize(params, _mcpErr);
           if (retryResult !== null) {
             this.mcpAvailable = true;
@@ -352,6 +382,9 @@ export class QmdClient {
             finalizeBreakdown(Date.now() - qStart);
             return retryResult;
           }
+        } else {
+          // 非 context size 错误，重置计数器（仅 context size 是连续模式）
+          this._vecContextErrorCount = 0;
         }
 
         mcpStatus = 'fail';
@@ -1176,6 +1209,8 @@ export class QmdClient {
           // REST 仅作 MCP 失败的备选，保持 undetermined (null)，下次 query 时按需探测。
           this.mcpAvailable = true;
           this.lastMcpErrorIsEmbed = false; // 恢复 MCP 时清除 embed 错误标记
+          this._vecContextErrorCount = 0;   // v2.5.0: 恢复时重置 context size 计数器
+          this._vecAutoDisabled = false;    // v2.5.0: 恢复时重新启用 vec 搜索
           this.mcpSessionId = null;
           this.clearRecovery();
           this.logger.info("[qmd-client] QMD MCP service recovered, switching back to MCP");

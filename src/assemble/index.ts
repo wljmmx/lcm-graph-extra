@@ -376,11 +376,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     // ==================================================================
-    // 1b. Token ratio > 0.65 warning + async pre-compaction trigger
+    // 1b. Token ratio > 0.55 warning + async pre-compaction trigger
     // ==================================================================
-    if (tokenRatio > 0.65 && !needsCompact) {
+    if (tokenRatio > 0.55 && !needsCompact) {
       ctx.logger?.warn?.(
-        "window monitor: token ratio above 0.65, triggering async pre-compaction",
+        "window monitor: token ratio above 0.55, triggering async pre-compaction",
         { tokenRatio: Number(tokenRatio.toFixed(3)), effectiveTokenCount, estimatedTokens, contextWindow },
       );
       if (ctx.losslessClawAdapter?.connected) {

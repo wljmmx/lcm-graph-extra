@@ -44,7 +44,7 @@ export interface StubResult {
 // 常量
 // ---------------------------------------------------------------------------
 
-const DEFAULT_THRESHOLD_BYTES = 8000; // ~2K tokens
+const DEFAULT_THRESHOLD_BYTES = 4000; // ~1K tokens（v2.5.0: 从 8000 降到 4000，更积极外存化）
 const DEFAULT_FRESH_TAIL = 8;
 
 /** lossless-claw 的 fileId 正则：file_ + 16 位小写 hex */
@@ -305,8 +305,95 @@ function formatToolOutputReference(
     'Exploration Summary:',
     explorationSummary.trim() || '(no summary available)',
     '',
-    'Call lcm_describe(id="<file_id above>", expandFile=true) to fetch the full output content from disk.',
+    'Call lcm_describe(id="<file_id above>", expandFile=true) to fetch the full output content from disk.
   ].join('\n');
+}
+
+/**
+ * v2.5.0: 分段 stubbing —— 将超大工具结果拆分为多个 16KB 分片，
+ * 每个分片写入独立文件，生成合并存根引用。
+ *
+ * 避免单次写入超大文件导致 OOM，Agent 可按需 lcm_describe 逐片取回。
+ */
+function stubChunked(
+  msg: any,
+  _idx: number,
+  textContent: string,
+  totalSize: number,
+  config: StubConfig,
+  logger: any,
+  conversationId: number | null | undefined,
+): any {
+  const CHUNK_SIZE = 16_384; // 16KB per chunk
+  const toolName = extractToolName(msg);
+  const chunks: string[] = [];
+
+  // 按 CHUNK_SIZE 分割文本（在换行处断开）
+  let remaining = textContent;
+  while (remaining.length > 0) {
+    if (remaining.length <= CHUNK_SIZE) {
+      chunks.push(remaining);
+      break;
+    }
+    // 在 CHUNK_SIZE 范围内找最后一个换行
+    let cut = CHUNK_SIZE;
+    const lastNewline = remaining.lastIndexOf('\n', CHUNK_SIZE);
+    if (lastNewline > CHUNK_SIZE / 2) {
+      cut = lastNewline + 1;
+    }
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
+  }
+
+  const chunkIds: string[] = [];
+  const convDir = conversationId != null
+    ? join(config.filesDir, String(conversationId))
+    : config.filesDir;
+  ensureDir(convDir);
+
+  for (let i = 0; i < chunks.length; i++) {
+    const fid = generateFileId();
+    const fpath = join(convDir, `${fid}.txt`);
+    try {
+      writeFileSync(fpath, chunks[i], { encoding: 'utf-8', mode: 0o600 });
+    } catch (err) {
+      logger?.warn?.('[stubLargeToolPayloads] chunked write failed', { fpath, err: String(err) });
+      continue;
+    }
+    if (conversationId != null) {
+      insertLargeFile({
+        fileId: fid,
+        conversationId,
+        fileName: `${toolName}.chunk${i + 1}.txt`,
+        mimeType: 'text/plain',
+        byteSize: byteLength(chunks[i]),
+        lineCount: chunks[i].split(/\r?\n/).length,
+        storageUri: fpath,
+        explorationSummary: `Chunk ${i + 1}/${chunks.length} of large tool output (${toolName})`,
+      });
+    }
+    chunkIds.push(fid);
+  }
+
+  const stub = [
+    `[LCM Tool Output: CHUNKED | tool=${toolName} | ${formatBytes(totalSize)} bytes | ${chunks.length} chunks]`,
+    '',
+    `This tool result was too large (${formatBytes(totalSize)} bytes) and has been split into ${chunks.length} chunks.`,
+    '',
+    'Chunk file IDs:',
+    ...chunkIds.map((fid, i) => `  ${i + 1}. ${fid} (chunk ${i + 1}/${chunks.length})`),
+    '',
+    'Call lcm_describe(id="<file_id>", expandFile=true) for each chunk to fetch the content.',
+  ].join('\n');
+
+  const content = msg.content;
+  if (Array.isArray(content)) {
+    return {
+      ...msg,
+      content: [{ type: 'text', text: stub, externalizedFileId: chunkIds[0], chunkedFileIds: chunkIds, originalByteSize: totalSize, toolOutputExternalized: true, externalizationReason: 'large_tool_result_chunked' }],
+    };
+  }
+  return { ...msg, content: stub, externalizedFileId: chunkIds[0], chunkedFileIds: chunkIds, originalByteSize: totalSize, toolOutputExternalized: true, externalizationReason: 'large_tool_result_chunked' };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +490,18 @@ export function stubLargeToolPayloads(
 
     // Fresh tail 保护：最近的消息不存根
     if (idx >= freshTailStart) return msg;
+
+    /**
+     * v2.5.0: 超大工具结果分段 stubbing（> 64KB）。
+     * 单文件写入可能 OOM 或耗时过长，拆分为多个 16KB 分片写入，
+     * 生成合并存根引用，Agent 可按需 lcm_describe 逐片取回。
+     */
+    const CHUNK_SIZE_BYTES = 16_384; // 16KB 分片
+    const CHUNK_THRESHOLD_BYTES = 65_536; // 64KB 触发分段
+
+    if (size > CHUNK_THRESHOLD_BYTES) {
+      return stubChunked(msg, idx, textContent, size, config, logger, conversationId);
+    }
 
     // ── 外部化（对齐 lossless-claw 的 externalizeLargeTextPayload） ──
 

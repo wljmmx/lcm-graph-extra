@@ -249,18 +249,25 @@ export const PluginConfigSchema = Type.Object({
     // 分片策略：保留完整语义（不截断丢弃），每个分片作为独立 vec/hyde 子查询发送，
     // 检索后端通过 RRF 合并结果。分片更短 → 与索引文档拼接后更易落在 embedding 模型
     // context window 内 → 解决 "documents exceed the context size" 错误。
-    // qwen3-embed 支持 32768 tokens，默认 4000 chars 给服务端文档侧留出足够 context window 空间，
-    // 减少 "documents exceed the context size" 错误。若仍有此错误可继续降低（如 2000）。
-    qmdQueryMaxChars: Type.Optional(Type.Number({ default: 4000, minimum: 500 })),
+    // Qwen3.5-Embedding-0.6B num_ctx=8192 tokens，默认 2000 chars 给文档侧留 7000+ tokens 空间。
+    // 若仍有 context size 错误可继续降低（如 1000）。
+    qmdQueryMaxChars: Type.Optional(Type.Number({ default: 2000, minimum: 500 })),
   })),
 
   lcmMonitor: Type.Optional(Type.Object({
     enabled: Type.Boolean({ default: true }),
     contextWindow: Type.Number({ default: 262_144, minimum: 1 }),
+    /**
+     * v2.5.0: summary 模型（lossless-claw compact 使用的模型）的上下文窗口大小。
+     * 当此值与主模型 contextWindow 不同时，compactTokenBudget 基于此值计算，
+     * 避免 summary 模型窗口小于主模型窗口时 token budget 超限导致 compaction 失败。
+     * 默认 0（未设置），回退到 contextWindow。
+     */
+    summaryModelContextWindow: Type.Optional(Type.Number({ default: 0, minimum: 0 })),
     dedupRounds: Type.Number({ default: 24, minimum: 1 }),
     highPressureThreshold: Type.Number({ default: 0.85, minimum: 0, maximum: 1 }),
     mediumPressureThreshold: Type.Number({ default: 0.70, minimum: 0, maximum: 1 }),
-    proactiveThreshold: Type.Number({ default: 0.65, minimum: 0, maximum: 1 }),
+    proactiveThreshold: Type.Number({ default: 0.55, minimum: 0, maximum: 1 }),
     systemPromptOverheadTokens: Type.Number({ default: 17_000, minimum: 0 }),
     compactTokenBudget: Type.Number({ default: 154_624, minimum: 0 }),
     compactTimeout: Type.Number({ default: 60_000, minimum: 0 }),
@@ -372,13 +379,22 @@ export function resolveContextProfile(
   const adaptiveLimits = defaultRetrievalLimits(scale);
   const adaptiveChars = defaultMaxContextChars(scale);
 
+  // v2.5.0: summary 模型窗口分离 —— 当 summary 模型窗口 < 主模型窗口时，
+  // compactTokenBudget 基于 summary 模型窗口计算，避免传给 lossless-claw 的
+  // tokenBudget 超过 summary 模型实际能力导致 compaction 失败。
+  const summaryCtxWindow = (wm as any)?.summaryModelContextWindow > 0
+    ? (wm as any).summaryModelContextWindow
+    : ctxWindow;
+  const compactTokenBudget = wm?.compactTokenBudget
+    ?? Math.round(summaryCtxWindow * COMPACT_RATIO);
+
   // P0-2 BUG-1: 修复 ?? 链失效死代码。
   // 原代码 `Math.round(...) ?? wm?.x` 中 Math.round 永远返回 number，导致用户在
   // lcmMonitor 中显式配置的 compactTokenBudget / retrievalLimits / maxContextChars 全部被忽略。
   // 修复策略：用户显式配置优先 → 自适应默认 → 兜底常量。
   return {
     contextWindow: ctxWindow,
-    compactTokenBudget: wm?.compactTokenBudget ?? Math.round(ctxWindow * COMPACT_RATIO),
+    compactTokenBudget,
     retrievalLimits: {
       qmd: wm?.retrievalLimits?.low?.qmd ?? adaptiveLimits.qmd,
       graph: wm?.retrievalLimits?.low?.graph ?? adaptiveLimits.graph,

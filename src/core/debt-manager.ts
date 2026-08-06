@@ -29,8 +29,10 @@ export interface DebtSchedulerConfig {
 }
 
 export const DEFAULT_SCHEDULER_CONFIG: Required<DebtSchedulerConfig> = {
-  pollIntervalMs: 60_000,
-  maxConcurrent: 1,
+  // v2.5.0: 从 60s 降到 30s，加快 compaction 债务处理速度
+  pollIntervalMs: 30_000,
+  // v2.5.0: 从 1 提升到 2，允许并行处理多个会话的 compaction
+  maxConcurrent: 2,
   urgentThreshold: 0.7,
 };
 
