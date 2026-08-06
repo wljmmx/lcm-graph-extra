@@ -324,12 +324,7 @@ export class LosslessClawAdapter {
           const uniqueKeys = [...new Set(keys)].filter(k => k !== 'constructor');
           lastError = 'lossless-claw factory returned invalid engine (missing compact)';
           lastErrorDetail = `engine keys: [${uniqueKeys.join(', ')}]`;
-          this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: engine missing compact method`, {
-            engineType: typeof engine,
-            engineKeys: uniqueKeys,
-            hasCompact: typeof engine.compact,
-            isPromise: engine instanceof Promise,
-          });
+          this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: engine missing compact, type=${typeof engine}, keys=[${uniqueKeys.join(', ')}]`);
           this.engine = null;
         } else {
           // 成功
@@ -341,12 +336,11 @@ export class LosslessClawAdapter {
           return true;
         }
       } catch (err) {
-        lastError = (err as Error).message;
+        const errMsg = (err as Error).message ?? String(err);
+        const errName = (err as Error).name ?? 'Error';
+        lastError = errMsg;
         lastErrorDetail = `stack: ${(err as Error).stack?.substring(0, 200) ?? 'N/A'}`;
-        this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory({}) threw`, {
-          err: lastError,
-          errName: (err as Error).name,
-        });
+        this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory({}) threw ${errName}: ${errMsg}`);
       }
 
       // 走到这里说明本次尝试失败，若还有重试机会则等待后重试
