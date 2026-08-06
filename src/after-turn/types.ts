@@ -19,4 +19,6 @@ export interface AfterTurnContext {
   sessionQualityScores: Map<string, number>;
   /** P2-1: L4 检索缓存，经验写入时整体失效 */
   l4QueryCache?: Map<string, { results: any[]; ts: number }>;
+  /** v2.7.0 P7: L2 检索缓存，用于 afterTurn 预取下一轮 vec 结果 */
+  l2QueryCache?: Map<string, { results: any[]; ts: number }>;
 }

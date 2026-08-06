@@ -776,6 +776,8 @@ const pluginEntry: any = definePluginEntry({
           lastAssembleExpIdsBySession,
           sessionQualityScores,
           l4QueryCache,
+          // v2.7.0 P7: L2 检索预取 — afterTurn 预取下一轮 vec 结果写入此缓存
+          l2QueryCache,
         };
         await afterTurnCore(ctx, params);
       },

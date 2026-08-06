@@ -4,14 +4,21 @@
  * 组合 quality / experience 子模块，实现完整的 afterTurn 生命周期。
  */
 
+import { createHash } from 'crypto';
 import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
 import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { serializeError } from '../utils/logger.js';
+import { shouldUpdateGoal, getGoal } from '../plugin/goal-cache.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
 import type { AfterTurnContext } from './types.js';
+
+/** v2.7.0 P7: 简单 hash，与 retrieval.ts 中 hashKey 保持一致 */
+function hashKey(s: string): string {
+  return createHash('sha256').update(s).digest('hex').slice(0, 16);
+}
 
 export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<void> {
   const afterTurnStart = Date.now();
@@ -290,6 +297,110 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
       }
     } catch (e) {
       ctx.logger?.debug?.("tracker.onResponseReceived failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+    }
+
+    // ==================================================================
+    // v2.7.0 P7: L2 检索预取 — 基于用户输入预测下一轮查询，预取 vec 结果
+    // ==================================================================
+    if (ctx.l2QueryCache && ctx.qmdClient && userContent) {
+      try {
+        const keywords = extractTopKeywords([{ role: 'user', content: userContent }], 10);
+        if (keywords.length >= 2) {
+          // 构造 1-3 个预测 query：完整消息 + Top 关键词组合
+          const predictedQueries: string[] = [];
+          predictedQueries.push(userContent.slice(0, 200)); // 截断后的原始消息
+          if (keywords.length >= 3) {
+            predictedQueries.push(keywords.slice(0, 3).join(' '));
+          }
+          if (keywords.length >= 5) {
+            predictedQueries.push(keywords.slice(0, 5).join(' '));
+          }
+
+          const prefetchLimit = 5;
+          const deduped = [...new Set(predictedQueries.filter(q => q.length > 5))];
+          ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch starting', {
+            queryCount: deduped.length,
+            keywords: keywords.slice(0, 5),
+          });
+
+          // 异步预取 vec 结果，写入 l2QueryCache
+          backgroundTasks.register('p7:l2-prefetch', (async () => {
+            for (const q of deduped) {
+              try {
+                const cacheKey = `vec:l2:${hashKey(q.toLowerCase().trim())}:${prefetchLimit}`;
+                // 跳过已有缓存（TTL 内）
+                const cached = ctx.l2QueryCache!.get(cacheKey);
+                if (cached && Date.now() - cached.ts < 900_000) {
+                  ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch skip (cached)', { key: cacheKey.slice(0, 32) });
+                  continue;
+                }
+                const vecRes = await ctx.qmdClient.query({
+                  searches: [{ type: 'vec', query: q }],
+                  limit: prefetchLimit,
+                  rerank: false,
+                });
+                if (vecRes && vecRes.length > 0) {
+                  ctx.l2QueryCache!.set(cacheKey, { results: vecRes as any[], ts: Date.now() });
+                  ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch cached', { key: cacheKey.slice(0, 32), count: vecRes.length });
+                }
+              } catch (prefetchErr) {
+                ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch query failed (non-fatal)', {
+                  err: (prefetchErr as Error).message,
+                });
+              }
+            }
+          })());
+        }
+      } catch (prefetchErr) {
+        ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch setup failed (non-fatal)', {
+          err: (prefetchErr as Error).message,
+        });
+      }
+    }
+
+    // ==================================================================
+    // v2.7.0 G-U: 目标切换智能卸载 — 检测 goal switch 后写入高优先级 compaction debt
+    // ==================================================================
+    try {
+      const sessionKey = typeof params.sessionKey === 'string'
+        ? params.sessionKey
+        : typeof params.session_id === 'string'
+          ? params.session_id
+          : '';
+      if (sessionKey && userContent) {
+        const oldGoal = getGoal(sessionKey);
+        const switched = shouldUpdateGoal(userContent, sessionKey);
+        if (switched && oldGoal) {
+          ctx.logger?.info?.('[afterTurn] G-U: goal switch detected, writing high-priority compaction debt', {
+            oldGoal: oldGoal.slice(0, 80),
+            newGoal: userContent.slice(0, 80),
+          });
+          // 写入高优先级债务，触发 debt-manager 对旧目标内容进行异步压缩
+          try {
+            const { getConversationId, writeCompactionDebt } = await import('../lcm-bridge.js');
+            const convId = getConversationId(sessionKey);
+            if (convId != null) {
+              writeCompactionDebt(
+                convId,
+                114688, // DEFAULT_TOKEN_BUDGET
+                (params.messages?.length ?? 0) * 200, // 粗略估算
+                'goal_switch_unload',
+              );
+              ctx.logger?.info?.('[afterTurn] G-U: compaction debt written for goal switch', {
+                conversationId: convId,
+              });
+            }
+          } catch (debtErr) {
+            ctx.logger?.debug?.('[afterTurn] G-U: write debt failed (non-fatal)', {
+              err: (debtErr as Error).message,
+            });
+          }
+        }
+      }
+    } catch (goalErr) {
+      ctx.logger?.debug?.('[afterTurn] G-U: goal unload check failed (non-fatal)', {
+        err: (goalErr as Error).message,
+      });
     }
   } catch (err) {
     ctx.logger?.error?.('[lcm-graph-extra] afterTurn error', { err: serializeError(err) });
