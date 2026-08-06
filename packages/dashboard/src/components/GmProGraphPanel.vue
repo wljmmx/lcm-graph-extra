@@ -274,7 +274,8 @@ function formatPagerank(v: number | undefined): string {
       <template #default>
         <div>{{ globalError || 'graph-memory-pro 服务不可达，请检查服务是否已启动' }}</div>
         <div style="margin-top: 6px; font-size: var(--fs-caption); color: var(--color-text-tertiary)">
-          提示：请确认 graph-memory-pro 插件已安装并启动，环境变量 GM_PRO_HTTP_URL 已正确配置（默认 http://127.0.0.1:7424）。
+          提示：graph-memory-pro 通过 OpenClaw Gateway 暴露 HTTP 路由（默认 http://127.0.0.1:18789）。
+          请确认 Gateway 已启动且 graph-memory-pro 插件已正确加载。
         </div>
       </template>
       <template #footer>
