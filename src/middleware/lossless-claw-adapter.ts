@@ -223,6 +223,9 @@ export class LosslessClawAdapter {
   private _initError: string | null = null;
   /** 是否已经尝试过连接（无论成功失败），用于防止重复日志 */
   private _connectionAttempted = false;
+  /** Path 1 (Symbol registry) 返回的 factory 是否来自 read-only 注册（引擎未初始化），
+   *  若为 true 则跳过 Path 1，走 Path 2/3/4 触发真正的引擎初始化 */
+  private _skipPath1 = false;
 
   /** 日志器 (P3-B2: 类型 any → Logger，缺失时降级到 globalLogger) */
   private logger: Logger;
@@ -341,6 +344,13 @@ export class LosslessClawAdapter {
         lastError = errMsg;
         lastErrorDetail = `stack: ${(err as Error).stack?.substring(0, 200) ?? 'N/A'}`;
         this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory({}) threw ${errName}: ${errMsg}`);
+
+        // 如果 lossless-claw 插件处于 read-only 注册模式（引擎未初始化），
+        // 标记跳过 Path 1 (Symbol registry)，后续重试走 Path 2/3/4 触发真正的引擎初始化
+        if (errMsg.includes('read-only') || errMsg.includes('disabled during')) {
+          this._skipPath1 = true;
+          this.logger?.info?.('[lcm] detected read-only Symbol registry factory, falling back to Path 2/3/4 for real engine init');
+        }
       }
 
       // 走到这里说明本次尝试失败，若还有重试机会则等待后重试
@@ -870,22 +880,26 @@ export class LosslessClawAdapter {
     Promise<((ctx: any) => Promise<LosslessClawEngine>) | null>
   {
     // ── Primary: globalThis Symbol 方式 ──
-    this.logger.debug("[lcm] path 1/4: Primary Symbol registry");
-    try {
-      const state: Record<string, any> | undefined =
-        (globalThis as any)[CONTEXT_ENGINE_REGISTRY_STATE];
-      if (state?.engines instanceof Map) {
-        const entry = state.engines.get('lossless-claw');
-        if (entry && typeof entry.factory === 'function') {
-          this.logger.info("[lcm] _discoverCEFactory: path 1/4 SUCCESS (Symbol registry)");
-          return entry.factory as (ctx: any) => Promise<LosslessClawEngine>;
+    if (this._skipPath1) {
+      this.logger.info("[lcm] path 1/4: SKIPPED (Symbol registry factory is read-only, engine not initialized)");
+    } else {
+      this.logger.debug("[lcm] path 1/4: Primary Symbol registry");
+      try {
+        const state: Record<string, any> | undefined =
+          (globalThis as any)[CONTEXT_ENGINE_REGISTRY_STATE];
+        if (state?.engines instanceof Map) {
+          const entry = state.engines.get('lossless-claw');
+          if (entry && typeof entry.factory === 'function') {
+            this.logger.info("[lcm] _discoverCEFactory: path 1/4 SUCCESS (Symbol registry)");
+            return entry.factory as (ctx: any) => Promise<LosslessClawEngine>;
+          }
         }
+      } catch (e) {
+        // Symbol 方式失败，走 Fallback
+        this.logger?.debug?.("[lcm] _discoverCEFactory: path 1/4 Symbol registry failed", { err: e instanceof Error ? e.message : String(e) });
       }
-    } catch (e) {
-      // Symbol 方式失败，走 Fallback
-      this.logger?.debug?.("[lcm] _discoverCEFactory: path 1/4 Symbol registry failed", { err: e instanceof Error ? e.message : String(e) });
-    }
       this.logger.debug("[lcm] _discoverCEFactory: path 1/4 FAILED (Symbol registry)");
+    }
 
     this.logger.debug("[lcm] path 2/4: Shared State");
     // ── Shared State: 直接通过 lossless-claw 的 globalThis Symbol shared-init 获取 engine ──
