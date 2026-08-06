@@ -100,6 +100,12 @@ const conflictCache = new Map<string, { conflicts: any[]; ts: number }>();
 const CONFLICT_CACHE_MAX = 50;
 const CONFLICT_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
 
+// v2.8.0 O7: 异步预取缓存 — afterTurn 预取 L2/L3/L4 结果，下一轮 assemble 直接使用
+// 架构：当前轮永远只使用上一轮预取的结果，检索耗时完全从用户感知路径移除
+const prefetchCache = new Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; query: string; ts: number }>();
+const PREFETCH_CACHE_MAX = 200;
+const PREFETCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10min TTL（允许跨长对话复用）
+
 // v2.7.0 P6: Token 估算缓存 —— 同 messages 数组短期复用，避免重复计算（200-400ms/次）
 const tokenEstimateCache = new Map<string, { tokens: number; ts: number }>();
 const TOKEN_ESTIMATE_CACHE_TTL_MS = 30 * 1000; // 30s TTL（短 TTL 确保一致性）
@@ -762,6 +768,8 @@ const pluginEntry: any = definePluginEntry({
           cacheSize: api.pluginConfig.retrieval?.cacheSize ?? 50,
           // v2.7.0 P4: 冲突检测异步缓存
           conflictCache,
+          // v2.8.0 O7: 异步预取缓存
+          prefetchCache,
           userProfile,
           setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
         };
@@ -788,6 +796,8 @@ const pluginEntry: any = definePluginEntry({
           l4QueryCache,
           // v2.7.0 P7: L2 检索预取 — afterTurn 预取下一轮 vec 结果写入此缓存
           l2QueryCache,
+          // v2.8.0 O7: 异步预取缓存 — afterTurn 全量预取 L2+L3+L4 供下一轮 assemble 使用
+          prefetchCache,
         };
         await afterTurnCore(ctx, params);
       },
@@ -2751,6 +2761,24 @@ const pluginEntry: any = definePluginEntry({
           }
           if (cleanedConflictCache > 0) {
             logger?.debug?.("heartbeat: conflict cache cleanup", { cleanedConflictCache });
+          }
+          // v2.8.0 O7: 清理过期预取缓存
+          let cleanedPrefetchCache = 0;
+          for (const [key, val] of prefetchCache) {
+            if (now - val.ts > PREFETCH_CACHE_TTL_MS) {
+              prefetchCache.delete(key);
+              cleanedPrefetchCache++;
+            }
+          }
+          if (prefetchCache.size > PREFETCH_CACHE_MAX) {
+            const entries = [...prefetchCache.entries()].sort((a, b) => a[1].ts - b[1].ts);
+            for (const [key] of entries.slice(0, entries.length - PREFETCH_CACHE_MAX)) {
+              prefetchCache.delete(key);
+              cleanedPrefetchCache++;
+            }
+          }
+          if (cleanedPrefetchCache > 0) {
+            logger?.debug?.("heartbeat: prefetch cache cleanup", { cleanedPrefetchCache });
           }
           hbSessionCleanupCounter = 0;
         }

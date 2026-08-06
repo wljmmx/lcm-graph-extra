@@ -35,6 +35,8 @@ export interface AssembleContext {
   cacheSize: number;
   /** v2.7.0 P4: 冲突检测异步缓存，当前轮注入上一轮检测结果 */
   conflictCache: Map<string, { conflicts: any[]; ts: number }>;
+  /** v2.8.0 O7: 异步预取缓存 — afterTurn 预取 L2/L3/L4 完整结果，assemble 直接使用 */
+  prefetchCache: Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; query: string; ts: number }>;
 }
 
 /**

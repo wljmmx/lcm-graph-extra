@@ -4,7 +4,6 @@
  * 组合 quality / experience 子模块，实现完整的 afterTurn 生命周期。
  */
 
-import { createHash } from 'crypto';
 import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
 import { llmTimeout } from '../config/defaults.js';
@@ -14,11 +13,6 @@ import { shouldUpdateGoal, getGoal } from '../plugin/goal-cache.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
 import type { AfterTurnContext } from './types.js';
-
-/** v2.7.0 P7: 简单 hash，与 retrieval.ts 中 hashKey 保持一致 */
-function hashKey(s: string): string {
-  return createHash('sha256').update(s).digest('hex').slice(0, 16);
-}
 
 export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<void> {
   const afterTurnStart = Date.now();
@@ -300,59 +294,124 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     }
 
     // ==================================================================
-    // v2.7.0 P7: L2 检索预取 — 基于用户输入预测下一轮查询，预取 vec 结果
+    // v2.8.0 O7: 全量异步预取 — L2(qmd lex+vec) + L3(graph) + L4(experience)
+    // 当前轮永远只使用上一轮预取的结果，检索耗时完全从用户感知路径移除
     // ==================================================================
-    if (ctx.l2QueryCache && ctx.qmdClient && userContent) {
+    if (ctx.prefetchCache && userContent) {
       try {
-        const keywords = extractTopKeywords([{ role: 'user', content: userContent }], 10);
-        if (keywords.length >= 2) {
-          // 构造 1-3 个预测 query：完整消息 + Top 关键词组合
-          const predictedQueries: string[] = [];
-          predictedQueries.push(userContent.slice(0, 200)); // 截断后的原始消息
-          if (keywords.length >= 3) {
-            predictedQueries.push(keywords.slice(0, 3).join(' '));
-          }
-          if (keywords.length >= 5) {
-            predictedQueries.push(keywords.slice(0, 5).join(' '));
-          }
+        const sessionKey = typeof params.sessionKey === 'string'
+          ? params.sessionKey
+          : typeof params.session_id === 'string'
+            ? params.session_id
+            : '';
 
-          const prefetchLimit = 5;
-          const deduped = [...new Set(predictedQueries.filter(q => q.length > 5))];
-          ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch starting', {
-            queryCount: deduped.length,
-            keywords: keywords.slice(0, 5),
+        if (!sessionKey) {
+          ctx.logger?.debug?.('[afterTurn] O7: prefetch skipped (no sessionKey)');
+        } else {
+          const query = userContent.slice(0, 500); // 截断查询，避免过长
+          const retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
+
+          ctx.logger?.debug?.('[afterTurn] O7: full prefetch starting', {
+            sessionKey: sessionKey.slice(0, 16),
+            queryLen: query.length,
+            limits: retrievalLimits,
           });
 
-          // 异步预取 vec 结果，写入 l2QueryCache
-          backgroundTasks.register('p7:l2-prefetch', (async () => {
-            for (const q of deduped) {
-              try {
-                const cacheKey = `vec:l2:${hashKey(q.toLowerCase().trim())}:${prefetchLimit}`;
-                // 跳过已有缓存（TTL 内）
-                const cached = ctx.l2QueryCache!.get(cacheKey);
-                if (cached && Date.now() - cached.ts < 900_000) {
-                  ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch skip (cached)', { key: cacheKey.slice(0, 32) });
-                  continue;
+          // 异步预取 L2+L3+L4，不阻塞 afterTurn 返回
+          // 不使用 backgroundTasks（避免 dispose 时被 5s 超时截断）
+          (async () => {
+            const results: { qmd: any[]; graph: any[]; exp: any[] } = { qmd: [], graph: [], exp: [] };
+
+            // L2: qmd lex+vec 并行检索
+            try {
+              if (ctx.qmdClient) {
+                const [lexRes, vecRes] = await Promise.allSettled([
+                  ctx.qmdClient.query({
+                    searches: [{ type: 'lex', query }],
+                    limit: retrievalLimits.qmd,
+                    rerank: true,
+                  }),
+                  ctx.qmdClient.query({
+                    searches: [{ type: 'vec', query }],
+                    limit: retrievalLimits.qmd,
+                    rerank: false,
+                  }),
+                ]);
+                if (lexRes.status === 'fulfilled' && Array.isArray(lexRes.value)) results.qmd.push(...lexRes.value);
+                if (vecRes.status === 'fulfilled' && Array.isArray(vecRes.value)) {
+                  // 按 docid 去重合并
+                  const seenIds = new Set(results.qmd.map((r: any) => r?.docid ?? r?.file ?? ''));
+                  for (const r of vecRes.value) {
+                    const id = r?.docid ?? r?.file ?? '';
+                    if (id && !seenIds.has(id)) {
+                      seenIds.add(id);
+                      results.qmd.push(r);
+                    }
+                  }
                 }
-                const vecRes = await ctx.qmdClient.query({
-                  searches: [{ type: 'vec', query: q }],
-                  limit: prefetchLimit,
-                  rerank: false,
-                });
-                if (vecRes && vecRes.length > 0) {
-                  ctx.l2QueryCache!.set(cacheKey, { results: vecRes as any[], ts: Date.now() });
-                  ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch cached', { key: cacheKey.slice(0, 32), count: vecRes.length });
-                }
-              } catch (prefetchErr) {
-                ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch query failed (non-fatal)', {
-                  err: (prefetchErr as Error).message,
-                });
               }
+            } catch (l2Err) {
+              ctx.logger?.debug?.('[afterTurn] O7: L2 prefetch failed (non-fatal)', {
+                err: (l2Err as Error).message,
+              });
             }
-          })());
+
+            // L3: Neo4j knowledge graph
+            try {
+              if (ctx.graphAdapter) {
+                const graphRes = await ctx.graphAdapter.searchWithCache(query, retrievalLimits.graph);
+                if (Array.isArray(graphRes)) results.graph = graphRes;
+              }
+            } catch (l3Err) {
+              ctx.logger?.debug?.('[afterTurn] O7: L3 prefetch failed (non-fatal)', {
+                err: (l3Err as Error).message,
+              });
+            }
+
+            // L4: Experience search
+            try {
+              if (ctx.expStore) {
+                const expRes = await ctx.expStore.searchByQuery({
+                  query,
+                  limit: retrievalLimits.exp,
+                  minScore: 0.3,
+                });
+                if (Array.isArray(expRes)) results.exp = expRes;
+              }
+            } catch (l4Err) {
+              ctx.logger?.debug?.('[afterTurn] O7: L4 prefetch failed (non-fatal)', {
+                err: (l4Err as Error).message,
+              });
+            }
+
+            // 写入预取缓存（LRU 上限保护）
+            if (ctx.prefetchCache) {
+              if (ctx.prefetchCache.size >= 200) {
+                const oldest = ctx.prefetchCache.keys().next().value;
+                if (oldest !== undefined) ctx.prefetchCache.delete(oldest);
+              }
+              ctx.prefetchCache.set(sessionKey, {
+                qmdResults: results.qmd,
+                graphResults: results.graph,
+                expResults: results.exp,
+                query,
+                ts: Date.now(),
+              });
+              ctx.logger?.info?.('[afterTurn] O7: prefetch cache written', {
+                sessionKey: sessionKey.slice(0, 16),
+                qmdCount: results.qmd.length,
+                graphCount: results.graph.length,
+                expCount: results.exp.length,
+              });
+            }
+          })().catch((err) => {
+            ctx.logger?.debug?.('[afterTurn] O7: prefetch task failed (non-fatal)', {
+              err: (err as Error).message,
+            });
+          });
         }
       } catch (prefetchErr) {
-        ctx.logger?.debug?.('[afterTurn] P7: L2 prefetch setup failed (non-fatal)', {
+        ctx.logger?.debug?.('[afterTurn] O7: prefetch setup failed (non-fatal)', {
           err: (prefetchErr as Error).message,
         });
       }

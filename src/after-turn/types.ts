@@ -21,4 +21,6 @@ export interface AfterTurnContext {
   l4QueryCache?: Map<string, { results: any[]; ts: number }>;
   /** v2.7.0 P7: L2 检索缓存，用于 afterTurn 预取下一轮 vec 结果 */
   l2QueryCache?: Map<string, { results: any[]; ts: number }>;
+  /** v2.8.0 O7: 异步预取缓存 — afterTurn 全量预取 L2+L3+L4 结果写入此缓存 */
+  prefetchCache?: Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; query: string; ts: number }>;
 }
