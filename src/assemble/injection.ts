@@ -294,7 +294,7 @@ export async function injectContext(
       sdkGuidance = buildMemorySystemPromptAddition({
         availableTools: new Set(availableTools),
         citationsMode: citationsMode as any,
-      });
+      }) ?? null;
       setCachedSdkGuidance(availableTools, citationsMode, sdkGuidance ?? '');
     }
     let addition = goalAnchor ? goalAnchor + '\n' : '';

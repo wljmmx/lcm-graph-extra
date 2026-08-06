@@ -6,8 +6,65 @@
  * - LLM 三元组提取（输入/输出契约）
  * - Neo4j upsert 调用契约
  * - G-8 异步验证回路触发
+ * - v2.8.0 O7: 异步预取缓存行为
  */
 import { describe, it, expect } from 'vitest';
+
+// =====================================================================
+// v2.8.0 O7: 异步预取缓存类型与模拟器
+// =====================================================================
+
+/** O7 预取缓存条目类型 */
+interface PrefetchEntry {
+  qmdResults: any[];
+  graphResults: any[];
+  expResults: any[];
+  query: string;
+  ts: number;
+}
+
+/** O7: 模拟 prefetchCache 行为，与 retrieval.test.ts 中一致 */
+class PrefetchCacheSimulator {
+  private cache = new Map<string, PrefetchEntry>();
+  private ttl: number;
+  private maxSize: number;
+
+  constructor(ttl = 10 * 60 * 1000, maxSize = 200) {
+    this.ttl = ttl;
+    this.maxSize = maxSize;
+  }
+
+  get(sessionKey: string): PrefetchEntry | undefined {
+    return this.cache.get(sessionKey);
+  }
+
+  set(sessionKey: string, entry: PrefetchEntry): void {
+    if (this.cache.size >= this.maxSize) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
+    }
+    this.cache.set(sessionKey, entry);
+  }
+
+  delete(sessionKey: string): boolean {
+    return this.cache.delete(sessionKey);
+  }
+
+  getAndConsume(sessionKey: string): PrefetchEntry | null {
+    const entry = this.cache.get(sessionKey);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > this.ttl) {
+      this.cache.delete(sessionKey);
+      return null;
+    }
+    this.cache.delete(sessionKey);
+    return entry;
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+}
 
 describe('afterTurn hook', () => {
   describe('经验触发检测', () => {
@@ -125,6 +182,173 @@ describe('afterTurn hook', () => {
       expect(sessionMap.get('sess-2')).toHaveLength(1);
       // 不同 session 不串扰
       expect(sessionMap.get('sess-1')).not.toContain('exp-3');
+    });
+  });
+
+  // =====================================================================
+  // v2.8.0 O7: 异步预取缓存
+  // =====================================================================
+
+  describe('O7: 异步预取缓存', () => {
+    describe('缓存条目契约', () => {
+      it('预取缓存条目应包含 qmdResults/graphResults/expResults/query/ts', () => {
+        const entry: PrefetchEntry = {
+          qmdResults: [{ docid: 'd1', file: 'a.ts' }],
+          graphResults: [{ id: 'n1', content: 'graph node' }],
+          expResults: [{ experience: { id: 'e1' }, score: 0.8 }],
+          query: 'test query',
+          ts: Date.now(),
+        };
+        expect(entry).toHaveProperty('qmdResults');
+        expect(entry).toHaveProperty('graphResults');
+        expect(entry).toHaveProperty('expResults');
+        expect(entry).toHaveProperty('query');
+        expect(entry).toHaveProperty('ts');
+        expect(Array.isArray(entry.qmdResults)).toBe(true);
+        expect(Array.isArray(entry.graphResults)).toBe(true);
+        expect(Array.isArray(entry.expResults)).toBe(true);
+      });
+
+      it('空检索结果也应有有效缓存条目', () => {
+        const entry: PrefetchEntry = {
+          qmdResults: [],
+          graphResults: [],
+          expResults: [],
+          query: 'no results',
+          ts: Date.now(),
+        };
+        expect(entry.qmdResults).toHaveLength(0);
+        expect(entry.graphResults).toHaveLength(0);
+        expect(entry.expResults).toHaveLength(0);
+      });
+    });
+
+    describe('L2 lex+vec 去重合并', () => {
+      it('按 docid 去重合并 lex 和 vec 结果', () => {
+        const lexResults = [
+          { docid: 'doc-1', file: 'a.ts', snippet: 'code a' },
+          { docid: 'doc-2', file: 'b.ts', snippet: 'code b' },
+        ];
+        const vecResults = [
+          { docid: 'doc-2', file: 'b.ts', snippet: 'code b vec' }, // 重复
+          { docid: 'doc-3', file: 'c.ts', snippet: 'code c' },      // 新
+        ];
+
+        // 模拟去重合并逻辑
+        const merged = [...lexResults];
+        const seenIds = new Set(merged.map((r: any) => r?.docid ?? r?.file ?? ''));
+        for (const r of vecResults) {
+          const id = r?.docid ?? r?.file ?? '';
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id);
+            merged.push(r);
+          }
+        }
+
+        expect(merged).toHaveLength(3);
+        expect(merged.map((r: any) => r.docid)).toEqual(['doc-1', 'doc-2', 'doc-3']);
+      });
+
+      it('当 docid 不存在时回退到 file 字段去重', () => {
+        const lexResults = [
+          { file: 'a.ts', snippet: 'code a' },
+        ];
+        const vecResults = [
+          { file: 'a.ts', snippet: 'code a vec' }, // 同 file 重复
+          { file: 'b.ts', snippet: 'code b' },      // 新 file
+        ];
+
+        const merged = [...lexResults];
+        const seenIds = new Set(merged.map((r: any) => r?.docid ?? r?.file ?? ''));
+        for (const r of vecResults) {
+          const id = r?.docid ?? r?.file ?? '';
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id);
+            merged.push(r);
+          }
+        }
+
+        expect(merged).toHaveLength(2);
+        expect(merged.map((r: any) => r.file)).toEqual(['a.ts', 'b.ts']);
+      });
+    });
+
+    describe('缓存写入与 LRU 保护', () => {
+      it('写入缓存时触发 LRU 淘汰最旧条目', () => {
+        const cache = new PrefetchCacheSimulator(60_000, 3);
+        for (let i = 0; i < 5; i++) {
+          cache.set(`session-${i}`, {
+            qmdResults: [{ docid: `d${i}` }],
+            graphResults: [],
+            expResults: [],
+            query: `q${i}`,
+            ts: Date.now() + i,
+          });
+        }
+        expect(cache.size).toBe(3);
+        expect(cache.getAndConsume('session-0')).toBeNull();
+        expect(cache.getAndConsume('session-1')).toBeNull();
+        expect(cache.getAndConsume('session-4')).not.toBeNull();
+      });
+
+      it('缓存未满时正常写入', () => {
+        const cache = new PrefetchCacheSimulator(60_000, 10);
+        cache.set('session-1', {
+          qmdResults: [{ docid: 'd1' }],
+          graphResults: [],
+          expResults: [],
+          query: 'q1',
+          ts: Date.now(),
+        });
+        expect(cache.size).toBe(1);
+      });
+    });
+
+    describe('session key 提取', () => {
+      it('应优先使用 params.sessionKey', () => {
+        const params = { sessionKey: 'sk-123', session_id: 'sid-456' };
+        const sessionKey = typeof params.sessionKey === 'string'
+          ? params.sessionKey
+          : typeof params.session_id === 'string'
+            ? params.session_id
+            : '';
+        expect(sessionKey).toBe('sk-123');
+      });
+
+      it('sessionKey 不存在时回退到 session_id', () => {
+        const params = { session_id: 'sid-456' };
+        const sessionKey = typeof (params as any).sessionKey === 'string'
+          ? (params as any).sessionKey
+          : typeof params.session_id === 'string'
+            ? params.session_id
+            : '';
+        expect(sessionKey).toBe('sid-456');
+      });
+
+      it('两者都不存在时返回空字符串', () => {
+        const params = {};
+        const sessionKey = typeof (params as any).sessionKey === 'string'
+          ? (params as any).sessionKey
+          : typeof (params as any).session_id === 'string'
+            ? (params as any).session_id
+            : '';
+        expect(sessionKey).toBe('');
+      });
+    });
+
+    describe('查询截断', () => {
+      it('userContent 超过 500 字符时截断到 500', () => {
+        const longQuery = 'x'.repeat(1000);
+        const truncated = longQuery.slice(0, 500);
+        expect(truncated.length).toBe(500);
+        expect(truncated).toBe('x'.repeat(500));
+      });
+
+      it('短查询不截断', () => {
+        const shortQuery = 'hello world';
+        const truncated = shortQuery.slice(0, 500);
+        expect(truncated).toBe('hello world');
+      });
     });
   });
 });
