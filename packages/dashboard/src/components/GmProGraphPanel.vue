@@ -14,7 +14,7 @@
  *   - gm-pro-by-type   按需加载（类型筛选）
  */
 import { ref, computed, h } from 'vue';
-import { useQuery } from '@tanstack/vue-query';
+import { useQuery, useQueryClient } from '@tanstack/vue-query';
 import {
   NGrid,
   NGi,
@@ -56,52 +56,90 @@ import {
 import { useBreakpoints } from '../composables/useBreakpoints';
 
 const message = useMessage();
+const queryClient = useQueryClient();
 const breakpoints = useBreakpoints({ xs: 0, s: 640, m: 768, l: 1024, xl: 1280 });
 const isNarrowScreen = breakpoints.smaller('m');
 
-// ===== 数据获取（轮询） =====
-const { data: statusRes, isLoading: statusLoading } = useQuery({
+// ===== 数据获取（轮询，关闭自动重试避免大量错误日志） =====
+const { data: statusRes, isLoading: statusLoading, isError: statusError } = useQuery({
   queryKey: ['gm-pro-status'],
   queryFn: fetchGmProStatus,
   refetchInterval: 30_000,
   staleTime: 15_000,
+  retry: 1,
+  retryDelay: 2000,
 });
 const { data: statsRes, isLoading: statsLoading } = useQuery({
   queryKey: ['gm-pro-stats'],
   queryFn: fetchGmProStats,
   refetchInterval: 30_000,
   staleTime: 15_000,
+  retry: 1,
+  retryDelay: 2000,
 });
 const { data: healthRes, isLoading: healthLoading } = useQuery({
   queryKey: ['gm-pro-health'],
   queryFn: fetchGmProHealth,
   refetchInterval: 60_000,
   staleTime: 30_000,
+  retry: 1,
+  retryDelay: 2000,
 });
 const { data: topRes, isLoading: topLoading } = useQuery({
   queryKey: ['gm-pro-top'],
   queryFn: () => fetchGmProTop(20),
   refetchInterval: 60_000,
   staleTime: 30_000,
+  retry: 1,
+  retryDelay: 2000,
 });
 const { data: dirtyRes } = useQuery({
   queryKey: ['gm-pro-dirty-nodes'],
   queryFn: fetchGmProDirtyNodes,
   refetchInterval: 120_000,
   staleTime: 60_000,
+  retry: 1,
+  retryDelay: 2000,
 });
 
 // ===== 派生数据 =====
-const status = computed<GmProStatus | null>(() => statusRes.value?.data ?? null);
-const stats = computed<GmProStats | null>(() => statsRes.value?.data ?? null);
-const health = computed<GmProHealth | null>(() => healthRes.value?.data ?? null);
-const topNodes = computed(() => topRes.value?.data?.nodes ?? []);
-const dirtyCount = computed(() => dirtyRes.value?.data?.count ?? 0);
-const dirtyNodeIds = computed(() => dirtyRes.value?.data?.nodeIds ?? []);
+const status = computed<GmProStatus | null>(() => statusRes.value?.ok ? (statusRes.value.data ?? null) : null);
+const stats = computed<GmProStats | null>(() => statsRes.value?.ok ? (statsRes.value.data ?? null) : null);
+const health = computed<GmProHealth | null>(() => healthRes.value?.ok ? (healthRes.value.data ?? null) : null);
+const topNodes = computed(() => topRes.value?.ok ? (topRes.value.data?.nodes ?? []) : []);
+const dirtyCount = computed(() => dirtyRes.value?.ok ? (dirtyRes.value.data?.count ?? 0) : 0);
+const dirtyNodeIds = computed(() => dirtyRes.value?.ok ? (dirtyRes.value.data?.nodeIds ?? []) : []);
+
+// 全局错误状态：代理返回 { ok: false, error } 或 HTTP 请求失败
+const globalError = computed(() => {
+  // 代理返回了结构化错误（HTTP 200 但 ok: false）
+  if (statusRes.value && !statusRes.value.ok) {
+    return statusRes.value.error ?? 'graph-memory-pro 返回异常';
+  }
+  // TanStack Query 捕获的 HTTP 错误（fetch 失败等）
+  if (statusError.value) {
+    return 'graph-memory-pro 状态查询失败';
+  }
+  return null;
+});
+const hasAnyError = computed(() => {
+  if (statusError.value) return true;
+  if (statusRes.value && !statusRes.value.ok) return true;
+  return false;
+});
 
 const neo4jConnected = computed(() => status.value?.status === 'connected');
 const neo4jStatusTagType = computed(() => neo4jConnected.value ? 'success' : 'error');
 const kpiCols = computed(() => isNarrowScreen.value ? '1 s:2' : '2 s:2 m:4');
+
+// 重试所有查询
+function handleRetryAll(): void {
+  queryClient.invalidateQueries({ queryKey: ['gm-pro-status'] });
+  queryClient.invalidateQueries({ queryKey: ['gm-pro-stats'] });
+  queryClient.invalidateQueries({ queryKey: ['gm-pro-health'] });
+  queryClient.invalidateQueries({ queryKey: ['gm-pro-top'] });
+  queryClient.invalidateQueries({ queryKey: ['gm-pro-dirty-nodes'] });
+}
 
 // ===== 类型筛选 =====
 const activeTypeFilter = ref<GmProNodeType | null>(null);
@@ -225,6 +263,25 @@ function formatPagerank(v: number | undefined): string {
 
 <template>
   <div class="gm-pro-panel">
+    <!-- ===== 全局错误提示 ===== -->
+    <NAlert
+      v-if="hasAnyError"
+      type="warning"
+      :show-icon="true"
+      title="graph-memory-pro 未连接"
+      style="margin-bottom: 12px"
+    >
+      <template #default>
+        <div>{{ globalError || 'graph-memory-pro 服务不可达，请检查服务是否已启动' }}</div>
+        <div style="margin-top: 6px; font-size: var(--fs-caption); color: var(--color-text-tertiary)">
+          提示：请确认 graph-memory-pro 插件已安装并启动，环境变量 GM_PRO_HTTP_URL 已正确配置（默认 http://127.0.0.1:7424）。
+        </div>
+      </template>
+      <template #footer>
+        <NButton size="small" type="warning" @click="handleRetryAll">重试连接</NButton>
+      </template>
+    </NAlert>
+
     <!-- ===== 概览 KPI 行 ===== -->
     <NGrid :cols="kpiCols" :x-gap="12" :y-gap="12" responsive="screen">
       <NGi>

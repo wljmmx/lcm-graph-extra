@@ -106,7 +106,6 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       });
 
       if (!resp.ok) {
-        reply.code(resp.status);
         let body: unknown;
         try { body = await resp.json(); } catch { body = { error: `graph-memory-pro returned ${resp.status}` }; }
         return { ok: false, error: `graph-memory-pro HTTP ${resp.status}`, detail: body };
@@ -114,7 +113,6 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
 
       const contentType = resp.headers.get('content-type') ?? '';
       if (!contentType.includes('application/json')) {
-        reply.code(502);
         return { ok: false, error: `graph-memory-pro 响应非 JSON (Content-Type: ${contentType || '空'})` };
       }
 
@@ -127,7 +125,7 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
         ? `graph-memory-pro 请求超时（${GM_PRO_HTTP_TIMEOUT}ms）`
         : `graph-memory-pro 不可达: ${msg}`;
       req.log.warn({ err: error, targetUrl }, 'graph-memory-pro 代理失败');
-      reply.code(502);
+      // 返回 200 让前端能解析结构化错误信息，而非被 apiGet 直接 throw
       return { ok: false, error };
     } finally {
       clearTimeout(timer);
