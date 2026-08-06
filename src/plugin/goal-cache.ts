@@ -22,6 +22,10 @@ interface GoalEntry {
   createdAt: number;
   /** 最后访问时间（用于 TTL 淘汰） */
   lastAccess: number;
+  /** v2.7.0 G-U: 目标切换次数，>0 表示发生过切换，用于防漂移锚点 */
+  switchCount: number;
+  /** v2.7.0 G-U: 上一个目标（切换前），用于防漂移提醒 */
+  previousGoal: string;
 }
 
 const goalCache = new Map<string, GoalEntry>();
@@ -89,11 +93,20 @@ export function cacheGoal(sessionKey: string, goal: string): void {
   }
 
   const now = Date.now();
+  const existing = goalCache.get(sessionKey);
+
+  // v2.7.0 G-U: 检测目标切换，递增 switchCount 并记录旧目标
+  const previousGoal = existing?.goal ?? '';
+  const switched = existing && existing.goal !== goal;
+  const switchCount = switched ? (existing.switchCount ?? 0) + 1 : (existing?.switchCount ?? 0);
+
   goalCache.set(sessionKey, {
     goal,
     freeTags: extractFreeTags(goal),
-    createdAt: now,
+    createdAt: existing?.createdAt ?? now,
     lastAccess: now,
+    switchCount,
+    previousGoal: switched ? existing.goal : (existing?.previousGoal ?? ''),
   });
 
   // TTL 清理
@@ -220,10 +233,59 @@ export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
 /**
  * 构建目标锚定提示词。
  * 注入到 system prompt 顶部，提醒 LLM 不要偏离原始任务。
+ *
+ * v2.7.0 G-U: 当 switchCount > 0 时使用防漂移锚点，明确告知 LLM 旧目标已归档、
+ * 不得回退。用户无感知，纯 system prompt 层面强化。
+ *
+ * @param goal 当前目标
+ * @param switched 是否发生过目标切换（用于选择锚点强度）
+ * @param previousGoal 上一个目标（切换场景下用于明确告知）
  */
-export function buildGoalAnchor(goal: string): string {
+export function buildGoalAnchor(goal: string, switched?: boolean, previousGoal?: string): string {
   if (!goal) return '';
-  return `\n## 目标任务提醒\n你正在处理用户的任务：「${goal}」\n请始终以此任务为核心，不要偏离到无关话题。如果之前的探索已经偏离了方向，请回到这个任务上来。`;
+
+  // v2.7.0 G-U: 防漂移锚点 —— 目标切换后使用，防止 LLM 回到旧任务
+  if (switched && previousGoal) {
+    return `\n## 任务切换提醒
+你已从旧任务「${previousGoal}」切换到新任务。
+当前任务：「${goal}」
+重要：旧任务已完成或归档。上下文中可能残留旧任务的摘要或引用，这些仅供历史参考，不得作为当前任务目标。
+请严格聚焦于当前任务，忽略任何与「${goal}」无关的上下文暗示。如果出现旧任务相关的内容，不要回到旧任务上。`;
+  }
+
+  // 首次切换或温和锚点（无 previousGoal 时）
+  if (switched) {
+    return `\n## 任务切换提醒
+当前任务已更新为：「${goal}」
+之前的任务已完成或归档。请聚焦当前任务，不要回到之前的任务。`;
+  }
+
+  // 默认温和锚点（无切换）
+  return `\n## 目标任务提醒
+你正在处理用户的任务：「${goal}」
+请始终以此任务为核心，不要偏离到无关话题。如果之前的探索已经偏离了方向，请回到这个任务上来。`;
+}
+
+/**
+ * v2.7.0 G-U: 获取目标切换次数。
+ * >0 表示发生过切换，调用方应用防漂移锚点。
+ */
+export function getGoalSwitchCount(sessionKey: string): number {
+  if (!sessionKey) return 0;
+  const entry = goalCache.get(sessionKey);
+  if (!entry) return 0;
+  return entry.switchCount ?? 0;
+}
+
+/**
+ * v2.7.0 G-U: 获取上一个目标。
+ * 返回空字符串表示未切换过。
+ */
+export function getPreviousGoal(sessionKey: string): string {
+  if (!sessionKey) return '';
+  const entry = goalCache.get(sessionKey);
+  if (!entry) return '';
+  return entry.previousGoal ?? '';
 }
 
 /** 供 heartbeat 清理过期缓存的公开入口 */

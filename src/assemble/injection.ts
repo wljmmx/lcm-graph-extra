@@ -19,7 +19,7 @@ import { buildKnowledgeGuidance } from './guidance.js';
 // P1-1: 动态 import 提升为静态导入，避免每次 injectContext 的 await import 开销
 import { backgroundTasks } from '../async/task-registry.js';
 import { detectConflicts } from '../merger.js';
-import { getGoal, buildGoalAnchor } from '../plugin/goal-cache.js';
+import { getGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
 /** v2.7.0 P3: SDK guidance 缓存 —— 同 tools + citations 组合短期复用，避免每次重新构建（50-100ms） */
@@ -286,7 +286,11 @@ export async function injectContext(
       : typeof params.session_id === 'string'
         ? params.session_id
         : '';
-    const goalAnchor = buildGoalAnchor(getGoal(sessionKey));
+    const goalAnchor = buildGoalAnchor(
+      getGoal(sessionKey),
+      getGoalSwitchCount(sessionKey) > 0,
+      getPreviousGoal(sessionKey),
+    );
 
     // v2.7.0 P3: SDK guidance 缓存 —— 同 tools + citations 组合复用，避免每次重建
     let sdkGuidance = getCachedSdkGuidance(availableTools, citationsMode);
@@ -355,7 +359,11 @@ export async function injectContext(
       : typeof params.session_id === 'string'
         ? params.session_id
         : '';
-    const goalAnchorRebuild = buildGoalAnchor(getGoal(sessionKeyForRebuild));
+    const goalAnchorRebuild = buildGoalAnchor(
+      getGoal(sessionKeyForRebuild),
+      getGoalSwitchCount(sessionKeyForRebuild) > 0,
+      getPreviousGoal(sessionKeyForRebuild),
+    );
     if (goalAnchorRebuild) {
       rebuilt += goalAnchorRebuild + '\n';
     }

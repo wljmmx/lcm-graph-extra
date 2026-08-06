@@ -7,7 +7,7 @@
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
 import { detectScenario, SCENARIO_LABELS, detectToolSearchMode, buildModeAwareGuidance } from '../tools/tool-catalog.js';
 import { getOverhead, setOverhead, getSdkOverhead, updateSdkOverhead } from '../plugin/overhead-cache.js';
-import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal } from '../plugin/goal-cache.js';
+import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
 import {
@@ -203,6 +203,20 @@ function buildChronologicalContext(
   }
 
   return result;
+}
+
+/**
+ * v2.7.0 G-U: 构建目标锚定用户消息。
+ * 当目标切换后使用防漂移锚点，防止 LLM 回到旧任务。
+ * 用户无感知，纯上下文注入。
+ */
+function buildGoalAnchorMsg(sessionKey: string): Array<{ role: string; content: string }> {
+  const goal = getGoal(sessionKey);
+  if (!goal) return [];
+  const switched = getGoalSwitchCount(sessionKey) > 0;
+  const prev = getPreviousGoal(sessionKey);
+  const anchor = buildGoalAnchor(goal, switched, prev);
+  return [{ role: 'user', content: anchor }];
 }
 
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
@@ -455,10 +469,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               budgetSummaries, messages, dedupLimit,
             );
             // Goal Anchoring
-            const goalMsg = getGoal(sessionKey);
-            const goalAnchorMsgs = goalMsg
-              ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
-              : [];
+            const goalAnchorMsgs = buildGoalAnchorMsg(sessionKey);
             finalMessages = [...goalAnchorMsgs, ...chronologicalMsgs];
             ctx.logger?.info?.('[assemble:medium] messages replaced with chronological context', {
               originalMsgCount: messages.length,
@@ -488,10 +499,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           //   3        — 丢弃摘要, 仅保留 4 条最近消息
           const buildDegradedContext = (reason: string, aggressiveLevel: number = 0) => {
             const existingSummaries = convSummaries;
-            const goalMsg = getGoal(sessionKey);
-            const goalAnchorMsgs = goalMsg
-              ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
-              : [];
+            const goalAnchorMsgs = buildGoalAnchorMsg(sessionKey);
 
             // Level 2+: 丢弃摘要，仅保留最近消息（硬编码，激进降级）
             if (aggressiveLevel >= 2) {
@@ -621,10 +629,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 );
 
                 // Goal Anchoring: 压缩时保留原始用户目标，防止任务丢失
-                const goalMsg = getGoal(sessionKey);
-                const goalAnchorMsgs = goalMsg
-                  ? [{ role: 'user', content: '## 原始任务目标\n' + goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
-                  : [];
+                const goalAnchorMsgs = buildGoalAnchorMsg(sessionKey);
 
                 finalMessages = [...goalAnchorMsgs, ...chronologicalMsgs];
                 ctx.logger?.info?.('[assemble:high] messages replaced with chronological context', {
@@ -763,10 +768,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             _existingSummaries, messages, _dedupRounds,
           );
           // Goal Anchoring: 摘要注入时也保留原始目标
-          const _goalMsg = getGoal(_sessionKey);
-          const _goalAnchorMsgs = _goalMsg
-            ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
-            : [];
+          const _goalAnchorMsgs = buildGoalAnchorMsg(_sessionKey);
           finalMessages = [..._goalAnchorMsgs, ..._chronologicalMsgs];
           ctx.logger?.info?.('[assemble:low-tier] messages replaced with chronological context', {
             originalMsgCount: messages.length,
@@ -828,10 +830,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // 降级策略：保留最近消息 + 目标锚定，丢弃旧消息防止上下文溢出。
           const _msgCountForFallback = messages.length;
           if (_msgCountForFallback > 20) {
-            const _goalMsg = getGoal(_sessionKey);
-            const _goalAnchorMsgs = _goalMsg
-              ? [{ role: 'user', content: '## 原始任务目标\n' + _goalMsg + '\n\n请继续完成以上任务，不要偏离。' }]
-              : [];
+            const _goalAnchorMsgs = buildGoalAnchorMsg(_sessionKey);
             const _fallbackKeep = Math.min(_msgCountForFallback, 8);
             finalMessages = [..._goalAnchorMsgs, ...messages.slice(-_fallbackKeep)];
             // BUGFIX: low_tier_no_summary_fallback 是低压力路径的正常行为
