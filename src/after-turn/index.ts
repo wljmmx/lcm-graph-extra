@@ -171,24 +171,10 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
 
                 const delta = score >= 0.5 ? 0.05 : -0.05;
                 try {
-                  const { withGmProFallback } = await import('../adapters/gm-pro-fallback.js');
-                  await withGmProFallback(
-                    'upsertFeedback',
-                    async (mod) => {
-                      await mod.upsertFeedback({
-                        nodeId: exp.id,
-                        query: exp.query,
-                        relevant: score >= 0.5,
-                        score,
-                        delta,
-                      });
-                      await store.updateQualityScore(exp.id, score, delta, 'gm-pro');
-                    },
-                    async () => {
-                      await store.updateQualityScore(exp.id, score, delta, 'local');
-                    },
-                    { logger: ctx.logger, label: 'G-8 upsertFeedback' },
-                  );
+                  // v2.3.2 compat: graph-memory-pro 的 upsertFeedback 签名已变更为
+                  // (driver, GmFeedback)，与旧版 {nodeId, query, relevant, score, delta} 不兼容。
+                  // 改用本地 store.updateQualityScore 直接持久化，避免静默错误。
+                  await store.updateQualityScore(exp.id, score, delta, 'local');
                 } catch {
                   await store.updateQualityScore(exp.id, score, delta);
                 }

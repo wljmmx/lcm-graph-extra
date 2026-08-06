@@ -141,25 +141,25 @@ describe('afterTurn hook', () => {
       expect(delta).toBe(-0.05);
     });
 
-    it('应优先调用 gm-pro upsertFeedback，失败降级到 store.updateQualityScore', () => {
-      // 验证降级链路存在
+    it('v2.3.2 compat: upsertFeedback 签名不兼容，直接走本地 store.updateQualityScore', () => {
+      // graph-memory-pro v2.3.2 的 upsertFeedback 签名已变更为 (driver, GmFeedback)，
+      // 与旧版 {nodeId, query, relevant, score, delta} 不兼容，直接使用本地持久化。
       const g8Path = {
-        primary: 'gm-pro.upsertFeedback',
-        fallback: 'store.updateQualityScore(id, score, delta, source)',
+        primary: 'store.updateQualityScore(id, score, delta, \'local\')',
+        note: 'gm-pro upsertFeedback 签名不兼容，不再尝试调用',
       };
-      expect(g8Path.primary).toContain('upsertFeedback');
-      expect(g8Path.fallback).toContain('updateQualityScore');
-      expect(g8Path.fallback).toContain('source');
+      expect(g8Path.primary).toContain('updateQualityScore');
+      expect(g8Path.primary).toContain('\'local\'');
     });
 
-    it('应记录 qualityScoreHistory 含 source 字段（gm-pro / local）', () => {
+    it('应记录 qualityScoreHistory 含 source 字段（local）', () => {
       const historyEntry = {
         ts: Date.now(),
         score: 0.85,
         delta: 0.05,
-        source: 'gm-pro' as const,
+        source: 'local' as const,
       };
-      expect(historyEntry.source).toBe('gm-pro');
+      expect(historyEntry.source).toBe('local');
     });
   });
 
