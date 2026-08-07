@@ -1,16 +1,29 @@
 <script setup lang="ts">
-import { NCard, NDescriptions, NDescriptionsItem, NEmpty } from 'naive-ui';
+import { NCard, NDescriptions, NDescriptionsItem } from 'naive-ui';
+import CardState from './CardState.vue';
 import StatusIndicator from '../StatusIndicator.vue';
 import type { DashboardSnapshot } from '../../api/health';
 
 defineProps<{
   memory: DashboardSnapshot | null;
+  loading?: boolean;
+  isError?: boolean;
 }>();
+
+const emit = defineEmits<{ retry: [] }>();
 </script>
 
 <template>
   <NCard title="检索状态" size="small">
-    <template v-if="memory">
+    <CardState
+      :loading="loading ?? false"
+      :is-error="isError"
+      :has-data="!!memory"
+      empty-text="暂无检索状态数据"
+      error-text="检索状态请求失败"
+      empty-hint="请确认插件已正确加载。"
+      @retry="emit('retry')"
+    >
       <NDescriptions :column="1" size="small" label-placement="left" bordered>
         <NDescriptionsItem label="最近查询">
           <span class="mono">{{ memory.retrieval?.lastQuery || '—' }}</span>
@@ -36,8 +49,7 @@ defineProps<{
           :failures="memory.retrieval?.qmdCircuitBreaker?.failures ?? 0"
         />
       </div>
-    </template>
-    <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+    </CardState>
   </NCard>
 </template>
 

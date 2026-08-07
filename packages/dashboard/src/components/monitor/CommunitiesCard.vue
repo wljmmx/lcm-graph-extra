@@ -1,18 +1,40 @@
 <script setup lang="ts">
-import { NCard, NTag, NEmpty } from 'naive-ui';
+import { ref, computed } from 'vue';
+import { NCard, NTag, NPagination } from 'naive-ui';
+import CardState from './CardState.vue';
 import type { GmProCommunitySummary } from '../../api/gm-pro';
 
-defineProps<{
+const props = defineProps<{
   communities: GmProCommunitySummary[];
+  loading?: boolean;
+  isError?: boolean;
 }>();
+
+const emit = defineEmits<{ retry: [] }>();
+
+const PAGE_SIZE = 10;
+const page = ref(1);
+
+const paginatedCommunities = computed(() => {
+  const start = (page.value - 1) * PAGE_SIZE;
+  return props.communities.slice(start, start + PAGE_SIZE);
+});
 </script>
 
 <template>
   <NCard title="社区概览" size="small">
-    <template v-if="communities.length">
+    <CardState
+      :loading="loading ?? false"
+      :is-error="isError"
+      :has-data="communities.length > 0"
+      empty-text="暂无社区数据"
+      error-text="社区数据请求失败"
+      empty-hint="请确认 graph-memory-pro 服务已启动。"
+      @retry="emit('retry')"
+    >
       <div class="community-list">
         <div
-          v-for="c in communities.slice(0, 10)"
+          v-for="c in paginatedCommunities"
           :key="c.communityId"
           class="community-row"
         >
@@ -24,11 +46,15 @@ defineProps<{
           <span class="community-summary">{{ c.summary?.slice(0, 80) }}{{ c.summary?.length > 80 ? '…' : '' }}</span>
         </div>
       </div>
-      <div v-if="communities.length > 10" class="muted" style="font-size:var(--fs-caption);margin-top:4px">
-        共 {{ communities.length }} 个社区，仅显示前 10 个
+      <div v-if="communities.length > PAGE_SIZE" class="pagination-row">
+        <NPagination
+          v-model:page="page"
+          :item-count="communities.length"
+          :page-size="PAGE_SIZE"
+          size="small"
+        />
       </div>
-    </template>
-    <NEmpty v-else description="暂无社区数据" style="padding:12px 0" />
+    </CardState>
   </NCard>
 </template>
 
@@ -58,5 +84,10 @@ defineProps<{
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+}
+.pagination-row {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

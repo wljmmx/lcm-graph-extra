@@ -16,13 +16,14 @@ import { computed, onBeforeUnmount, shallowRef } from 'vue';
 import VChart from 'vue-echarts';
 import { use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
-import { LineChart, BarChart, GaugeChart, PieChart, ScatterChart, GraphChart } from 'echarts/charts';
+import { LineChart, BarChart, GaugeChart, PieChart, ScatterChart, GraphChart, HeatmapChart } from 'echarts/charts';
 import {
   GridComponent,
   TooltipComponent,
   LegendComponent,
   TitleComponent,
   DataZoomComponent,
+  VisualMapComponent,
 } from 'echarts/components';
 import { NEmpty } from 'naive-ui';
 import {
@@ -42,11 +43,13 @@ use([
   PieChart,
   ScatterChart,
   GraphChart,
+  HeatmapChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
   TitleComponent,
   DataZoomComponent,
+  VisualMapComponent,
 ]);
 
 const props = withDefaults(

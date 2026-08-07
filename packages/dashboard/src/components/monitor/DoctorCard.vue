@@ -1,14 +1,45 @@
 <script setup lang="ts">
-import { NCard, NTag, NDescriptions, NDescriptionsItem, NEmpty, NSpace } from 'naive-ui';
+import { computed } from 'vue';
+import { NCard, NTag, NDescriptions, NDescriptionsItem, NSpace } from 'naive-ui';
+import CardState from './CardState.vue';
 
-defineProps<{
+const props = defineProps<{
   doctor: any | null;
+  loading?: boolean;
+  isError?: boolean;
 }>();
+
+const emit = defineEmits<{ retry: [] }>();
+
+// 整体健康摘要：统计 neo4j/llm/embedding/auto_feedback 中的异常项数
+const abnormalCount = computed(() => {
+  const d = props.doctor;
+  if (!d) return 0;
+  let n = 0;
+  if (!d.neo4j?.ok) n++;
+  if (!d.llm?.ok) n++;
+  if (!d.embedding?.ok) n++;
+  if (d.auto_feedback && !d.auto_feedback.ok) n++;
+  return n;
+});
 </script>
 
 <template>
   <NCard title="系统诊断 (Doctor)" size="small">
-    <template v-if="doctor">
+    <CardState
+      :loading="loading ?? false"
+      :is-error="isError"
+      :has-data="!!doctor"
+      empty-text="暂无诊断报告"
+      error-text="系统诊断请求失败"
+      empty-hint="请确认 GM_PRO_AUTH_TOKEN 已配置（/api/doctor 为敏感路径需鉴权）。"
+      @retry="emit('retry')"
+    >
+      <div style="margin-bottom: 8px">
+        <NTag :type="abnormalCount === 0 ? 'success' : 'error'" size="small">
+          {{ abnormalCount === 0 ? '全部正常' : `${abnormalCount} 项异常` }}
+        </NTag>
+      </div>
       <NDescriptions :column="1" size="small" label-placement="left" bordered>
         <NDescriptionsItem label="Neo4j">
           <NTag :type="doctor.neo4j?.ok ? 'success' : 'error'" size="small">{{ doctor.neo4j?.ok ? '连通' : '异常' }}</NTag>
@@ -33,11 +64,6 @@ defineProps<{
           </NSpace>
         </NDescriptionsItem>
       </NDescriptions>
-    </template>
-    <NEmpty v-else description="暂无诊断报告" style="padding: 12px 0">
-      <template #extra>
-        <span class="muted" style="font-size:var(--fs-caption)">请确认 GM_PRO_AUTH_TOKEN 已配置（/api/doctor 为敏感路径需鉴权）。</span>
-      </template>
-    </NEmpty>
+    </CardState>
   </NCard>
 </template>

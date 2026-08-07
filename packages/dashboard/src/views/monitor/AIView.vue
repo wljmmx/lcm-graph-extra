@@ -10,8 +10,14 @@ import AssociationMatrixCard from '../../components/monitor/AssociationMatrixCar
 
 const {
   gmProTuner,
+  gmProTunerLoading,
+  gmProTunerIsError,
   gmProDoctor,
+  gmProDoctorLoading,
+  gmProDoctorIsError,
   gmProAm,
+  gmProAmLoading,
+  gmProAmIsError,
   refreshStatus,
 } = useMonitorData();
 </script>
@@ -25,31 +31,32 @@ const {
 
     <NGrid :cols="'1 s:1 m:2 l:3'" :x-gap="12" :y-gap="12" responsive="screen">
       <NGi>
-        <AutoTunerCard :tuner="gmProTuner" />
+        <AutoTunerCard
+          :tuner="gmProTuner"
+          :loading="gmProTunerLoading"
+          :is-error="gmProTunerIsError"
+        />
       </NGi>
       <NGi>
-        <DoctorCard :doctor="gmProDoctor" />
+        <DoctorCard
+          :doctor="gmProDoctor"
+          :loading="gmProDoctorLoading"
+          :is-error="gmProDoctorIsError"
+        />
       </NGi>
       <NGi>
-        <AssociationMatrixCard :am="gmProAm" />
+        <AssociationMatrixCard
+          :am="gmProAm"
+          :loading="gmProAmLoading"
+          :is-error="gmProAmIsError"
+        />
       </NGi>
     </NGrid>
   </div>
 </template>
 
 <style scoped>
-.view {
-  padding: 16px;
-}
-.view-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.view-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-}
+.view { padding: 16px; }
+.view-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.view-title { margin: 0; font-size: 18px; font-weight: 600; }
 </style>

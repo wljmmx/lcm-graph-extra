@@ -1,23 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { NCard, NEmpty } from 'naive-ui';
+import { NCard } from 'naive-ui';
+import CardState from './CardState.vue';
 import EChart from '../EChart.vue';
 import { useTheme } from '../../composables/useTheme';
 
 const props = defineProps<{
   nodes: any[];
+  loading?: boolean;
+  isError?: boolean;
+}>();
+
+const emit = defineEmits<{
+  retry: [];
+  'node-click': [id: string];
 }>();
 
 const { isDark } = useTheme();
-
-const CHART = computed(() => ({
-  primary: isDark.value ? '#4098fc' : '#2080f0',
-  success: isDark.value ? '#36ad6a' : '#18a058',
-  warning: isDark.value ? '#fcb040' : '#f0a020',
-  danger:  isDark.value ? '#de5169' : '#d03050',
-  info:    isDark.value ? '#9270ed' : '#7c3aed',
-  neutral: isDark.value ? '#a8abb2' : '#909399',
-}));
 
 const top10ChartOption = computed(() => {
   const nodes = props.nodes;
@@ -38,23 +37,41 @@ const top10ChartOption = computed(() => {
     },
     series: [{
       type: 'bar',
-      data: nodes.map((n: any) => n.pagerank ?? 0).reverse(),
+      // 携带 nodeId 以支持点击回传（echarts click 事件的 payload.data 即此对象）
+      data: nodes.map((n: any) => ({ value: n.pagerank ?? 0, nodeId: n.id })).reverse(),
       barWidth: 14,
       itemStyle: {
         borderRadius: [0, 3, 3, 0],
-        color: CHART.value.primary,
+        color: isDark.value ? '#4098fc' : '#2080f0',
       },
     }],
   };
 });
+
+function onChartClick(payload: any) {
+  const nodeId = payload?.data?.nodeId;
+  if (nodeId != null) emit('node-click', String(nodeId));
+}
 </script>
 
 <template>
   <NCard title="Top 10 PageRank" size="small">
-    <template v-if="nodes.length">
-      <EChart v-if="top10ChartOption" :option="top10ChartOption" :height="240" />
-      <NEmpty v-else description="无图表数据" style="padding:8px 0" />
-    </template>
-    <NEmpty v-else description="无 Top 节点数据" style="padding:12px 0" />
+    <CardState
+      :loading="loading ?? false"
+      :is-error="isError"
+      :has-data="nodes.length > 0"
+      empty-text="暂无 Top 节点数据"
+      error-text="Top 节点请求失败"
+      empty-hint="请确认 graph-memory-pro 服务已启动。"
+      @retry="emit('retry')"
+    >
+      <EChart
+        v-if="top10ChartOption"
+        :option="top10ChartOption"
+        :height="240"
+        aria-label="Top 10 PageRank 图表"
+        @click="onChartClick"
+      />
+    </CardState>
   </NCard>
 </template>

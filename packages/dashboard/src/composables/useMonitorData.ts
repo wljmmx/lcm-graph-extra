@@ -78,7 +78,7 @@ export function useMonitorData() {
   });
 
   // ── 5. gm-pro-health (30s) ──
-  const { data: gmProHealthRes } = useQuery({
+  const { data: gmProHealthRes, isLoading: gmProHealthLoading, isError: gmProHealthIsError } = useQuery({
     queryKey: ['gm-pro-health'],
     queryFn: fetchGmProHealth,
     refetchInterval: 30_000,
@@ -87,7 +87,7 @@ export function useMonitorData() {
   const gmProHealth = computed(() => gmProHealthRes.value?.ok ? (gmProHealthRes.value.data ?? null) : null);
 
   // ── 6. gm-pro-top10 (60s) ──
-  const { data: gmProTop10Res } = useQuery({
+  const { data: gmProTop10Res, isLoading: gmProTop10Loading, isError: gmProTop10IsError } = useQuery({
     queryKey: ['gm-pro-top10'],
     queryFn: () => fetchGmProTop(10),
     refetchInterval: 60_000,
@@ -96,7 +96,7 @@ export function useMonitorData() {
   const gmProTop10 = computed(() => gmProTop10Res.value?.ok ? (gmProTop10Res.value.data?.nodes ?? []) : []);
 
   // ── 7. gm-pro-dirty (60s) ──
-  const { data: gmProDirtyRes } = useQuery({
+  const { data: gmProDirtyRes, isLoading: gmProDirtyLoading, isError: gmProDirtyIsError } = useQuery({
     queryKey: ['gm-pro-dirty-nodes'],
     queryFn: fetchGmProDirtyNodes,
     refetchInterval: 60_000,
@@ -105,7 +105,7 @@ export function useMonitorData() {
   const gmProDirty = computed(() => gmProDirtyRes.value?.ok ? (gmProDirtyRes.value.data ?? null) : null);
 
   // ── 8. gm-pro-communities (120s) ──
-  const { data: gmProCommunitiesRes } = useQuery({
+  const { data: gmProCommunitiesRes, isLoading: gmProCommunitiesLoading, isError: gmProCommunitiesIsError } = useQuery({
     queryKey: ['gm-pro-communities'],
     queryFn: fetchGmProCommunities,
     refetchInterval: 120_000,
@@ -116,7 +116,7 @@ export function useMonitorData() {
   );
 
   // ── 9. gm-pro-usage (60s) ──
-  const { data: gmProUsageRes } = useQuery({
+  const { data: gmProUsageRes, isLoading: gmProUsageLoading, isError: gmProUsageIsError } = useQuery({
     queryKey: ['gm-pro-usage'],
     queryFn: fetchGmProUsage,
     refetchInterval: 60_000,
@@ -125,7 +125,7 @@ export function useMonitorData() {
   const gmProUsage = computed(() => gmProUsageRes.value?.ok ? (gmProUsageRes.value.data ?? null) : null);
 
   // ── 10. gm-pro-auto-tuner (120s) ──
-  const { data: gmProTunerRes } = useQuery({
+  const { data: gmProTunerRes, isLoading: gmProTunerLoading, isError: gmProTunerIsError } = useQuery({
     queryKey: ['gm-pro-auto-tuner'],
     queryFn: fetchGmProAutoTunerState,
     refetchInterval: 120_000,
@@ -134,7 +134,7 @@ export function useMonitorData() {
   const gmProTuner = computed(() => gmProTunerRes.value?.ok ? (gmProTunerRes.value.data ?? null) : null);
 
   // ── 11. gm-pro-services (60s) ──
-  const { data: gmProServicesRes } = useQuery({
+  const { data: gmProServicesRes, isLoading: gmProServicesLoading, isError: gmProServicesIsError } = useQuery({
     queryKey: ['gm-pro-services'],
     queryFn: fetchGmProServices,
     refetchInterval: 60_000,
@@ -145,7 +145,7 @@ export function useMonitorData() {
   );
 
   // ── 12. gm-pro-doctor (120s) ──
-  const { data: gmProDoctorRes } = useQuery({
+  const { data: gmProDoctorRes, isLoading: gmProDoctorLoading, isError: gmProDoctorIsError } = useQuery({
     queryKey: ['gm-pro-doctor'],
     queryFn: fetchGmProDoctor,
     refetchInterval: 120_000,
@@ -154,7 +154,7 @@ export function useMonitorData() {
   const gmProDoctor = computed(() => gmProDoctorRes.value?.ok ? (gmProDoctorRes.value.data ?? null) : null);
 
   // ── 13. gm-pro-association-matrix (120s) ──
-  const { data: gmProAmRes } = useQuery({
+  const { data: gmProAmRes, isLoading: gmProAmLoading, isError: gmProAmIsError } = useQuery({
     queryKey: ['gm-pro-association-matrix'],
     queryFn: fetchGmProAssociationMatrixState,
     refetchInterval: 120_000,
@@ -202,8 +202,15 @@ export function useMonitorData() {
     // derived
     db, memory, agent, graphHealth, moaPerf,
     // gm-pro
-    gmProHealth, gmProTop10, gmProDirty, gmProCommunities,
-    gmProUsage, gmProTuner, gmProServices, gmProDoctor, gmProAm,
+    gmProHealth, gmProHealthLoading, gmProHealthIsError,
+    gmProTop10, gmProTop10Loading, gmProTop10IsError,
+    gmProDirty, gmProDirtyLoading, gmProDirtyIsError,
+    gmProCommunities, gmProCommunitiesLoading, gmProCommunitiesIsError,
+    gmProUsage, gmProUsageLoading, gmProUsageIsError,
+    gmProTuner, gmProTunerLoading, gmProTunerIsError,
+    gmProServices, gmProServicesLoading, gmProServicesIsError,
+    gmProDoctor, gmProDoctorLoading, gmProDoctorIsError,
+    gmProAm, gmProAmLoading, gmProAmIsError,
     // status
     isAnyLoading, isAnyError, refreshStatus,
     CHART,

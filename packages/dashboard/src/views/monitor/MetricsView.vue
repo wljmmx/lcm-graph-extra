@@ -11,6 +11,8 @@ import UserProfileCard from '../../components/monitor/UserProfileCard.vue';
 
 const {
   gmProUsage,
+  gmProUsageLoading,
+  gmProUsageIsError,
   memory,
   refreshStatus,
 } = useMonitorData();
@@ -25,7 +27,11 @@ const {
 
     <NGrid :cols="'1 s:1 m:2 l:2'" :x-gap="12" :y-gap="12" responsive="screen">
       <NGi>
-        <TokenUsageCard :usage="gmProUsage" />
+        <TokenUsageCard
+          :usage="gmProUsage"
+          :loading="gmProUsageLoading"
+          :is-error="gmProUsageIsError"
+        />
       </NGi>
       <NGi>
         <CascadeCard :memory="memory" />
@@ -41,18 +47,7 @@ const {
 </template>
 
 <style scoped>
-.view {
-  padding: 16px;
-}
-.view-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.view-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-}
+.view { padding: 16px; }
+.view-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.view-title { margin: 0; font-size: 18px; font-weight: 600; }
 </style>
