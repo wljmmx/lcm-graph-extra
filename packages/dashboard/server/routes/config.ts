@@ -92,156 +92,165 @@ export function writeRawConfig(updates: Record<string, unknown>): void {
 
 const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' | 'object'; description: string; path: string }[]> = {
   // ─── 顶层字段 ───────────────────────────────────────────────────────────
-  summaryStrategy: [{ type: 'string', description: '摘要策略：strategy | hybrid | full', path: 'summaryStrategy' }],
-  maxGraphDepth: [{ type: 'number', description: '图谱最大遍历深度', path: 'maxGraphDepth' }],
-  maxNodeCount: [{ type: 'number', description: '单次检索最大节点数', path: 'maxNodeCount' }],
-  maxTokens: [{ type: 'number', description: '上下文 token 预算', path: 'maxTokens' }],
-  budgetRatio: [{ type: 'number', description: '上下文预算占比（0-1）', path: 'budgetRatio' }],
-  enableCrossFileLinkage: [{ type: 'boolean', description: '启用跨文件关联', path: 'enableCrossFileLinkage' }],
-  crossReferenceRetentionDays: [{ type: 'number', description: '跨引用保留天数', path: 'crossReferenceRetentionDays' }],
-  distillationIntervalMs: [{ type: 'number', description: '蒸馏间隔（毫秒）', path: 'distillationIntervalMs' }],
-  cliTimeout: [{ type: 'number', description: 'CLI 超时（毫秒）', path: 'cliTimeout' }],
-  cliFallbackSearchType: [{ type: 'string', description: 'CLI 降级搜索类型：search | hybrid', path: 'cliFallbackSearchType' }],
-  qmdMcpTimeout: [{ type: 'number', description: 'QMD MCP 初始化握手超时（ms）', path: 'qmdMcpTimeout' }],
-  qmdMcpQueryTimeout: [{ type: 'number', description: 'QMD MCP/REST 查询超时（ms）', path: 'qmdMcpQueryTimeout' }],
-  tripletTimeoutMs: [{ type: 'number', description: '三元组提取超时（ms）', path: 'tripletTimeoutMs' }],
-  experienceTtlIntervalMs: [{ type: 'number', description: '经验 TTL 清理间隔（ms）', path: 'experienceTtlIntervalMs' }],
-  enableCliFallback: [{ type: 'boolean', description: '启用 QMD CLI 降级（关闭可避免 CLI 卡死）', path: 'enableCliFallback' }],
-  largeFileThreshold: [{ type: 'number', description: '大文件阈值（字节）', path: 'largeFileThreshold' }],
-  largeFilesDir: [{ type: 'string', description: '大文件存储目录', path: 'largeFilesDir' }],
+  summaryStrategy: [{ type: 'string', description: '摘要策略：strategy | hybrid | full。strategy=按需生成（快、省 token，推荐默认）；hybrid=策略+关键节点全文（平衡）；full=所有命中节点全文（最准但费 token）。推荐：strategy', path: 'summaryStrategy' }],
+  maxGraphDepth: [{ type: 'number', description: '图谱最大遍历深度。小项目 3-5，中大型项目 10-20；过深易引发图谱膨胀。推荐：10', path: 'maxGraphDepth' }],
+  maxNodeCount: [{ type: 'number', description: '单次检索最大节点数（防内存爆）。推荐：5000', path: 'maxNodeCount' }],
+  maxTokens: [{ type: 'number', description: '上下文 token 预算（给检索结果留出的总上限）。推荐：65536', path: 'maxTokens' }],
+  budgetRatio: [{ type: 'number', description: '上下文预算占比（0-1）：检索结果占总上下文窗口的比例。值越大检索越全，留给思考的空间越少。推荐：0.3', path: 'budgetRatio' }],
+  enableCrossFileLinkage: [{ type: 'boolean', description: '启用跨文件关联：根据三元组在跨文件之间建边。推荐：true（大型代码库效果显著）', path: 'enableCrossFileLinkage' }],
+  crossReferenceRetentionDays: [{ type: 'number', description: '跨引用保留天数。推荐：90', path: 'crossReferenceRetentionDays' }],
+  distillationIntervalMs: [{ type: 'number', description: '蒸馏间隔（毫秒）：两次经验蒸馏之间的最小间隔。推荐：7200000（每 2 小时）', path: 'distillationIntervalMs' }],
+  cliTimeout: [{ type: 'number', description: 'CLI 超时（毫秒）：QMD CLI fallback 命令执行超时。推荐：30000（30s）', path: 'cliTimeout' }],
+  cliFallbackSearchType: [{ type: 'string', description: 'CLI 降级搜索类型：search | hybrid。search=轻量词法（无向量）；hybrid=词法+向量（结果更全，推荐）。推荐：hybrid', path: 'cliFallbackSearchType' }],
+  qmdMcpTimeout: [{ type: 'number', description: 'QMD MCP 初始化握手超时（ms）。JSON-RPC 握手通常 <500ms。推荐：3000', path: 'qmdMcpTimeout' }],
+  qmdMcpQueryTimeout: [{ type: 'number', description: 'QMD MCP/REST 查询超时（ms）。首次查询需 embedding 冷启动（4-5s），后续 300-400ms。推荐：15000', path: 'qmdMcpQueryTimeout' }],
+  tripletTimeoutMs: [{ type: 'number', description: '三元组提取超时（ms）：afterTurn 三元组 LLM 调用超时。本地大模型建议 60s。推荐：60000', path: 'tripletTimeoutMs' }],
+  experienceTtlIntervalMs: [{ type: 'number', description: '经验 TTL 清理间隔（ms）。推荐：86400000（每 24 小时）', path: 'experienceTtlIntervalMs' }],
+  enableCliFallback: [{ type: 'boolean', description: '启用 QMD CLI 降级。关闭可避免 CLI 卡死；若 MCP+REST 均失败则直接报错。推荐：true', path: 'enableCliFallback' }],
+  largeFileThreshold: [{ type: 'number', description: '大文件阈值（字节，简写覆盖 stubLargeToolPayloads.thresholdBytes）。~2K tokens 起步。推荐：8000', path: 'largeFileThreshold' }],
+  largeFilesDir: [{ type: 'string', description: '大文件存储目录（简写覆盖 stubLargeToolPayloads.filesDir，空=默认 ~/.openclaw/lcm-files）。推荐：空字符串', path: 'largeFilesDir' }],
 
   // ─── 压缩 ───────────────────────────────────────────────────────────────
   compaction: [
-    { type: 'boolean', description: '是否启用压缩', path: 'compaction.enabled' },
-    { type: 'number', description: '触发压缩的消息阈值', path: 'compaction.triggerThreshold' },
-    { type: 'number', description: '软阈值 token 数', path: 'compaction.softThresholdTokens' },
-    { type: 'number', description: '保留近期 token 数', path: 'compaction.keepRecentTokens' },
+    { type: 'boolean', description: '是否启用 LCM 上下文压缩。开启可长期保持对话不爆上下文。推荐：true', path: 'compaction.enabled' },
+    { type: 'number', description: '触发压缩的消息条数阈值。推荐：20000', path: 'compaction.triggerThreshold' },
+    { type: 'number', description: '软阈值 token 数：超过此值开始计划压缩。推荐：163840', path: 'compaction.softThresholdTokens' },
+    { type: 'number', description: '保留近期 token 数（不被压缩，保留最近对话上下文）。推荐：131072', path: 'compaction.keepRecentTokens' },
   ],
 
   // ─── 经验提取 ───────────────────────────────────────────────────────────
   experience: [
-    { type: 'boolean', description: '是否启用经验提取', path: 'experience.enabled' },
-    { type: 'number', description: '经验相关性阈值（0-1）', path: 'experience.relevanceThreshold' },
-    { type: 'string', description: '摘要模式：async | sync', path: 'experience.summaryMode' },
-    { type: 'string', description: 'Dreaming 定时 cron 表达式', path: 'experience.schedule.dreaming' },
-    { type: 'string', description: '增量定时 cron 表达式', path: 'experience.schedule.incremental' },
+    { type: 'boolean', description: '是否启用经验提取（长期知识积累）。推荐：true', path: 'experience.enabled' },
+    { type: 'number', description: '经验相关性阈值（0-1）：高于此值的经验才会纳入当前上下文。越大越精准但召回越少。推荐：0.6', path: 'experience.relevanceThreshold' },
+    { type: 'string', description: '摘要模式：async | sync。async=后台异步（对话不阻塞，推荐）；sync=写完立刻阻塞式摘要。推荐：async', path: 'experience.summaryMode' },
+    { type: 'string', description: 'Dreaming 定时 cron 表达式：夜间做全量经验再整理。推荐：0 3 * * *（凌晨 3 点）', path: 'experience.schedule.dreaming' },
+    { type: 'string', description: '增量定时 cron 表达式：半天一次的增量经验抽取。推荐：0 */12 * * *', path: 'experience.schedule.incremental' },
   ],
 
   // ─── TTL ────────────────────────────────────────────────────────────────
   ttl: [
-    { type: 'boolean', description: '是否启用 TTL 清理', path: 'ttl.enabled' },
-    { type: 'number', description: 'TTL 保留天数', path: 'ttl.retentionDays' },
-    { type: 'number', description: '清理间隔（小时）', path: 'ttl.cleanupIntervalHours' },
+    { type: 'boolean', description: '是否启用 TTL 节点清理（自动淘汰过期图节点）。推荐：true', path: 'ttl.enabled' },
+    { type: 'number', description: 'TTL 保留天数：超过此天数的图节点被清理。推荐：90', path: 'ttl.retentionDays' },
+    { type: 'number', description: '清理间隔（小时）。推荐：24', path: 'ttl.cleanupIntervalHours' },
   ],
 
   // ─── 检索 ───────────────────────────────────────────────────────────────
   retrieval: [
-    { type: 'number', description: 'QMD 检索条数', path: 'retrieval.limits.qmd' },
-    { type: 'number', description: '图谱检索条数', path: 'retrieval.limits.graph' },
-    { type: 'number', description: '经验检索条数', path: 'retrieval.limits.exp' },
-    { type: 'string', description: 'QMD MCP 端点地址', path: 'retrieval.qmd.mcpEndpoint' },
-    { type: 'boolean', description: '启用图谱检索', path: 'retrieval.graph.enabled' },
-    { type: 'number', description: '图谱检索条数上限', path: 'retrieval.graph.searchLimit' },
+    { type: 'number', description: 'QMD 检索条数。推荐：5', path: 'retrieval.limits.qmd' },
+    { type: 'number', description: '图谱检索条数。推荐：5', path: 'retrieval.limits.graph' },
+    { type: 'number', description: '经验检索条数。推荐：3', path: 'retrieval.limits.exp' },
+    { type: 'string', description: 'QMD MCP 端点地址。推荐：http://127.0.0.1:8081', path: 'retrieval.qmd.mcpEndpoint' },
+    { type: 'boolean', description: '启用图谱检索（Neo4j/GraphRAG）。推荐：true', path: 'retrieval.graph.enabled' },
+    { type: 'number', description: '图谱检索条数上限（1-20）。推荐：5', path: 'retrieval.graph.searchLimit' },
     // BUG-6: 缓存容量可配置（原硬编码 50）
-    { type: 'number', description: '图谱检索缓存大小', path: 'retrieval.graph.searchCacheSize' },
-    { type: 'number', description: 'L2/L4 查询缓存大小', path: 'retrieval.cacheSize' },
+    { type: 'number', description: '图谱检索缓存大小（>=10）。推荐：50', path: 'retrieval.graph.searchCacheSize' },
+    { type: 'number', description: 'L2/L4 查询缓存大小（>=10）。推荐：50', path: 'retrieval.cacheSize' },
+    { type: 'number', description: 'QMD vec/hyde 查询文本分片阈值（字符数，>=500）。超过拆分为多个分片独立查询，用 RRF 合并。推荐：8000；若遇到 documents exceed context size 可降到 3000', path: 'retrieval.qmdQueryMaxChars' },
   ],
 
   // ─── 上下文监控 ─────────────────────────────────────────────────────────
   lcmMonitor: [
-    { type: 'boolean', description: '是否启用上下文监控', path: 'lcmMonitor.enabled' },
-    { type: 'number', description: '上下文窗口大小（tokens）', path: 'lcmMonitor.contextWindow' },
-    { type: 'number', description: '去重轮数', path: 'lcmMonitor.dedupRounds' },
-    { type: 'number', description: '高压阈值（0-1）', path: 'lcmMonitor.highPressureThreshold' },
-    { type: 'number', description: '中压阈值（0-1）', path: 'lcmMonitor.mediumPressureThreshold' },
-    { type: 'number', description: '主动触发阈值（0-1）', path: 'lcmMonitor.proactiveThreshold' },
-    { type: 'number', description: '系统提示词开销（tokens）', path: 'lcmMonitor.systemPromptOverheadTokens' },
-    { type: 'number', description: '压缩 token 预算', path: 'lcmMonitor.compactTokenBudget' },
-    { type: 'number', description: '压缩超时（ms）', path: 'lcmMonitor.compactTimeout' },
-    { type: 'number', description: '最大摘要 token 占比（0-1）', path: 'lcmMonitor.maxSummaryTokenRatio' },
+    { type: 'boolean', description: '是否启用 LCM 上下文监控与主动压缩。推荐：true', path: 'lcmMonitor.enabled' },
+    { type: 'number', description: '上下文窗口大小（tokens，即模型上下文上限）。推荐：262144', path: 'lcmMonitor.contextWindow' },
+    { type: 'number', description: '去重轮数（同一轮上下文压缩去重的迭代次数）。推荐：24', path: 'lcmMonitor.dedupRounds' },
+    { type: 'number', description: '高压阈值（0-1）：超过此值进入高压压缩，大量削减检索条数。推荐：0.85', path: 'lcmMonitor.highPressureThreshold' },
+    { type: 'number', description: '中压阈值（0-1）：超过此值进入中压，适度削减。推荐：0.7', path: 'lcmMonitor.mediumPressureThreshold' },
+    { type: 'number', description: '主动触发阈值（0-1）：超过此值后台开始规划压缩。推荐：0.65', path: 'lcmMonitor.proactiveThreshold' },
+    { type: 'number', description: '系统提示词开销（tokens，预留的系统提示词空间）。推荐：17000', path: 'lcmMonitor.systemPromptOverheadTokens' },
+    { type: 'number', description: '压缩 token 预算：单次压缩后允许的最大摘要 token 数。推荐：114688', path: 'lcmMonitor.compactTokenBudget' },
+    { type: 'number', description: '压缩超时（ms）。本地大模型建议 60s。推荐：60000', path: 'lcmMonitor.compactTimeout' },
+    { type: 'number', description: '最大摘要 token 占比（0-1）：摘要不超过上下文的此比例。推荐：0.45', path: 'lcmMonitor.maxSummaryTokenRatio' },
     // 检索限额（按压力层级）
-    { type: 'number', description: '低压检索 QMD 条数', path: 'lcmMonitor.retrievalLimits.low.qmd' },
-    { type: 'number', description: '低压检索 图谱 条数', path: 'lcmMonitor.retrievalLimits.low.graph' },
-    { type: 'number', description: '低压检索 经验 条数', path: 'lcmMonitor.retrievalLimits.low.exp' },
-    { type: 'number', description: '中压检索 QMD 条数', path: 'lcmMonitor.retrievalLimits.medium.qmd' },
-    { type: 'number', description: '中压检索 图谱 条数', path: 'lcmMonitor.retrievalLimits.medium.graph' },
-    { type: 'number', description: '中压检索 经验 条数', path: 'lcmMonitor.retrievalLimits.medium.exp' },
-    { type: 'number', description: '高压检索 QMD 条数', path: 'lcmMonitor.retrievalLimits.high.qmd' },
-    { type: 'number', description: '高压检索 图谱 条数', path: 'lcmMonitor.retrievalLimits.high.graph' },
-    { type: 'number', description: '高压检索 经验 条数', path: 'lcmMonitor.retrievalLimits.high.exp' },
+    { type: 'number', description: '低压检索 QMD 条数。推荐：5', path: 'lcmMonitor.retrievalLimits.low.qmd' },
+    { type: 'number', description: '低压检索 图谱 条数。推荐：5', path: 'lcmMonitor.retrievalLimits.low.graph' },
+    { type: 'number', description: '低压检索 经验 条数。推荐：3', path: 'lcmMonitor.retrievalLimits.low.exp' },
+    { type: 'number', description: '中压检索 QMD 条数。推荐：3', path: 'lcmMonitor.retrievalLimits.medium.qmd' },
+    { type: 'number', description: '中压检索 图谱 条数。推荐：3', path: 'lcmMonitor.retrievalLimits.medium.graph' },
+    { type: 'number', description: '中压检索 经验 条数。推荐：1', path: 'lcmMonitor.retrievalLimits.medium.exp' },
+    { type: 'number', description: '高压检索 QMD 条数。推荐：1', path: 'lcmMonitor.retrievalLimits.high.qmd' },
+    { type: 'number', description: '高压检索 图谱 条数。推荐：1', path: 'lcmMonitor.retrievalLimits.high.graph' },
+    { type: 'number', description: '高压检索 经验 条数。推荐：0', path: 'lcmMonitor.retrievalLimits.high.exp' },
     // 上下文字符限制
-    { type: 'number', description: '低压上下文字符数', path: 'lcmMonitor.maxContextChars.low' },
-    { type: 'number', description: '中压上下文字符数', path: 'lcmMonitor.maxContextChars.medium' },
-    { type: 'number', description: '高压上下文字符数', path: 'lcmMonitor.maxContextChars.high' },
+    { type: 'number', description: '低压上下文字符数。推荐：12000', path: 'lcmMonitor.maxContextChars.low' },
+    { type: 'number', description: '中压上下文字符数。推荐：6000', path: 'lcmMonitor.maxContextChars.medium' },
+    { type: 'number', description: '高压上下文字符数。推荐：1600', path: 'lcmMonitor.maxContextChars.high' },
   ],
 
   // ─── LLM 超时 ───────────────────────────────────────────────────────────
   llmTimeouts: [
-    { type: 'number', description: 'Rerank 超时（ms）', path: 'llmTimeouts.rerankTimeoutMs' },
-    { type: 'number', description: 'Judge 超时（ms）', path: 'llmTimeouts.judgeTimeoutMs' },
-    { type: 'number', description: 'Validate 超时（ms）', path: 'llmTimeouts.validateTimeoutMs' },
-    { type: 'number', description: 'Summarize 超时（ms）', path: 'llmTimeouts.summarizeTimeoutMs' },
-    { type: 'number', description: 'Embed 超时（ms）', path: 'llmTimeouts.embedTimeoutMs' },
-    { type: 'number', description: 'Graph LLM 超时（ms）', path: 'llmTimeouts.graphLlmTimeoutMs' },
-    { type: 'number', description: 'Cascade Tier2 超时（ms）', path: 'llmTimeouts.cascadeTier2Ms' },
-    { type: 'number', description: 'Cascade Tier3 超时（ms）', path: 'llmTimeouts.cascadeTier3Ms' },
-    { type: 'number', description: 'Distill 超时（ms）', path: 'llmTimeouts.distillMs' },
+    { type: 'number', description: 'Rerank 超时（ms）。推荐：30000', path: 'llmTimeouts.rerankTimeoutMs' },
+    { type: 'number', description: 'Judge 超时（ms）：Cascade Tier2 判断。推荐：60000', path: 'llmTimeouts.judgeTimeoutMs' },
+    { type: 'number', description: 'Validate 超时（ms）：经验相关性校验。推荐：45000', path: 'llmTimeouts.validateTimeoutMs' },
+    { type: 'number', description: 'Summarize 超时（ms）：经验回顾摘要。推荐：90000', path: 'llmTimeouts.summarizeTimeoutMs' },
+    { type: 'number', description: 'Embed 超时（ms）：Embedding 调用。推荐：60000', path: 'llmTimeouts.embedTimeoutMs' },
+    { type: 'number', description: 'Graph LLM 超时（ms）：三元组提取回退。推荐：90000', path: 'llmTimeouts.graphLlmTimeoutMs' },
+    { type: 'number', description: 'Cascade Tier2 超时（ms）：Promise.race 回退。推荐：60000', path: 'llmTimeouts.cascadeTier2Ms' },
+    { type: 'number', description: 'Cascade Tier3 超时（ms）：工具验证。推荐：90000', path: 'llmTimeouts.cascadeTier3Ms' },
+    { type: 'number', description: 'Distill 超时（ms）：单次经验蒸馏。推荐：120000', path: 'llmTimeouts.distillMs' },
   ],
 
   // ─── 备份 ───────────────────────────────────────────────────────────────
   backupConfig: [
-    { type: 'boolean', description: '是否启用备份', path: 'backupConfig.enabled' },
-    { type: 'number', description: '备份保留天数', path: 'backupConfig.retentionDays' },
-    { type: 'number', description: '最大备份数', path: 'backupConfig.maxBackups' },
-    { type: 'number', description: '备份间隔（小时）', path: 'backupConfig.intervalHours' },
-    { type: 'string', description: '备份目录路径', path: 'backupConfig.backupDir' },
+    { type: 'boolean', description: '是否启用图谱+经验自动备份。推荐：true', path: 'backupConfig.enabled' },
+    { type: 'number', description: '备份保留天数。推荐：30', path: 'backupConfig.retentionDays' },
+    { type: 'number', description: '最大备份数。推荐：10', path: 'backupConfig.maxBackups' },
+    { type: 'number', description: '备份间隔（小时）。推荐：24', path: 'backupConfig.intervalHours' },
+    { type: 'string', description: '备份目录路径（空=默认 ~/.openclaw/backups）。推荐：空字符串', path: 'backupConfig.backupDir' },
   ],
 
   // ─── 大文件存根 ─────────────────────────────────────────────────────────
   stubLargeToolPayloads: [
-    { type: 'boolean', description: '启用大工具负载外部分片', path: 'stubLargeToolPayloads.enabled' },
-    { type: 'number', description: '触发阈值（字节）', path: 'stubLargeToolPayloads.thresholdBytes' },
-    { type: 'string', description: '外部文件存储目录', path: 'stubLargeToolPayloads.filesDir' },
-    { type: 'number', description: 'Fresh tail 保护条数', path: 'stubLargeToolPayloads.freshTailCount' },
+    { type: 'boolean', description: '启用大工具负载外部分片 + 存根替换（兼容 lossless-claw）。小文件可不启用。推荐：false（按需开启）', path: 'stubLargeToolPayloads.enabled' },
+    { type: 'number', description: '触发阈值（字节，~2K tokens）。推荐：8000', path: 'stubLargeToolPayloads.thresholdBytes' },
+    { type: 'string', description: '外部文件存储目录（空=默认 ~/.openclaw/lcm-files）。推荐：空字符串', path: 'stubLargeToolPayloads.filesDir' },
+    { type: 'number', description: '最近 N 条消息不存根（fresh tail 保护，防止最新上下文丢失）。推荐：8', path: 'stubLargeToolPayloads.freshTailCount' },
   ],
 
   // ─── Webhook ────────────────────────────────────────────────────────────
   webhook: [
-    { type: 'boolean', description: '是否启用 Webhook', path: 'webhook.enabled' },
+    { type: 'boolean', description: '是否启用 Webhook（事件回调到自定义地址）。推荐：false（无外部系统时）', path: 'webhook.enabled' },
   ],
 
   // ─── 日志 ───────────────────────────────────────────────────────────────
   logging: [
-    { type: 'string', description: '日志级别：silent | fatal | error | warn | info | debug | trace', path: 'logging.level' },
-    { type: 'string', description: '日志文件路径', path: 'logging.file' },
+    { type: 'string', description: '日志级别：silent | fatal | error | warn | info | debug | trace。silent=完全静默；fatal/error=仅报错；warn=警告+错误；info=常规运行（推荐）；debug=排查问题；trace=全量追踪。推荐：info', path: 'logging.level' },
+    { type: 'string', description: '日志文件路径（空=仅标准输出）。推荐：空字符串', path: 'logging.file' },
   ],
 
   // ─── LLM Provider ───────────────────────────────────────────────────────
   llmProvider: [
-    { type: 'string', description: 'LLM Provider 类型', path: 'llmProvider.provider' },
-    { type: 'string', description: 'LLM 模型名', path: 'llmProvider.model' },
-    { type: 'number', description: 'LLM 最大 token 数', path: 'llmProvider.maxTokens' },
+    { type: 'string', description: 'LLM Provider 类型：openclaw_hooks | openai | ollama | deepseek | unsloth | custom。openclaw_hooks=通过 OpenClaw 网关自动路由（推荐默认）；ollama=本地部署；openai/deepseek=云端 API；custom=自定义 BaseURL。推荐：openclaw_hooks', path: 'llmProvider.provider' },
+    { type: 'string', description: 'LLM 模型名。推荐：default（随 provider 默认）', path: 'llmProvider.model' },
+    { type: 'number', description: 'LLM 最大 token 数：8192 | 16384 | 24576 | 32768。按模型上下文窗口匹配：8k(<32k) / 16k(32k-64k) / 24k(64k-128k) / 32k(>=128k)。推荐：32768', path: 'llmProvider.maxTokens' },
   ],
 
   // ─── 蒸馏 LLM ───────────────────────────────────────────────────────────
   distillationLlm: [
-    { type: 'string', description: '蒸馏 LLM Provider 类型', path: 'distillationLlm.provider' },
-    { type: 'string', description: '蒸馏 LLM 模型名', path: 'distillationLlm.model' },
-    { type: 'string', description: '蒸馏 LLM Base URL', path: 'distillationLlm.baseURL' },
-    { type: 'string', description: '蒸馏 LLM Keep Alive', path: 'distillationLlm.keepAlive' },
+    { type: 'string', description: '蒸馏 LLM Provider 类型：openclaw_hooks | openai | ollama | deepseek | unsloth | custom。经验蒸馏模型，建议用本地强模型。推荐：openclaw_hooks', path: 'distillationLlm.provider' },
+    { type: 'string', description: '蒸馏 LLM 模型名（建议能力>=27B，本地 qwen3.6:27b 起步）。推荐：ollama/qwen3.6:27b', path: 'distillationLlm.model' },
+    { type: 'string', description: '蒸馏 LLM Base URL。custom 时必填。推荐：空字符串', path: 'distillationLlm.baseURL' },
+    { type: 'string', description: '蒸馏 LLM Keep Alive（模型内存驻留时长，如 1h=保留 1 小时）。注意：不是请求超时，超时看 llmTimeouts.distillMs。推荐：1h', path: 'distillationLlm.keepAlive' },
   ],
 
   // ─── Embedding ──────────────────────────────────────────────────────────
   embedding: [
-    { type: 'string', description: 'Embedding 模型名', path: 'embedding.model' },
-    { type: 'string', description: 'Embedding Base URL', path: 'embedding.baseURL' },
-    { type: 'number', description: 'Embedding 维度', path: 'embedding.dimensions' },
-    { type: 'string', description: 'Embedding Keep Alive', path: 'embedding.keepAlive' },
+    { type: 'string', description: 'Embedding 模型名。空=跟随主 Provider。推荐：空字符串', path: 'embedding.model' },
+    { type: 'string', description: 'Embedding Base URL（走独立 embedding 服务时填）。推荐：空字符串', path: 'embedding.baseURL' },
+    { type: 'number', description: 'Embedding 维度（0=模型自带默认）。推荐：0', path: 'embedding.dimensions' },
+    { type: 'string', description: 'Embedding Keep Alive。推荐：空字符串', path: 'embedding.keepAlive' },
   ],
 
   // ─── Dashboard Snapshot ─────────────────────────────────────────────────
   dashboardSnapshot: [
-    { type: 'boolean', description: '是否启用 Snapshot 服务', path: 'dashboardSnapshot.enabled' },
+    { type: 'boolean', description: '是否启用 Snapshot 能力服务（端口 7423，供设置页切换能力档次）。推荐：true', path: 'dashboardSnapshot.enabled' },
+  ],
+
+  // ─── MoA 多模型协作（基础字段，复杂嵌套请用「高级 JSON 编辑」）─────
+  moa: [
+    { type: 'boolean', description: '是否启用 MoA 多模型分层协作（多模型会诊复杂问题）。推荐：false（算力充分时开启）', path: 'moa.enabled' },
+    { type: 'number', description: '任务复杂度阈值（0-1）：超过此值触发 MoA。推荐：0.6', path: 'moa.complexityThreshold' },
+    { type: 'string', description: '协作模式：auto | parallel | serial。auto=自动判断（本地串行+远程并行，推荐）；parallel=强制并行（快但费 token）；serial=强制串行（省 token、稳）。推荐：auto', path: 'moa.mode' },
+    { type: 'number', description: 'Phase1 参考模型同步阶段总时间预算（ms，>=30000）。超时则 fallback 单模型。推荐：240000（4 分钟）', path: 'moa.syncBudgetMs' },
   ],
 };
 
@@ -301,132 +310,139 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
   if (_schemaDocCache) return _schemaDocCache;
   const docs: SchemaFieldDoc[] = [
     // ─── 顶层字段 ─────────────────────────────────────────────────────────
-    { path: 'summaryStrategy', type: 'string', description: '摘要策略：strategy | hybrid | full', updatable: true, defaultValue: 'strategy' },
-    { path: 'maxGraphDepth', type: 'number', description: '图谱最大遍历深度', updatable: true, defaultValue: 10 },
-    { path: 'maxNodeCount', type: 'number', description: '单次检索最大节点数', updatable: true, defaultValue: 5000 },
-    { path: 'maxTokens', type: 'number', description: '上下文 token 预算', updatable: true, defaultValue: 65536 },
-    { path: 'budgetRatio', type: 'number', description: '上下文预算占比（0-1）', updatable: true, defaultValue: 0.3 },
-    { path: 'enableCrossFileLinkage', type: 'boolean', description: '启用跨文件关联', updatable: true, defaultValue: true },
-    { path: 'crossReferenceRetentionDays', type: 'number', description: '跨引用保留天数', updatable: true, defaultValue: 90 },
-    { path: 'distillationIntervalMs', type: 'number', description: '蒸馏间隔（毫秒）', updatable: true, defaultValue: 7200000 },
-    { path: 'cliTimeout', type: 'number', description: 'CLI 超时（毫秒）', updatable: true, defaultValue: 30000 },
-    { path: 'cliFallbackSearchType', type: 'string', description: 'CLI 降级搜索类型：search | hybrid', updatable: true, defaultValue: 'hybrid' },
-    { path: 'qmdMcpTimeout', type: 'number', description: 'QMD MCP 初始化握手超时（ms）', updatable: true, defaultValue: 3000 },
-    { path: 'qmdMcpQueryTimeout', type: 'number', description: 'QMD MCP/REST 查询超时（ms）', updatable: true, defaultValue: 15000 },
-    { path: 'tripletTimeoutMs', type: 'number', description: '三元组提取超时（ms）', updatable: true, defaultValue: 60000 },
-    { path: 'experienceTtlIntervalMs', type: 'number', description: '经验 TTL 清理间隔（ms）', updatable: true, defaultValue: 86400000 },
-    { path: 'enableCliFallback', type: 'boolean', description: '启用 QMD CLI 降级（关闭可避免 CLI 卡死）', updatable: true, defaultValue: true },
-    { path: 'largeFileThreshold', type: 'number', description: '大文件阈值（字节）', updatable: true, defaultValue: 8000 },
-    { path: 'largeFilesDir', type: 'string', description: '大文件存储目录', updatable: true, defaultValue: '' },
+    { path: 'summaryStrategy', type: 'string', description: '摘要策略：strategy | hybrid | full。strategy=按需生成（快、省 token，推荐默认）；hybrid=策略+关键节点全文（平衡）；full=所有命中节点全文（最准但费 token）。推荐：strategy', updatable: true, defaultValue: 'strategy' },
+    { path: 'maxGraphDepth', type: 'number', description: '图谱最大遍历深度。小项目 3-5，中大型项目 10-20；过深易引发图谱膨胀。推荐：10', updatable: true, defaultValue: 10 },
+    { path: 'maxNodeCount', type: 'number', description: '单次检索最大节点数（防内存爆）。推荐：5000', updatable: true, defaultValue: 5000 },
+    { path: 'maxTokens', type: 'number', description: '上下文 token 预算（给检索结果留出的总上限）。推荐：65536', updatable: true, defaultValue: 65536 },
+    { path: 'budgetRatio', type: 'number', description: '上下文预算占比（0-1）：检索结果占总上下文窗口的比例。值越大检索越全，留给思考的空间越少。推荐：0.3', updatable: true, defaultValue: 0.3 },
+    { path: 'enableCrossFileLinkage', type: 'boolean', description: '启用跨文件关联：根据三元组在跨文件之间建边。推荐：true（大型代码库效果显著）', updatable: true, defaultValue: true },
+    { path: 'crossReferenceRetentionDays', type: 'number', description: '跨引用保留天数。推荐：90', updatable: true, defaultValue: 90 },
+    { path: 'distillationIntervalMs', type: 'number', description: '蒸馏间隔（毫秒）：两次经验蒸馏之间的最小间隔。推荐：7200000（每 2 小时）', updatable: true, defaultValue: 7200000 },
+    { path: 'cliTimeout', type: 'number', description: 'CLI 超时（毫秒）：QMD CLI fallback 命令执行超时。推荐：30000（30s）', updatable: true, defaultValue: 30000 },
+    { path: 'cliFallbackSearchType', type: 'string', description: 'CLI 降级搜索类型：search | hybrid。search=轻量词法（无向量）；hybrid=词法+向量（结果更全，推荐）。推荐：hybrid', updatable: true, defaultValue: 'hybrid' },
+    { path: 'qmdMcpTimeout', type: 'number', description: 'QMD MCP 初始化握手超时（ms）。JSON-RPC 握手通常 <500ms。推荐：3000', updatable: true, defaultValue: 3000 },
+    { path: 'qmdMcpQueryTimeout', type: 'number', description: 'QMD MCP/REST 查询超时（ms）。首次查询需 embedding 冷启动（4-5s），后续 300-400ms。推荐：15000', updatable: true, defaultValue: 15000 },
+    { path: 'tripletTimeoutMs', type: 'number', description: '三元组提取超时（ms）：afterTurn 三元组 LLM 调用超时。本地大模型建议 60s。推荐：60000', updatable: true, defaultValue: 60000 },
+    { path: 'experienceTtlIntervalMs', type: 'number', description: '经验 TTL 清理间隔（ms）。推荐：86400000（每 24 小时）', updatable: true, defaultValue: 86400000 },
+    { path: 'enableCliFallback', type: 'boolean', description: '启用 QMD CLI 降级。关闭可避免 CLI 卡死；若 MCP+REST 均失败则直接报错。推荐：true', updatable: true, defaultValue: true },
+    { path: 'largeFileThreshold', type: 'number', description: '大文件阈值（字节，简写覆盖 stubLargeToolPayloads.thresholdBytes）。~2K tokens 起步。推荐：8000', updatable: true, defaultValue: 8000 },
+    { path: 'largeFilesDir', type: 'string', description: '大文件存储目录（简写覆盖 stubLargeToolPayloads.filesDir，空=默认 ~/.openclaw/lcm-files）。推荐：空字符串', updatable: true, defaultValue: '' },
 
     // ─── 压缩 ────────────────────────────────────────────────────────────
-    { path: 'compaction.enabled', type: 'boolean', description: '是否启用压缩', updatable: true, defaultValue: true },
-    { path: 'compaction.triggerThreshold', type: 'number', description: '触发压缩的消息阈值', updatable: true, defaultValue: 20000 },
-    { path: 'compaction.softThresholdTokens', type: 'number', description: '软阈值 token 数', updatable: true, defaultValue: 163840 },
-    { path: 'compaction.keepRecentTokens', type: 'number', description: '保留近期 token 数', updatable: true, defaultValue: 131072 },
+    { path: 'compaction.enabled', type: 'boolean', description: '是否启用 LCM 上下文压缩。开启可长期保持对话不爆上下文。推荐：true', updatable: true, defaultValue: true },
+    { path: 'compaction.triggerThreshold', type: 'number', description: '触发压缩的消息条数阈值。推荐：20000', updatable: true, defaultValue: 20000 },
+    { path: 'compaction.softThresholdTokens', type: 'number', description: '软阈值 token 数：超过此值开始计划压缩。推荐：163840', updatable: true, defaultValue: 163840 },
+    { path: 'compaction.keepRecentTokens', type: 'number', description: '保留近期 token 数（不被压缩，保留最近对话上下文）。推荐：131072', updatable: true, defaultValue: 131072 },
 
     // ─── 经验提取 ────────────────────────────────────────────────────────
-    { path: 'experience.enabled', type: 'boolean', description: '是否启用经验提取', updatable: true, defaultValue: true },
-    { path: 'experience.relevanceThreshold', type: 'number', description: '经验相关性阈值（0-1）', updatable: true, defaultValue: 0.6 },
-    { path: 'experience.summaryMode', type: 'string', description: '摘要模式：async | sync', updatable: true, defaultValue: 'async' },
-    { path: 'experience.schedule.dreaming', type: 'string', description: 'Dreaming 定时 cron 表达式', updatable: true, defaultValue: '0 3 * * *' },
-    { path: 'experience.schedule.incremental', type: 'string', description: '增量定时 cron 表达式', updatable: true, defaultValue: '0 */12 * * *' },
+    { path: 'experience.enabled', type: 'boolean', description: '是否启用经验提取（长期知识积累）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'experience.relevanceThreshold', type: 'number', description: '经验相关性阈值（0-1）：高于此值的经验才会纳入当前上下文。越大越精准但召回越少。推荐：0.6', updatable: true, defaultValue: 0.6 },
+    { path: 'experience.summaryMode', type: 'string', description: '摘要模式：async | sync。async=后台异步（对话不阻塞，推荐）；sync=写完立刻阻塞式摘要。推荐：async', updatable: true, defaultValue: 'async' },
+    { path: 'experience.schedule.dreaming', type: 'string', description: 'Dreaming 定时 cron 表达式：夜间做全量经验再整理。推荐：0 3 * * *（凌晨 3 点）', updatable: true, defaultValue: '0 3 * * *' },
+    { path: 'experience.schedule.incremental', type: 'string', description: '增量定时 cron 表达式：半天一次的增量经验抽取。推荐：0 */12 * * *', updatable: true, defaultValue: '0 */12 * * *' },
 
     // ─── TTL ─────────────────────────────────────────────────────────────
-    { path: 'ttl.enabled', type: 'boolean', description: '是否启用 TTL 清理', updatable: true, defaultValue: true },
-    { path: 'ttl.retentionDays', type: 'number', description: 'TTL 保留天数', updatable: true, defaultValue: 90 },
-    { path: 'ttl.cleanupIntervalHours', type: 'number', description: '清理间隔（小时）', updatable: true, defaultValue: 24 },
+    { path: 'ttl.enabled', type: 'boolean', description: '是否启用 TTL 节点清理（自动淘汰过期图节点）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'ttl.retentionDays', type: 'number', description: 'TTL 保留天数：超过此天数的图节点被清理。推荐：90', updatable: true, defaultValue: 90 },
+    { path: 'ttl.cleanupIntervalHours', type: 'number', description: '清理间隔（小时）。推荐：24', updatable: true, defaultValue: 24 },
 
     // ─── 检索 ────────────────────────────────────────────────────────────
-    { path: 'retrieval.limits.qmd', type: 'number', description: 'QMD 检索条数', updatable: true, defaultValue: 5 },
-    { path: 'retrieval.limits.graph', type: 'number', description: '图谱检索条数', updatable: true, defaultValue: 5 },
-    { path: 'retrieval.limits.exp', type: 'number', description: '经验检索条数', updatable: true, defaultValue: 3 },
-    { path: 'retrieval.qmd.mcpEndpoint', type: 'string', description: 'QMD MCP 端点地址', updatable: true, defaultValue: 'http://127.0.0.1:8081' },
-    { path: 'retrieval.graph.enabled', type: 'boolean', description: '启用图谱检索', updatable: true, defaultValue: true },
-    { path: 'retrieval.graph.searchLimit', type: 'number', description: '图谱检索条数上限', updatable: true, defaultValue: 5 },
+    { path: 'retrieval.limits.qmd', type: 'number', description: 'QMD 检索条数。推荐：5', updatable: true, defaultValue: 5 },
+    { path: 'retrieval.limits.graph', type: 'number', description: '图谱检索条数。推荐：5', updatable: true, defaultValue: 5 },
+    { path: 'retrieval.limits.exp', type: 'number', description: '经验检索条数。推荐：3', updatable: true, defaultValue: 3 },
+    { path: 'retrieval.qmd.mcpEndpoint', type: 'string', description: 'QMD MCP 端点地址。推荐：http://127.0.0.1:8081', updatable: true, defaultValue: 'http://127.0.0.1:8081' },
+    { path: 'retrieval.graph.enabled', type: 'boolean', description: '启用图谱检索（Neo4j/GraphRAG）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'retrieval.graph.searchLimit', type: 'number', description: '图谱检索条数上限（1-20）。推荐：5', updatable: true, defaultValue: 5 },
     // BUG-6: 缓存容量可配置（原硬编码 50）
-    { path: 'retrieval.graph.searchCacheSize', type: 'number', description: '图谱检索缓存大小', updatable: true, defaultValue: 50 },
-    { path: 'retrieval.cacheSize', type: 'number', description: 'L2/L4 查询缓存大小', updatable: true, defaultValue: 50 },
+    { path: 'retrieval.graph.searchCacheSize', type: 'number', description: '图谱检索缓存大小（>=10）。推荐：50', updatable: true, defaultValue: 50 },
+    { path: 'retrieval.cacheSize', type: 'number', description: 'L2/L4 查询缓存大小（>=10）。推荐：50', updatable: true, defaultValue: 50 },
+    { path: 'retrieval.qmdQueryMaxChars', type: 'number', description: 'QMD vec/hyde 查询文本分片阈值（字符数，>=500）。超过拆分为多个分片独立查询，用 RRF 合并。推荐：8000；若遇到 documents exceed context size 可降到 3000', updatable: true, defaultValue: 8000 },
 
     // ─── 上下文监控 ──────────────────────────────────────────────────────
-    { path: 'lcmMonitor.enabled', type: 'boolean', description: '是否启用上下文监控', updatable: true, defaultValue: true },
-    { path: 'lcmMonitor.contextWindow', type: 'number', description: '上下文窗口大小（tokens）', updatable: true, defaultValue: 262144 },
-    { path: 'lcmMonitor.dedupRounds', type: 'number', description: '去重轮数', updatable: true, defaultValue: 24 },
-    { path: 'lcmMonitor.highPressureThreshold', type: 'number', description: '高压阈值（0-1）', updatable: true, defaultValue: 0.85 },
-    { path: 'lcmMonitor.mediumPressureThreshold', type: 'number', description: '中压阈值（0-1）', updatable: true, defaultValue: 0.70 },
-    { path: 'lcmMonitor.proactiveThreshold', type: 'number', description: '主动触发阈值（0-1）', updatable: true, defaultValue: 0.65 },
-    { path: 'lcmMonitor.systemPromptOverheadTokens', type: 'number', description: '系统提示词开销（tokens）', updatable: true, defaultValue: 17000 },
-    { path: 'lcmMonitor.compactTokenBudget', type: 'number', description: '压缩 token 预算', updatable: true, defaultValue: 154624 },
-    { path: 'lcmMonitor.compactTimeout', type: 'number', description: '压缩超时（ms）', updatable: true, defaultValue: 60000 },
-    { path: 'lcmMonitor.maxSummaryTokenRatio', type: 'number', description: '最大摘要 token 占比（0-1）', updatable: true, defaultValue: 0.45 },
-    { path: 'lcmMonitor.retrievalLimits.low.qmd', type: 'number', description: '低压检索 QMD 条数', updatable: true, defaultValue: 5 },
-    { path: 'lcmMonitor.retrievalLimits.low.graph', type: 'number', description: '低压检索 图谱 条数', updatable: true, defaultValue: 5 },
-    { path: 'lcmMonitor.retrievalLimits.low.exp', type: 'number', description: '低压检索 经验 条数', updatable: true, defaultValue: 3 },
-    { path: 'lcmMonitor.retrievalLimits.medium.qmd', type: 'number', description: '中压检索 QMD 条数', updatable: true, defaultValue: 3 },
-    { path: 'lcmMonitor.retrievalLimits.medium.graph', type: 'number', description: '中压检索 图谱 条数', updatable: true, defaultValue: 3 },
-    { path: 'lcmMonitor.retrievalLimits.medium.exp', type: 'number', description: '中压检索 经验 条数', updatable: true, defaultValue: 1 },
-    { path: 'lcmMonitor.retrievalLimits.high.qmd', type: 'number', description: '高压检索 QMD 条数', updatable: true, defaultValue: 1 },
-    { path: 'lcmMonitor.retrievalLimits.high.graph', type: 'number', description: '高压检索 图谱 条数', updatable: true, defaultValue: 1 },
-    { path: 'lcmMonitor.retrievalLimits.high.exp', type: 'number', description: '高压检索 经验 条数', updatable: true, defaultValue: 0 },
-    { path: 'lcmMonitor.maxContextChars.low', type: 'number', description: '低压上下文字符数', updatable: true, defaultValue: 12000 },
-    { path: 'lcmMonitor.maxContextChars.medium', type: 'number', description: '中压上下文字符数', updatable: true, defaultValue: 6000 },
-    { path: 'lcmMonitor.maxContextChars.high', type: 'number', description: '高压上下文字符数', updatable: true, defaultValue: 1600 },
+    { path: 'lcmMonitor.enabled', type: 'boolean', description: '是否启用 LCM 上下文监控与主动压缩。推荐：true', updatable: true, defaultValue: true },
+    { path: 'lcmMonitor.contextWindow', type: 'number', description: '上下文窗口大小（tokens，即模型上下文上限）。推荐：262144', updatable: true, defaultValue: 262144 },
+    { path: 'lcmMonitor.dedupRounds', type: 'number', description: '去重轮数（同一轮上下文压缩去重的迭代次数）。推荐：24', updatable: true, defaultValue: 24 },
+    { path: 'lcmMonitor.highPressureThreshold', type: 'number', description: '高压阈值（0-1）：超过此值进入高压压缩，大量削减检索条数。推荐：0.85', updatable: true, defaultValue: 0.85 },
+    { path: 'lcmMonitor.mediumPressureThreshold', type: 'number', description: '中压阈值（0-1）：超过此值进入中压，适度削减。推荐：0.7', updatable: true, defaultValue: 0.70 },
+    { path: 'lcmMonitor.proactiveThreshold', type: 'number', description: '主动触发阈值（0-1）：超过此值后台开始规划压缩。推荐：0.65', updatable: true, defaultValue: 0.65 },
+    { path: 'lcmMonitor.systemPromptOverheadTokens', type: 'number', description: '系统提示词开销（tokens，预留的系统提示词空间）。推荐：17000', updatable: true, defaultValue: 17000 },
+    { path: 'lcmMonitor.compactTokenBudget', type: 'number', description: '压缩 token 预算：单次压缩后允许的最大摘要 token 数。推荐：114688', updatable: true, defaultValue: 114688 },
+    { path: 'lcmMonitor.compactTimeout', type: 'number', description: '压缩超时（ms）。本地大模型建议 60s。推荐：60000', updatable: true, defaultValue: 60000 },
+    { path: 'lcmMonitor.maxSummaryTokenRatio', type: 'number', description: '最大摘要 token 占比（0-1）：摘要不超过上下文的此比例。推荐：0.45', updatable: true, defaultValue: 0.45 },
+    { path: 'lcmMonitor.retrievalLimits.low.qmd', type: 'number', description: '低压检索 QMD 条数。推荐：5', updatable: true, defaultValue: 5 },
+    { path: 'lcmMonitor.retrievalLimits.low.graph', type: 'number', description: '低压检索 图谱 条数。推荐：5', updatable: true, defaultValue: 5 },
+    { path: 'lcmMonitor.retrievalLimits.low.exp', type: 'number', description: '低压检索 经验 条数。推荐：3', updatable: true, defaultValue: 3 },
+    { path: 'lcmMonitor.retrievalLimits.medium.qmd', type: 'number', description: '中压检索 QMD 条数。推荐：3', updatable: true, defaultValue: 3 },
+    { path: 'lcmMonitor.retrievalLimits.medium.graph', type: 'number', description: '中压检索 图谱 条数。推荐：3', updatable: true, defaultValue: 3 },
+    { path: 'lcmMonitor.retrievalLimits.medium.exp', type: 'number', description: '中压检索 经验 条数。推荐：1', updatable: true, defaultValue: 1 },
+    { path: 'lcmMonitor.retrievalLimits.high.qmd', type: 'number', description: '高压检索 QMD 条数。推荐：1', updatable: true, defaultValue: 1 },
+    { path: 'lcmMonitor.retrievalLimits.high.graph', type: 'number', description: '高压检索 图谱 条数。推荐：1', updatable: true, defaultValue: 1 },
+    { path: 'lcmMonitor.retrievalLimits.high.exp', type: 'number', description: '高压检索 经验 条数。推荐：0', updatable: true, defaultValue: 0 },
+    { path: 'lcmMonitor.maxContextChars.low', type: 'number', description: '低压上下文字符数。推荐：12000', updatable: true, defaultValue: 12000 },
+    { path: 'lcmMonitor.maxContextChars.medium', type: 'number', description: '中压上下文字符数。推荐：6000', updatable: true, defaultValue: 6000 },
+    { path: 'lcmMonitor.maxContextChars.high', type: 'number', description: '高压上下文字符数。推荐：1600', updatable: true, defaultValue: 1600 },
 
     // ─── LLM 超时 ────────────────────────────────────────────────────────
-    { path: 'llmTimeouts.rerankTimeoutMs', type: 'number', description: 'Rerank 超时（ms）', updatable: true, defaultValue: 30000 },
-    { path: 'llmTimeouts.judgeTimeoutMs', type: 'number', description: 'Judge 超时（ms）', updatable: true, defaultValue: 60000 },
-    { path: 'llmTimeouts.validateTimeoutMs', type: 'number', description: 'Validate 超时（ms）', updatable: true, defaultValue: 45000 },
-    { path: 'llmTimeouts.summarizeTimeoutMs', type: 'number', description: 'Summarize 超时（ms）', updatable: true, defaultValue: 90000 },
-    { path: 'llmTimeouts.embedTimeoutMs', type: 'number', description: 'Embed 超时（ms）', updatable: true, defaultValue: 60000 },
-    { path: 'llmTimeouts.graphLlmTimeoutMs', type: 'number', description: 'Graph LLM 超时（ms）', updatable: true, defaultValue: 90000 },
-    { path: 'llmTimeouts.cascadeTier2Ms', type: 'number', description: 'Cascade Tier2 超时（ms）', updatable: true, defaultValue: 60000 },
-    { path: 'llmTimeouts.cascadeTier3Ms', type: 'number', description: 'Cascade Tier3 超时（ms）', updatable: true, defaultValue: 90000 },
-    { path: 'llmTimeouts.distillMs', type: 'number', description: 'Distill 超时（ms）', updatable: true, defaultValue: 120000 },
+    { path: 'llmTimeouts.rerankTimeoutMs', type: 'number', description: 'Rerank 超时（ms）。推荐：30000', updatable: true, defaultValue: 30000 },
+    { path: 'llmTimeouts.judgeTimeoutMs', type: 'number', description: 'Judge 超时（ms）：Cascade Tier2 判断。推荐：60000', updatable: true, defaultValue: 60000 },
+    { path: 'llmTimeouts.validateTimeoutMs', type: 'number', description: 'Validate 超时（ms）：经验相关性校验。推荐：45000', updatable: true, defaultValue: 45000 },
+    { path: 'llmTimeouts.summarizeTimeoutMs', type: 'number', description: 'Summarize 超时（ms）：经验回顾摘要。推荐：90000', updatable: true, defaultValue: 90000 },
+    { path: 'llmTimeouts.embedTimeoutMs', type: 'number', description: 'Embed 超时（ms）：Embedding 调用。推荐：60000', updatable: true, defaultValue: 60000 },
+    { path: 'llmTimeouts.graphLlmTimeoutMs', type: 'number', description: 'Graph LLM 超时（ms）：三元组提取回退。推荐：90000', updatable: true, defaultValue: 90000 },
+    { path: 'llmTimeouts.cascadeTier2Ms', type: 'number', description: 'Cascade Tier2 超时（ms）：Promise.race 回退。推荐：60000', updatable: true, defaultValue: 60000 },
+    { path: 'llmTimeouts.cascadeTier3Ms', type: 'number', description: 'Cascade Tier3 超时（ms）：工具验证。推荐：90000', updatable: true, defaultValue: 90000 },
+    { path: 'llmTimeouts.distillMs', type: 'number', description: 'Distill 超时（ms）：单次经验蒸馏。推荐：120000', updatable: true, defaultValue: 120000 },
 
     // ─── 备份 ────────────────────────────────────────────────────────────
-    { path: 'backupConfig.enabled', type: 'boolean', description: '是否启用备份', updatable: true, defaultValue: true },
-    { path: 'backupConfig.retentionDays', type: 'number', description: '备份保留天数', updatable: true, defaultValue: 30 },
-    { path: 'backupConfig.maxBackups', type: 'number', description: '最大备份数', updatable: true, defaultValue: 10 },
-    { path: 'backupConfig.intervalHours', type: 'number', description: '备份间隔（小时）', updatable: true, defaultValue: 24 },
-    { path: 'backupConfig.backupDir', type: 'string', description: '备份目录路径', updatable: true, defaultValue: '' },
+    { path: 'backupConfig.enabled', type: 'boolean', description: '是否启用图谱+经验自动备份。推荐：true', updatable: true, defaultValue: true },
+    { path: 'backupConfig.retentionDays', type: 'number', description: '备份保留天数。推荐：30', updatable: true, defaultValue: 30 },
+    { path: 'backupConfig.maxBackups', type: 'number', description: '最大备份数。推荐：10', updatable: true, defaultValue: 10 },
+    { path: 'backupConfig.intervalHours', type: 'number', description: '备份间隔（小时）。推荐：24', updatable: true, defaultValue: 24 },
+    { path: 'backupConfig.backupDir', type: 'string', description: '备份目录路径（空=默认 ~/.openclaw/backups）。推荐：空字符串', updatable: true, defaultValue: '' },
 
     // ─── 大文件存根 ──────────────────────────────────────────────────────
-    { path: 'stubLargeToolPayloads.enabled', type: 'boolean', description: '启用大工具负载外部分片', updatable: true, defaultValue: false },
-    { path: 'stubLargeToolPayloads.thresholdBytes', type: 'number', description: '触发阈值（字节）', updatable: true, defaultValue: 8000 },
-    { path: 'stubLargeToolPayloads.filesDir', type: 'string', description: '外部文件存储目录', updatable: true, defaultValue: '' },
-    { path: 'stubLargeToolPayloads.freshTailCount', type: 'number', description: 'Fresh tail 保护条数', updatable: true, defaultValue: 8 },
+    { path: 'stubLargeToolPayloads.enabled', type: 'boolean', description: '启用大工具负载外部分片 + 存根替换（兼容 lossless-claw）。小文件可不启用。推荐：false（按需开启）', updatable: true, defaultValue: false },
+    { path: 'stubLargeToolPayloads.thresholdBytes', type: 'number', description: '触发阈值（字节，~2K tokens）。推荐：8000', updatable: true, defaultValue: 8000 },
+    { path: 'stubLargeToolPayloads.filesDir', type: 'string', description: '外部文件存储目录（空=默认 ~/.openclaw/lcm-files）。推荐：空字符串', updatable: true, defaultValue: '' },
+    { path: 'stubLargeToolPayloads.freshTailCount', type: 'number', description: '最近 N 条消息不存根（fresh tail 保护，防止最新上下文丢失）。推荐：8', updatable: true, defaultValue: 8 },
 
     // ─── Webhook ─────────────────────────────────────────────────────────
-    { path: 'webhook.enabled', type: 'boolean', description: '是否启用 Webhook', updatable: true, defaultValue: false },
+    { path: 'webhook.enabled', type: 'boolean', description: '是否启用 Webhook（事件回调到自定义地址）。推荐：false（无外部系统时）', updatable: true, defaultValue: false },
     { path: 'webhook.url', type: 'string', description: 'Webhook URL（SSRF 风险，不支持热更新）', updatable: false, defaultValue: '' },
 
     // ─── 日志 ────────────────────────────────────────────────────────────
-    { path: 'logging.level', type: 'string', description: '日志级别：silent | fatal | error | warn | info | debug | trace', updatable: true, defaultValue: 'info' },
-    { path: 'logging.file', type: 'string', description: '日志文件路径', updatable: true, defaultValue: '' },
+    { path: 'logging.level', type: 'string', description: '日志级别：silent | fatal | error | warn | info | debug | trace。silent=完全静默；fatal/error=仅报错；warn=警告+错误；info=常规运行（推荐）；debug=排查问题；trace=全量追踪。推荐：info', updatable: true, defaultValue: 'info' },
+    { path: 'logging.file', type: 'string', description: '日志文件路径（空=仅标准输出）。推荐：空字符串', updatable: true, defaultValue: '' },
 
     // ─── LLM Provider ────────────────────────────────────────────────────
-    { path: 'llmProvider.provider', type: 'string', description: 'LLM Provider 类型', updatable: true, defaultValue: 'openclaw_hooks' },
-    { path: 'llmProvider.model', type: 'string', description: 'LLM 模型名', updatable: true, defaultValue: 'default' },
-    { path: 'llmProvider.maxTokens', type: 'number', description: 'LLM 最大 token 数（8k/16k/24k/32k，根据模型上下文窗口自动匹配）', updatable: true, defaultValue: 32768 },
+    { path: 'llmProvider.provider', type: 'string', description: 'LLM Provider 类型：openclaw_hooks | openai | ollama | deepseek | unsloth | custom。openclaw_hooks=通过 OpenClaw 网关自动路由（推荐默认）；ollama=本地部署；openai/deepseek=云端 API；custom=自定义 BaseURL。推荐：openclaw_hooks', updatable: true, defaultValue: 'openclaw_hooks' },
+    { path: 'llmProvider.model', type: 'string', description: 'LLM 模型名。推荐：default（随 provider 默认）', updatable: true, defaultValue: 'default' },
+    { path: 'llmProvider.maxTokens', type: 'number', description: 'LLM 最大 token 数：8192 | 16384 | 24576 | 32768。按模型上下文窗口匹配：8k(<32k) / 16k(32k-64k) / 24k(64k-128k) / 32k(>=128k)。推荐：32768', updatable: true, defaultValue: 32768 },
 
     // ─── 蒸馏 LLM ────────────────────────────────────────────────────────
-    { path: 'distillationLlm.provider', type: 'string', description: '蒸馏 LLM Provider 类型', updatable: true, defaultValue: 'openclaw_hooks' },
-    { path: 'distillationLlm.model', type: 'string', description: '蒸馏 LLM 模型名', updatable: true, defaultValue: 'ollama/qwen3.6:27b' },
+    { path: 'distillationLlm.provider', type: 'string', description: '蒸馏 LLM Provider 类型：openclaw_hooks | openai | ollama | deepseek | unsloth | custom。经验蒸馏模型，建议用本地强模型。推荐：openclaw_hooks', updatable: true, defaultValue: 'openclaw_hooks' },
+    { path: 'distillationLlm.model', type: 'string', description: '蒸馏 LLM 模型名（建议能力>=27B，本地 qwen3.6:27b 起步）。推荐：ollama/qwen3.6:27b', updatable: true, defaultValue: 'ollama/qwen3.6:27b' },
     { path: 'distillationLlm.apiKey', type: 'string', description: '蒸馏 LLM API Key（脱敏）', updatable: false, defaultValue: '***' },
-    { path: 'distillationLlm.baseURL', type: 'string', description: '蒸馏 LLM Base URL', updatable: true, defaultValue: '' },
-    { path: 'distillationLlm.keepAlive', type: 'string', description: '蒸馏 LLM Keep Alive', updatable: true, defaultValue: '1h' },
+    { path: 'distillationLlm.baseURL', type: 'string', description: '蒸馏 LLM Base URL。custom 时必填。推荐：空字符串', updatable: true, defaultValue: '' },
+    { path: 'distillationLlm.keepAlive', type: 'string', description: '蒸馏 LLM Keep Alive（模型内存驻留时长，如 1h=保留 1 小时）。注意：不是请求超时，超时看 llmTimeouts.distillMs。推荐：1h', updatable: true, defaultValue: '1h' },
 
     // ─── Embedding ───────────────────────────────────────────────────────
-    { path: 'embedding.model', type: 'string', description: 'Embedding 模型名', updatable: true, defaultValue: '' },
+    { path: 'embedding.model', type: 'string', description: 'Embedding 模型名。空=跟随主 Provider。推荐：空字符串', updatable: true, defaultValue: '' },
     { path: 'embedding.apiKey', type: 'string', description: 'Embedding API Key（脱敏）', updatable: false, defaultValue: '***' },
-    { path: 'embedding.baseURL', type: 'string', description: 'Embedding Base URL', updatable: true, defaultValue: '' },
-    { path: 'embedding.dimensions', type: 'number', description: 'Embedding 维度', updatable: true, defaultValue: 0 },
-    { path: 'embedding.keepAlive', type: 'string', description: 'Embedding Keep Alive', updatable: true, defaultValue: '' },
+    { path: 'embedding.baseURL', type: 'string', description: 'Embedding Base URL（走独立 embedding 服务时填）。推荐：空字符串', updatable: true, defaultValue: '' },
+    { path: 'embedding.dimensions', type: 'number', description: 'Embedding 维度（0=模型自带默认）。推荐：0', updatable: true, defaultValue: 0 },
+    { path: 'embedding.keepAlive', type: 'string', description: 'Embedding Keep Alive。推荐：空字符串', updatable: true, defaultValue: '' },
 
     // ─── Dashboard Snapshot ──────────────────────────────────────────────
-    { path: 'dashboardSnapshot.enabled', type: 'boolean', description: '是否启用 Snapshot 服务', updatable: true, defaultValue: true },
+    { path: 'dashboardSnapshot.enabled', type: 'boolean', description: '是否启用 Snapshot 能力服务（端口 7423，供设置页切换能力档次）。推荐：true', updatable: true, defaultValue: true },
     { path: 'dashboardSnapshot.port', type: 'number', description: 'Snapshot 服务端口', updatable: false, defaultValue: 7423 },
     { path: 'dashboardSnapshot.host', type: 'string', description: 'Snapshot 服务监听地址', updatable: false, defaultValue: '127.0.0.1' },
+
+    // ─── MoA 多模型协作（基础字段；复杂嵌套用「高级 JSON 编辑」）────────
+    { path: 'moa.enabled', type: 'boolean', description: '是否启用 MoA 多模型分层协作（多模型会诊复杂问题）。推荐：false（算力充分时开启）', updatable: true, defaultValue: false },
+    { path: 'moa.complexityThreshold', type: 'number', description: '任务复杂度阈值（0-1）：超过此值触发 MoA。推荐：0.6', updatable: true, defaultValue: 0.6 },
+    { path: 'moa.mode', type: 'string', description: '协作模式：auto | parallel | serial。auto=自动判断（本地串行+远程并行，推荐）；parallel=强制并行（快但费 token）；serial=强制串行（省 token、稳）。推荐：auto', updatable: true, defaultValue: 'auto' },
+    { path: 'moa.syncBudgetMs', type: 'number', description: 'Phase1 参考模型同步阶段总时间预算（ms，>=30000）。超时则 fallback 单模型。推荐：240000（4 分钟）', updatable: true, defaultValue: 240000 },
 
     // ─── Neo4j（只读）────────────────────────────────────────────────────
     { path: 'neo4j.uri', type: 'string', description: 'Neo4j Bolt 连接地址', updatable: false, defaultValue: 'bolt://localhost:7687' },
@@ -829,10 +845,11 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         // oneOf → 取第一个选项的类型和默认值
         const first = prop.oneOf[0];
         const type = first?.type ?? 'string';
+        const enumOptions = (prop.enum ?? (first as GmProSchemaProperty)?.enum) as unknown[] | undefined;
         docs.push({
           path,
           type: mapJsonSchemaType(type),
-          description: buildFieldDescription(key, path, prop.description, parentContext, hint),
+          description: buildFieldDescription(key, path, prop.description, parentContext, hint, enumOptions, prop.default ?? first?.default),
           updatable: !isSensitive,
           defaultValue: first?.default ?? prop.default,
         });
@@ -841,7 +858,7 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         docs.push({
           path,
           type: mapJsonSchemaType(type),
-          description: buildFieldDescription(key, path, prop.description, parentContext, hint),
+          description: buildFieldDescription(key, path, prop.description, parentContext, hint, prop.enum as unknown[] | undefined, prop.default),
           updatable: !isSensitive,
           defaultValue: prop.default,
         });
@@ -853,30 +870,48 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
   /**
    * 智能生成字段描述，优先级：
    * 1. uiHints.label（用户显式标注）
-   * 2. schema 中的 description（插件作者提供）
+   * 2. schema 中的 description（插件作者提供） + 附加 enum 列表 + help 推荐
    * 3. 父级上下文 + 路径推断（如 "llm.apiKey" → "LLM API Key"）
    * 4. 字段 key 名兜底
+   *
+   * 枚举列表采用 "：opt1 | opt2 | opt3" 后缀格式，便于前端 parseEnumOptions 解析为 NSelect 选项。
    */
   function buildFieldDescription(
     key: string,
     path: string,
     schemaDesc: string | undefined,
     parentContext: string | undefined,
-    hint: { label?: string } | undefined,
+    hint: { label?: string; help?: string } | undefined,
+    enumOptions: unknown[] | undefined,
+    _defaultValue: unknown,
   ): string {
-    if (hint?.label) return hint.label;
-    if (schemaDesc) return schemaDesc;
+    // 1) 显式 label 直接用（但仍附加 enum/help 让前端解析）
+    const base = hint?.label
+      ? hint.label
+      : schemaDesc
+        ? schemaDesc
+        : (() => {
+            const parts = path.split('.');
+            const contextPrefix = parentContext
+              ? parentContext.split('。')[0].split('：')[0] + ' - '
+              : '';
+            const keyLabel = KEY_LABEL_MAP[key] ?? key;
+            return contextPrefix + keyLabel;
+          })();
 
-    // 无 schema 描述时，从路径生成有意义的描述
-    const parts = path.split('.');
-    // 父级上下文（如父对象 description）提供能力定位
-    const contextPrefix = parentContext
-      ? parentContext.split('。')[0].split('：')[0] + ' - '
-      : '';
+    const pieces: string[] = [base];
 
-    // 根据 key 名生成中文描述
-    const keyLabel = KEY_LABEL_MAP[key] ?? key;
-    return contextPrefix + keyLabel;
+    // 2) 枚举选项 → 追加 "：a | b | c" 格式（便于 parseEnumOptions 抽取）
+    if (enumOptions && enumOptions.length > 0) {
+      pieces.push('：' + enumOptions.map((o) => String(o)).join(' | '));
+    }
+
+    // 3) help → 作为「建议」追加
+    if (hint?.help) {
+      pieces.push('。建议：' + hint.help);
+    }
+
+    return pieces.join('');
   }
 
   /** 常见字段名 → 中文描述映射 */

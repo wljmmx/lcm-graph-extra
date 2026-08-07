@@ -4,11 +4,17 @@
  *
  * 从后端 schema 文档获取可更新字段列表，按分组渲染表单，
  * 用户修改后通过 PATCH /api/config 批量提交。
+ *
+ * v2025.6 增强：
+ * - 支持枚举字段（summaryStrategy/cliFallbackSearchType/logging.level/llmProvider…）→ NSelect 下拉
+ * - 支持敏感字段（apiKey/password/token）→ NInput password 掩码
+ * - 支持 0-1 比例/阈值字段 → NInputNumber 自动加 min/max
+ * - 分组标签扩展：llmProvider/distillationLlm/embedding/webhook/moa/logging/stubLargeToolPayloads/backupConfig/llmTimeouts/neo4j
  */
 import { computed, reactive, watch } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import {
-  NCard, NForm, NFormItem, NInputNumber, NSwitch, NInput,
+  NCard, NForm, NFormItem, NInputNumber, NSwitch, NInput, NSelect,
   NButton, NSpace, NAlert, NDivider, NTag, useMessage,
 } from 'naive-ui';
 import { fetchConfig, fetchConfigSchema, updateConfig } from '../api/config';
@@ -48,11 +54,22 @@ const fieldGroups = computed<FieldGroup[]>(() => {
 
   const groupLabels: Record<string, string> = {
     general: '通用',
-    compaction: '压缩',
-    experience: '经验提取',
+    compaction: '上下文压缩 (Compaction)',
+    experience: '经验提取 (Experience)',
     ttl: 'TTL 清理',
-    retrieval: '检索限额',
-    lcmMonitor: '上下文监控',
+    retrieval: '双引擎检索 (Retrieval)',
+    lcmMonitor: '上下文监控 (LCM Monitor)',
+    llmTimeouts: 'LLM 调用超时',
+    backupConfig: '自动备份',
+    stubLargeToolPayloads: '大工具负载分片',
+    webhook: 'Webhook 回调',
+    logging: '日志',
+    llmProvider: '主 LLM Provider',
+    distillationLlm: '蒸馏 LLM',
+    embedding: 'Embedding 模型',
+    dashboardSnapshot: '能力档次服务',
+    moa: 'MoA 多模型协作',
+    neo4j: 'Neo4j 连接（只读）',
   };
 
   return Array.from(groupMap.entries()).map(([name, fields]) => ({
@@ -125,6 +142,44 @@ function saveConfig(): void {
   }
   configMutation.mutate(updates);
 }
+
+// ===== 字段渲染辅助（与 GmPro 卡片保持一致） =====
+
+/** 从 description 中解析枚举选项（如 "策略：strategy | hybrid | full"） */
+function parseEnumOptions(field: SchemaFieldDoc): string[] | null {
+  // 匹配 "：a | b | c" 或 ": a | b | c" 结尾/中间的模式
+  const match = field.description.match(/[：:]\s*([^：:|]+(?:\s*\|\s*[^：:|]+)+)/);
+  if (match) {
+    return match[1].split('|').map(s => s.trim()).filter(Boolean);
+  }
+  return null;
+}
+
+/** 判断字段是否为敏感信息（API Key / password / token 等） */
+function isSensitiveField(field: SchemaFieldDoc): boolean {
+  const lower = field.path.toLowerCase();
+  return lower.endsWith('apikey') || lower.endsWith('authtoken') || lower.includes('password') ||
+    field.description.toLowerCase().includes('密钥') || field.description.toLowerCase().includes('token');
+}
+
+/** 是否只读字段（updatable=false，展示为 disabled 输入框） */
+function isReadonly(field: SchemaFieldDoc): boolean {
+  return !field.updatable;
+}
+
+/** 获取数字字段的最小值 */
+function getMin(field: SchemaFieldDoc): number | undefined {
+  if (field.description.includes('0-1') || field.description.includes('（0-1）')) return 0;
+  if (field.description.includes('阈值') || field.description.includes('占比') || field.description.includes('比例')) return 0;
+  return undefined;
+}
+
+/** 获取数字字段的最大值 */
+function getMax(field: SchemaFieldDoc): number | undefined {
+  if (field.description.includes('0-1') || field.description.includes('（0-1）')) return 1;
+  if (field.description.includes('占比') || field.description.includes('比例')) return 1;
+  return undefined;
+}
 </script>
 
 <template>
@@ -152,32 +207,74 @@ function saveConfig(): void {
         <NDivider v-if="fieldGroups.length > 1" title-placement="left" style="margin: 0 0 8px">
           {{ group.label }}
         </NDivider>
-        <NForm label-placement="left" label-width="180" size="small">
+        <NForm label-placement="left" label-width="220" size="small">
           <NFormItem
             v-for="field in group.fields"
             :key="field.path"
             :label="field.description"
           >
+            <!-- 只读字段：禁用样式的 NInput，提示「只读」 -->
+            <template v-if="isReadonly(field)">
+              <NInput
+                size="small"
+                style="width: 260px"
+                :value="String(editValues[field.path] ?? '')"
+                disabled
+                clearable
+              />
+              <template #feedback>
+                <span style="font-size: 11px; color: var(--color-text-tertiary)">
+                  {{ field.path }} · 只读 · 默认: {{ String(field.defaultValue ?? '—') }}
+                </span>
+              </template>
+            </template>
+
             <!-- boolean → NSwitch -->
             <NSwitch
-              v-if="field.type === 'boolean'"
+              v-else-if="field.type === 'boolean'"
               size="small"
               :value="editValues[field.path] as boolean"
               @update:value="(v: boolean) => { editValues[field.path] = v; }"
             />
-            <!-- number → NInputNumber -->
+
+            <!-- enum string → NSelect -->
+            <NSelect
+              v-else-if="field.type === 'string' && parseEnumOptions(field)"
+              size="small"
+              style="width: 320px"
+              :value="String(editValues[field.path] ?? '')"
+              :options="parseEnumOptions(field)!.map(opt => ({ label: opt, value: opt }))"
+              @update:value="(v: string) => { editValues[field.path] = v; }"
+            />
+
+            <!-- sensitive string → NInput password + show-password-on="click" -->
+            <NInput
+              v-else-if="field.type === 'string' && isSensitiveField(field)"
+              size="small"
+              style="width: 280px"
+              type="password"
+              show-password-on="click"
+              placeholder="已配置（脱敏显示，留空不修改）"
+              :value="String(editValues[field.path] ?? '')"
+              @update:value="(v: string) => { editValues[field.path] = v; }"
+            />
+
+            <!-- number → NInputNumber 带 min/max -->
             <NInputNumber
               v-else-if="field.type === 'number'"
               size="small"
-              style="width: 160px"
+              style="width: 180px"
+              :min="getMin(field)"
+              :max="getMax(field)"
               :value="editValues[field.path] as number"
               @update:value="(v: number | null) => { editValues[field.path] = v ?? 0; }"
             />
-            <!-- string → NInput -->
+
+            <!-- plain string → NInput -->
             <NInput
               v-else
               size="small"
-              style="width: 200px"
+              style="width: 320px"
               :value="String(editValues[field.path] ?? '')"
               @update:value="(v: string) => { editValues[field.path] = v; }"
             />
