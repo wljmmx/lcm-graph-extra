@@ -1718,7 +1718,7 @@ const moaLatencyPhaseOption = computed(() => {
         tab="🔧 服务状态"
         display-directive="show"
       >
-        <!-- 错误态穿透（H2 修复）：聚合错误条，替代把错误误显示为"插件未响应" -->
+        <!-- 错误态穿透 -->
         <NAlert
           v-if="latestIsError || graphHealthIsError || agentIsError"
           type="error"
@@ -1728,602 +1728,449 @@ const moaLatencyPhaseOption = computed(() => {
         >
           {{ failedPanelSummary }}。服务恢复后将自动重试。
         </NAlert>
-        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
-        <!-- 熔断状态 -->
-        <NGi>
-          <NCard title="熔断状态" size="small">
-            <template v-if="db">
-              <StatusIndicator
-                label="LCM"
-                :available="db.cbLcmAvailable"
-                :failures="db.cbLcmFailures"
-              />
-              <StatusIndicator
-                label="QMD"
-                :available="db.cbQmdAvailable"
-                :failures="db.cbQmdFailures"
-              />
-              <StatusIndicator
-                label="Neo4j"
-                :available="db.cbNeo4jAvailable"
-                :failures="db.cbNeo4jFailures"
-              />
-            </template>
-            <NEmpty v-else description="无历史数据" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
 
-        <!-- v1.1-7: 降级链路状态（实时展示 L1/L2/L3/L4 + gm-pro 各路径状态） -->
-        <NGi>
-          <NCard title="降级链路状态" size="small">
-            <template v-if="memory">
-              <!-- 各检索层状态指示灯（形状+符号双重编码，不单靠颜色） -->
-              <ul class="layer-grid" role="list">
-                <li class="layer-cell">
-                  <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L1 ? '✗' : '✓' }}</span>
-                  <span class="layer-label">L1 QMD<span class="sr-only">{{ layerStatus.L1 ? '降级' : '正常' }}</span></span>
-                </li>
-                <li class="layer-cell">
-                  <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L2 ? '✗' : '✓' }}</span>
-                  <span class="layer-label">L2 熔断<span class="sr-only">{{ layerStatus.L2 ? '降级' : '正常' }}</span></span>
-                </li>
-                <li class="layer-cell">
-                  <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L3 ? '✗' : '✓' }}</span>
-                  <span class="layer-label">L3 图谱<span class="sr-only">{{ layerStatus.L3 ? '降级' : '正常' }}</span></span>
-                </li>
-                <li class="layer-cell">
-                  <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L4 ? '✗' : '✓' }}</span>
-                  <span class="layer-label">L4 经验<span class="sr-only">{{ layerStatus.L4 ? '降级' : '正常' }}</span></span>
-                </li>
-                <li class="layer-cell">
-                  <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.gmPro ? '✗' : '✓' }}</span>
-                  <span class="layer-label">gm-pro<span class="sr-only">{{ layerStatus.gmPro ? '降级' : '正常' }}</span></span>
-                </li>
-              </ul>
-              <!-- UX 摘要 -->
-              <NDescriptions :column="1" size="small" label-placement="left" bordered style="margin-top: 8px">
-                <NDescriptionsItem label="降级率">
-                  <NTag :type="degradationTagType" size="small">
-                    {{ (uxSummary.degradationRate * 100).toFixed(1) }}%
-                  </NTag>
-                  <span class="muted mono" style="margin-left: 6px">
-                    {{ uxSummary.degradedCount }}/{{ uxSummary.totalAssembles }}
-                  </span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Token 节省率">
-                  <span class="mono">{{ (uxSummary.tokenSavedRatio * 100).toFixed(1) }}%</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="经验命中率">
-                  <span class="mono">{{ (uxSummary.experienceHitRate * 100).toFixed(1) }}%</span>
-                </NDescriptionsItem>
-              </NDescriptions>
-              <!-- 最近一次降级原因 -->
-              <div v-if="lastDegradedReasons.length" class="profile-section" style="margin-top: 8px">
-                <div class="profile-label">最近降级原因</div>
-                <NSpace :size="4">
-                  <NTag
-                    v-for="r in lastDegradedReasons"
-                    :key="r"
-                    size="small"
-                    type="warning"
-                  >
-                    {{ r }}
-                  </NTag>
-                </NSpace>
-              </div>
-              <div v-else class="muted" style="margin-top: 8px; font-size: var(--fs-caption)">
-                最近一次 assemble 未触发降级
-              </div>
-            </template>
-            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
+        <!-- ═══════════════ 核心服务 ═══════════════ -->
+        <NDivider title-placement="left" style="margin: 4px 0 12px">核心服务</NDivider>
 
-        <!-- Cascade 面板 -->
-        <NGi>
-          <NCard title="Cascade" size="small">
-            <template v-if="memory">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="arms 数量">
-                  {{ memory.cascade?.armsCount ?? 0 }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="置信阈值">
-                  {{ memory.cascade?.confidenceThreshold ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Tier1 置信度">
-                  <span v-if="cascadeTier1Confidence !== null" class="mono">
-                    {{ cascadeTier1Confidence }}
-                  </span>
-                  <span v-else class="muted">—</span>
-                  <NTag
-                    v-if="cascadeJudgeSource"
-                    size="small"
-                    :type="cascadeJudgeSource === 'gm-pro' ? 'success' : 'default'"
-                    style="margin-left: 6px"
-                  >
-                    {{ cascadeJudgeSource }}
-                  </NTag>
-                </NDescriptionsItem>
-              </NDescriptions>
-              <EChart
-                v-if="cascadeTopArms.length"
-                :option="betaOption"
-                height="220px"
-                aria-label="Cascade Top 10 臂分布柱状图：各臂的 alpha 和 beta 权重"
-              />
-              <NEmpty
-                v-else
-                size="small"
-                description="无 arm 数据"
-                style="margin: 12px 0"
-              />
-            </template>
-            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- 用户画像 -->
-        <NGi>
-          <NCard title="用户画像" size="small">
-            <template v-if="memory">
-              <div class="profile-section">
-                <div class="profile-label">技术栈 Top5</div>
-                <NSpace :size="4" v-if="topTechStack.length">
-                  <NTag
-                    v-for="t in topTechStack"
-                    :key="t.name"
-                    size="small"
-                    type="info"
-                  >
-                    {{ t.name }} ({{ t.weight }})
-                  </NTag>
-                </NSpace>
-                <span v-else class="muted">—</span>
-              </div>
-              <div class="profile-section">
-                <div class="profile-label">场景 Top5</div>
-                <NSpace :size="4" v-if="topScenario.length">
-                  <NTag
-                    v-for="s in topScenario"
-                    :key="s.name"
-                    size="small"
-                    type="success"
-                  >
-                    {{ s.name }} ({{ s.weight }})
-                  </NTag>
-                </NSpace>
-                <span v-else class="muted">—</span>
-              </div>
-              <div class="profile-section">
-                <span class="profile-label">语言：</span>
-                <NTag size="small">{{ userLanguage }}</NTag>
-              </div>
-            </template>
-            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- 债务调度 -->
-        <NGi>
-          <NCard title="债务调度" size="small">
-            <template v-if="memory">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="running">
-                  {{ memory.debt?.running ?? 0 }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="pendingCount">
-                  {{ memory.debt?.pendingCount ?? 0 }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="pollIntervalMs">
-                  {{ memory.debt?.pollIntervalMs ?? 0 }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="maxConcurrent">
-                  {{ memory.debt?.maxConcurrent ?? 0 }}
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- 检索状态 -->
-        <NGi>
-          <NCard title="检索状态" size="small">
-            <template v-if="memory">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="最近查询">
-                  <span class="mono">{{ memory.retrieval?.lastQuery || '—' }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="性能摘要">
-                  <span class="mono">{{ memory.retrieval?.perfSummary || '—' }}</span>
-                </NDescriptionsItem>
-              </NDescriptions>
-              <div class="profile-section">
-                <div class="profile-label">图谱适配器</div>
-                <StatusIndicator
-                  label="Neo4j"
-                  mode="connection"
-                  :available="!!memory.graphAdapter?.connected"
-                  :failures="memory.graphAdapter?.circuitBreaker?.failures ?? (memory.graphAdapter?.connectFailed ? 1 : 0)"
-                />
-                <div v-if="memory.graphAdapter?.circuitBreaker?.open" class="muted mono" style="color: var(--n-error-color)">
-                  熔断已触发 (failures: {{ memory.graphAdapter.circuitBreaker.failures }})
-                </div>
-                <div v-else-if="memory.graphAdapter?.lastError" class="muted mono">
-                  {{ memory.graphAdapter.lastError }}
-                </div>
-              </div>
-              <div class="profile-section" style="margin-top: 8px">
-                <div class="profile-label">QMD 熔断器</div>
-                <StatusIndicator
-                  label="QMD"
-                  :available="memory.retrieval?.qmdCircuitBreaker?.available ?? true"
-                  :failures="memory.retrieval?.qmdCircuitBreaker?.failures ?? 0"
-                />
-                <div v-if="memory.retrieval?.qmdCircuitBreaker?.open" class="muted mono" style="color: var(--n-error-color)">
-                  熔断已触发 (failures: {{ memory.retrieval.qmdCircuitBreaker.failures }})
-                </div>
-              </div>
-            </template>
-            <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- G-5: 图谱健康卡片（增强：gm-pro 双层数据源 + Top10 柱状图 + 脏节点监控） -->
-        <NGi>
-          <NCard title="图谱健康" size="small">
-            <!-- 基础层：内部 graphHealth（降级到本地 graphAdapter） -->
-            <div v-if="graphHealthLoading && !graphHealth" class="card-loading">
-              <NSpin size="small" />
+        <!-- gm-pro 服务状态（全宽表格） -->
+        <NCard title="gm-pro 服务状态" size="small" style="margin-bottom: 12px">
+          <template v-if="gmProServices">
+            <div class="svc-header-row">
+              <NTag type="info" size="small">v{{ gmProServices.version }}</NTag>
+              <span class="muted" style="font-size:var(--fs-caption)">
+                {{ gmProServices.timestamp ? (gmProServices.timestamp as string).slice(0, 19).replace('T', ' ') : '—' }}
+              </span>
             </div>
-            <NEmpty v-else-if="!graphHealth" description="无图谱健康数据" style="padding: 12px 0" />
-
-            <template v-else>
-              <!-- 数据源标签 -->
-              <div class="profile-section" style="margin-bottom: 8px">
-                <NTag :type="graphHealthTagType" size="small">
-                  {{ graphHealth.status }}
-                </NTag>
-                <NTag :type="graphHealthSourceTagType" size="small" style="margin-left: 6px">
-                  source: {{ graphHealth.source }}
-                </NTag>
-              </div>
-
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="nodeCount">
-                  {{ graphHealth.nodeCount ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="relationshipCount">
-                  {{ graphHealth.relationshipCount ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="graphAdapter">
-                  <StatusIndicator
-                    label="connected"
-                    mode="connection"
-                    :available="!!graphHealth.graphAdapterConnected"
-                    :failures="graphHealth.circuitBreakerFailures ?? 0"
-                  />
-                </NDescriptionsItem>
-                <NDescriptionsItem v-if="graphHealth.circuitBreakerOpen !== undefined" label="熔断器">
-                  <NTag :type="graphHealth.circuitBreakerOpen ? 'error' : 'success'" size="small">
-                    {{ graphHealth.circuitBreakerOpen ? 'OPEN (熔断)' : 'CLOSED (正常)' }}
-                  </NTag>
-                  <span class="mono" style="margin-left: 6px">failures: {{ graphHealth.circuitBreakerFailures ?? 0 }}</span>
-                </NDescriptionsItem>
-              </NDescriptions>
-              <div v-if="graphHealth.error" class="muted mono" style="margin-top: 6px">
-                {{ graphHealth.error }}
-              </div>
-            </template>
-
-            <!-- gm-pro 增强层：健康概览 -->
-            <NDivider v-if="gmProHealth" style="margin: 8px 0" />
-            <template v-if="gmProHealth">
-              <div class="profile-section" style="margin-bottom: 4px">
-                <NTag type="success" size="small">gm-pro 健康概览</NTag>
-              </div>
-              <NGrid :cols="'2 s:2 m:3'" :x-gap="8" :y-gap="4" responsive="screen">
-                <NGi>
-                  <div class="health-stat">
-                    <span class="health-stat-label">活跃节点</span>
-                    <span class="health-stat-value">{{ gmProHealth.nodes?.active ?? '—' }} / {{ gmProHealth.nodes?.total ?? '—' }}</span>
-                  </div>
-                </NGi>
-                <NGi>
-                  <div class="health-stat">
-                    <span class="health-stat-label">孤立节点</span>
-                    <span class="health-stat-value" :class="{ 'text-warning': (gmProHealth.isolatedNodes ?? 0) > 0 }">{{ gmProHealth.isolatedNodes ?? '—' }}</span>
-                  </div>
-                </NGi>
-                <NGi>
-                  <div class="health-stat">
-                    <span class="health-stat-label">高过时节点</span>
-                    <span class="health-stat-value" :class="{ 'text-danger': (gmProHealth.highStaleNodes ?? 0) > 0 }">{{ gmProHealth.highStaleNodes ?? '—' }}</span>
-                  </div>
-                </NGi>
-                <NGi>
-                  <div class="health-stat">
-                    <span class="health-stat-label">社区数</span>
-                    <span class="health-stat-value">{{ gmProHealth.communities ?? '—' }}</span>
-                  </div>
-                </NGi>
-                <NGi>
-                  <div class="health-stat">
-                    <span class="health-stat-label">平均 PageRank</span>
-                    <span class="health-stat-value mono">{{ gmProHealth.avgPageRank?.toFixed(4) ?? '—' }}</span>
-                  </div>
-                </NGi>
-                <NGi v-if="gmProHealth.anomalies?.length">
-                  <div class="health-stat">
-                    <span class="health-stat-label">异常</span>
-                    <span class="health-stat-value text-warning">{{ gmProHealth.anomalies.length }} 项</span>
-                  </div>
-                </NGi>
-              </NGrid>
-              <!-- 异常详情 -->
-              <div v-if="gmProHealth.anomalies?.length" style="margin-top: 6px">
-                <NSpace :size="4">
-                  <NTag v-for="a in gmProHealth.anomalies" :key="a" size="small" type="warning">{{ a }}</NTag>
-                </NSpace>
-              </div>
-            </template>
-
-            <!-- gm-pro 增强层：熔断器状态 -->
-            <template v-if="gmProHealth?.circuitBreakers">
-              <NDivider style="margin: 8px 0">熔断器</NDivider>
-              <div v-for="(cb, name) in gmProHealth.circuitBreakers" :key="name" style="display:flex;align-items:center;gap:8px;padding:2px 0">
-                <span class="mono" style="font-size:var(--fs-caption);min-width:56px">{{ name }}</span>
-                <NTag :type="(cb as any).open ? 'error' : 'success'" size="tiny">
-                  {{ (cb as any).open ? 'OPEN' : 'CLOSED' }}
-                </NTag>
-                <span class="muted" style="font-size:var(--fs-caption)">failures: {{ (cb as any).failures ?? 0 }}</span>
-              </div>
-            </template>
-
-            <!-- gm-pro 增强层：Top 10 PageRank 柱状图 -->
-            <template v-if="gmProTop10.length">
-              <NDivider style="margin: 8px 0">Top 10 PageRank</NDivider>
-              <EChart
-                v-if="top10ChartOption"
-                :option="top10ChartOption"
-                :height="200"
-                :loading="false"
-              />
-              <NEmpty v-else description="无图表数据" style="padding: 8px 0" />
-            </template>
-
-            <!-- gm-pro 增强层：脏节点监控 -->
-            <template v-if="gmProDirty">
-              <NDivider style="margin: 8px 0">增量维护</NDivider>
-              <div style="display:flex;align-items:center;gap:8px">
-                <NTag :type="(gmProDirty.count ?? 0) > 0 ? 'warning' : 'success'" size="small">
-                  脏节点: {{ gmProDirty.count ?? 0 }} 个
-                </NTag>
-                <span v-if="(gmProDirty.nodeIds as string[])?.length" class="muted" style="font-size:var(--fs-caption)">
-                  {{ (gmProDirty.nodeIds as string[]).slice(0, 3).join(', ') }}{{ (gmProDirty.nodeIds as string[]).length > 3 ? '…' : '' }}
-                </span>
-              </div>
-            </template>
-          </NCard>
-        </NGi>
-
-        <!-- G-5.4: gm-pro 社区概览 -->
-        <NGi>
-          <NCard title="社区概览" size="small">
-            <template v-if="gmProCommunities.length">
-              <div style="max-height:260px;overflow-y:auto">
-                <div
-                  v-for="c in gmProCommunities.slice(0, 10)"
-                  :key="c.communityId"
-                  style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--color-border-subtle)"
-                >
-                  <span class="mono" style="font-size:11px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="c.communityId">
-                    {{ c.communityId.slice(0, 12) + '…' }}
-                  </span>
-                  <NTag size="tiny" :bordered="false">{{ c.memberCount }} 成员</NTag>
-                  <span style="font-size:var(--fs-caption);color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
-                    {{ c.summary?.slice(0, 80) }}{{ c.summary?.length > 80 ? '…' : '' }}
-                  </span>
-                </div>
-              </div>
-              <div v-if="gmProCommunities.length > 10" class="muted" style="font-size:var(--fs-caption);margin-top:4px">
-                共 {{ gmProCommunities.length }} 个社区，仅显示前 10 个
-              </div>
-            </template>
-            <NEmpty v-else description="暂无社区数据" style="padding:12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- G-5.5: gm-pro LLM Token 用量 -->
-        <NGi>
-          <NCard title="LLM Token 用量" size="small">
-            <template v-if="gmProUsage">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="总调用次数">
-                  <span class="mono">{{ gmProUsage.total?.calls ?? '—' }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="总 Token 消耗">
-                  <span class="mono">{{ formatTokens(gmProUsage.total?.totalTokens ?? 0) }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Prompt Tokens">
-                  <span class="mono">{{ formatTokens(gmProUsage.total?.promptTokens ?? 0) }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Completion Tokens">
-                  <span class="mono">{{ formatTokens(gmProUsage.total?.completionTokens ?? 0) }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem v-if="gmProUsage.byModel" label="模型分布">
-                  <div style="max-height:100px;overflow-y:auto">
-                    <div v-for="(v, k) in (gmProUsage.byModel as Record<string, any>)" :key="k" style="font-size:var(--fs-caption);padding:2px 0">
-                      <span class="mono">{{ k }}:</span> {{ formatTokens(v.totalTokens ?? 0) }}
-                    </div>
-                  </div>
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-            <NEmpty v-else description="暂无用量数据" style="padding:12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- G-5.6: gm-pro AutoTuner 状态 -->
-        <NGi>
-          <NCard title="AutoTuner 调优" size="small">
-            <template v-if="gmProTuner">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="状态">
-                  <NTag size="small" :type="gmProTuner.enabled ? 'success' : 'default'">
-                    {{ gmProTuner.enabled ? '已启用' : '未启用' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="数据可用">
-                  <NTag size="small" :type="gmProTuner.available ? 'success' : 'warning'">
-                    {{ gmProTuner.available ? '是' : '否' }}
-                  </NTag>
-                  <span v-if="!gmProTuner.available && gmProTuner.reason" class="muted" style="font-size:var(--fs-caption);margin-left:6px">
-                    {{ gmProTuner.reason }}
-                  </span>
-                </NDescriptionsItem>
-                <template v-if="gmProTuner.available">
-                  <NDescriptionsItem label="调优轮次">
-                    <span class="mono">{{ gmProTuner.state?.totalRounds ?? '—' }}</span>
-                  </NDescriptionsItem>
-                  <NDescriptionsItem label="快照数">
-                    <span class="mono">{{ gmProTuner.state?.snapshots?.length ?? '—' }}</span>
-                  </NDescriptionsItem>
-                </template>
-              </NDescriptions>
-            </template>
-            <NEmpty v-else description="暂无调优数据" style="padding:12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- G-5.7: gm-pro 服务状态 -->
-        <NGi>
-          <NCard title="gm-pro 服务状态" size="small">
-            <template v-if="gmProServices">
-              <div class="profile-section" style="margin-bottom:4px">
-                <span class="muted" style="font-size:var(--fs-caption)">
-                  v{{ gmProServices.version }} · {{ gmProServices.timestamp ? (gmProServices.timestamp as string).slice(0, 19).replace('T', ' ') : '—' }}
-                </span>
-              </div>
-              <div style="max-height:240px;overflow-y:auto">
-                <div
-                  v-for="svc in (gmProServices.services ?? [])"
-                  :key="svc.name"
-                  style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid var(--color-border-subtle)"
-                >
-                  <span class="mono" style="font-size:11px;min-width:80px">{{ svc.name }}</span>
-                  <NTag
-                    size="tiny"
-                    :type="svc.status === 'connected' || svc.status === 'running' || svc.status === 'ok' || svc.status === 'configured' || svc.status === 'initialized' ? 'success' : svc.status === 'disconnected' || svc.status === 'not-initialized' ? 'error' : 'warning'"
-                  >
-                    {{ svc.status }}
-                  </NTag>
-                  <span v-if="svc.detail" class="muted" style="font-size:11px">
-                    {{ typeof svc.detail === 'object' ? JSON.stringify(svc.detail).slice(0, 60) : String(svc.detail).slice(0, 60) }}
-                  </span>
-                </div>
-              </div>
-            </template>
-            <NEmpty v-else description="暂无服务状态" style="padding:12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- G-5.8: gm-pro 系统诊断 (Doctor) -->
-        <NGi>
-          <NCard title="系统诊断 (Doctor)" size="small">
-            <template v-if="gmProDoctor">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="Neo4j">
-                  <NTag :type="(gmProDoctor as any).neo4j?.ok ? 'success' : 'error'" size="small">
-                    {{ (gmProDoctor as any).neo4j?.ok ? '连通' : '异常' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="LLM">
-                  <NTag :type="(gmProDoctor as any).llm?.ok ? 'success' : 'error'" size="small">
-                    {{ (gmProDoctor as any).llm?.ok ? '连通' : '异常' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Embedding">
-                  <NTag :type="(gmProDoctor as any).embedding?.ok ? 'success' : 'error'" size="small">
-                    {{ (gmProDoctor as any).embedding?.ok ? '连通' : '异常' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem v-if="(gmProDoctor as any).issues?.length" label="问题">
-                  <NSpace :size="4">
-                    <NTag v-for="(issue, i) in (gmProDoctor as any).issues" :key="i" size="small" type="warning">
-                      {{ issue }}
+            <!-- 服务列表表格 -->
+            <table class="svc-table" v-if="(gmProServices.services ?? []).length">
+              <thead>
+                <tr>
+                  <th>服务</th>
+                  <th>状态</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="svc in (gmProServices.services ?? [])" :key="svc.name">
+                  <td class="mono svc-name">{{ svc.name }}</td>
+                  <td>
+                    <NTag
+                      size="tiny"
+                      :type="svc.status === 'connected' || svc.status === 'running' || svc.status === 'ok' || svc.status === 'configured' || svc.status === 'initialized' ? 'success' : svc.status === 'disconnected' || svc.status === 'not-initialized' || svc.status === 'error' ? 'error' : 'warning'"
+                    >
+                      {{ svc.status }}
                     </NTag>
-                  </NSpace>
-                </NDescriptionsItem>
-              </NDescriptions>
+                  </td>
+                  <td class="svc-detail">
+                    <template v-if="svc.detail">
+                      <span v-if="typeof svc.detail === 'object' && !Array.isArray(svc.detail)">
+                        <span v-for="(v, k) in (svc.detail as Record<string, unknown>)" :key="k" class="svc-detail-kv">
+                          <span class="muted">{{ k }}:</span> {{ typeof v === 'object' ? JSON.stringify(v).slice(0, 80) : String(v).slice(0, 80) }}
+                        </span>
+                      </span>
+                      <span v-else class="muted">{{ String(svc.detail).slice(0, 120) }}</span>
+                    </template>
+                    <span v-else class="muted">—</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <NEmpty v-else description="服务列表为空" style="padding:8px 0" />
+          </template>
+          <NEmpty v-else description="gm-pro 服务不可达" style="padding:12px 0">
+            <template #extra>
+              <span class="muted" style="font-size:var(--fs-caption)">请确认 graph-memory-pro HTTP 服务 (端口 7850) 已启动且 GM_PRO_AUTH_TOKEN 配置正确。</span>
             </template>
-            <NEmpty v-else description="暂无诊断报告" style="padding:12px 0" />
-          </NCard>
-        </NGi>
+          </NEmpty>
+        </NCard>
 
-        <!-- G-5.9: gm-pro 关联矩阵 M -->
-        <NGi>
-          <NCard title="关联矩阵 M" size="small">
-            <template v-if="gmProAm">
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="维度">
-                  <span class="mono">{{ (gmProAm as any).dimensions ?? '—' }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="时间步">
-                  <span class="mono">{{ (gmProAm as any).timeSteps ?? '—' }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="已应用">
-                  <span class="mono">{{ (gmProAm as any).applied ?? '—' }}</span>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="被拒">
-                  <span class="mono">{{ (gmProAm as any).rejected ?? '—' }}</span>
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-            <NEmpty v-else description="暂无关联矩阵数据" style="padding:12px 0" />
-          </NCard>
-        </NGi>
-
-        <!-- Agent 状态 -->
-        <NGi>
-          <NCard title="Agent 状态" size="small">
-            <div v-if="agentLoading && !agent" class="card-loading">
-              <NSpin size="small" />
-            </div>
-            <template v-else-if="agent">
-              <div class="profile-section">
-                <NTag :type="agent.online ? 'success' : 'error'" size="small">
-                  {{ agent.online ? '在线' : '离线' }}
-                </NTag>
+        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <!-- Agent 状态 -->
+          <NGi>
+            <NCard title="Agent 状态" size="small">
+              <div v-if="agentLoading && !agent" class="card-loading">
+                <NSpin size="small" />
               </div>
-              <NAlert
-                v-if="agent.error"
-                type="warning"
-                :show-icon="true"
-                style="margin: 8px 0"
-              >
-                {{ agent.error }}
-              </NAlert>
-              <NDescriptions
-                v-if="agentExtraFields.length"
-                :column="1"
-                size="small"
-                label-placement="left"
-                bordered
-              >
-                <NDescriptionsItem
-                  v-for="f in agentExtraFields"
-                  :key="f.key"
-                  :label="f.key"
+              <template v-else-if="agent">
+                <div class="profile-section">
+                  <NTag :type="agent.online ? 'success' : 'error'" size="small">
+                    {{ agent.online ? '在线' : '离线' }}
+                  </NTag>
+                </div>
+                <NAlert
+                  v-if="agent.error"
+                  type="warning"
+                  :show-icon="true"
+                  style="margin: 8px 0"
                 >
-                  <span class="mono">{{ f.value }}</span>
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-            <NEmpty v-else description="无 Agent 数据" style="padding: 12px 0" />
-          </NCard>
-        </NGi>
-      </NGrid>
+                  {{ agent.error }}
+                </NAlert>
+                <NDescriptions
+                  v-if="agentExtraFields.length"
+                  :column="1"
+                  size="small"
+                  label-placement="left"
+                  bordered
+                >
+                  <NDescriptionsItem
+                    v-for="f in agentExtraFields"
+                    :key="f.key"
+                    :label="f.key"
+                  >
+                    <span class="mono">{{ f.value }}</span>
+                  </NDescriptionsItem>
+                </NDescriptions>
+              </template>
+              <NEmpty v-else description="无 Agent 数据" style="padding: 12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- 熔断状态 -->
+          <NGi>
+            <NCard title="熔断状态" size="small">
+              <template v-if="db">
+                <StatusIndicator label="LCM" :available="db.cbLcmAvailable" :failures="db.cbLcmFailures" />
+                <StatusIndicator label="QMD" :available="db.cbQmdAvailable" :failures="db.cbQmdFailures" />
+                <StatusIndicator label="Neo4j" :available="db.cbNeo4jAvailable" :failures="db.cbNeo4jFailures" />
+              </template>
+              <NEmpty v-else description="无历史数据" style="padding: 12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- 降级链路状态 -->
+          <NGi>
+            <NCard title="降级链路" size="small">
+              <template v-if="memory">
+                <ul class="layer-grid" role="list">
+                  <li class="layer-cell">
+                    <span class="dot" :class="layerStatus.L1 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L1 ? '✗' : '✓' }}</span>
+                    <span class="layer-label">L1 QMD</span>
+                  </li>
+                  <li class="layer-cell">
+                    <span class="dot" :class="layerStatus.L2 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L2 ? '✗' : '✓' }}</span>
+                    <span class="layer-label">L2 熔断</span>
+                  </li>
+                  <li class="layer-cell">
+                    <span class="dot" :class="layerStatus.L3 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L3 ? '✗' : '✓' }}</span>
+                    <span class="layer-label">L3 图谱</span>
+                  </li>
+                  <li class="layer-cell">
+                    <span class="dot" :class="layerStatus.L4 ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.L4 ? '✗' : '✓' }}</span>
+                    <span class="layer-label">L4 经验</span>
+                  </li>
+                  <li class="layer-cell">
+                    <span class="dot" :class="layerStatus.gmPro ? 'dot-fail' : 'dot-ok'" aria-hidden="true">{{ layerStatus.gmPro ? '✗' : '✓' }}</span>
+                    <span class="layer-label">gm-pro</span>
+                  </li>
+                </ul>
+                <NDescriptions :column="1" size="small" label-placement="left" bordered style="margin-top: 8px">
+                  <NDescriptionsItem label="降级率">
+                    <NTag :type="degradationTagType" size="small">{{ (uxSummary.degradationRate * 100).toFixed(1) }}%</NTag>
+                    <span class="muted mono" style="margin-left:6px">{{ uxSummary.degradedCount }}/{{ uxSummary.totalAssembles }}</span>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="Token 节省率">
+                    <span class="mono">{{ (uxSummary.tokenSavedRatio * 100).toFixed(1) }}%</span>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="经验命中率">
+                    <span class="mono">{{ (uxSummary.experienceHitRate * 100).toFixed(1) }}%</span>
+                  </NDescriptionsItem>
+                </NDescriptions>
+                <div v-if="lastDegradedReasons.length" class="profile-section" style="margin-top:8px">
+                  <div class="profile-label">最近降级原因</div>
+                  <NSpace :size="4">
+                    <NTag v-for="r in lastDegradedReasons" :key="r" size="small" type="warning">{{ r }}</NTag>
+                  </NSpace>
+                </div>
+              </template>
+              <NEmpty v-else description="插件未响应" style="padding: 12px 0" />
+            </NCard>
+          </NGi>
+        </NGrid>
+
+        <!-- ═══════════════ 图谱健康 ═══════════════ -->
+        <NDivider title-placement="left" style="margin: 16px 0 12px">图谱健康</NDivider>
+
+        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <!-- 图谱健康 + 社区（Tab 合并） -->
+          <NGi>
+            <NCard title="图谱健康" size="small">
+              <div v-if="graphHealthLoading && !graphHealth" class="card-loading"><NSpin size="small" /></div>
+              <NEmpty v-else-if="!graphHealth" description="无图谱健康数据" style="padding:12px 0" />
+
+              <template v-else>
+                <div class="profile-section" style="margin-bottom:8px">
+                  <NTag :type="graphHealthTagType" size="small">{{ graphHealth.status }}</NTag>
+                  <NTag :type="graphHealthSourceTagType" size="small" style="margin-left:6px">source: {{ graphHealth.source }}</NTag>
+                </div>
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="nodeCount">{{ graphHealth.nodeCount ?? '—' }}</NDescriptionsItem>
+                  <NDescriptionsItem label="relationshipCount">{{ graphHealth.relationshipCount ?? '—' }}</NDescriptionsItem>
+                  <NDescriptionsItem label="graphAdapter">
+                    <StatusIndicator label="connected" mode="connection" :available="!!graphHealth.graphAdapterConnected" :failures="graphHealth.circuitBreakerFailures ?? 0" />
+                  </NDescriptionsItem>
+                  <NDescriptionsItem v-if="graphHealth.circuitBreakerOpen !== undefined" label="熔断器">
+                    <NTag :type="graphHealth.circuitBreakerOpen ? 'error' : 'success'" size="small">{{ graphHealth.circuitBreakerOpen ? 'OPEN' : 'CLOSED' }}</NTag>
+                    <span class="mono" style="margin-left:6px">failures: {{ graphHealth.circuitBreakerFailures ?? 0 }}</span>
+                  </NDescriptionsItem>
+                </NDescriptions>
+                <div v-if="graphHealth.error" class="muted mono" style="margin-top:6px">{{ graphHealth.error }}</div>
+              </template>
+
+              <!-- gm-pro 健康概览 -->
+              <NDivider v-if="gmProHealth" style="margin:8px 0" />
+              <template v-if="gmProHealth">
+                <div class="profile-section" style="margin-bottom:4px">
+                  <NTag type="success" size="small">gm-pro 概览</NTag>
+                </div>
+                <NGrid :cols="'2 s:2 m:3'" :x-gap="8" :y-gap="4" responsive="screen">
+                  <NGi><div class="health-stat"><span class="health-stat-label">活跃节点</span><span class="health-stat-value">{{ gmProHealth.nodes?.active ?? '—' }} / {{ gmProHealth.nodes?.total ?? '—' }}</span></div></NGi>
+                  <NGi><div class="health-stat"><span class="health-stat-label">孤立节点</span><span class="health-stat-value" :class="{ 'text-warning': (gmProHealth.isolatedNodes ?? 0) > 0 }">{{ gmProHealth.isolatedNodes ?? '—' }}</span></div></NGi>
+                  <NGi><div class="health-stat"><span class="health-stat-label">高过时</span><span class="health-stat-value" :class="{ 'text-danger': (gmProHealth.highStaleNodes ?? 0) > 0 }">{{ gmProHealth.highStaleNodes ?? '—' }}</span></div></NGi>
+                  <NGi><div class="health-stat"><span class="health-stat-label">社区数</span><span class="health-stat-value">{{ gmProHealth.communities ?? '—' }}</span></div></NGi>
+                  <NGi><div class="health-stat"><span class="health-stat-label">平均 PR</span><span class="health-stat-value mono">{{ gmProHealth.avgPageRank?.toFixed(4) ?? '—' }}</span></div></NGi>
+                  <NGi v-if="gmProHealth.anomalies?.length"><div class="health-stat"><span class="health-stat-label">异常</span><span class="health-stat-value text-warning">{{ gmProHealth.anomalies.length }} 项</span></div></NGi>
+                </NGrid>
+                <div v-if="gmProHealth.anomalies?.length" style="margin-top:6px">
+                  <NSpace :size="4"><NTag v-for="a in gmProHealth.anomalies" :key="a" size="small" type="warning">{{ a }}</NTag></NSpace>
+                </div>
+              </template>
+
+              <!-- gm-pro 熔断器 -->
+              <template v-if="gmProHealth?.circuitBreakers">
+                <NDivider style="margin:8px 0">熔断器</NDivider>
+                <div v-for="(cb, name) in gmProHealth.circuitBreakers" :key="name" style="display:flex;align-items:center;gap:8px;padding:2px 0">
+                  <span class="mono" style="font-size:var(--fs-caption);min-width:56px">{{ name }}</span>
+                  <NTag :type="(cb as any).open ? 'error' : 'success'" size="tiny">{{ (cb as any).open ? 'OPEN' : 'CLOSED' }}</NTag>
+                  <span class="muted" style="font-size:var(--fs-caption)">failures: {{ (cb as any).failures ?? 0 }}</span>
+                </div>
+              </template>
+
+              <!-- Top 10 PageRank -->
+              <template v-if="gmProTop10.length">
+                <NDivider style="margin:8px 0">Top 10 PageRank</NDivider>
+                <EChart v-if="top10ChartOption" :option="top10ChartOption" :height="200" />
+                <NEmpty v-else description="无图表数据" style="padding:8px 0" />
+              </template>
+
+              <!-- 脏节点 -->
+              <template v-if="gmProDirty">
+                <NDivider style="margin:8px 0">增量维护</NDivider>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <NTag :type="(gmProDirty.count ?? 0) > 0 ? 'warning' : 'success'" size="small">脏节点: {{ gmProDirty.count ?? 0 }} 个</NTag>
+                  <span v-if="(gmProDirty.nodeIds as string[])?.length" class="muted" style="font-size:var(--fs-caption)">{{ (gmProDirty.nodeIds as string[]).slice(0, 3).join(', ') }}{{ (gmProDirty.nodeIds as string[]).length > 3 ? '…' : '' }}</span>
+                </div>
+              </template>
+            </NCard>
+          </NGi>
+
+          <!-- 社区概览 -->
+          <NGi>
+            <NCard title="社区概览" size="small">
+              <template v-if="gmProCommunities.length">
+                <div style="max-height:260px;overflow-y:auto">
+                  <div v-for="c in gmProCommunities.slice(0, 10)" :key="c.communityId" style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--color-border-subtle)">
+                    <span class="mono" style="font-size:11px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="c.communityId">{{ c.communityId.slice(0, 12) + '…' }}</span>
+                    <NTag size="tiny" :bordered="false">{{ c.memberCount }} 成员</NTag>
+                    <span style="font-size:var(--fs-caption);color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">{{ c.summary?.slice(0, 80) }}{{ c.summary?.length > 80 ? '…' : '' }}</span>
+                  </div>
+                </div>
+                <div v-if="gmProCommunities.length > 10" class="muted" style="font-size:var(--fs-caption);margin-top:4px">共 {{ gmProCommunities.length }} 个社区，仅显示前 10 个</div>
+              </template>
+              <NEmpty v-else description="暂无社区数据" style="padding:12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- 检索状态 -->
+          <NGi>
+            <NCard title="检索状态" size="small">
+              <template v-if="memory">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="最近查询"><span class="mono">{{ memory.retrieval?.lastQuery || '—' }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="性能摘要"><span class="mono">{{ memory.retrieval?.perfSummary || '—' }}</span></NDescriptionsItem>
+                </NDescriptions>
+                <div class="profile-section"><div class="profile-label">图谱适配器</div>
+                  <StatusIndicator label="Neo4j" mode="connection" :available="!!memory.graphAdapter?.connected" :failures="memory.graphAdapter?.circuitBreaker?.failures ?? (memory.graphAdapter?.connectFailed ? 1 : 0)" />
+                  <div v-if="memory.graphAdapter?.circuitBreaker?.open" class="muted mono" style="color:var(--n-error-color)">熔断已触发 (failures: {{ memory.graphAdapter.circuitBreaker.failures }})</div>
+                  <div v-else-if="memory.graphAdapter?.lastError" class="muted mono">{{ memory.graphAdapter.lastError }}</div>
+                </div>
+                <div class="profile-section" style="margin-top:8px"><div class="profile-label">QMD 熔断器</div>
+                  <StatusIndicator label="QMD" :available="memory.retrieval?.qmdCircuitBreaker?.available ?? true" :failures="memory.retrieval?.qmdCircuitBreaker?.failures ?? 0" />
+                  <div v-if="memory.retrieval?.qmdCircuitBreaker?.open" class="muted mono" style="color:var(--n-error-color)">熔断已触发 (failures: {{ memory.retrieval.qmdCircuitBreaker.failures }})</div>
+                </div>
+              </template>
+              <NEmpty v-else description="插件未响应" style="padding:12px 0" />
+            </NCard>
+          </NGi>
+        </NGrid>
+
+        <!-- ═══════════════ gm-pro 智能 ═══════════════ -->
+        <NDivider title-placement="left" style="margin: 16px 0 12px">gm-pro 智能</NDivider>
+
+        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <!-- AutoTuner 调优 -->
+          <NGi>
+            <NCard title="AutoTuner 调优" size="small">
+              <template v-if="gmProTuner">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="启用状态">
+                    <NTag size="small" :type="gmProTuner.enabled ? 'success' : 'warning'">
+                      {{ gmProTuner.enabled ? '已启用' : '未启用' }}
+                    </NTag>
+                    <span v-if="!gmProTuner.enabled && gmProTuner.reason" class="muted" style="font-size:var(--fs-caption);margin-left:6px">{{ gmProTuner.reason }}</span>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="数据可用">
+                    <NTag size="small" :type="gmProTuner.available ? 'success' : 'warning'">{{ gmProTuner.available ? '是' : '否' }}</NTag>
+                    <span v-if="!gmProTuner.available && gmProTuner.reason" class="muted" style="font-size:var(--fs-caption);margin-left:6px">{{ gmProTuner.reason }}</span>
+                  </NDescriptionsItem>
+                  <template v-if="gmProTuner.available">
+                    <NDescriptionsItem label="调优轮次"><span class="mono">{{ gmProTuner.state?.totalRounds ?? '—' }}</span></NDescriptionsItem>
+                    <NDescriptionsItem label="快照数"><span class="mono">{{ gmProTuner.state?.snapshots?.length ?? '—' }}</span></NDescriptionsItem>
+                  </template>
+                </NDescriptions>
+              </template>
+              <NEmpty v-else description="暂无调优数据" style="padding:12px 0">
+                <template #extra>
+                  <span class="muted" style="font-size:var(--fs-caption)">请确认 openclaw.json 中 autoTuner 已启用，且 gm-pro 服务可达。</span>
+                </template>
+              </NEmpty>
+            </NCard>
+          </NGi>
+
+          <!-- 系统诊断 (Doctor) -->
+          <NGi>
+            <NCard title="系统诊断 (Doctor)" size="small">
+              <template v-if="gmProDoctor">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="Neo4j">
+                    <NTag :type="(gmProDoctor as any).neo4j?.ok ? 'success' : 'error'" size="small">{{ (gmProDoctor as any).neo4j?.ok ? '连通' : '异常' }}</NTag>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="LLM">
+                    <NTag :type="(gmProDoctor as any).llm?.ok ? 'success' : 'error'" size="small">{{ (gmProDoctor as any).llm?.ok ? '连通' : '异常' }}</NTag>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="Embedding">
+                    <NTag :type="(gmProDoctor as any).embedding?.ok ? 'success' : 'error'" size="small">{{ (gmProDoctor as any).embedding?.ok ? '连通' : '异常' }}</NTag>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem v-if="(gmProDoctor as any).issues?.length" label="问题">
+                    <NSpace :size="4"><NTag v-for="(issue, i) in (gmProDoctor as any).issues" :key="i" size="small" type="warning">{{ issue }}</NTag></NSpace>
+                  </NDescriptionsItem>
+                </NDescriptions>
+              </template>
+              <NEmpty v-else description="暂无诊断报告" style="padding:12px 0">
+                <template #extra>
+                  <span class="muted" style="font-size:var(--fs-caption)">请确认 GM_PRO_AUTH_TOKEN 已配置（/api/doctor 为敏感路径需鉴权）。</span>
+                </template>
+              </NEmpty>
+            </NCard>
+          </NGi>
+
+          <!-- 关联矩阵 M -->
+          <NGi>
+            <NCard title="关联矩阵 M" size="small">
+              <template v-if="gmProAm">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="维度"><span class="mono">{{ (gmProAm as any).dimensions ?? '—' }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="时间步"><span class="mono">{{ (gmProAm as any).timeSteps ?? '—' }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="已应用"><span class="mono">{{ (gmProAm as any).applied ?? '—' }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="被拒"><span class="mono">{{ (gmProAm as any).rejected ?? '—' }}</span></NDescriptionsItem>
+                </NDescriptions>
+              </template>
+              <NEmpty v-else description="暂无关联矩阵数据" style="padding:12px 0">
+                <template #extra>
+                  <span class="muted" style="font-size:var(--fs-caption)">请确认 openclaw.json 中 associationMatrix 已启用，且 gm-pro 服务可达。</span>
+                </template>
+              </NEmpty>
+            </NCard>
+          </NGi>
+        </NGrid>
+
+        <!-- ═══════════════ 运行指标 ═══════════════ -->
+        <NDivider title-placement="left" style="margin: 16px 0 12px">运行指标</NDivider>
+
+        <NGrid :cols="panelCols" :x-gap="12" :y-gap="12" responsive="screen">
+          <!-- LLM Token 用量 -->
+          <NGi>
+            <NCard title="LLM Token 用量" size="small">
+              <template v-if="gmProUsage">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="总调用次数"><span class="mono">{{ gmProUsage.total?.calls ?? '—' }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="总 Token"><span class="mono">{{ formatTokens(gmProUsage.total?.totalTokens ?? 0) }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="Prompt"><span class="mono">{{ formatTokens(gmProUsage.total?.promptTokens ?? 0) }}</span></NDescriptionsItem>
+                  <NDescriptionsItem label="Completion"><span class="mono">{{ formatTokens(gmProUsage.total?.completionTokens ?? 0) }}</span></NDescriptionsItem>
+                  <NDescriptionsItem v-if="gmProUsage.byModel" label="模型分布">
+                    <div style="max-height:100px;overflow-y:auto">
+                      <div v-for="(v, k) in (gmProUsage.byModel as Record<string, any>)" :key="k" style="font-size:var(--fs-caption);padding:2px 0">
+                        <span class="mono">{{ k }}:</span> {{ formatTokens(v.totalTokens ?? 0) }}
+                      </div>
+                    </div>
+                  </NDescriptionsItem>
+                </NDescriptions>
+              </template>
+              <NEmpty v-else description="暂无用量数据" style="padding:12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- Cascade -->
+          <NGi>
+            <NCard title="Cascade" size="small">
+              <template v-if="memory">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="arms 数量">{{ memory.cascade?.armsCount ?? 0 }}</NDescriptionsItem>
+                  <NDescriptionsItem label="置信阈值">{{ memory.cascade?.confidenceThreshold ?? '—' }}</NDescriptionsItem>
+                  <NDescriptionsItem label="Tier1 置信度">
+                    <span v-if="cascadeTier1Confidence !== null" class="mono">{{ cascadeTier1Confidence }}</span>
+                    <span v-else class="muted">—</span>
+                    <NTag v-if="cascadeJudgeSource" size="small" :type="cascadeJudgeSource === 'gm-pro' ? 'success' : 'default'" style="margin-left:6px">{{ cascadeJudgeSource }}</NTag>
+                  </NDescriptionsItem>
+                </NDescriptions>
+                <EChart v-if="cascadeTopArms.length" :option="betaOption" height="220px" aria-label="Cascade Top 10 臂分布" />
+                <NEmpty v-else size="small" description="无 arm 数据" style="margin:12px 0" />
+              </template>
+              <NEmpty v-else description="插件未响应" style="padding:12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- 债务调度 -->
+          <NGi>
+            <NCard title="债务调度" size="small">
+              <template v-if="memory">
+                <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                  <NDescriptionsItem label="running">{{ memory.debt?.running ?? 0 }}</NDescriptionsItem>
+                  <NDescriptionsItem label="pendingCount">{{ memory.debt?.pendingCount ?? 0 }}</NDescriptionsItem>
+                  <NDescriptionsItem label="pollIntervalMs">{{ memory.debt?.pollIntervalMs ?? 0 }}</NDescriptionsItem>
+                  <NDescriptionsItem label="maxConcurrent">{{ memory.debt?.maxConcurrent ?? 0 }}</NDescriptionsItem>
+                </NDescriptions>
+              </template>
+              <NEmpty v-else description="插件未响应" style="padding:12px 0" />
+            </NCard>
+          </NGi>
+
+          <!-- 用户画像 -->
+          <NGi>
+            <NCard title="用户画像" size="small">
+              <template v-if="memory">
+                <div class="profile-section">
+                  <div class="profile-label">技术栈 Top5</div>
+                  <NSpace :size="4" v-if="topTechStack.length">
+                    <NTag v-for="t in topTechStack" :key="t.name" size="small" type="info">{{ t.name }} ({{ t.weight }})</NTag>
+                  </NSpace>
+                  <span v-else class="muted">—</span>
+                </div>
+                <div class="profile-section">
+                  <div class="profile-label">场景 Top5</div>
+                  <NSpace :size="4" v-if="topScenario.length">
+                    <NTag v-for="s in topScenario" :key="s.name" size="small" type="success">{{ s.name }} ({{ s.weight }})</NTag>
+                  </NSpace>
+                  <span v-else class="muted">—</span>
+                </div>
+                <div class="profile-section">
+                  <span class="profile-label">语言：</span>
+                  <NTag size="small">{{ userLanguage }}</NTag>
+                </div>
+              </template>
+              <NEmpty v-else description="插件未响应" style="padding:12px 0" />
+            </NCard>
+          </NGi>
+        </NGrid>
       </NTabPane>
 
       <!-- ===== Tab 3: MoA 性能 ===== -->
@@ -3087,5 +2934,46 @@ const moaLatencyPhaseOption = computed(() => {
 }
 .text-danger {
   color: var(--color-danger);
+}
+
+/* ===== gm-pro 服务表格 ===== */
+.svc-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.svc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-caption);
+}
+.svc-table th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.svc-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  vertical-align: middle;
+}
+.svc-name {
+  font-weight: 500;
+  min-width: 90px;
+}
+.svc-detail {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.svc-detail-kv {
+  display: inline-block;
+  margin-right: 12px;
+  font-size: var(--fs-caption);
 }
 </style>
