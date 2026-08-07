@@ -7,10 +7,11 @@
  * - recordMoaRun / recordAllComplexity 环形缓冲区
  * - percentiles 计算
  * - 时间分桶
+ * - 启动时从磁盘加载持久化数据
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -22,6 +23,7 @@ vi.mock("node:fs", () => ({
 
 vi.mock("node:fs/promises", () => ({
   writeFile: vi.fn().mockResolvedValue(undefined),
+  readFile: vi.fn().mockResolvedValue(""),
 }));
 
 vi.mock("node:os", () => ({
@@ -38,6 +40,7 @@ import {
   recordMoaRun,
   recordAllComplexity,
   getMoaPerformance,
+  loadFromDisk,
   PERF_FILE,
 } from "./perf-tracker";
 
@@ -327,6 +330,82 @@ describe("MoA PerfTracker", () => {
 
       const perf = getMoaPerformance();
       expect(perf.latencyPercentiles.p50).toBeGreaterThan(0);
+    });
+  });
+
+  // ===================== 启动时从磁盘加载 ============================
+
+  describe("loadFromDisk：启动时还原持久化数据", () => {
+    /**
+     * 验证 snapshot 服务重启后，从 ~/.openclaw/moa-perf.json 还原
+     * runRecords / allComplexityRecords，Dashboard MoA 监控页不再显示空数据。
+     */
+    it("v1 格式：还原 runRecords 和 allComplexityRecords", async () => {
+      const persisted = {
+        version: 1,
+        savedAt: Date.now(),
+        runRecords: [
+          {
+            id: "moa-restored-1",
+            timestamp: Date.now() - 60_000,
+            queryPreview: "restored query",
+            totalMs: 1500,
+            refMs: 1000,
+            aggMs: 500,
+            totalTokens: 800,
+            refCount: 2,
+            validRefCount: 2,
+            refTimings: [500, 500],
+            refModels: ["gpt-4o", "claude-3"],
+            refTokens: [400, 400],
+            aggModel: "gpt-4o-mini",
+            aggTokens: 0,
+            responseLen: 1200,
+            success: true,
+            mode: "parallel",
+            complexityScore: 0.7,
+          },
+        ],
+        allComplexityRecords: [
+          { timestamp: Date.now() - 60_000, score: 0.7 },
+          { timestamp: Date.now() - 30_000, score: 0.5 },
+        ],
+        summary: { totalRuns: 1 } as any,
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFile).mockResolvedValueOnce(JSON.stringify(persisted));
+
+      await loadFromDisk();
+
+      const perf = getMoaPerformance();
+      expect(perf.totalRuns).toBeGreaterThanOrEqual(1);
+      expect(perf.recentRuns.some((r) => r.queryPreview === "restored query")).toBe(true);
+      expect(perf.allComplexityHistory.some((r) => r.score === 0.7)).toBe(true);
+    });
+
+    it("文件不存在时静默跳过，不抛错", async () => {
+      vi.mocked(existsSync).mockReturnValue(false);
+      await expect(loadFromDisk()).resolves.toBeUndefined();
+    });
+
+    it("旧格式（无 version 字段）静默跳过，不还原数据", async () => {
+      // 旧格式仅写入 MoaPerformanceSummary（无 version / runRecords 字段）
+      const legacy = { totalRuns: 99, recentRuns: [{ id: "legacy" }] };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFile).mockResolvedValueOnce(JSON.stringify(legacy));
+
+      const before = getMoaPerformance().totalRuns;
+      await loadFromDisk();
+      const after = getMoaPerformance().totalRuns;
+
+      // 不应还原 legacy 数据
+      expect(after).toBe(before);
+    });
+
+    it("文件解析失败时静默跳过，不抛错", async () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFile).mockResolvedValueOnce("{invalid json");
+      await expect(loadFromDisk()).resolves.toBeUndefined();
     });
   });
 });

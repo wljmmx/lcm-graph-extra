@@ -26,7 +26,30 @@ import EChart from '../../components/EChart.vue';
 import { useMonitorData } from '../../composables/useMonitorData';
 import { timeRangeToMs, type TimeRange } from '../../utils/format';
 
-const { moaPerf, moaPerfLoading, CHART } = useMonitorData();
+const { moaPerf: rawMoaPerf, moaPerfLoading, CHART } = useMonitorData();
+
+// 防御性补全：上游响应可能缺失部分字段（如 snapshot 服务返回非 200 时 fallback 不完整）
+const moaPerf = computed(() => {
+  if (!rawMoaPerf.value) return null;
+  const d = rawMoaPerf.value as any;
+  return {
+    ...d,
+    allComplexityPercentiles: d.allComplexityPercentiles ?? { p50: 0, p90: 0, p95: 0, p99: 0 },
+    complexityPercentiles: d.complexityPercentiles ?? { p50: 0, p90: 0, p95: 0, p99: 0 },
+    allComplexityHistory: d.allComplexityHistory ?? [],
+    complexityHistory: d.complexityHistory ?? [],
+    allComplexityDistribution: d.allComplexityDistribution ?? { low: 0, medium: 0, high: 0 },
+    complexityDistribution: d.complexityDistribution ?? { low: 0, medium: 0, high: 0 },
+    complexityHourlyBuckets: d.complexityHourlyBuckets ?? [],
+    complexityDailyBuckets: d.complexityDailyBuckets ?? [],
+    latencyPercentiles: d.latencyPercentiles ?? { p50: 0, p90: 0, p95: 0, p99: 0 },
+    refLatencyPercentiles: d.refLatencyPercentiles ?? { p50: 0, p90: 0, p95: 0, p99: 0 },
+    aggLatencyPercentiles: d.aggLatencyPercentiles ?? { p50: 0, p90: 0, p95: 0, p99: 0 },
+    modelBreakdown: d.modelBreakdown ?? [],
+    errorBreakdown: d.errorBreakdown ?? {},
+    recentRuns: d.recentRuns ?? [],
+  };
+});
 
 // ── 辅助函数 ──
 function formatMs(ms: number): string {

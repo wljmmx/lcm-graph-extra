@@ -8,7 +8,7 @@
 
 import type { MoaPipelineResult, LlmCallResult } from './types.js';
 import { mkdirSync, existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -514,9 +514,27 @@ function classifyError(error?: string): string {
 // ============================================================================
 
 const PERF_FILE = join(homedir(), '.openclaw', 'moa-perf.json');
+const PERF_FILE_VERSION = 1;
 
 let lastPersistTime = 0;
 const PERSIST_THROTTLE_MS = 5_000;
+
+/**
+ * 持久化文件结构。
+ *
+ * v1（当前）：单独保存原始 runRecords / allComplexityRecords，
+ * 启动时直接还原内存环形缓冲区，确保进程重启后历史数据完整可见。
+ *
+ * 兼容性：若文件存在但缺少 version 字段（旧格式仅写入 summary），
+ * loadFromDisk 会跳过还原，仍可正常写入新格式覆盖。
+ */
+interface PersistedPerfFile {
+  version: number;
+  savedAt: number;
+  runRecords: MoaRunRecord[];
+  allComplexityRecords: Array<{ timestamp: number; score: number }>;
+  summary: MoaPerformanceSummary;
+}
 
 function persistThrottled(): void {
   const now = Date.now();
@@ -534,14 +552,69 @@ function persistAsync(): void {
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      await writeFile(PERF_FILE, JSON.stringify(getMoaPerformance(), null, 2), 'utf-8');
+      // 写入原始缓冲区 + 聚合 summary，启动时可直接还原内存
+      const payload: PersistedPerfFile = {
+        version: PERF_FILE_VERSION,
+        savedAt: Date.now(),
+        runRecords: [...runRecords],
+        allComplexityRecords: [...allComplexityRecords],
+        summary: getMoaPerformance(),
+      };
+      await writeFile(PERF_FILE, JSON.stringify(payload, null, 2), 'utf-8');
     } catch {
       // 静默失败，不影响主流程
     }
   });
 }
 
-export { PERF_FILE };
+/**
+ * 启动时从磁盘恢复历史数据。
+ *
+ * 修复前：persistAsync 已写入 ~/.openclaw/moa-perf.json，但模块加载时
+ * 从未读取该文件，导致 snapshot 服务（端口 7423）重启后 runRecords /
+ * allComplexityRecords 全部丢失，Dashboard MoA 监控页显示空数据。
+ *
+ * 行为：
+ * - 文件不存在 / 解析失败 / 旧格式（无 version 字段）→ 静默跳过
+ * - v1 格式 → 还原 runRecords（截断到 MAX_RECORDS）和 allComplexityRecords（截断到 MAX_ALL_COMPLEXITY）
+ * - 异步执行，不阻塞模块导出；加载期间 getMoaPerformance 仍可正常返回（基于当前空缓冲区）
+ * - 加载完成后清除 performanceCache，确保下次查询返回还原后的数据
+ */
+async function loadFromDisk(): Promise<void> {
+  try {
+    if (!existsSync(PERF_FILE)) return;
+    const raw = await readFile(PERF_FILE, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<PersistedPerfFile>;
+
+    // 兼容性：旧格式仅写入 MoaPerformanceSummary（无 version / runRecords 字段）
+    if (typeof parsed.version !== 'number' || parsed.version !== PERF_FILE_VERSION) {
+      return;
+    }
+
+    if (Array.isArray(parsed.runRecords) && parsed.runRecords.length > 0) {
+      // 截断到 MAX_RECORDS 防止意外的大文件撑爆缓冲区
+      const restored = parsed.runRecords.slice(-MAX_RECORDS);
+      runRecords.length = 0;
+      runRecords.push(...restored);
+    }
+
+    if (Array.isArray(parsed.allComplexityRecords) && parsed.allComplexityRecords.length > 0) {
+      const restored = parsed.allComplexityRecords.slice(-MAX_ALL_COMPLEXITY);
+      allComplexityRecords.length = 0;
+      allComplexityRecords.push(...restored);
+    }
+
+    // 还原后清除性能缓存，确保下次 getMoaPerformance() 基于还原后的数据计算
+    clearPerformanceCache();
+  } catch {
+    // 静默失败，不影响主流程
+  }
+}
+
+// 模块加载时异步触发还原（不阻塞导入，不阻塞事件循环）
+void loadFromDisk();
+
+export { PERF_FILE, loadFromDisk };
 
 // ============================================================================
 // 工具函数

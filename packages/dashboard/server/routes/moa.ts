@@ -295,6 +295,15 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
             errorBreakdown: {},
             complexityDistribution: { low: 0, medium: 0, high: 0 },
             fallbackCount: 0,
+            // 以下字段与 catch 分支保持一致，避免前端模板访问 undefined 属性导致页面空白
+            avgComplexityScore: 0,
+            complexityPercentiles: { p50: 0, p90: 0, p95: 0, p99: 0 },
+            complexityHistory: [],
+            allComplexityDistribution: { low: 0, medium: 0, high: 0 },
+            allComplexityPercentiles: { p50: 0, p90: 0, p95: 0, p99: 0 },
+            allComplexityHistory: [],
+            complexityHourlyBuckets: [],
+            complexityDailyBuckets: [],
           },
         };
       }
