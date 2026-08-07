@@ -110,7 +110,15 @@ const { data: dirtyRes } = useQuery({
 const status = computed<GmProStatus | null>(() => statusRes.value?.ok ? (statusRes.value.data ?? null) : null);
 const stats = computed<GmProStats | null>(() => statsRes.value?.ok ? (statsRes.value.data ?? null) : null);
 const health = computed<GmProHealth | null>(() => healthRes.value?.ok ? (healthRes.value.data ?? null) : null);
-const topNodes = computed(() => topRes.value?.ok ? (topRes.value.data?.nodes ?? []) : []);
+/** 从 gm-pro 响应中提取节点数组（兼容 { nodes: [...] } 和 [...] 两种格式） */
+function extractNodes(data: unknown): any[] {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (typeof data === 'object' && Array.isArray((data as any).nodes)) return (data as any).nodes;
+  return [];
+}
+
+const topNodes = computed(() => topRes.value?.ok ? extractNodes(topRes.value.data) : []);
 const dirtyCount = computed(() => dirtyRes.value?.ok ? (dirtyRes.value.data?.count ?? 0) : 0);
 const dirtyNodeIds = computed(() => dirtyRes.value?.ok ? (dirtyRes.value.data?.nodeIds ?? []) : []);
 
@@ -175,7 +183,7 @@ async function handleTypeFilter(type: GmProNodeType): void {
 
 const typeFilterNodes = computed(() => {
   if (!typeFilterData.value?.ok) return [];
-  return (typeFilterData.value.data as any)?.nodes ?? [];
+  return extractNodes(typeFilterData.value.data);
 });
 
 // ===== 搜索 =====
@@ -204,7 +212,7 @@ async function handleSearch(): void {
 
 const searchNodes = computed(() => {
   if (!searchResult.value?.ok) return [];
-  return (searchResult.value.data as any)?.nodes ?? [];
+  return extractNodes(searchResult.value.data);
 });
 const searchEdges = computed(() => {
   if (!searchResult.value?.ok) return [];

@@ -60,20 +60,20 @@ export interface MemoryGraphResponse {
 // Cypher 查询
 // ---------------------------------------------------------------------------
 
-/** neo4j 搜索：按 name/title CONTAINS，过滤 superseded EXPERIENCE */
+/** neo4j 搜索：按 name/title CONTAINS（大小写不敏感），过滤 superseded EXPERIENCE */
 const NEO4J_SEARCH_CYPHER = `
 MATCH (n)
-WHERE (n.name CONTAINS $q OR n.title CONTAINS $q)
+WHERE (toLower(n.name) CONTAINS toLower($q) OR toLower(n.title) CONTAINS toLower($q))
   AND NOT (n:EXPERIENCE AND n.state = 'superseded')
 RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
        coalesce(n.pagerank, 0) AS pagerank
 LIMIT toInteger($limit)
 `;
 
-/** 图谱浏览（q 非空）：含关系的子图，过滤 superseded */
+/** 图谱浏览（q 非空）：含关系的子图，过滤 superseded（大小写不敏感） */
 const GRAPH_WITH_EDGES_CYPHER = `
 MATCH (n)
-WHERE ($q IS NULL OR $q = '' OR n.name CONTAINS $q OR n.title CONTAINS $q)
+WHERE ($q IS NULL OR $q = '' OR toLower(n.name) CONTAINS toLower($q) OR toLower(n.title) CONTAINS toLower($q))
   AND NOT (n:EXPERIENCE AND n.state = 'superseded')
 OPTIONAL MATCH (n)-[r]-(m)
 WHERE NOT (m:EXPERIENCE AND m.state = 'superseded')

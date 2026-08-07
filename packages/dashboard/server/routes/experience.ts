@@ -257,6 +257,7 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
     const from = parseOptionalNumber(q.from);
     const to = parseOptionalNumber(q.to);
     const tag = parseOptionalString(q.tag);
+    const freeTag = parseOptionalString(q.freeTag);
     const projectName = parseOptionalString(q.projectName);
     const limitRaw = parseOptionalNumber(q.limit);
     const limit = Math.min(Math.max(limitRaw ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
@@ -268,6 +269,7 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
       from: from ?? null,
       to: to ?? null,
       tag: tag ?? null,
+      freeTag: freeTag ?? null,
       projectName: projectName ?? null,
       limit,
       offset,
