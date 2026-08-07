@@ -63,6 +63,8 @@ import {
   fetchGmProUsage,
   fetchGmProAutoTunerState,
   fetchGmProServices,
+  fetchGmProDoctor,
+  fetchGmProAssociationMatrixState,
   type GmProCommunitySummary,
   type GmProServiceStatus,
 } from '../api/gm-pro';
@@ -228,6 +230,24 @@ const { data: gmProServicesRes } = useQuery({
 const gmProServices = computed<GmProServiceStatus | null>(() =>
   gmProServicesRes.value?.ok ? (gmProServicesRes.value.data ?? null) : null,
 );
+
+// G-5.8: gm-pro 系统诊断 (Doctor)
+const { data: gmProDoctorRes } = useQuery({
+  queryKey: ['gm-pro-doctor'],
+  queryFn: fetchGmProDoctor,
+  refetchInterval: 120_000,
+  staleTime: 60_000,
+});
+const gmProDoctor = computed(() => gmProDoctorRes.value?.ok ? (gmProDoctorRes.value.data ?? null) : null);
+
+// G-5.9: gm-pro 关联矩阵 M 状态
+const { data: gmProAmRes } = useQuery({
+  queryKey: ['gm-pro-association-matrix'],
+  queryFn: fetchGmProAssociationMatrixState,
+  refetchInterval: 120_000,
+  staleTime: 60_000,
+});
+const gmProAm = computed(() => gmProAmRes.value?.ok ? (gmProAmRes.value.data ?? null) : null);
 
 // MoA 性能数据（30s 轮询）
 const { data: moaPerfData, isLoading: moaPerfLoading } = useQuery({
@@ -2205,6 +2225,62 @@ const moaLatencyPhaseOption = computed(() => {
               </div>
             </template>
             <NEmpty v-else description="暂无服务状态" style="padding:12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- G-5.8: gm-pro 系统诊断 (Doctor) -->
+        <NGi>
+          <NCard title="系统诊断 (Doctor)" size="small">
+            <template v-if="gmProDoctor">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="Neo4j">
+                  <NTag :type="(gmProDoctor as any).neo4j?.ok ? 'success' : 'error'" size="small">
+                    {{ (gmProDoctor as any).neo4j?.ok ? '连通' : '异常' }}
+                  </NTag>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="LLM">
+                  <NTag :type="(gmProDoctor as any).llm?.ok ? 'success' : 'error'" size="small">
+                    {{ (gmProDoctor as any).llm?.ok ? '连通' : '异常' }}
+                  </NTag>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="Embedding">
+                  <NTag :type="(gmProDoctor as any).embedding?.ok ? 'success' : 'error'" size="small">
+                    {{ (gmProDoctor as any).embedding?.ok ? '连通' : '异常' }}
+                  </NTag>
+                </NDescriptionsItem>
+                <NDescriptionsItem v-if="(gmProDoctor as any).issues?.length" label="问题">
+                  <NSpace :size="4">
+                    <NTag v-for="(issue, i) in (gmProDoctor as any).issues" :key="i" size="small" type="warning">
+                      {{ issue }}
+                    </NTag>
+                  </NSpace>
+                </NDescriptionsItem>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="暂无诊断报告" style="padding:12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- G-5.9: gm-pro 关联矩阵 M -->
+        <NGi>
+          <NCard title="关联矩阵 M" size="small">
+            <template v-if="gmProAm">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="维度">
+                  <span class="mono">{{ (gmProAm as any).dimensions ?? '—' }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="时间步">
+                  <span class="mono">{{ (gmProAm as any).timeSteps ?? '—' }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="已应用">
+                  <span class="mono">{{ (gmProAm as any).applied ?? '—' }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="被拒">
+                  <span class="mono">{{ (gmProAm as any).rejected ?? '—' }}</span>
+                </NDescriptionsItem>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="暂无关联矩阵数据" style="padding:12px 0" />
           </NCard>
         </NGi>
 

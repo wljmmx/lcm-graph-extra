@@ -21,7 +21,7 @@
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useMutation, useQuery } from '@tanstack/vue-query';
-import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, NTag, NText, NCard, NDescriptions, NDescriptionsItem, NDivider, NEmpty, NSpin, NButton, useMessage } from 'naive-ui';
+import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, NTag, NText, useMessage } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
 import OperationRecentHistory from '../components/OperationRecentHistory.vue';
@@ -43,12 +43,6 @@ import {
 import { formatDateTime } from '../utils/format';
 import type { McpInvokeResponse } from '../api/experience';
 import { extractDetails, extractText } from '../api/experience';
-import {
-  fetchGmProAutoTunerState,
-  fetchGmProDoctor,
-  fetchGmProAssociationMatrixState,
-  fetchGmProUsage,
-} from '../api/gm-pro';
 
 const message = useMessage();
 
@@ -328,40 +322,6 @@ function backupFilePath(log: OperationLogRecord | null): string | null {
 onMounted(() => {
   void refreshHistory();
 });
-
-// ===== gm-pro 运维卡片数据（只读轮询） =====
-
-const { data: autoTunerRes } = useQuery({
-  queryKey: ['gm-pro-auto-tuner'],
-  queryFn: fetchGmProAutoTunerState,
-  refetchInterval: 60_000,
-  staleTime: 30_000,
-});
-const autoTunerState = computed(() => autoTunerRes.value?.data ?? null);
-
-const { data: doctorRes } = useQuery({
-  queryKey: ['gm-pro-doctor'],
-  queryFn: fetchGmProDoctor,
-  refetchInterval: 120_000,
-  staleTime: 60_000,
-});
-const doctorResult = computed(() => doctorRes.value?.data ?? null);
-
-const { data: amRes } = useQuery({
-  queryKey: ['gm-pro-association-matrix'],
-  queryFn: fetchGmProAssociationMatrixState,
-  refetchInterval: 120_000,
-  staleTime: 60_000,
-});
-const amState = computed(() => amRes.value?.data ?? null);
-
-const { data: usageRes } = useQuery({
-  queryKey: ['gm-pro-usage'],
-  queryFn: fetchGmProUsage,
-  refetchInterval: 120_000,
-  staleTime: 60_000,
-});
-const usageData = computed(() => usageRes.value?.data ?? null);
 
 // ===== 各卡片执行入口（封装 runMutation） =====
 
@@ -926,124 +886,7 @@ function executeImport(): void {
           </OperationCard>
         </NGi>
 
-        <!-- ===== gm-pro 运维卡片（只读轮询） ===== -->
-
-        <!-- Card 10: Auto Tuner 状态 -->
-        <NGi>
-          <NCard title="Auto Tuner" size="small">
-            <template #header-extra>
-              <NTag :type="autoTunerState ? 'success' : 'default'" size="small">
-                {{ autoTunerState ? '活跃' : '无数据' }}
-              </NTag>
-            </template>
-            <NSpin v-if="!autoTunerState" size="small" />
-            <template v-else>
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="调优轮次">
-                  {{ (autoTunerState as any).round ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="快照数">
-                  {{ (autoTunerState as any).snapshotCount ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem v-if="(autoTunerState as any).currentAction" label="当前动作">
-                  <span class="mono" style="font-size:var(--fs-caption)">{{ JSON.stringify((autoTunerState as any).currentAction) }}</span>
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-          </NCard>
-        </NGi>
-
-        <!-- Card 11: 系统诊断 (Doctor) -->
-        <NGi>
-          <NCard title="系统诊断 (Doctor)" size="small">
-            <template #header-extra>
-              <NTag :type="doctorResult ? 'success' : 'default'" size="small">
-                {{ doctorResult ? '有报告' : '无数据' }}
-              </NTag>
-            </template>
-            <NSpin v-if="!doctorResult" size="small" />
-            <template v-else>
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="Neo4j">
-                  <NTag :type="(doctorResult as any).neo4j?.ok ? 'success' : 'error'" size="small">
-                    {{ (doctorResult as any).neo4j?.ok ? '连通' : '异常' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="LLM">
-                  <NTag :type="(doctorResult as any).llm?.ok ? 'success' : 'error'" size="small">
-                    {{ (doctorResult as any).llm?.ok ? '连通' : '异常' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Embedding">
-                  <NTag :type="(doctorResult as any).embedding?.ok ? 'success' : 'error'" size="small">
-                    {{ (doctorResult as any).embedding?.ok ? '连通' : '异常' }}
-                  </NTag>
-                </NDescriptionsItem>
-                <NDescriptionsItem v-if="(doctorResult as any).issues?.length" label="问题">
-                  <NSpace :size="4">
-                    <NTag v-for="(issue, i) in (doctorResult as any).issues" :key="i" size="small" type="warning">
-                      {{ issue }}
-                    </NTag>
-                  </NSpace>
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-          </NCard>
-        </NGi>
-
-        <!-- Card 12: 关联矩阵 M 状态 -->
-        <NGi>
-          <NCard title="关联矩阵 M" size="small">
-            <template #header-extra>
-              <NTag :type="amState ? 'success' : 'default'" size="small">
-                {{ amState ? '已加载' : '无数据' }}
-              </NTag>
-            </template>
-            <NSpin v-if="!amState" size="small" />
-            <template v-else>
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="维度">
-                  {{ (amState as any).dimensions ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="时间步">
-                  {{ (amState as any).timeSteps ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="已应用">
-                  {{ (amState as any).applied ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="被拒">
-                  {{ (amState as any).rejected ?? '—' }}
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-          </NCard>
-        </NGi>
-
-        <!-- Card 13: Token 用量 -->
-        <NGi>
-          <NCard title="Token 用量" size="small">
-            <template #header-extra>
-              <NTag :type="usageData ? 'success' : 'default'" size="small">
-                {{ usageData ? '有数据' : '无数据' }}
-              </NTag>
-            </template>
-            <NSpin v-if="!usageData" size="small" />
-            <template v-else>
-              <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                <NDescriptionsItem label="本月 Token">
-                  {{ (usageData as any).monthlyTokens ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="LLM 调用">
-                  {{ (usageData as any).llmCalls ?? '—' }}
-                </NDescriptionsItem>
-                <NDescriptionsItem label="Embed 调用">
-                  {{ (usageData as any).embedCalls ?? '—' }}
-                </NDescriptionsItem>
-              </NDescriptions>
-            </template>
-          </NCard>
-        </NGi>
-      </NGrid>
+        </NGrid>
 
       <!-- M14 修复：顶部错误兜底提示（友好文案 + 可关闭） -->
       <NAlert
