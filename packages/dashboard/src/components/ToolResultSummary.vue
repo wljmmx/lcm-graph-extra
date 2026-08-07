@@ -81,6 +81,13 @@ const chips = computed<MetricChip[]>(() => {
         { label: '错误', value: m.errorCount as number, variant: 'count', tone: m.errorCount > 0 ? 'danger' : 'default' },
       ];
 
+    case 'lcmg_distill_retry':
+      return [
+        { label: '模式', value: m.mode as string, variant: 'text', tone: 'default' },
+        { label: '重置数量', value: m.resetCount as number, variant: 'count', tone: m.resetCount > 0 ? 'success' : 'default' },
+        { label: '跳过(PENDING)', value: m.skippedPending as number, variant: 'count', tone: 'default' },
+      ];
+
     case 'lcmg_compact':
       return [
         { label: '目标', value: m.target as string, variant: 'text', tone: 'default' },

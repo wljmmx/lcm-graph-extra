@@ -10,9 +10,9 @@
 import { invokeMcpTool, type McpInvokeResponse } from './experience';
 import { apiGet } from './client';
 
-/** 图谱维护（dedup / PageRank / community + 债务表对账） */
-export function invokeMaintain(): Promise<McpInvokeResponse> {
-  return invokeMcpTool('lcmg_maintain', {});
+/** 图谱维护（dedup / PageRank / community + 债务表对账）。可选 params 如 { source: 'ttl_cleanup' } 用于 TTL 清理变体。 */
+export function invokeMaintain(params: Record<string, unknown> = {}): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_maintain', params);
 }
 
 /** 系统诊断（lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics 全栈自检） */

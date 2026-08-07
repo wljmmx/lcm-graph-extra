@@ -330,7 +330,7 @@ function executeMaintain(): void {
     cardKey: 'maintain',
     tool: 'lcmg_maintain',
     params: {},
-    invokeFn: () => invokeMaintain(),
+    invokeFn: () => invokeMaintain({}),
   });
 }
 
@@ -393,12 +393,13 @@ function executeResetBreaker(): void {
 }
 
 function executeTtlCleanup(): void {
-  // TTL 清理复用 lcmg_maintain（已内置债务表对账 + 孤儿清理）
+  // TTL 清理复用 lcmg_maintain（已内置债务表对账 + 孤儿清理），传入 source 参数区分
+  const params = { source: 'ttl_cleanup' } as const;
   runMutation({
     cardKey: 'ttl_cleanup',
     tool: 'lcmg_maintain',
-    params: { source: 'ttl_cleanup' },
-    invokeFn: () => invokeMaintain(),
+    params,
+    invokeFn: () => invokeMaintain(params),
   });
 }
 
