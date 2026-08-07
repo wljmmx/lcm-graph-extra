@@ -245,3 +245,136 @@ export interface GmProUsage {
 export function fetchGmProUsage(): Promise<GmProProxyResponse<GmProUsage>> {
   return apiGet<GmProProxyResponse<GmProUsage>>('/api/gm-pro/proxy/usage');
 }
+
+// ─── 社区 ──────────────────────────────────────────────────────────────────
+
+export interface GmProCommunitySummary {
+  communityId: string;
+  summary: string;
+  memberCount: number;
+  embedding?: number[];
+}
+
+export interface GmProCommunitiesResult {
+  count?: number;
+  summaries?: GmProCommunitySummary[];
+}
+
+export function fetchGmProCommunities(): Promise<GmProProxyResponse<GmProCommunitiesResult>> {
+  return apiGet<GmProProxyResponse<GmProCommunitiesResult>>('/api/gm-pro/proxy/communities');
+}
+
+export function fetchGmProCommunitySummary(id: string): Promise<GmProProxyResponse<GmProCommunitySummary>> {
+  return apiGet<GmProProxyResponse<GmProCommunitySummary>>(`/api/gm-pro/proxy/communities/${encodeURIComponent(id)}/summary`);
+}
+
+export interface GmProCommunityNodesResult {
+  communityId?: string;
+  count?: number;
+  nodes?: GmProNode[];
+}
+
+export function fetchGmProCommunityNodes(id: string, limit?: number): Promise<GmProProxyResponse<GmProCommunityNodesResult>> {
+  const qs = limit != null ? `?limit=${limit}` : '';
+  return apiGet<GmProProxyResponse<GmProCommunityNodesResult>>(`/api/gm-pro/proxy/communities/${encodeURIComponent(id)}/nodes${qs}`);
+}
+
+export interface GmProCommunityRepresentativesResult {
+  communityId?: string;
+  representatives?: GmProNode[];
+}
+
+export function fetchGmProCommunityRepresentatives(id: string): Promise<GmProProxyResponse<GmProCommunityRepresentativesResult>> {
+  return apiGet<GmProProxyResponse<GmProCommunityRepresentativesResult>>(`/api/gm-pro/proxy/communities/${encodeURIComponent(id)}/representatives`);
+}
+
+// ─── 图谱可视化 ────────────────────────────────────────────────────────────
+
+export interface GmProGraphWalkParams {
+  seedIds: string[];
+  depth?: number;
+  maxNodes?: number;
+}
+
+export interface GmProGraphWalkResult {
+  nodes?: GmProNode[];
+  edges?: Array<{
+    source: string;
+    target: string;
+    type?: string;
+    [key: string]: unknown;
+  }>;
+}
+
+export function fetchGmProGraphWalk(params: GmProGraphWalkParams): Promise<GmProProxyResponse<GmProGraphWalkResult>> {
+  const qs = new URLSearchParams();
+  qs.set('seedIds', params.seedIds.join(','));
+  if (params.depth != null) qs.set('depth', String(params.depth));
+  if (params.maxNodes != null) qs.set('maxNodes', String(params.maxNodes));
+  return apiGet<GmProProxyResponse<GmProGraphWalkResult>>(`/api/gm-pro/proxy/graph/walk?${qs.toString()}`);
+}
+
+// ─── 节点边 ────────────────────────────────────────────────────────────────
+
+export interface GmProNodeEdgesResult {
+  nodeId?: string;
+  edges?: Array<{
+    source: string;
+    target: string;
+    type?: string;
+    [key: string]: unknown;
+  }>;
+}
+
+export function fetchGmProNodeEdges(id: string): Promise<GmProProxyResponse<GmProNodeEdgesResult>> {
+  return apiGet<GmProProxyResponse<GmProNodeEdgesResult>>(`/api/gm-pro/proxy/nodes/${encodeURIComponent(id)}/edges`);
+}
+
+// ─── 节点反馈统计 ──────────────────────────────────────────────────────────
+
+export interface GmProNodeFeedbackStats {
+  nodeId?: string;
+  feedbackCount?: number;
+  avgScore?: number;
+  [key: string]: unknown;
+}
+
+export function fetchGmProNodeFeedbackStats(id: string): Promise<GmProProxyResponse<GmProNodeFeedbackStats>> {
+  return apiGet<GmProProxyResponse<GmProNodeFeedbackStats>>(`/api/gm-pro/proxy/nodes/${encodeURIComponent(id)}/feedback-stats`);
+}
+
+// ─── Schema 自省 ───────────────────────────────────────────────────────────
+
+export interface GmProSchemaResult {
+  nodeTypes?: Array<{ label: string; count: number }>;
+  edgeTypes?: Array<{ type: string; count: number }>;
+  indexingModels?: string | null;
+  vectorDimension?: number | null;
+}
+
+export function fetchGmProSchema(): Promise<GmProProxyResponse<GmProSchemaResult>> {
+  return apiGet<GmProProxyResponse<GmProSchemaResult>>('/api/gm-pro/proxy/schema');
+}
+
+// ─── 配置 ──────────────────────────────────────────────────────────────────
+
+export interface GmProConfigResult {
+  version?: string;
+  config?: Record<string, unknown>;
+}
+
+export function fetchGmProConfig(): Promise<GmProProxyResponse<GmProConfigResult>> {
+  return apiGet<GmProProxyResponse<GmProConfigResult>>('/api/gm-pro/proxy/config');
+}
+
+// ─── 服务状态 ──────────────────────────────────────────────────────────────
+
+export interface GmProServiceStatus {
+  version?: string;
+  timestamp?: string;
+  services?: Array<{ name: string; status: string; detail?: unknown }>;
+}
+
+export function fetchGmProServices(): Promise<GmProProxyResponse<GmProServiceStatus>> {
+  return apiGet<GmProProxyResponse<GmProServiceStatus>>('/api/gm-pro/proxy/ops/services');
+}

@@ -41,12 +41,17 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/search',
   '/api/top',
   '/api/nodes-by-type',
+  '/api/communities',
+  '/api/graph/walk',
+  '/api/schema',
   '/api/maintain/dirty-nodes',
   '/api/metrics',
   '/api/auto-tuner/state',
   '/api/association-matrix/state',
   '/api/doctor',
   '/api/usage',
+  '/api/config',
+  '/api/ops/services',
 ]);
 
 export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
