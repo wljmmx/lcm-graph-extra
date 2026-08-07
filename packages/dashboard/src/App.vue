@@ -78,17 +78,26 @@ function onThemeSelect(key: string): void {
   setMode(key as ThemeMode);
 }
 
-// 当前激活的菜单 key（与路由路径对齐；测试中心下的子 tab 路径也归并到 /testing）
+// 当前激活的菜单 key（与路由路径对齐；监控子路由归并到 /monitor/overview；
+// 测试中心下的子 tab 路径也归并到 /testing）
 const activeKey = computed(() => {
+  if (route.path.startsWith('/monitor')) {
+    return '/monitor/overview';
+  }
   if (route.path === '/testing' || route.path === '/benchmark' || route.path === '/qmd-test') {
     return '/testing';
   }
   return route.path;
 });
 
-// 面包屑：路由路径 → 可读名称
+// 面包屑：路由路径 → 可读名称（监控子路由动态映射）
 const breadcrumbMap: Record<string, string> = {
-  '/': '监控',
+  '/monitor/overview': '监控总览',
+  '/monitor/services': '核心服务',
+  '/monitor/graph': '图谱中心',
+  '/monitor/ai': '智能引擎',
+  '/monitor/metrics': '指标分析',
+  '/monitor/moa': 'MoA 多模型',
   '/experience': '经验',
   '/memory': '记忆',
   '/maintain': '维护',
@@ -122,9 +131,21 @@ function renderMenuLabel(to: string, label: string, icon: string): Component {
     );
 }
 
-// 顶部导航 6 项：监控/经验/记忆/维护/测试中心/设置（P2-5: 添加图标）
+// 顶部导航：监控（含子菜单分组）/ 经验 / 记忆 / 维护 / 测试中心 / 设置
 const menuOptions = computed<MenuOption[]>(() => [
-  { label: renderMenuLabel('/', '监控', 'activity'), key: '/' },
+  {
+    label: '监控',
+    key: 'monitor-group',
+    icon: () => h(Icon, { name: 'activity', size: 16 }),
+    children: [
+      { label: renderMenuLabel('/monitor/overview', '总览', 'barChart'), key: '/monitor/overview' },
+      { label: renderMenuLabel('/monitor/services', '核心服务', 'server'), key: '/monitor/services' },
+      { label: renderMenuLabel('/monitor/graph', '图谱中心', 'share'), key: '/monitor/graph' },
+      { label: renderMenuLabel('/monitor/ai', '智能引擎', 'cpu'), key: '/monitor/ai' },
+      { label: renderMenuLabel('/monitor/metrics', '指标分析', 'trendingUp'), key: '/monitor/metrics' },
+      { label: renderMenuLabel('/monitor/moa', 'MoA 多模型', 'layers'), key: '/monitor/moa' },
+    ],
+  },
   { label: renderMenuLabel('/experience', '经验', 'bookOpen'), key: '/experience' },
   { label: renderMenuLabel('/memory', '记忆', 'database'), key: '/memory' },
   { label: renderMenuLabel('/maintain', '维护', 'tools'), key: '/maintain' },

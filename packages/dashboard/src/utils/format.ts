@@ -152,6 +152,20 @@ export function bucketSizeLabel(size: BucketSize): string {
   }
 }
 
+/**
+ * Token 数量格式化（K/M 缩写）。
+ *
+ * - >= 1M → "1.0M"
+ * - >= 1K → "1.0K"
+ * - 否则原样返回
+ */
+export function formatTokens(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
 // ----- Duration -----
 /**
  * 时长格式化（智能 ms/s）。
