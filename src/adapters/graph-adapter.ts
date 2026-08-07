@@ -1171,8 +1171,11 @@ export class GraphAdapter {
   async quickHealth(): Promise<boolean> {
     this._healthCheckCount++;
     if (this._healthCheckInProgress) {
+      // v2.7.0 P1-FIX: health() 正在执行恢复，跳过本次检查避免误增失败计数。
+      // 修复前：返回 this.isConnected（若 _connectFailed=true 则为 false），
+      // 导致 quickHealth 失败计数在 health() 恢复期间继续增长，可能触发重复恢复。
       this.logger?.debug?.('[graph-adapter] quickHealth skipped (health check in progress)');
-      return this.isConnected;
+      return true;
     }
     try {
       if (this.driver) {
@@ -1221,18 +1224,33 @@ export class GraphAdapter {
         if (this.mod && typeof this.mod.getDriver === 'function') {
           const gmDriver = this.mod.getDriver();
           if (gmDriver) {
-            this.driver = gmDriver;
-            this.logger?.info?.('[graph-adapter] health check: acquired driver from graph-memory-pro (was lazy-init)');
-            this._connectRetryCount = 0;
-            this._connectFailed = false;
-            this._lastFailTime = 0;
-            this._lastError = null;
+            // v2.7.0 P1-FIX: 验证 gm-pro driver 连通性后再返回 true
+            // 修复前：直接赋值 this.driver 并返回 true，不验证 driver 是否有效。
+            // 若 gm-pro 返回过期/断开的单例 driver，health() 会虚假成功，
+            // 导致 quickHealth 下一轮再次失败 → 触发不必要的重复重建。
+            let gmDriverOk = false;
             try {
-              await this._ensureRecaller();
-            } catch (recallerErr) {
-              this.logger?.warn?.('[graph-adapter] health check: Recaller init failed after driver acquired', { err: recallerErr instanceof Error ? recallerErr.message : String(recallerErr) });
+              await gmDriver.verifyConnectivity();
+              gmDriverOk = true;
+            } catch (verifyErr) {
+              this.logger?.warn?.('[graph-adapter] health check: gm-pro driver verifyConnectivity failed, will close and retry', { err: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) });
+              try { await gmDriver.close(); } catch {}
             }
-            return true;
+            if (gmDriverOk) {
+              this.driver = gmDriver;
+              this.logger?.info?.('[graph-adapter] health check: acquired driver from graph-memory-pro (was lazy-init)');
+              this._connectRetryCount = 0;
+              this._connectFailed = false;
+              this._lastFailTime = 0;
+              this._lastError = null;
+              try {
+                await this._ensureRecaller();
+              } catch (recallerErr) {
+                this.logger?.warn?.('[graph-adapter] health check: Recaller init failed after driver acquired', { err: recallerErr instanceof Error ? recallerErr.message : String(recallerErr) });
+              }
+              return true;
+            }
+            // gmDriver 验证失败，driver 已被关闭，继续走 connect() 新建
           }
         }
         return await this.connect();
@@ -1242,6 +1260,11 @@ export class GraphAdapter {
           try {
             await releaseDriver(this.neo4jConfig);
           } catch { /* ignore release errors */ }
+          // v2.7.0 P1-FIX: gm-pro driver 不在连接池中，releaseDriver 是 no-op。
+          // 直接关闭 driver 防止泄漏，确保后续 reconnect 创建全新连接。
+          try {
+            await this.driver.close();
+          } catch { /* ignore close errors */ }
           this.driver = null;
         }
         this._recaller = null;
@@ -1255,13 +1278,27 @@ export class GraphAdapter {
           if (this.mod && typeof this.mod.getDriver === 'function') {
             const gmDriver = this.mod.getDriver();
             if (gmDriver) {
-              this.driver = gmDriver;
-              this.logger?.info?.('[graph-adapter] health check: recovered via graph-memory-pro driver');
+              // v2.7.0 P1-FIX: 验证 gm-pro driver 连通性后再返回 true
+              // 修复前：直接赋值返回 true，不验证。若 gm-pro 返回过期单例 driver，
+              // health() 虚假成功，quickHealth 下一轮再次失败 → 循环重建。
+              let gmDriverOk = false;
               try {
-                await this._ensureRecaller();
-              } catch { /* recaller init non-fatal */ }
-              this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
-              return true;
+                await gmDriver.verifyConnectivity();
+                gmDriverOk = true;
+              } catch (verifyErr) {
+                this.logger?.warn?.('[graph-adapter] health check: gm-pro driver verifyConnectivity failed in recovery path', { err: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) });
+                try { await gmDriver.close(); } catch {}
+              }
+              if (gmDriverOk) {
+                this.driver = gmDriver;
+                this.logger?.info?.('[graph-adapter] health check: recovered via graph-memory-pro driver');
+                try {
+                  await this._ensureRecaller();
+                } catch { /* recaller init non-fatal */ }
+                this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
+                return true;
+              }
+              // gmDriver 验证失败，已被关闭，继续走 connect() 新建
             }
           }
           const reconnected = await this.connect();

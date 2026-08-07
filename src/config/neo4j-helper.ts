@@ -57,20 +57,27 @@ function getEntriesConfig(): { uri?: string; user?: string; password?: string } 
 
 /**
  * Resolve Neo4j connection credentials from config/env/defaults.
+ *
+ * Priority: plugin config > entries config > env vars > defaults.
+ *
+ * v2.7.0 P1-FIX: 移除 `!pluginUri.includes('localhost')` 过滤器。
+ * 修复前：包含 localhost 的 URI 被丢弃，导致本地开发环境配置被忽略，
+ * 回退到 entriesConfig 或环境变量，若后者未配置则落到默认值 bolt://localhost:7687。
+ * 若实际 Neo4j 运行在 localhost 的不同端口，将导致连接失败。
+ * 修复后：信任用户显式配置的 URI，无论是否包含 localhost。
  */
 export function resolveNeo4jConfig(
   pluginConfig: Record<string, unknown> | undefined,
 ): Neo4jConnectionConfig {
   const neo4jSection = (pluginConfig?.neo4j ?? {}) as Record<string, unknown>;
 
-  // Only trust plugin config if it has a non-empty URI
   const pluginUri = (neo4jSection.uri as string) || '';
   
   // Try entries config if plugin config doesn't have valid URI
   const entriesConfig = getEntriesConfig();
   
   const uri =
-    (pluginUri && !pluginUri.includes('localhost') ? pluginUri : undefined) ||
+    pluginUri ||
     entriesConfig?.uri ||
     process.env.NEO4J_URI ||
     "bolt://localhost:7687";
