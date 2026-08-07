@@ -472,11 +472,11 @@ function executeBootstrap(): void {
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">14 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">13 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- 14 张操作卡片网格（2 列响应式） -->
+      <!-- 13 张操作卡片网格（2 列响应式） -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 卡片 1: 图谱维护 -->
         <NGi>

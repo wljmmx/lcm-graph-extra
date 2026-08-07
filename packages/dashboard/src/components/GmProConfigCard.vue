@@ -9,7 +9,7 @@ import { computed, reactive, watch } from 'vue';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query';
 import {
   NCard, NForm, NFormItem, NInputNumber, NInput,
-  NButton, NSpace, NAlert, NDivider, NTag, useMessage,
+  NButton, NSpace, NAlert, NDivider, NTag, NSwitch, NSelect, useMessage,
 } from 'naive-ui';
 import { fetchGmProConfig, fetchGmProConfigSchema, updateGmProConfig } from '../api/config';
 import type { SchemaFieldDoc } from '../api/config';
@@ -50,6 +50,11 @@ const fieldGroups = computed<FieldGroup[]>(() => {
     general: '图谱检索',
     embedding: 'Embedding',
     llm: 'LLM',
+    autoTuner: '自动调优 (AutoTuner)',
+    associationMatrix: '关联矩阵 (Association Matrix)',
+    apiServer: 'API 服务器',
+    autoFeedback: '自动反馈 (Auto-Feedback)',
+    neo4j: 'Neo4j',
   };
 
   return Array.from(groupMap.entries()).map(([name, fields]) => ({
@@ -122,6 +127,39 @@ function saveConfig(): void {
   }
   configMutation.mutate(updates);
 }
+
+// ===== 字段渲染辅助 =====
+
+/** 从 description 中解析枚举选项（如 "策略：strategy | hybrid | full"） */
+function parseEnumOptions(field: SchemaFieldDoc): string[] | null {
+  // 匹配 "：a | b | c" 或 ": a | b | c" 结尾的模式
+  const match = field.description.match(/[：:]\s*([^：:|]+(?:\s*\|\s*[^：:|]+)+)\s*$/);
+  if (match) {
+    return match[1].split('|').map(s => s.trim()).filter(Boolean);
+  }
+  return null;
+}
+
+/** 判断字段是否为敏感信息（API Key 等） */
+function isSensitiveField(field: SchemaFieldDoc): boolean {
+  const lower = field.path.toLowerCase();
+  return lower.endsWith('apikey') || lower.endsWith('authtoken') || lower.includes('password') ||
+    field.description.toLowerCase().includes('密钥') || field.description.toLowerCase().includes('token');
+}
+
+/** 获取数字字段的最小值 */
+function getMin(field: SchemaFieldDoc): number | undefined {
+  if (field.description.includes('0-1') || field.description.includes('（0-1）')) return 0;
+  if (field.description.includes('阈值') || field.description.includes('占比')) return 0;
+  return undefined;
+}
+
+/** 获取数字字段的最大值 */
+function getMax(field: SchemaFieldDoc): number | undefined {
+  if (field.description.includes('0-1') || field.description.includes('（0-1）')) return 1;
+  if (field.description.includes('占比')) return 1;
+  return undefined;
+}
 </script>
 
 <template>
@@ -163,15 +201,44 @@ function saveConfig(): void {
             :key="field.path"
             :label="field.description"
           >
-            <!-- number → NInputNumber -->
+            <!-- boolean → NSwitch -->
+            <NSwitch
+              v-if="field.type === 'boolean'"
+              size="small"
+              :value="Boolean(editValues[field.path])"
+              @update:value="(v: boolean) => { editValues[field.path] = v; }"
+            />
+            <!-- enum string → NSelect -->
+            <NSelect
+              v-else-if="field.type === 'string' && parseEnumOptions(field)"
+              size="small"
+              style="width: 200px"
+              :value="String(editValues[field.path] ?? '')"
+              :options="parseEnumOptions(field)!.map(opt => ({ label: opt, value: opt }))"
+              @update:value="(v: string) => { editValues[field.path] = v; }"
+            />
+            <!-- sensitive string → NInput password -->
+            <NInput
+              v-else-if="field.type === 'string' && isSensitiveField(field)"
+              size="small"
+              style="width: 260px"
+              type="password"
+              show-password-on="click"
+              placeholder="已配置（脱敏显示）"
+              :value="String(editValues[field.path] ?? '')"
+              @update:value="(v: string) => { editValues[field.path] = v; }"
+            />
+            <!-- number → NInputNumber with min/max -->
             <NInputNumber
-              v-if="field.type === 'number'"
+              v-else-if="field.type === 'number'"
               size="small"
               style="width: 160px"
+              :min="getMin(field)"
+              :max="getMax(field)"
               :value="editValues[field.path] as number"
               @update:value="(v: number | null) => { editValues[field.path] = v ?? 0; }"
             />
-            <!-- string → NInput -->
+            <!-- plain string → NInput -->
             <NInput
               v-else
               size="small"

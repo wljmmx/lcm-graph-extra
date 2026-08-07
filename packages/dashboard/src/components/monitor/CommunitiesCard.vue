@@ -19,7 +19,7 @@ defineProps<{
           <span
             class="mono community-id"
             :title="c.communityId"
-          >{{ c.communityId.slice(0, 12) + '…' }}</span>
+          >{{ c.communityId.length > 12 ? c.communityId.slice(0, 12) + '…' : c.communityId }}</span>
           <NTag size="tiny" :bordered="false">{{ c.memberCount }} 成员</NTag>
           <span class="community-summary">{{ c.summary?.slice(0, 80) }}{{ c.summary?.length > 80 ? '…' : '' }}</span>
         </div>

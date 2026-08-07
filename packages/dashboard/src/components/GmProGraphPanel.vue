@@ -31,6 +31,7 @@ import {
   NInputNumber,
   NDivider,
   NTable,
+  NDataTable,
   NDrawer,
   NDrawerContent,
   NFormItem,
@@ -442,7 +443,7 @@ function formatPagerank(v: number | undefined): string {
       <div v-if="activeTypeFilter" style="margin-top: 8px">
         <NSpin v-if="typeFilterLoading" size="small" />
         <template v-else-if="typeFilterNodes.length">
-          <NTable
+          <NDataTable
             :data="typeFilterNodes"
             :columns="typeFilterColumns"
             :bordered="false"
@@ -460,7 +461,7 @@ function formatPagerank(v: number | undefined): string {
     <NCard title="Top 节点 (PageRank)" size="small" style="margin-top: 12px">
       <NSpin v-if="topLoading" size="small" />
       <template v-else-if="topNodes.length">
-        <NTable
+        <NDataTable
           :data="topNodes"
           :columns="[
             { title: '#', key: 'rank', width: 40, render: (_r: any, idx: number) => h('span', { class: 'mono muted' }, String(idx + 1)) },
@@ -525,7 +526,7 @@ function formatPagerank(v: number | undefined): string {
           <div style="margin-bottom: 4px;font-size:var(--fs-caption);color:var(--color-text-tertiary)">
             找到 {{ searchNodes.length }} 个节点，{{ searchEdges.length }} 条关系
           </div>
-          <NTable
+          <NDataTable
             :data="searchNodes"
             :columns="searchColumns"
             :bordered="false"
