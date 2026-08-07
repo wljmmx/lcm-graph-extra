@@ -8,7 +8,7 @@
  * 中已注册的 POST /api/mcp/invoke 转发到 OpenClaw MCP host。
  */
 import { invokeMcpTool, type McpInvokeResponse } from './experience';
-import { apiGet } from './client';
+import { apiGet, apiPost } from './client';
 
 /** 图谱维护（dedup / PageRank / community + 债务表对账）。可选 params 如 { source: 'ttl_cleanup' } 用于 TTL 清理变体。 */
 export function invokeMaintain(params: Record<string, unknown> = {}): Promise<McpInvokeResponse> {
@@ -81,9 +81,24 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
  * 原理：以节点 name 作为 query 和 reply，启发式必然命中（name 在 reply 中），
  * 一次性喂入 N 条快速突破冷启动。
  * v2.3.5 新增。
+ *
+ * ⚠️ 此工具是 graph-memory-pro 的 HTTP API 功能（POST /api/feedback/bootstrap），
+ * 不是 MCP 工具，因此走 gm-pro HTTP 代理路径而非 MCP invoke。
  */
-export function invokeBootstrap(limit: number = 100): Promise<McpInvokeResponse> {
-  return invokeMcpTool('lcmg_bootstrap', { limit });
+export async function invokeBootstrap(limit: number = 100): Promise<McpInvokeResponse> {
+  try {
+    const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(
+      '/api/gm-pro/proxy/feedback/bootstrap',
+      { limit },
+    );
+    if (resp.ok) {
+      return { ok: true, result: resp.data };
+    }
+    return { ok: false, error: resp.error ?? 'Bootstrap 反馈失败' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Bootstrap 请求失败: ${msg}` };
+  }
 }
 
 // ===== 操作日志查询（对应后端 GET /api/operation-logs，读取 ~/.openclaw/operation_logs.db） =====

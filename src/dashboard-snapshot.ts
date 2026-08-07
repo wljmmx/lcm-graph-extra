@@ -168,7 +168,6 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
   'lcmg_forget',
   'lcmg_pin',
   'lcmg_distill_retry',
-  'lcmg_bootstrap',
 ]);
 
 /**

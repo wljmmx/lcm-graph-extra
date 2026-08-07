@@ -64,7 +64,6 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   lcmg_restore: 600_000,        // 恢复，10min
   lcmg_import: 600_000,         // 历史导入，10min
   lcmg_backfill: 900_000,       // 经验回溯，15min（100会话检测+提取，无 LLM）
-  lcmg_bootstrap: 300_000,      // Bootstrap 反馈，5min（批量 Neo4j 写入，最多500条）
 
   // heavy: 批量 LLM 蒸馏
   lcmg_distill: 3_600_000,      // 蒸馏，60min（50条 * 120s/条 / 并发3 ≈ 2000s，留余量）

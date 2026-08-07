@@ -461,7 +461,7 @@ function executeImport(): void {
 function executeBootstrap(): void {
   runMutation({
     cardKey: 'bootstrap',
-    tool: 'lcmg_bootstrap',
+    tool: 'gm_bootstrap',
     params: { limit: bootstrapLimit.value },
     invokeFn: () => invokeBootstrap(bootstrapLimit.value),
   });
@@ -908,7 +908,7 @@ function executeBootstrap(): void {
             icon="zap"
             :confirm-level="1"
             :loading="!!loadingMap.bootstrap"
-            tool-name="lcmg_bootstrap"
+            tool-name="gm_bootstrap"
             :last-status="lastResultMap.bootstrap?.status ?? null"
             :last-details="lastResultMap.bootstrap?.details ?? null"
             :last-text="lastResultMap.bootstrap?.text ?? null"
@@ -926,7 +926,7 @@ function executeBootstrap(): void {
               </NFormItem>
             </template>
             <template #extra>
-              <OperationRecentHistory :logs="historyOf('lcmg_bootstrap')" />
+              <OperationRecentHistory :logs="historyOf('gm_bootstrap')" />
             </template>
           </OperationCard>
         </NGi>
