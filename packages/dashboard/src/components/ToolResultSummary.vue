@@ -155,6 +155,16 @@ const chips = computed<MetricChip[]>(() => {
           : []),
       ];
 
+    case 'lcmg_bootstrap':
+      return [
+        { label: '扫描节点', value: m.scanned as number, variant: 'count', tone: 'default' },
+        { label: '合成反馈', value: m.bootstrapped as number, variant: 'count', tone: m.bootstrapped > 0 ? 'success' : 'warning' },
+        { label: '跳过', value: m.skipped as number, variant: 'count', tone: (m.skipped as number) > 0 ? 'warning' : 'default' },
+        ...((m.errors as number) > 0
+          ? [{ label: '错误', value: m.errors as number, variant: 'count' as const, tone: 'danger' as const }]
+          : []),
+      ];
+
     default:
       return [];
   }

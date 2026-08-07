@@ -76,6 +76,16 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
   return invokeMcpTool('lcmg_import', { source, limit });
 }
 
+/**
+ * Bootstrap 反馈工具：用已有图谱节点合成 warmup 反馈，突破冷启动。
+ * 原理：以节点 name 作为 query 和 reply，启发式必然命中（name 在 reply 中），
+ * 一次性喂入 N 条快速突破冷启动。
+ * v2.3.5 新增。
+ */
+export function invokeBootstrap(limit: number = 100): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_bootstrap', { limit });
+}
+
 // ===== 操作日志查询（对应后端 GET /api/operation-logs，读取 ~/.openclaw/operation_logs.db） =====
 
 /**

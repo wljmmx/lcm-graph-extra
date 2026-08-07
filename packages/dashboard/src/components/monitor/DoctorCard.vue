@@ -19,6 +19,14 @@ defineProps<{
         <NDescriptionsItem label="Embedding">
           <NTag :type="doctor.embedding?.ok ? 'success' : 'error'" size="small">{{ doctor.embedding?.ok ? '连通' : '异常' }}</NTag>
         </NDescriptionsItem>
+        <NDescriptionsItem v-if="doctor.auto_feedback" label="Auto-Feedback">
+          <NTag :type="doctor.auto_feedback?.ok ? 'success' : 'error'" size="small">
+            {{ doctor.auto_feedback?.ok ? '正常' : '异常' }}
+          </NTag>
+          <span v-if="doctor.auto_feedback?.sessionCacheSize != null" class="muted" style="margin-left:8px; font-size:var(--fs-caption)">
+            cache: {{ doctor.auto_feedback.sessionCacheSize }}
+          </span>
+        </NDescriptionsItem>
         <NDescriptionsItem v-if="doctor.issues?.length" label="问题">
           <NSpace :size="4">
             <NTag v-for="(issue, i) in doctor.issues" :key="i" size="small" type="warning">{{ issue }}</NTag>

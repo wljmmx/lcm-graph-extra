@@ -20,7 +20,8 @@
  *   GM_PRO_AUTH_TOKEN —— graph-memory-pro apiServer.authToken，用于 X-Auth-Token 鉴权
  *
  * 安全：
- *   - 仅允许 GET 请求（只读），拒绝 POST/PATCH/PUT/DELETE 写操作
+ *   - GET 仅允许只读路径（白名单校验），拒绝其他写操作
+ *   - POST 仅允许白名单中的写路径（如 /api/feedback/bootstrap）
  *   - 路径白名单校验，防止 SSRF 遍历
  *   - 携带 X-Auth-Token 头（若配置了 GM_PRO_AUTH_TOKEN），对应 graph-memory-pro 的 authToken 配置
  *   - 独立服务器自带 CORS 支持，不依赖 Gateway 的 Basic Auth
@@ -58,6 +59,11 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/usage',
   '/api/config',
   '/api/ops/services',
+]);
+
+/** graph-memory-pro 允许的 POST 写 API 路径白名单（v2.3.5+） */
+const ALLOWED_GM_PRO_POST_PATHS = new Set([
+  '/api/feedback/bootstrap',
 ]);
 
 export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
@@ -126,6 +132,71 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
         : `graph-memory-pro 不可达: ${msg}`;
       req.log.warn({ err: error, targetUrl }, 'graph-memory-pro 代理失败');
       // 返回 200 让前端能解析结构化错误信息，而非被 apiGet 直接 throw
+      return { ok: false, error };
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  /**
+   * POST /api/gm-pro/proxy/*
+   *
+   * 代理 graph-memory-pro 的写 API 请求。
+   * 仅允许 ALLOWED_GM_PRO_POST_PATHS 白名单中的路径。
+   * v2.3.5 新增：用于 Bootstrap 反馈工具（POST /api/feedback/bootstrap）。
+   */
+  app.post('/api/gm-pro/proxy/*', async (req, reply) => {
+    const urlPath = req.url.split('?')[0];
+    const proxyPath = urlPath.replace('/gm-pro/proxy', '');
+
+    // POST 白名单校验（精确匹配，不支持前缀）
+    if (!ALLOWED_GM_PRO_POST_PATHS.has(proxyPath)) {
+      reply.code(403);
+      return { ok: false, error: `POST 路径不在白名单中: ${proxyPath}` };
+    }
+
+    const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GM_PRO_HTTP_TIMEOUT);
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+    if (GM_PRO_AUTH_TOKEN) {
+      headers['x-auth-token'] = GM_PRO_AUTH_TOKEN;
+    }
+
+    try {
+      const body = req.body ? JSON.stringify(req.body) : undefined;
+      const resp = await fetch(targetUrl, {
+        method: 'POST',
+        headers,
+        body,
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) {
+        let errBody: unknown;
+        try { errBody = await resp.json(); } catch { errBody = { error: `graph-memory-pro returned ${resp.status}` }; }
+        return { ok: false, error: `graph-memory-pro HTTP ${resp.status}`, detail: errBody };
+      }
+
+      const contentType = resp.headers.get('content-type') ?? '';
+      if (!contentType.includes('application/json')) {
+        return { ok: false, error: `graph-memory-pro 响应非 JSON (Content-Type: ${contentType || '空'})` };
+      }
+
+      const data = await resp.json();
+      return { ok: true, data };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTimeout = err instanceof Error && err.name === 'AbortError';
+      const error = isTimeout
+        ? `graph-memory-pro 请求超时（${GM_PRO_HTTP_TIMEOUT}ms）`
+        : `graph-memory-pro 不可达: ${msg}`;
+      req.log.warn({ err: error, targetUrl }, 'graph-memory-pro POST 代理失败');
       return { ok: false, error };
     } finally {
       clearTimeout(timer);

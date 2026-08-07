@@ -37,6 +37,7 @@ import {
   invokeRestore,
   invokeSync,
   invokeImport,
+  invokeBootstrap,
   fetchOperationLogs,
   type OperationLogRecord,
 } from '../api/maintain';
@@ -117,6 +118,9 @@ const importSourceOptions = [
   { label: 'LCM 消息 (lcm_messages)', value: 'lcm_messages' },
   { label: '记忆文件 (memory_files)', value: 'memory_files' },
 ];
+
+// 卡片 10：Bootstrap 反馈（v2.3.5 新增）
+const bootstrapLimit = ref<number>(100);
 
 // ===== 路径安全校验（前端轻量校验，后端 POST /api/mcp/invoke 有硬墙兜底） =====
 
@@ -453,17 +457,26 @@ function executeImport(): void {
     invokeFn: () => invokeImport(importSource.value, importLimit.value),
   });
 }
+
+function executeBootstrap(): void {
+  runMutation({
+    cardKey: 'bootstrap',
+    tool: 'lcmg_bootstrap',
+    params: { limit: bootstrapLimit.value },
+    invokeFn: () => invokeBootstrap(bootstrapLimit.value),
+  });
+}
 </script>
 
 <template>
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">13 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">14 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- 13 张操作卡片网格（2 列响应式） -->
+      <!-- 14 张操作卡片网格（2 列响应式） -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 卡片 1: 图谱维护 -->
         <NGi>
@@ -883,6 +896,37 @@ function executeImport(): void {
             </template>
             <template #extra>
               <OperationRecentHistory :logs="historyOf('lcmg_import')" />
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 10: Bootstrap 反馈（v2.3.5 新增） -->
+        <NGi>
+          <OperationCard
+            title="Bootstrap 反馈"
+            description="针对「图谱已有历史节点但零反馈」的冷启动场景，以节点 name 作为 query 和 reply 合成 warmup 反馈，一次性喂入 N 条快速突破冷启动。"
+            icon="zap"
+            :confirm-level="1"
+            :loading="!!loadingMap.bootstrap"
+            tool-name="lcmg_bootstrap"
+            :last-status="lastResultMap.bootstrap?.status ?? null"
+            :last-details="lastResultMap.bootstrap?.details ?? null"
+            :last-text="lastResultMap.bootstrap?.text ?? null"
+            @execute="executeBootstrap"
+          >
+            <template #form>
+              <NFormItem label="合成条数" size="small" :show-feedback="false">
+                <NInputNumber
+                  v-model:value="bootstrapLimit"
+                  :min="1"
+                  :max="500"
+                  size="small"
+                  style="width: 100%"
+                />
+              </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_bootstrap')" />
             </template>
           </OperationCard>
         </NGi>
