@@ -24,6 +24,12 @@
  *   - 路径白名单校验，防止 SSRF 遍历
  *   - 携带 X-Auth-Token 头（若配置了 GM_PRO_AUTH_TOKEN），对应 graph-memory-pro 的 authToken 配置
  *   - 独立服务器自带 CORS 支持，不依赖 Gateway 的 Basic Auth
+ *
+ * ⚠️ 鉴权依赖：
+ *   graph-memory-pro HTTP 服务器将以下路径标记为敏感读路径（需 X-Auth-Token 鉴权）：
+ *     /api/health, /api/metrics, /api/usage, /api/doctor
+ *   若 GM_PRO_AUTH_TOKEN 未配置而 graph-memory-pro 配置了 authToken，
+ *   这些路径将返回 401 Unauthorized。请确保两端配置一致。
  */
 import type { FastifyInstance } from 'fastify';
 

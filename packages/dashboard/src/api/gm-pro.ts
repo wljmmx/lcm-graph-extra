@@ -356,15 +356,16 @@ export function fetchGmProSchema(): Promise<GmProProxyResponse<GmProSchemaResult
   return apiGet<GmProProxyResponse<GmProSchemaResult>>('/api/gm-pro/proxy/schema');
 }
 
-// ─── 配置 ──────────────────────────────────────────────────────────────────
+// ─── 运行时配置（graph-memory-pro 直接查询，区别于 config.ts 的配置管理 API） ──
 
-export interface GmProConfigResult {
+export interface GmProRuntimeConfigResult {
   version?: string;
   config?: Record<string, unknown>;
 }
 
-export function fetchGmProConfig(): Promise<GmProProxyResponse<GmProConfigResult>> {
-  return apiGet<GmProProxyResponse<GmProConfigResult>>('/api/gm-pro/proxy/config');
+/** 获取 graph-memory-pro 运行时配置（脱敏后），通过代理直连 gm-pro HTTP API */
+export function fetchGmProRuntimeConfig(): Promise<GmProProxyResponse<GmProRuntimeConfigResult>> {
+  return apiGet<GmProProxyResponse<GmProRuntimeConfigResult>>('/api/gm-pro/proxy/config');
 }
 
 // ─── 服务状态 ──────────────────────────────────────────────────────────────

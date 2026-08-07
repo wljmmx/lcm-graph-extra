@@ -46,12 +46,16 @@ import {
   fetchGmProNode,
   fetchGmProNodesByType,
   fetchGmProDirtyNodes,
+  fetchGmProNodeEdges,
+  fetchGmProNodeFeedbackStats,
   type GmProStatus,
   type GmProStats,
   type GmProHealth,
   type GmProNode,
   type GmProNodeType,
   type GmProProxyResponse,
+  type GmProNodeEdgesResult,
+  type GmProNodeFeedbackStats,
 } from '../api/gm-pro';
 import { useBreakpoints } from '../composables/useBreakpoints';
 
@@ -212,6 +216,8 @@ const selectedNodeId = ref<string | null>(null);
 const nodeDetailLoading = ref(false);
 const nodeDetail = ref<GmProNode | null>(null);
 const nodeDetailError = ref(false);
+const nodeEdges = ref<GmProNodeEdgesResult | null>(null);
+const nodeFeedbackStats = ref<GmProNodeFeedbackStats | null>(null);
 const drawerShow = ref(false);
 
 async function handleNodeClick(id: string): void {
@@ -220,12 +226,25 @@ async function handleNodeClick(id: string): void {
   nodeDetailLoading.value = true;
   nodeDetailError.value = false;
   nodeDetail.value = null;
+  nodeEdges.value = null;
+  nodeFeedbackStats.value = null;
   try {
-    const res = await fetchGmProNode(id);
-    if (res.ok) {
-      nodeDetail.value = res.data as GmProNode;
+    // 并行获取节点详情、关联边和反馈统计
+    const [nodeRes, edgesRes, feedbackRes] = await Promise.all([
+      fetchGmProNode(id),
+      fetchGmProNodeEdges(id),
+      fetchGmProNodeFeedbackStats(id),
+    ]);
+    if (nodeRes.ok) {
+      nodeDetail.value = nodeRes.data as GmProNode;
     } else {
       nodeDetailError.value = true;
+    }
+    if (edgesRes.ok) {
+      nodeEdges.value = edgesRes.data as GmProNodeEdgesResult;
+    }
+    if (feedbackRes.ok) {
+      nodeFeedbackStats.value = feedbackRes.data as GmProNodeFeedbackStats;
     }
   } catch {
     nodeDetailError.value = true;
@@ -577,6 +596,44 @@ function formatPagerank(v: number | undefined): string {
               <span class="mono">{{ formatDateTime(nodeDetail.updatedAt) }}</span>
             </NDescriptionsItem>
           </NDescriptions>
+
+          <!-- 反馈统计 -->
+          <NDivider v-if="nodeFeedbackStats" style="margin: 12px 0 8px">反馈统计</NDivider>
+          <NDescriptions
+            v-if="nodeFeedbackStats"
+            :column="2"
+            bordered
+            size="small"
+            label-placement="left"
+          >
+            <NDescriptionsItem label="反馈次数">
+              <span class="mono">{{ nodeFeedbackStats.feedbackCount ?? '—' }}</span>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="平均评分">
+              <NTag size="small" :type="(nodeFeedbackStats.avgScore ?? 0) >= 0.7 ? 'success' : (nodeFeedbackStats.avgScore ?? 0) >= 0.4 ? 'warning' : 'error'">
+                {{ nodeFeedbackStats.avgScore?.toFixed(3) ?? '—' }}
+              </NTag>
+            </NDescriptionsItem>
+          </NDescriptions>
+
+          <!-- 关联边 -->
+          <NDivider v-if="nodeEdges" style="margin: 12px 0 8px">
+            关联关系 ({{ nodeEdges.edges?.length ?? 0 }} 条)
+          </NDivider>
+          <div v-if="nodeEdges?.edges?.length" style="max-height:200px;overflow-y:auto">
+            <div
+              v-for="(edge, idx) in nodeEdges.edges"
+              :key="idx"
+              style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:var(--fs-caption);border-bottom:1px solid var(--color-border-subtle)"
+            >
+              <NTag size="tiny" :bordered="false">{{ edge.type ?? 'RELATED' }}</NTag>
+              <span class="mono" style="font-size:11px;color:var(--color-text-tertiary)">
+                {{ edge.source === nodeDetail?.id ? '→' : '←' }}
+                {{ edge.source === nodeDetail?.id ? (edge.target?.slice(0, 16) + (edge.target?.length > 16 ? '…' : '')) : (edge.source?.slice(0, 16) + (edge.source?.length > 16 ? '…' : '')) }}
+              </span>
+            </div>
+          </div>
+          <NEmpty v-else-if="nodeEdges" description="无关联关系" style="padding:8px 0" size="small" />
         </template>
         <NEmpty v-else description="未选中节点" />
 

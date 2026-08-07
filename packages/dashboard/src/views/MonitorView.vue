@@ -59,6 +59,12 @@ import {
   fetchGmProHealth,
   fetchGmProTop,
   fetchGmProDirtyNodes,
+  fetchGmProCommunities,
+  fetchGmProUsage,
+  fetchGmProAutoTunerState,
+  fetchGmProServices,
+  type GmProCommunitySummary,
+  type GmProServiceStatus,
 } from '../api/gm-pro';
 import { useTheme } from '../composables/useTheme';
 
@@ -163,7 +169,7 @@ const { data: gmProHealthRes } = useQuery({
   refetchInterval: 30_000,
   staleTime: 15_000,
 });
-const gmProHealth = computed(() => gmProHealthRes.value?.data ?? null);
+const gmProHealth = computed(() => gmProHealthRes.value?.ok ? (gmProHealthRes.value.data ?? null) : null);
 
 // G-5.2: gm-pro Top 10 节点（用于柱状图）
 const { data: gmProTop10Res } = useQuery({
@@ -172,7 +178,7 @@ const { data: gmProTop10Res } = useQuery({
   refetchInterval: 60_000,
   staleTime: 30_000,
 });
-const gmProTop10 = computed(() => gmProTop10Res.value?.data?.nodes ?? []);
+const gmProTop10 = computed(() => gmProTop10Res.value?.ok ? (gmProTop10Res.value.data?.nodes ?? []) : []);
 
 // G-5.3: gm-pro 脏节点监控
 const { data: gmProDirtyRes } = useQuery({
@@ -181,7 +187,47 @@ const { data: gmProDirtyRes } = useQuery({
   refetchInterval: 60_000,
   staleTime: 30_000,
 });
-const gmProDirty = computed(() => gmProDirtyRes.value?.data ?? null);
+const gmProDirty = computed(() => gmProDirtyRes.value?.ok ? (gmProDirtyRes.value.data ?? null) : null);
+
+// G-5.4: gm-pro 社区概览
+const { data: gmProCommunitiesRes } = useQuery({
+  queryKey: ['gm-pro-communities'],
+  queryFn: fetchGmProCommunities,
+  refetchInterval: 120_000,
+  staleTime: 60_000,
+});
+const gmProCommunities = computed<GmProCommunitySummary[]>(() =>
+  gmProCommunitiesRes.value?.ok ? (gmProCommunitiesRes.value.data?.summaries ?? []) : [],
+);
+
+// G-5.5: gm-pro LLM Token 用量
+const { data: gmProUsageRes } = useQuery({
+  queryKey: ['gm-pro-usage'],
+  queryFn: fetchGmProUsage,
+  refetchInterval: 60_000,
+  staleTime: 30_000,
+});
+const gmProUsage = computed(() => gmProUsageRes.value?.ok ? (gmProUsageRes.value.data ?? null) : null);
+
+// G-5.6: gm-pro AutoTuner 状态
+const { data: gmProTunerRes } = useQuery({
+  queryKey: ['gm-pro-auto-tuner'],
+  queryFn: fetchGmProAutoTunerState,
+  refetchInterval: 120_000,
+  staleTime: 60_000,
+});
+const gmProTuner = computed(() => gmProTunerRes.value?.ok ? (gmProTunerRes.value.data ?? null) : null);
+
+// G-5.7: gm-pro 服务状态总览
+const { data: gmProServicesRes } = useQuery({
+  queryKey: ['gm-pro-services'],
+  queryFn: fetchGmProServices,
+  refetchInterval: 60_000,
+  staleTime: 30_000,
+});
+const gmProServices = computed<GmProServiceStatus | null>(() =>
+  gmProServicesRes.value?.ok ? (gmProServicesRes.value.data ?? null) : null,
+);
 
 // MoA 性能数据（30s 轮询）
 const { data: moaPerfData, isLoading: moaPerfLoading } = useQuery({
@@ -2038,6 +2084,127 @@ const moaLatencyPhaseOption = computed(() => {
                 </span>
               </div>
             </template>
+          </NCard>
+        </NGi>
+
+        <!-- G-5.4: gm-pro 社区概览 -->
+        <NGi>
+          <NCard title="社区概览" size="small">
+            <template v-if="gmProCommunities.length">
+              <div style="max-height:260px;overflow-y:auto">
+                <div
+                  v-for="c in gmProCommunities.slice(0, 10)"
+                  :key="c.communityId"
+                  style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--color-border-subtle)"
+                >
+                  <span class="mono" style="font-size:11px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="c.communityId">
+                    {{ c.communityId.slice(0, 12) + '…' }}
+                  </span>
+                  <NTag size="tiny" :bordered="false">{{ c.memberCount }} 成员</NTag>
+                  <span style="font-size:var(--fs-caption);color:var(--color-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">
+                    {{ c.summary?.slice(0, 80) }}{{ c.summary?.length > 80 ? '…' : '' }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="gmProCommunities.length > 10" class="muted" style="font-size:var(--fs-caption);margin-top:4px">
+                共 {{ gmProCommunities.length }} 个社区，仅显示前 10 个
+              </div>
+            </template>
+            <NEmpty v-else description="暂无社区数据" style="padding:12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- G-5.5: gm-pro LLM Token 用量 -->
+        <NGi>
+          <NCard title="LLM Token 用量" size="small">
+            <template v-if="gmProUsage">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="总调用次数">
+                  <span class="mono">{{ gmProUsage.total?.calls ?? '—' }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="总 Token 消耗">
+                  <span class="mono">{{ formatTokens(gmProUsage.total?.totalTokens ?? 0) }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="Prompt Tokens">
+                  <span class="mono">{{ formatTokens(gmProUsage.total?.promptTokens ?? 0) }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="Completion Tokens">
+                  <span class="mono">{{ formatTokens(gmProUsage.total?.completionTokens ?? 0) }}</span>
+                </NDescriptionsItem>
+                <NDescriptionsItem v-if="gmProUsage.byModel" label="模型分布">
+                  <div style="max-height:100px;overflow-y:auto">
+                    <div v-for="(v, k) in (gmProUsage.byModel as Record<string, any>)" :key="k" style="font-size:var(--fs-caption);padding:2px 0">
+                      <span class="mono">{{ k }}:</span> {{ formatTokens(v.totalTokens ?? 0) }}
+                    </div>
+                  </div>
+                </NDescriptionsItem>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="暂无用量数据" style="padding:12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- G-5.6: gm-pro AutoTuner 状态 -->
+        <NGi>
+          <NCard title="AutoTuner 调优" size="small">
+            <template v-if="gmProTuner">
+              <NDescriptions :column="1" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="状态">
+                  <NTag size="small" :type="gmProTuner.enabled ? 'success' : 'default'">
+                    {{ gmProTuner.enabled ? '已启用' : '未启用' }}
+                  </NTag>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="数据可用">
+                  <NTag size="small" :type="gmProTuner.available ? 'success' : 'warning'">
+                    {{ gmProTuner.available ? '是' : '否' }}
+                  </NTag>
+                  <span v-if="!gmProTuner.available && gmProTuner.reason" class="muted" style="font-size:var(--fs-caption);margin-left:6px">
+                    {{ gmProTuner.reason }}
+                  </span>
+                </NDescriptionsItem>
+                <template v-if="gmProTuner.available">
+                  <NDescriptionsItem label="调优轮次">
+                    <span class="mono">{{ gmProTuner.state?.totalRounds ?? '—' }}</span>
+                  </NDescriptionsItem>
+                  <NDescriptionsItem label="快照数">
+                    <span class="mono">{{ gmProTuner.state?.snapshots?.length ?? '—' }}</span>
+                  </NDescriptionsItem>
+                </template>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="暂无调优数据" style="padding:12px 0" />
+          </NCard>
+        </NGi>
+
+        <!-- G-5.7: gm-pro 服务状态 -->
+        <NGi>
+          <NCard title="gm-pro 服务状态" size="small">
+            <template v-if="gmProServices">
+              <div class="profile-section" style="margin-bottom:4px">
+                <span class="muted" style="font-size:var(--fs-caption)">
+                  v{{ gmProServices.version }} · {{ gmProServices.timestamp ? (gmProServices.timestamp as string).slice(0, 19).replace('T', ' ') : '—' }}
+                </span>
+              </div>
+              <div style="max-height:240px;overflow-y:auto">
+                <div
+                  v-for="svc in (gmProServices.services ?? [])"
+                  :key="svc.name"
+                  style="display:flex;align-items:center;gap:8px;padding:3px 0;border-bottom:1px solid var(--color-border-subtle)"
+                >
+                  <span class="mono" style="font-size:11px;min-width:80px">{{ svc.name }}</span>
+                  <NTag
+                    size="tiny"
+                    :type="svc.status === 'connected' || svc.status === 'running' || svc.status === 'ok' || svc.status === 'configured' || svc.status === 'initialized' ? 'success' : svc.status === 'disconnected' || svc.status === 'not-initialized' ? 'error' : 'warning'"
+                  >
+                    {{ svc.status }}
+                  </NTag>
+                  <span v-if="svc.detail" class="muted" style="font-size:11px">
+                    {{ typeof svc.detail === 'object' ? JSON.stringify(svc.detail).slice(0, 60) : String(svc.detail).slice(0, 60) }}
+                  </span>
+                </div>
+              </div>
+            </template>
+            <NEmpty v-else description="暂无服务状态" style="padding:12px 0" />
           </NCard>
         </NGi>
 
