@@ -69,8 +69,10 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/gm-pro/proxy/*', async (req, reply) => {
     // 提取代理路径：/api/gm-pro/proxy/status → /api/status
     // 示例：GET /api/gm-pro/proxy/status → proxy to {GM_PRO_HTTP_URL}/api/status
+    // v2.7.0 P1-FIX: 修复前 urlPath.replace('/api/gm-pro/proxy', '') 把 /api 也 strip 了，
+    // 导致 proxyPath = /status 而非 /api/status，白名单校验失败返回 403。
     const urlPath = req.url.split('?')[0];
-    const proxyPath = urlPath.replace('/api/gm-pro/proxy', '');
+    const proxyPath = urlPath.replace('/gm-pro/proxy', '');
 
     // 路径白名单校验（前缀匹配，/api/nodes/abc 匹配 /api/nodes）
     const basePath = '/' + proxyPath.split('/').filter(Boolean).slice(0, 3).join('/');
