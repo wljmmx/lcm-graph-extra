@@ -2267,7 +2267,17 @@ const pluginEntry: any = definePluginEntry({
                   }
                 } else {
                   _graphQuickHealthFailCount++;
-                  logger?.warn?.(`heartbeat: graph/neo4j quickHealth failed (${_graphQuickHealthFailCount} consecutive), driver unavailable`);
+                  // P1-FIX: 区分「初始化窗口期」与「真正的 driver 故障」。
+                  // 初始化窗口期（initPromise 仍在进行 / mod 尚未加载）不视为 driver unavailable，
+                  // 避免在 gateway register() 到达前的 30s 轮询窗口期产生误导性 warn 日志。
+                  const isInitializing = !!initPromise || !(graphAdapter as any).mod;
+                  if (isInitializing) {
+                    logger?.debug?.(`heartbeat: graph/neo4j quickHealth not ready (initializing, attempt ${_graphQuickHealthFailCount})`);
+                    // 初始化窗口期不累加失败计数，避免触发不必要的 full recovery
+                    _graphQuickHealthFailCount = 0;
+                  } else {
+                    logger?.warn?.(`heartbeat: graph/neo4j quickHealth failed (${_graphQuickHealthFailCount} consecutive), driver unavailable`);
+                  }
                 }
               } catch (e) {
                 _graphQuickHealthFailCount++;

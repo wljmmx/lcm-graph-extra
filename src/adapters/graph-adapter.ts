@@ -556,17 +556,20 @@ export class GraphAdapter {
             this.logger?.info?.('[graph-adapter] search: retrying after connection recovery');
             return await this._doSearch(this.mod, this.driver, query, rl);
           } catch (retryErr) {
-            this.logger?.warn?.('[graph-adapter] search: retry after recovery failed', { err: String(retryErr) });
+            this.logger?.error?.('[graph-adapter] search: retry after recovery failed — L3 graph recall completely broken', { query: query.slice(0, 100), err: String(retryErr) });
           }
         }
       }
-      this.logger?.warn?.(`[lcm-graph-extra] search error: ${err}`);
+      // P2-FIX: 从 warn 升级为 error —— 返回空数组意味着 L3 图谱召回完全失效，
+      // 生产日志中必须可见（原 warn 级易被过滤或忽略）。
+      this.logger?.error?.(`[lcm-graph-extra] search error (L3 graph recall returning empty): ${err}`, { query: query.slice(0, 100) });
       return [];
     }
   }
 
   private async _doSearch(mod: any, driver: any, query: string, rl: number): Promise<RetrievalResult[]> {
     let nodes: any[] = [];
+    let recallFailed = false;
 
     if (this._recaller) {
       try {
@@ -574,12 +577,18 @@ export class GraphAdapter {
         nodes = recallResult.nodes ?? [];
         this.logger?.debug?.('[graph-adapter] Recaller returned', { nodeCount: nodes.length });
       } catch (recallErr) {
-        this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back', { err: recallErr });
+        recallFailed = true;
+        this.logger?.warn?.('[graph-adapter] Recaller.recall failed, falling back to searchNodes', { err: recallErr });
       }
     }
 
     if (nodes.length === 0) {
       nodes = await mod.searchNodes(driver, query, rl);
+      // P2-FIX: recall 失败 + fallback 也返回 0 节点 → L3 图谱召回完全失效，
+      // 升级为 error 级确保生产日志可见（原仅 recall 失败时 warn，fallback 空 results 无日志）。
+      if (recallFailed && nodes.length === 0) {
+        this.logger?.error?.('[graph-adapter] L3 graph recall completely empty: Recaller.recall failed AND searchNodes fallback returned 0 nodes', { query: query.slice(0, 100) });
+      }
     }
     let reranked = (nodes ?? []).filter((n: any) => {
       const st = n?.state ?? n?.properties?.state;
@@ -1181,6 +1190,25 @@ export class GraphAdapter {
       if (this.driver) {
         await this.driver.verifyConnectivity();
         return true;
+      }
+      // P1-FIX: driver 引用为 null 时（初始化窗口期 / health() 恢复后未完成 connect），
+      // 尝试从 gm-pro 单例获取 driver，避免误报 "driver unavailable"。
+      // 与 health() L1224-1255 的逻辑保持一致。
+      if (this.mod && typeof this.mod.getDriver === 'function') {
+        const gmDriver = this.mod.getDriver();
+        if (gmDriver) {
+          try {
+            await gmDriver.verifyConnectivity();
+            // gm-pro driver 可用，同步到 this.driver 供后续使用
+            this.driver = gmDriver;
+            this._connectFailed = false;
+            this.logger?.info?.('[graph-adapter] quickHealth: acquired driver from graph-memory-pro (was null)');
+            return true;
+          } catch {
+            // gm-pro driver 也不可用，返回 false 触发完整恢复
+            return false;
+          }
+        }
       }
       return false;
     } catch {
