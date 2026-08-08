@@ -172,11 +172,9 @@ describe('MaintainView', () => {
     expect(text).toContain('恢复');
     expect(text).toContain('同步修复');
     expect(text).toContain('历史导入');
-    // gm-pro 运维卡片（NCard 组件）
-    expect(text).toContain('Auto Tuner');
-    expect(text).toContain('系统诊断 (Doctor)');
-    expect(text).toContain('关联矩阵 M');
-    expect(text).toContain('Token 用量');
+    // gm-pro 运维卡片已合并到操作卡片中，系统诊断保留
+    expect(text).toContain('系统诊断');
+    expect(text).toContain('Bootstrap 反馈');
     // 日志区
     expect(text).toContain('操作日志');
     // 初始空日志
@@ -227,14 +225,15 @@ describe('MaintainView', () => {
     expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_maintain', {});
   });
 
-  it('点击 ttl_cleanup 卡片也调用 lcmg_maintain（复用工具）', async () => {
+  it('点击 ttl_cleanup 卡片也调用 lcmg_maintain（复用工具，传 source 区分）', async () => {
     const wrapper = mountView();
     const cards = wrapper.findAllComponents({ name: 'OperationCard' });
     const ttlCard = cards.find((c) => c.props('title') === 'TTL 清理');
     expect(ttlCard).toBeTruthy();
     ttlCard!.vm.$emit('execute');
     await flushPromises();
-    expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_maintain', {});
+    // TTL 清理复用 lcmg_maintain，传 source=ttl_cleanup 用于历史过滤区分
+    expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_maintain', { source: 'ttl_cleanup' });
   });
 
   it('点击 restore 卡片执行按钮传递 dryRun=true（默认）+ 三次确认级别', async () => {
