@@ -213,21 +213,15 @@ function getMax(field: SchemaFieldDoc): number | undefined {
             :key="field.path"
             :label="field.description"
           >
-            <!-- 只读字段：禁用样式的 NInput，提示「只读」 -->
-            <template v-if="isReadonly(field)">
-              <NInput
-                size="small"
-                style="width: 260px"
-                :value="String(editValues[field.path] ?? '')"
-                disabled
-                clearable
-              />
-              <template #feedback>
-                <span style="font-size: 11px; color: var(--color-text-tertiary)">
-                  {{ field.path }} · 只读 · 默认: {{ String(field.defaultValue ?? '—') }}
-                </span>
-              </template>
-            </template>
+            <!-- 只读字段：禁用样式的 NInput -->
+            <NInput
+              v-if="isReadonly(field)"
+              size="small"
+              style="width: 260px"
+              :value="String(editValues[field.path] ?? '')"
+              disabled
+              clearable
+            />
 
             <!-- boolean → NSwitch -->
             <NSwitch
@@ -280,7 +274,7 @@ function getMax(field: SchemaFieldDoc): number | undefined {
             />
             <template #feedback>
               <span style="font-size: 11px; color: var(--color-text-tertiary)">
-                {{ field.path }} · 默认: {{ String(field.defaultValue ?? '—') }}
+                {{ field.path }}{{ isReadonly(field) ? ' · 只读' : '' }} · 默认: {{ String(field.defaultValue ?? '—') }}
               </span>
             </template>
           </NFormItem>
