@@ -243,6 +243,12 @@ export class GraphAdapter {
   private driver: any = null;
   private _connectFailed = false;
   private _connectRetryCount = 0;
+  /**
+   * 方案 A (2026-08-09): 当前 driver 是否来自 graph-memory-pro 单例（getDriver）。
+   * 为 true 时绝不允许 close() 该 driver —— 它由 gm-pro 独占管理，
+   * extra 只借用不销毁，否则会误杀 gm-pro 运行中的 driver（无自愈）。
+   */
+  private _driverFromGmPro = false;
   /** 最近一次连接/健康检查失败的具体错误信息，供 dashboard 诊断展示 */
   private _lastError: string | null = null;
   /** health() 被调用的总次数，用于诊断 heartbeat 是否在运行 */
@@ -290,9 +296,11 @@ export class GraphAdapter {
       const gmDriver = mod.getDriver?.() ?? null;
       if (gmDriver) {
         this.driver = gmDriver;
+        this._driverFromGmPro = true;
       } else {
         this.logger?.debug?.('[graph-adapter] graph-memory-pro getDriver() returned null, acquiring own driver');
         this.driver = await acquireDriver(this.neo4jConfig);
+        this._driverFromGmPro = false;
       }
       if (!this.driver) {
         this._lastError = 'no driver available (gm-pro getDriver null + acquireDriver returned null)';
@@ -438,11 +446,19 @@ export class GraphAdapter {
       this.logger?.warn?.(`[graph-adapter] connection error detected (${context}), initiating recovery`);
 
       if (this.driver) {
-        try {
-          await releaseDriver(this.neo4jConfig);
-        } catch { /* ignore */ }
+        // 方案 A (2026-08-09): gm-pro driver 由 gm-pro 独占管理，
+        // 只清引用、绝不开 close()，避免误杀 gm-pro 运行中的 driver（无自愈）。
+        // 后续重新 getDriver() 拿到新引用即可。
+        if (!this._driverFromGmPro) {
+          try {
+            await releaseDriver(this.neo4jConfig);
+          } catch { /* ignore */ }
+        } else {
+          this.logger?.info?.('[graph-adapter] recovery: dropping gm-pro driver reference without close (owned by gm-pro)');
+        }
         this.driver = null;
       }
+      this._driverFromGmPro = false;
       this._recaller = null;
       this._embedFn = null;
       this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
@@ -1261,8 +1277,10 @@ export class GraphAdapter {
               await gmDriver.verifyConnectivity();
               gmDriverOk = true;
             } catch (verifyErr) {
-              this.logger?.warn?.('[graph-adapter] health check: gm-pro driver verifyConnectivity failed, will close and retry', { err: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) });
-              try { await gmDriver.close(); } catch {}
+              this.logger?.warn?.('[graph-adapter] health check: gm-pro driver verifyConnectivity failed, will drop ref and connect fresh (NOT closing gm-pro driver)', { err: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) });
+              // 方案 A (2026-08-09): 不 close gm-pro driver —— 它由 gm-pro 独占管理，
+              // close 会误杀 gm-pro 运行中的 driver（无自愈）。只让 gmDriverOk=false，
+              // 走下方 connect() 拿到 gm-pro 暴露的新引用。
             }
             if (gmDriverOk) {
               this.driver = gmDriver;
@@ -1285,16 +1303,22 @@ export class GraphAdapter {
       } catch {
         const hadExistingDriver = !!this.driver;
         if (this.driver) {
-          try {
-            await releaseDriver(this.neo4jConfig);
-          } catch { /* ignore release errors */ }
-          // v2.7.0 P1-FIX: gm-pro driver 不在连接池中，releaseDriver 是 no-op。
-          // 直接关闭 driver 防止泄漏，确保后续 reconnect 创建全新连接。
-          try {
-            await this.driver.close();
-          } catch { /* ignore close errors */ }
+          // 方案 A (2026-08-09): gm-pro driver 由 gm-pro 独占管理，绝不开 close()。
+          // 原逻辑对从 gm-pro getDriver() 拿到的共享引用直接 close()，
+          // 会误杀 gm-pro 运行中的 driver（无自愈）→ 本次修复核心点。
+          if (this._driverFromGmPro) {
+            this.logger?.warn?.('[graph-adapter] health: dropping gm-pro driver ref without close (owned by gm-pro)');
+          } else {
+            try {
+              await releaseDriver(this.neo4jConfig);
+            } catch { /* ignore release errors */ }
+            try {
+              await this.driver.close();
+            } catch { /* ignore close errors */ }
+          }
           this.driver = null;
         }
+        this._driverFromGmPro = false;
         this._recaller = null;
         this._embedFn = null;
         if (hadExistingDriver) {
@@ -1314,8 +1338,8 @@ export class GraphAdapter {
                 await gmDriver.verifyConnectivity();
                 gmDriverOk = true;
               } catch (verifyErr) {
-                this.logger?.warn?.('[graph-adapter] health check: gm-pro driver verifyConnectivity failed in recovery path', { err: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) });
-                try { await gmDriver.close(); } catch {}
+                this.logger?.warn?.('[graph-adapter] health check: gm-pro driver verifyConnectivity failed in recovery path, will drop ref and connect fresh (NOT closing gm-pro driver)', { err: verifyErr instanceof Error ? verifyErr.message : String(verifyErr) });
+                // 方案 A (2026-08-09): 不 close gm-pro driver —— gm-pro 独占管理，close 会误杀。
               }
               if (gmDriverOk) {
                 this.driver = gmDriver;
@@ -1350,13 +1374,18 @@ export class GraphAdapter {
   }
 
   async close(): Promise<void> {
-    // Release driver back to pool instead of closing directly
-    try {
-      await releaseDriver(this.neo4jConfig);
-    } catch (relErr) {
-      this.logger?.warn?.(`[graph-adapter] releaseDriver failed: ${relErr}`);
+    // 方案 A (2026-08-09): gm-pro driver 由 gm-pro 独占管理，
+    // 本对象关停时只清引用、绝不动它（不 release / 不 close）。
+    if (!this._driverFromGmPro) {
+      // Release driver back to pool instead of closing directly
+      try {
+        await releaseDriver(this.neo4jConfig);
+      } catch (relErr) {
+        this.logger?.warn?.(`[graph-adapter] releaseDriver failed: ${relErr}`);
+      }
     }
     this.driver = null;
+    this._driverFromGmPro = false;
     this.mod = null;
     this._recaller = null;
     this._embedFn = null;
