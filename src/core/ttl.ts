@@ -226,9 +226,12 @@ export interface Neo4jTtlAdapter {
  * 内存图在每次检索后才临时加载，进程退出即丢失。因此节点权重永不衰减，TTL 过期判断
  * 失效，`lcmg_pin` 的豁免语义也无意义。
  *
- * 本函数直接在 Neo4j 上用 Cypher 批量衰减：
+ * 本函数在 Neo4j 上执行权重衰减：
  *   weight = max(minWeight, weight * 0.5 ^ (daysSinceUpdate / halfLifeDays))
  * 跳过 pinned=true 的节点（pinnedExempt=true 时）与无 weight 属性的节点。
+ *
+ * 实现为「读取 → JS 计算 → 批量写回」：部署环境的 Cypher 不支持 pow/power 等
+ * 数学函数（报 Unknown function），因此在应用侧用 Math.pow 计算衰减因子。
  */
 export async function applyNeo4jWeightDecay(
   adapter: Neo4jTtlAdapter,
@@ -239,24 +242,42 @@ export async function applyNeo4jWeightDecay(
   if (halfLifeDays <= 0) return 0;
   try {
     const exemptClause = pinnedExempt ? 'AND NOT n.pinned = true' : '';
-    // 用 Neo4j 的 duration 计算天数差，避免客户端时区问题
-    // 注意：Neo4j Cypher 的幂函数是 pow()，不是 power()（power() 会报 Unknown function）
-    const result = await adapter.query(
+
+    // v2.1.12 修复：不再在 Cypher 里用数学函数（pow/power）。
+    // 实测部署环境对这两个函数都报 "Unknown function"（非标准 Neo4j 或函数被限制），
+    // 导致权重衰减从未生效。改为「读取 → JS 计算 → 批量写回」，不依赖任何 DB 数学函数。
+    const rows = await adapter.query(
       `MATCH (n) WHERE n.weight IS NOT NULL AND n.updatedAt IS NOT NULL ${exemptClause}
-       WITH n, n.weight AS w, n.updatedAt AS ua,
-            duration.inseconds(datetime(ua), datetime()).seconds AS secs
-       WHERE secs > 0
-       SET n.weight = CASE
-         WHEN w * pow(0.5, (secs / 86400.0) / $halfLifeDays) < $minWeight
-         THEN $minWeight
-         ELSE w * pow(0.5, (secs / 86400.0) / $halfLifeDays)
-       END
-       RETURN count(n) AS c`,
-      { halfLifeDays, minWeight },
+       RETURN id(n) AS id, n.weight AS w, n.updatedAt AS ua`,
     );
-    const row = result?.[0] as { c?: { toNumber?: () => number } | number } | undefined;
-    const c = (row?.c as any)?.toNumber ? (row?.c as any).toNumber() : (row?.c as number) ?? 0;
-    return typeof c === 'number' ? c : 0;
+    if (!rows || rows.length === 0) return 0;
+
+    const now = Date.now();
+    const updates: Array<{ id: number; w: number }> = [];
+    for (const row of rows) {
+      const id = Number(row?.id);
+      if (!Number.isFinite(id)) continue;
+      const w = Number(row?.w ?? 1);
+      const uaDate = new Date(String(row?.ua));
+      if (isNaN(uaDate.getTime())) continue;
+      const secs = Math.max(0, (now - uaDate.getTime()) / 1000);
+      if (secs <= 0) continue;
+      // 衰减公式：weight = max(minWeight, weight * 0.5 ^ (daysSinceUpdate / halfLifeDays))
+      const factor = Math.pow(0.5, (secs / 86400.0) / halfLifeDays);
+      const newW = Math.max(minWeight, w * factor);
+      updates.push({ id, w: newW });
+    }
+    if (updates.length === 0) return 0;
+
+    // 批量写回（UNWIND 一条事务完成所有更新）
+    await adapter.query(
+      `UNWIND $rows AS row
+       MATCH (n) WHERE id(n) = row.id
+       SET n.weight = row.w
+       RETURN count(n) AS c`,
+      { rows: updates },
+    );
+    return updates.length;
   } catch (err) {
     getGlobalLogger()?.error?.('applyNeo4jWeightDecay failed — weight decay skipped, nodes will retain stale weights', { err: err instanceof Error ? err.message : String(err) });
     return 0;
