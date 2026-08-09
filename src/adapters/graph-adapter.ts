@@ -426,6 +426,16 @@ export class GraphAdapter {
   private _isConnectionError(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     const lowerMsg = msg.toLowerCase();
+    // 先排除已知的非连接错误（语法错误、未知函数、类型错误等），
+    // 这些错误重试也不会成功，恢复连接无意义。
+    if (lowerMsg.includes('unknown function')
+      || lowerMsg.includes('syntax')
+      || lowerMsg.includes('variable `')
+      || lowerMsg.includes('type mismatch')
+      || lowerMsg.includes('cannot be cast')
+      || lowerMsg.includes('is not defined')) {
+      return false;
+    }
     return lowerMsg.includes('pool is closed')
       || lowerMsg.includes('connection closed')
       || lowerMsg.includes('connection refused')

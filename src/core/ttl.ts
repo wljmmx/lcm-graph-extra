@@ -240,15 +240,16 @@ export async function applyNeo4jWeightDecay(
   try {
     const exemptClause = pinnedExempt ? 'AND NOT n.pinned = true' : '';
     // 用 Neo4j 的 duration 计算天数差，避免客户端时区问题
+    // 注意：Neo4j Cypher 的幂函数是 pow()，不是 power()（power() 会报 Unknown function）
     const result = await adapter.query(
       `MATCH (n) WHERE n.weight IS NOT NULL AND n.updatedAt IS NOT NULL ${exemptClause}
        WITH n, n.weight AS w, n.updatedAt AS ua,
             duration.inseconds(datetime(ua), datetime()).seconds AS secs
        WHERE secs > 0
        SET n.weight = CASE
-         WHEN w * power(0.5, (secs / 86400.0) / $halfLifeDays) < $minWeight
+         WHEN w * pow(0.5, (secs / 86400.0) / $halfLifeDays) < $minWeight
          THEN $minWeight
-         ELSE w * power(0.5, (secs / 86400.0) / $halfLifeDays)
+         ELSE w * pow(0.5, (secs / 86400.0) / $halfLifeDays)
        END
        RETURN count(n) AS c`,
       { halfLifeDays, minWeight },
@@ -256,7 +257,8 @@ export async function applyNeo4jWeightDecay(
     const row = result?.[0] as { c?: { toNumber?: () => number } | number } | undefined;
     const c = (row?.c as any)?.toNumber ? (row?.c as any).toNumber() : (row?.c as number) ?? 0;
     return typeof c === 'number' ? c : 0;
-  } catch {
+  } catch (err) {
+    getGlobalLogger()?.error?.('applyNeo4jWeightDecay failed — weight decay skipped, nodes will retain stale weights', { err: err instanceof Error ? err.message : String(err) });
     return 0;
   }
 }
@@ -290,7 +292,8 @@ export async function cleanupNeo4jExpiredNodes(
     const row = result?.[0] as { c?: { toNumber?: () => number } | number } | undefined;
     const c = (row?.c as any)?.toNumber ? (row?.c as any).toNumber() : (row?.c as number) ?? 0;
     return typeof c === 'number' ? c : 0;
-  } catch {
+  } catch (err) {
+    getGlobalLogger()?.error?.('cleanupNeo4jExpiredNodes failed — expired node cleanup skipped', { err: err instanceof Error ? err.message : String(err) });
     return 0;
   }
 }
