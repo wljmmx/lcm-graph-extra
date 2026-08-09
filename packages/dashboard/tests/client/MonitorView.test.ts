@@ -39,9 +39,14 @@ vi.mock('@tanstack/vue-query', async () => {
   const useQuery = vi.fn(() => ({
     data: ref(null),
     isLoading: ref(false),
+    isFetching: ref(false),
     isError: ref(false),
   }));
-  return { useQuery, VueQueryPlugin: { install: () => {} } };
+  const useQueryClient = vi.fn(() => ({
+    invalidateQueries: vi.fn(),
+    refetchQueries: vi.fn(),
+  }));
+  return { useQuery, useQueryClient, VueQueryPlugin: { install: () => {} } };
 });
 
 // mock useTheme composable（提供 isDark 等 reactive 状态）

@@ -15,7 +15,7 @@
  *          agent.error → 警告提示。
  */
 import { computed, ref, h, watch, onMounted, onBeforeUnmount } from 'vue';
-import { useQuery } from '@tanstack/vue-query';
+import { useQuery, useQueryClient } from '@tanstack/vue-query';
 import { useRouter, useRoute } from 'vue-router';
 import {
   NGrid,
@@ -65,9 +65,12 @@ import {
   fetchGmProServices,
   fetchGmProDoctor,
   fetchGmProAssociationMatrixState,
+  postGmProAssociationMatrixSave,
+  postGmProAssociationMatrixLoad,
   type GmProCommunitySummary,
   type GmProServiceStatus,
 } from '../api/gm-pro';
+import AssociationMatrixCard from '../components/monitor/AssociationMatrixCard.vue';
 import { useTheme } from '../composables/useTheme';
 
 const { isDark } = useTheme();
@@ -241,13 +244,51 @@ const { data: gmProDoctorRes } = useQuery({
 const gmProDoctor = computed(() => gmProDoctorRes.value?.ok ? (gmProDoctorRes.value.data ?? null) : null);
 
 // G-5.9: gm-pro 关联矩阵 M 状态
-const { data: gmProAmRes } = useQuery({
+const { data: gmProAmRes, isFetching: gmProAmFetching, isError: gmProAmError } = useQuery({
   queryKey: ['gm-pro-association-matrix'],
   queryFn: fetchGmProAssociationMatrixState,
   refetchInterval: 120_000,
   staleTime: 60_000,
 });
 const gmProAm = computed(() => gmProAmRes.value?.ok ? (gmProAmRes.value.data ?? null) : null);
+
+// G-5.9.1: 关联矩阵 M 持久化操作（save / load），成功后刷新状态
+const queryClient = useQueryClient();
+const amActing = ref(false);
+async function handleAmSave(): Promise<void> {
+  if (amActing.value) return;
+  amActing.value = true;
+  try {
+    const res = await postGmProAssociationMatrixSave();
+    if (res.ok) {
+      message.success(`关联矩阵 M 已保存${res.data?.path ? ` → ${res.data.path}` : ''}`);
+    } else {
+      message.error(`保存失败: ${res.error || '未知错误'}`);
+    }
+  } catch (err: any) {
+    message.error(`保存失败: ${err?.message || String(err)}`);
+  } finally {
+    amActing.value = false;
+    queryClient.invalidateQueries({ queryKey: ['gm-pro-association-matrix'] });
+  }
+}
+async function handleAmLoad(): Promise<void> {
+  if (amActing.value) return;
+  amActing.value = true;
+  try {
+    const res = await postGmProAssociationMatrixLoad();
+    if (res.ok) {
+      message.success('关联矩阵 M 已从磁盘加载');
+    } else {
+      message.error(`加载失败: ${res.error || '未知错误'}`);
+    }
+  } catch (err: any) {
+    message.error(`加载失败: ${err?.message || String(err)}`);
+  } finally {
+    amActing.value = false;
+    queryClient.invalidateQueries({ queryKey: ['gm-pro-association-matrix'] });
+  }
+}
 
 // MoA 性能数据（30s 轮询）
 const { data: moaPerfData, isLoading: moaPerfLoading } = useQuery({
@@ -2065,21 +2106,15 @@ const moaLatencyPhaseOption = computed(() => {
 
           <!-- 关联矩阵 M -->
           <NGi>
-            <NCard title="关联矩阵 M" size="small">
-              <template v-if="gmProAm">
-                <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                  <NDescriptionsItem label="维度"><span class="mono">{{ (gmProAm as any).dimensions ?? '—' }}</span></NDescriptionsItem>
-                  <NDescriptionsItem label="时间步"><span class="mono">{{ (gmProAm as any).timeSteps ?? '—' }}</span></NDescriptionsItem>
-                  <NDescriptionsItem label="已应用"><span class="mono">{{ (gmProAm as any).applied ?? '—' }}</span></NDescriptionsItem>
-                  <NDescriptionsItem label="被拒"><span class="mono">{{ (gmProAm as any).rejected ?? '—' }}</span></NDescriptionsItem>
-                </NDescriptions>
-              </template>
-              <NEmpty v-else description="暂无关联矩阵数据" style="padding:12px 0">
-                <template #extra>
-                  <span class="muted" style="font-size:var(--fs-caption)">请确认 openclaw.json 中 associationMatrix 已启用，且 gm-pro 服务可达。</span>
-                </template>
-              </NEmpty>
-            </NCard>
+            <AssociationMatrixCard
+              :am="gmProAm"
+              :loading="gmProAmFetching"
+              :is-error="gmProAmError"
+              :acting="amActing"
+              @save="handleAmSave"
+              @load="handleAmLoad"
+              @retry="queryClient.invalidateQueries({ queryKey: ['gm-pro-association-matrix'] })"
+            />
           </NGi>
         </NGrid>
 

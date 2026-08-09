@@ -12,7 +12,7 @@
  *   fetchGmProStatus() → GET /api/gm-pro/proxy/status  → GET {GM_PRO_HTTP_URL}/api/status
  *   fetchGmProStats()  → GET /api/gm-pro/proxy/stats   → GET {GM_PRO_HTTP_URL}/api/stats
  */
-import { apiGet } from './client';
+import { apiGet, apiPost } from './client';
 
 // ─── 通用代理响应 ──────────────────────────────────────────────────────────
 
@@ -218,12 +218,65 @@ export function fetchGmProAutoTunerState(): Promise<GmProProxyResponse<GmProAuto
 
 // ─── Association Matrix 状态 ───────────────────────────────────────────────
 
+/**
+ * graph-memory-pro /api/association-matrix/state 响应体。
+ *
+ * 实际返回格式（graph-memory-pro src/routes/crud.ts handleAssociationMatrixState）：
+ *   { enabled, available, config,
+ *     stats: { enabled, dim, t, updatesApplied, updatesRejected, historySize },
+ *     coldStart, feedbackCount, warmupFeedbacks,
+ *     persist: { path, persisted: {exists, bytes, modifiedAt} }, hint }
+ */
+export interface GmProAssociationMatrixStats {
+  enabled?: boolean;
+  dim?: number;              // 矩阵维度 N
+  t?: number;                // Adam 时间步
+  updatesApplied?: number;   // 已应用的更新次数
+  updatesRejected?: number;  // 被 R-3 拒绝的更新次数
+  historySize?: number;      // R-3 历史样本池大小
+}
+
+export interface GmProAssociationMatrixPersistInfo {
+  path?: string;
+  persisted?: { exists?: boolean; bytes?: number; modifiedAt?: string } | null;
+}
+
 export interface GmProAssociationMatrixState {
+  enabled?: boolean;
+  available?: boolean;
+  reason?: string;
+  config?: Record<string, unknown> | null;
+  stats?: GmProAssociationMatrixStats | null;
+  coldStart?: boolean;
+  feedbackCount?: number;
+  warmupFeedbacks?: number;
+  persist?: GmProAssociationMatrixPersistInfo | null;
+  hint?: string;
   [key: string]: unknown;
 }
 
 export function fetchGmProAssociationMatrixState(): Promise<GmProProxyResponse<GmProAssociationMatrixState>> {
   return apiGet<GmProProxyResponse<GmProAssociationMatrixState>>('/api/gm-pro/proxy/association-matrix/state');
+}
+
+// ─── Association Matrix 持久化（save / load）───────────────────────────────
+
+export interface GmProAssociationMatrixSaveResult {
+  ok?: boolean;
+  path?: string;
+  bytes?: number;
+  dim?: number;
+  updateCount?: number;
+  rejectedCount?: number;
+  reason?: string;
+}
+
+export function postGmProAssociationMatrixSave(): Promise<GmProProxyResponse<GmProAssociationMatrixSaveResult>> {
+  return apiPost<GmProProxyResponse<GmProAssociationMatrixSaveResult>>('/api/gm-pro/proxy/association-matrix/save', {});
+}
+
+export function postGmProAssociationMatrixLoad(): Promise<GmProProxyResponse<GmProAssociationMatrixSaveResult>> {
+  return apiPost<GmProProxyResponse<GmProAssociationMatrixSaveResult>>('/api/gm-pro/proxy/association-matrix/load', {});
 }
 
 // ─── Doctor 诊断 ───────────────────────────────────────────────────────────

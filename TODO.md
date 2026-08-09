@@ -161,6 +161,27 @@
 
 ---
 
+## 🧠 关联矩阵 M 可视化 + gm-pro 反馈闭环对接 (2026-08-09)
+
+> 背景：异步 L3/L4 处理需对接 graph-memory-pro 最新 recaller（JudgeManager / AssociationMatrix / SessionRecallCache），
+> 并修复 dashboard 关联矩阵 M 展示的数据契约错配。
+
+### 🔴 P0 — 前端展示正确性
+- [x] **AM-1**: 对齐 `GmProAssociationMatrixState` 类型到 gm-pro 真实响应（`stats: {dim,t,updatesApplied,updatesRejected,historySize}`）
+- [x] **AM-2**: 重写 `AssociationMatrixCard.vue`（冷启动进度条 + 学习状态 chip + applied/rejected 比率 + 持久化按钮）
+- [x] **AM-3**: 修复 `MonitorView.vue` 内联 AM 卡字段映射（复用 `AssociationMatrixCard`，接入 save/load 处理）
+
+### 🟡 P1 — 持久化操作 + 可视化增强
+- [x] **AM-4**: dashboard proxy 白名单加 `POST /api/association-matrix/save` + `/load`
+- [ ] **AM-5**: AM 学习曲线采样（复刻 `fetchHealthHistory` 模式，前端绘制 updatesApplied/feedbackCount 时序）
+- [ ] **AM-6**: gm-pro 新增 `/api/association-matrix/visual` 轻量可视化端点（降采样偏差 + rowEnergy）
+
+### 🟢 P2 — 反馈闭环（插件侧）
+- [x] **AM-7**: 对接 SessionRecallCache，agent_end 自动采集反馈 → `processFeedback` 闭环
+- [x] **AM-8**: 插件 dispose 时持久化关联矩阵 M（`saveRecallerAssociationMatrix`）
+
+---
+
 ## 📋 当前进度统计
 
 | 版本 | 总任务 | 完成 | 进行中 | 待开始 | 完成率 |

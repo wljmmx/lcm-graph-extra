@@ -64,6 +64,9 @@ const ALLOWED_GM_PRO_PATHS = new Set([
 /** graph-memory-pro 允许的 POST 写 API 路径白名单（v2.3.5+） */
 const ALLOWED_GM_PRO_POST_PATHS = new Set([
   '/api/feedback/bootstrap',
+  // 关联矩阵 M 持久化（save / load）
+  '/api/association-matrix/save',
+  '/api/association-matrix/load',
 ]);
 
 export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
