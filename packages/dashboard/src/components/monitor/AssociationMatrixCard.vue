@@ -1,21 +1,27 @@
 <script setup lang="ts">
 /**
- * 关联矩阵 M：冷启动进度 + 学习状态 + applied/rejected 比率。
+ * 关联矩阵 M：冷启动进度 + 学习状态 + applied/rejected 比率 + 学习曲线 + 热力网格。
  *
- * 数据契约对齐 graph-memory-pro /api/association-matrix/state：
- *   { enabled, available, reason, config,
- *     stats: { enabled, dim, t, updatesApplied, updatesRejected, historySize },
- *     coldStart, feedbackCount, warmupFeedbacks,
- *     persist: { path, persisted: {exists, bytes, modifiedAt} }, hint }
+ * 数据契约对齐 graph-memory-pro：
+ *   - /api/association-matrix/state   （stats / coldStart / feedbackCount / persist）
+ *   - /api/association-matrix/history （学习曲线采样，跨重启持久化）
+ *   - /api/association-matrix/visual  （降采样热力网格 + 学习集中度标量）
  *
- * 注：M 是单个 N×N 矩阵，无"时间轴"维度，因此不再绘制"维度×时间步"热力图。
- * 学习集中度可视化（降采样 |M-I| / rowEnergy）由 P1 的 /api/association-matrix/visual 提供。
+ * 三个端点分开调用（AM-5 / AM-6），互不阻塞，history/visual 在卡片内部按需拉取。
  */
 import { computed } from 'vue';
-import { NCard, NDescriptions, NDescriptionsItem, NProgress, NTag, NButton, NSpin } from 'naive-ui';
+import { useQuery } from '@tanstack/vue-query';
+import { NCard, NDescriptions, NDescriptionsItem, NProgress, NTag, NButton, NSpin, NEmpty } from 'naive-ui';
 import CardState from './CardState.vue';
+import EChart from '../EChart.vue';
 import { useTheme } from '../../composables/useTheme';
-import type { GmProAssociationMatrixState } from '../../api/gm-pro';
+import {
+  fetchGmProAssociationMatrixHistory,
+  fetchGmProAssociationMatrixVisual,
+  type GmProAssociationMatrixState,
+  type GmProAssociationMatrixVisual,
+  type GmProLearningSample,
+} from '../../api/gm-pro';
 
 const props = defineProps<{
   am: GmProAssociationMatrixState | null;
@@ -77,6 +83,119 @@ const persistText = computed(() => {
   const bytes = p.bytes != null ? `${(p.bytes / 1024).toFixed(1)}KB` : '';
   const time = p.modifiedAt ? new Date(p.modifiedAt).toLocaleString() : '';
   return [bytes, time].filter(Boolean).join(' · ') || '已保存';
+});
+
+// ── AM-5: 学习曲线（独立端点，跨重启历史） ─────────────────────────────
+const { data: historyRes, isFetching: historyFetching } = useQuery({
+  queryKey: ['gm-pro-association-matrix-history'],
+  queryFn: () => fetchGmProAssociationMatrixHistory(120),
+  refetchInterval: 120_000,
+  staleTime: 60_000,
+});
+const historySamples = computed<GmProLearningSample[]>(() =>
+  historyRes.value?.ok ? (historyRes.value.data?.samples ?? []) : [],
+);
+
+const historyOption = computed<Record<string, unknown>>(() => {
+  const samples = historySamples.value;
+  const x = samples.map(s => new Date(s.timestamp).toLocaleTimeString());
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: {},
+    grid: { left: 40, right: 16, top: 28, bottom: 28 },
+    xAxis: { type: 'category', data: x, boundaryGap: false },
+    yAxis: { type: 'value', minInterval: 1 },
+    series: [
+      { name: '已应用', type: 'line', smooth: true, showSymbol: false, data: samples.map(s => s.updatesApplied) },
+      { name: '被拒', type: 'line', smooth: true, showSymbol: false, data: samples.map(s => s.updatesRejected) },
+      { name: '反馈数', type: 'line', smooth: true, showSymbol: false, data: samples.map(s => s.feedbackCount) },
+    ],
+  };
+});
+
+// ── AM-6: 热力网格（独立端点，降采样） ─────────────────────────────────
+const visualMax = 48; // 降采样网格尺寸（避免 1024×1024 全量传输）
+const { data: visualRes, isFetching: visualFetching } = useQuery({
+  queryKey: ['gm-pro-association-matrix-visual', visualMax],
+  queryFn: () => fetchGmProAssociationMatrixVisual(visualMax),
+  refetchInterval: 180_000,
+  staleTime: 120_000,
+});
+const visual = computed<GmProAssociationMatrixVisual | null>(() =>
+  visualRes.value?.ok ? (visualRes.value.data ?? null) : null,
+);
+
+/** 热力图数据 [x, y, value]，x=列 y=行（web 热力图 y 向下增长） */
+const heatmapData = computed<Array<[number, number, number]>>(() => {
+  const v = visual.value;
+  const grid = v?.grid ?? 0;
+  const values = v?.values ?? [];
+  const out: Array<[number, number, number]> = [];
+  for (let r = 0; r < grid; r++) {
+    for (let c = 0; c < grid; c++) {
+      out.push([r, c, values[r * grid + c] ?? 0]);
+    }
+  }
+  return out;
+});
+
+/** 热力图颜色区间：以对角 + 白（0）为对称，负蓝正红 */
+const heatmapMinMax = computed(() => {
+  const v = heatmapData.value;
+  if (!v.length) return { min: -1, max: 1 };
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const [, , val] of v) {
+    if (val < min) min = val;
+    if (val > max) max = val;
+  }
+  const bound = Math.max(Math.abs(min), Math.abs(max), 1e-6);
+  // 对称区间，突出对角（M=I 时对角=1，其余=0）
+  return { min: -bound, max: bound };
+});
+
+const heatmapOption = computed<Record<string, unknown>>(() => {
+  const v = visual.value;
+  const grid = v?.grid ?? 0;
+  if (!grid || !heatmapData.value.length) return {};
+  const { min, max } = heatmapMinMax.value;
+  return {
+    tooltip: {
+      position: 'top',
+      formatter: (p: { value: [number, number, number] }) => {
+        const [r, c, val] = p.value;
+        return `维度 ${r} × ${c}<br/>值: ${val.toFixed(4)}`;
+      },
+    },
+    grid: { left: 40, right: 24, top: 8, bottom: 32 },
+    xAxis: { type: 'category', data: Array.from({ length: grid }, (_, i) => i), splitArea: { show: true } },
+    yAxis: { type: 'category', data: Array.from({ length: grid }, (_, i) => i), splitArea: { show: true } },
+    visualMap: {
+      min, max,
+      calculable: true,
+      orient: 'vertical',
+      right: 0,
+      top: 'center',
+      inRange: { color: ['#313695', '#4575b4', '#74add1', '#e0f3f8', '#ffffbf', '#fee090', '#fdae61', '#f46d43', '#d73027'] },
+    },
+    series: [{
+      type: 'heatmap',
+      data: heatmapData.value,
+      label: { show: false },
+      emphasis: { itemStyle: { shadowBlur: 4, shadowColor: 'rgba(0,0,0,0.5)' } },
+    }],
+  };
+});
+
+/** 学习集中度标量（仅当热力网格有数据时展示） */
+const visualScalars = computed(() => {
+  const v = visual.value;
+  if (!v) return null;
+  return [
+    { label: '对角偏差', value: v.diagDeviation?.toFixed(4) ?? '—' },
+    { label: 'Frobenius', value: v.frobenius?.toFixed(3) ?? '—' },
+    { label: '接近单位阵', value: v.identityRatio != null ? `${(v.identityRatio * 100).toFixed(1)}%` : '—' },
+  ];
 });
 </script>
 
@@ -151,6 +270,33 @@ const persistText = computed(() => {
         <div style="display:flex;gap:8px;margin-top:10px">
           <NButton size="tiny" secondary type="primary" :loading="acting" @click="emit('save')">保存 M</NButton>
           <NButton size="tiny" secondary :loading="acting" @click="emit('load')">加载 M</NButton>
+        </div>
+
+        <!-- AM-5: 学习曲线（跨重启历史） -->
+        <div style="margin-top:12px">
+          <div class="ratio-label">
+            <span class="muted" style="font-size:var(--fs-caption)">学习曲线（跨重启）</span>
+            <NSpin :show="historyFetching" size="small" style="width:14px">
+              <span class="mono" style="font-size:var(--fs-caption)">{{ historySamples.length }} 点</span>
+            </NSpin>
+          </div>
+          <NEmpty v-if="!historySamples.length" description="暂无采样" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
+          <EChart v-else :option="historyOption" height="180px" aria-label="关联矩阵M学习曲线：已应用/被拒/反馈数随时间变化" />
+        </div>
+
+        <!-- AM-6: 热力网格（降采样） -->
+        <div style="margin-top:12px">
+          <div class="ratio-label">
+            <span class="muted" style="font-size:var(--fs-caption)">热力网格（{{ visual?.grid ?? '—' }}×{{ visual?.grid ?? '—' }} 降采样）</span>
+            <NSpin :show="visualFetching" size="small" style="width:14px" />
+          </div>
+          <NEmpty v-if="!visual?.grid" description="暂无网格数据" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
+          <EChart v-else :option="heatmapOption" height="220px" aria-label="关联矩阵M降采样热力网格" />
+          <div v-if="visualScalars" style="display:flex;gap:12px;margin-top:4px;flex-wrap:wrap">
+            <span v-for="s in visualScalars" :key="s.label" class="muted" style="font-size:var(--fs-caption)">
+              {{ s.label }}: <span class="mono">{{ s.value }}</span>
+            </span>
+          </div>
         </div>
       </template>
 

@@ -173,8 +173,8 @@
 
 ### 🟡 P1 — 持久化操作 + 可视化增强
 - [x] **AM-4**: dashboard proxy 白名单加 `POST /api/association-matrix/save` + `/load`
-- [ ] **AM-5**: AM 学习曲线采样（复刻 `fetchHealthHistory` 模式，前端绘制 updatesApplied/feedbackCount 时序）
-- [ ] **AM-6**: gm-pro 新增 `/api/association-matrix/visual` 轻量可视化端点（降采样偏差 + rowEnergy）
+- [x] **AM-5**: AM 学习曲线采样（复刻 `fetchHealthHistory` 模式，前端绘制 updatesApplied/feedbackCount 时序）
+- [x] **AM-6**: gm-pro 新增 `/api/association-matrix/visual` 轻量可视化端点（降采样偏差 + rowEnergy）
 
 ### 🟢 P2 — 反馈闭环（插件侧）
 - [x] **AM-7**: 对接 SessionRecallCache，agent_end 自动采集反馈 → `processFeedback` 闭环

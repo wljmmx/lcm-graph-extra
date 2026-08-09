@@ -279,6 +279,45 @@ export function postGmProAssociationMatrixLoad(): Promise<GmProProxyResponse<GmP
   return apiPost<GmProProxyResponse<GmProAssociationMatrixSaveResult>>('/api/gm-pro/proxy/association-matrix/load', {});
 }
 
+// ─── Association Matrix 学习曲线（AM-5，跨重启持久化）──────────────────────
+
+export interface GmProLearningSample {
+  timestamp: number;
+  t: number;
+  updatesApplied: number;
+  updatesRejected: number;
+  feedbackCount: number;
+}
+
+export interface GmProAssociationMatrixHistory {
+  available?: boolean;
+  count?: number;
+  samples?: GmProLearningSample[];
+}
+
+export function fetchGmProAssociationMatrixHistory(n?: number): Promise<GmProProxyResponse<GmProAssociationMatrixHistory>> {
+  const qs = n != null ? `?n=${n}` : '';
+  return apiGet<GmProProxyResponse<GmProAssociationMatrixHistory>>(`/api/gm-pro/proxy/association-matrix/history${qs}`);
+}
+
+// ─── Association Matrix 可视化热力网格（AM-6）───────────────────────────────
+
+export interface GmProAssociationMatrixVisual {
+  available?: boolean;
+  dim?: number;
+  grid?: number;
+  values?: number[];
+  diagDeviation?: number;
+  rowEnergy?: number[];
+  frobenius?: number;
+  identityRatio?: number;
+}
+
+export function fetchGmProAssociationMatrixVisual(max?: number): Promise<GmProProxyResponse<GmProAssociationMatrixVisual>> {
+  const qs = max != null ? `?max=${max}` : '';
+  return apiGet<GmProProxyResponse<GmProAssociationMatrixVisual>>(`/api/gm-pro/proxy/association-matrix/visual${qs}`);
+}
+
 // ─── Doctor 诊断 ───────────────────────────────────────────────────────────
 
 export interface GmProDoctorResult {

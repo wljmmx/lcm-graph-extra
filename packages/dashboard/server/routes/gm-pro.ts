@@ -55,6 +55,8 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/metrics',
   '/api/auto-tuner/state',
   '/api/association-matrix/state',
+  '/api/association-matrix/history',
+  '/api/association-matrix/visual',
   '/api/doctor',
   '/api/usage',
   '/api/config',
