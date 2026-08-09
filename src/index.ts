@@ -397,6 +397,12 @@ const pluginEntry: any = definePluginEntry({
             searchLimit: pluginConfig.retrieval?.graph?.searchLimit ?? 5,
             searchCacheSize: pluginConfig.retrieval?.graph?.searchCacheSize ?? 50,
             embedding: resolveEmbeddingConfig(pluginConfig) ?? undefined,
+            // v2.3.6 在线学习：把 judge / associationMatrix / autoFeedback 透传给适配层，
+            // 由 graph-adapter 注入 Recaller（JudgeManager + AssociationMatrix）并驱动反馈闭环。
+            embeddingDimensions: resolveEmbeddingConfig(pluginConfig)?.dimensions ?? undefined,
+            judge: pluginConfig.retrieval?.graph?.judge,
+            associationMatrix: pluginConfig.retrieval?.graph?.associationMatrix,
+            autoFeedback: pluginConfig.retrieval?.graph?.autoFeedback,
           },
           logger,
         );
@@ -1649,6 +1655,12 @@ const pluginEntry: any = definePluginEntry({
 
         // 6. Dispose QmdClient（清理 recoveryTimer，避免 timer 泄漏）
         try { qmdClient?.dispose?.(); } catch {}
+
+        // 6.5 v2.3.6 链路 3：持久化关联矩阵 M（若启用）
+        //    在关闭 driver 前保存，避免学习到的最新 M 在重启后丢失。
+        try { await graphAdapter?.saveAssociationMatrix?.(); } catch (e) {
+          logger?.debug?.("graph adapter saveAssociationMatrix failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
 
         // 7. Close Neo4j driver pool before resetting to avoid "Pool is closed" errors
         //    必须 await，确保 driver 底层 TCP 连接被优雅关闭

@@ -331,43 +331,11 @@ export async function performRetrieval(
         ctx.logger?.debug?.("recordCascadeConfidence failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
       }
 
-      const r2JudgeQuery = qmdQuery;
-      const r2JudgeNodeIds = allResults.map((r: any) => r?.id ?? r?.experience?.id).filter(Boolean);
-      const r2JudgeScenario = scenarioAdjust?.scenario;
-      backgroundTasks.register('r2:judgeRecall', (async () => {
-        try {
-          const { withGmProFallback } = await import('../adapters/gm-pro-fallback.js');
-          const judgeResult = await withGmProFallback(
-            'judgeRecall',
-            async (mod) => {
-              return await mod.judgeRecall({
-                query: r2JudgeQuery,
-                recalledNodeIds: r2JudgeNodeIds,
-                scenario: r2JudgeScenario,
-              });
-            },
-            async () => null,
-            { logger: ctx.logger, label: 'R-2 judgeRecall (async)' },
-          );
-          if (judgeResult && typeof judgeResult.tier1Confidence === 'number') {
-            try {
-              // P0-6: 已改为静态导入
-              healthMetrics.recordCascadeConfidence(judgeResult.tier1Confidence, 'gm-pro');
-            } catch { /* non-fatal */ }
-            // 反馈到 cascade arms（gm-pro 高置信 → 正反馈，影响下一轮采样）
-            if (judgeResult.tier1Confidence >= 0.7) {
-              for (const nid of r2JudgeNodeIds) {
-                ctx.cascadeManager.recordFeedback(
-                  CascadeManager.makeArmKey(r2JudgeScenario ?? 'default', nid),
-                  true,
-                );
-              }
-            }
-          }
-        } catch (r2JudgeErr) {
-          ctx.logger?.debug?.("R-2 judgeRecall async failed (non-fatal)", { err: String(r2JudgeErr) });
-        }
-      })().then(() => {}, () => {}));
+      // P2-3: 原 judgeRecall 异步任务已移除 —— gm-pro 2.3.6 彻底删除了 judgeRecall API，
+      // 对应的 L3 反馈闭环改由 v2.3.6 统一链路承担：
+      //   afterTurn 预取 L3 时 recordRecall → agent_end 时 consumeAndProcessFeedback
+      //   （JudgeManager 判定 → upsertFeedback → incrementFeedback → M 更新）
+      // 此处不再重复录入 SessionRecallCache，避免与预取采集端重复记录。
 
       if (confidence.needsTier2 && tier === 'low') {
         const scenarioTag = scenarioAdjust?.scenario ?? 'default';

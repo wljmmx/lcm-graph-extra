@@ -242,6 +242,37 @@ export const PluginConfigSchema = Type.Object({
       searchLimit: Type.Number({ default: 5, minimum: 1 }),
       // BUG-6: 图谱检索缓存大小可配置（原硬编码 DEFAULTS.graph.searchCacheSize = 50）
       searchCacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),
+      // v2.3.6 在线学习：JudgeManager（I-2 裁判）注入 Recaller，形成反馈闭环
+      judge: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: true })),
+        // 1=启发式(零 LLM) / 2=LLM 裁判 / 3=自定义
+        tier: Type.Optional(Type.Union([
+          Type.Literal(1),
+          Type.Literal(2),
+          Type.Literal(3),
+        ], { default: 1 })),
+        // 冷启动阈值（默认 20，见 gm-pro DEFAULT_JUDGE_CONFIG）
+        judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 20, minimum: 1 })),
+        // 启发式匹配维度：id / name / both
+        heuristicMatch: Type.Optional(Type.Union([
+          Type.Literal('id'),
+          Type.Literal('name'),
+          Type.Literal('both'),
+        ], { default: 'both' })),
+        llmJudgeMaxNodes: Type.Optional(Type.Number({ default: 8, minimum: 1 })),
+        llmJudgeTimeoutMs: Type.Optional(Type.Number({ default: 30_000, minimum: 1_000 })),
+      })),
+      // v2.3.6 在线学习：关联矩阵 M（L-1），默认关闭，需显式启用
+      associationMatrix: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: false })),
+        learningRate: Type.Optional(Type.Number({ default: 0.1, minimum: 0, maximum: 1 })),
+        warmupFeedbacks: Type.Optional(Type.Number({ default: 20, minimum: 1 })),
+        persistPath: Type.Optional(Type.String()),
+      })),
+      // v2.3.5 方案 A：agent_end 自动反馈采集（冷启动死循环破除）
+      autoFeedback: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: true })),
+      })),
     })),
     // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
     cacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),
@@ -447,6 +478,10 @@ export function validateConfig(input: unknown): PluginConfig {
   if (!config.retrieval) config.retrieval = {};
   if (!config.retrieval?.limits) config.retrieval.limits = { qmd: 5, graph: 5, exp: 3 };
   if (!config.retrieval?.graph) config.retrieval.graph = { enabled: true, searchLimit: 5 };
+  // v2.3.6: 默认启用 judge + autoFeedback，关闭 associationMatrix（需显式开启）
+  if (!config.retrieval?.graph?.judge) config.retrieval.graph.judge = { enabled: true, tier: 1, judgeWarmupFeedbacks: 20, heuristicMatch: 'both', llmJudgeMaxNodes: 8, llmJudgeTimeoutMs: 30_000 };
+  if (!config.retrieval?.graph?.associationMatrix) config.retrieval.graph.associationMatrix = { enabled: false, learningRate: 0.1, warmupFeedbacks: 20 };
+  if (!config.retrieval?.graph?.autoFeedback) config.retrieval.graph.autoFeedback = { enabled: true };
   if (!config.lcmMonitor) config.lcmMonitor = {
     enabled: true, contextWindow: 262_144, dedupRounds: 24,
     highPressureThreshold: 0.85, mediumPressureThreshold: 0.70,

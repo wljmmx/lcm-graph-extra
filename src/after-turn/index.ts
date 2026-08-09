@@ -112,6 +112,37 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
       }
     } catch { /* non-fatal */ }
 
+    // ==================================================================
+    // v2.3.6 链路 2（agent_end 自动反馈采集 → 反馈闭环）
+    //
+    // 对应 gm-pro 方案 A 的 agent_end 钩子：consume 上一轮预取时录入的 L3 召回节点，
+    // 用本轮 assistant 回复作为判定依据，调 processFeedback 完成
+    //   JudgeManager 判定 → upsertFeedback → incrementFeedback → updateAssociationMatrix(M 更新)
+    //
+    // 时序说明：
+    //   - afterTurn(N-1) 预取 L3 时 recordRecall(sessionKey, ...)   ← 采集
+    //   - assemble(N) 使用预取结果注入上下文                            ← 使用
+    //   - afterTurn(N) 此处 consume(sessionKey) → processFeedback    ← 消费
+    // 全程 fire-and-forget，不阻塞会话；无召回/无回复则跳过。
+    // ==================================================================
+    if (ctx.graphAdapter?.consumeAndProcessFeedback && ctx.graphAdapter?.mod?.getSessionRecallCache) {
+      const fbSessionKey = typeof params.sessionKey === 'string'
+        ? params.sessionKey
+        : typeof params.session_id === 'string'
+          ? params.session_id
+          : '';
+      const fbSessionId = typeof params.sessionId === 'string' ? params.sessionId : fbSessionKey;
+      if (fbSessionKey && assistantContent?.trim()) {
+        (async () => {
+          try {
+            await ctx.graphAdapter.consumeAndProcessFeedback(fbSessionKey, assistantContent, fbSessionId);
+          } catch (fbErr) {
+            ctx.logger?.debug?.('[afterTurn] v2.3.6 feedback loop skipped (non-fatal)', { err: fbErr instanceof Error ? fbErr.message : String(fbErr) });
+          }
+        })().catch(() => { /* swallow unhandled */ });
+      }
+    }
+
     // S-7': 用户画像
     try {
       ctx.userProfile.observe(userContent);
@@ -347,6 +378,20 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
               if (ctx.graphAdapter) {
                 const graphRes = await ctx.graphAdapter.searchWithCache(query, retrievalLimits.graph);
                 if (Array.isArray(graphRes)) results.graph = graphRes;
+                // v2.3.6 链路 2 采集端：把本次 L3 召回节点录入 SessionRecallCache，
+                // 供下一轮 agent_end consume() 后 processFeedback 自动判定（Tier 1 零 LLM 成本）。
+                if (graphRes?.length && ctx.graphAdapter.recordRecallToSessionCache) {
+                  const nodeIds = graphRes
+                    .map((r: any) => r?.metadata?.nodeId)
+                    .filter(Boolean) as string[];
+                  if (nodeIds.length) {
+                    try {
+                      ctx.graphAdapter.recordRecallToSessionCache(sessionKey, query, nodeIds);
+                    } catch (rrErr) {
+                      ctx.logger?.debug?.('[afterTurn] O7: recordRecallToSessionCache failed (non-fatal)', { err: rrErr instanceof Error ? rrErr.message : String(rrErr) });
+                    }
+                  }
+                }
               }
             } catch (l3Err) {
               ctx.logger?.debug?.('[afterTurn] O7: L3 prefetch failed (non-fatal)', {

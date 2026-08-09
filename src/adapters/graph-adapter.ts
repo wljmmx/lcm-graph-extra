@@ -107,6 +107,35 @@ export interface GraphAdapterConfig {
   embedding?: EmbeddingConfig;
   /** BUG-6: 图谱检索缓存大小可配置（原硬编码 DEFAULTS.graph.searchCacheSize = 50） */
   searchCacheSize?: number;
+  /**
+   * v2.3.6 在线学习对接：站在 graph-memory-pro 最新 Recaller 能力之上，
+   * 让 L3 召回 + 反馈自动采集形成闭环（链路 1/2/3）。
+   */
+  /** 嵌入维度（关联矩阵 M 需要；缺省则对 embedFn 探测一次） */
+  embeddingDimensions?: number;
+  /** I-2 LLM/启发式裁判配置（注入 Recaller.setJudgeManager） */
+  judge?: {
+    enabled?: boolean;
+    /** 1=启发式(零 LLM) / 2=LLM 裁判 / 3=自定义 */
+    tier?: 1 | 2 | 3;
+    /** 冷启动阈值（默认 20，见 gm-pro DEFAULT_JUDGE_CONFIG） */
+    judgeWarmupFeedbacks?: number;
+    heuristicMatch?: 'id' | 'name' | 'both';
+    llmJudgeMaxNodes?: number;
+    llmJudgeTimeoutMs?: number;
+  };
+  /** L-1 关联矩阵 M 在线学习配置（默认关闭，需显式启用） */
+  associationMatrix?: {
+    enabled?: boolean;
+    learningRate?: number;
+    warmupFeedbacks?: number;
+    /** M 持久化文件路径（缺省用 gm-pro 默认目录） */
+    persistPath?: string;
+  };
+  /** v2.3.5 方案 A: agent_end 自动反馈采集 */
+  autoFeedback?: {
+    enabled?: boolean;
+  };
 }
 
 const _gmpRequire = createRequire(import.meta.url);
@@ -269,6 +298,9 @@ export class GraphAdapter {
   private _recaller: any = null;
   private _embedFn: any = null;
   private _llm?: (system: string, user: string) => Promise<string>;
+  // v2.3.6 在线学习：JudgeManager + AssociationMatrix 注入 Recaller，形成反馈闭环
+  private _judgeManager: any = null;
+  private _associationMatrix: any = null;
 
   // P2-3 H-16: searchWithCache 的 LRU 容量与 TTL 改为引用 DEFAULTS.graph
   private searchCache!: LRUCache<string, RetrievalResult[]>;
@@ -347,6 +379,9 @@ export class GraphAdapter {
           this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller', { err: embedErr });
         }
 
+        // v2.3.6: 注入 JudgeManager + AssociationMatrix（反馈闭环 + 在线学习）
+        await this._configureRecallerOnline(mod);
+
         this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
       } catch (initErr) {
         this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes', { err: initErr });
@@ -403,7 +438,113 @@ export class GraphAdapter {
     } else {
       this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
     }
+    // v2.3.6: 注入 JudgeManager + AssociationMatrix（反馈闭环 + 在线学习）
+    await this._configureRecallerOnline(this.mod);
     this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
+  }
+
+  /**
+   * v2.3.6 在线学习闭环：向 Recaller 注入 JudgeManager + AssociationMatrix。
+   *
+   * 对应 gm-pro 链路：
+   *   - 链路 1（召回）：Recaller.setEmbedFn → setJudgeManager → setAssociationMatrix → recall()
+   *   - 链路 3（M 持久化）：createAssociationMatrixPersisted 启动自动 load 恢复
+   *
+   * 幂等：_recaller 缺失或已注入过则跳过。失败不致命（仅降级为无反馈召回）。
+   */
+  private async _configureRecallerOnline(mod: any): Promise<void> {
+    if (!mod || !this._recaller) return;
+    // 已注入 JudgeManager 则跳过（recovery/多次 connect 时不重复 bootstrap）
+    if (this._judgeManager && this._recaller.getJudgeManager?.()) return;
+
+    // ── 1. JudgeManager（I-2：启发式/LLM 裁判）─────────────────
+    try {
+      const JudgeManager = mod.JudgeManager;
+      if (typeof JudgeManager === 'function' && this.config.judge?.enabled !== false) {
+        const judgeCfg: Record<string, any> = {
+          enabled: this.config.judge?.enabled ?? true,
+          tier: this.config.judge?.tier ?? 1,
+          heuristicMatch: this.config.judge?.heuristicMatch ?? 'both',
+        };
+        if (typeof this.config.judge?.judgeWarmupFeedbacks === 'number') {
+          judgeCfg.judgeWarmupFeedbacks = this.config.judge.judgeWarmupFeedbacks;
+        }
+        if (typeof this.config.judge?.llmJudgeMaxNodes === 'number') {
+          judgeCfg.llmJudgeMaxNodes = this.config.judge.llmJudgeMaxNodes;
+        }
+        if (typeof this.config.judge?.llmJudgeTimeoutMs === 'number') {
+          judgeCfg.llmJudgeTimeoutMs = this.config.judge.llmJudgeTimeoutMs;
+        }
+        const jm = new JudgeManager(judgeCfg);
+        // 从 Neo4j 恢复累计反馈计数，避免冷启动反复
+        if (typeof mod.getFeedbackCount === 'function') {
+          try {
+            const persistedCount = await mod.getFeedbackCount(this.driver);
+            for (let i = 0; i < (persistedCount ?? 0); i++) jm.incrementFeedback();
+            this.logger?.debug?.('[graph-adapter] JudgeManager feedback bootstrap', { persistedCount });
+          } catch { /* DB 可能为空 */ }
+        }
+        this._recaller.setJudgeManager(jm);
+        this._judgeManager = jm;
+        this.logger?.info?.('[graph-adapter] JudgeManager injected into Recaller (feedback loop enabled)');
+      }
+    } catch (judgeErr) {
+      this.logger?.warn?.('[graph-adapter] JudgeManager inject failed (feedback loop degraded)', { err: String(judgeErr) });
+      this._judgeManager = null;
+    }
+
+    // ── 2. AssociationMatrix（L-1：在线学习 M 矩阵，默认关闭）─────
+    if (this.config.associationMatrix?.enabled === true) {
+      try {
+        const dim = await this._probeEmbedDimension();
+        if (dim > 0 && typeof mod.createAssociationMatrixPersisted === 'function') {
+          const gmCfg: Record<string, any> = {
+            associationMatrix: { enabled: true },
+            warmup: {},
+          };
+          if (typeof this.config.associationMatrix.learningRate === 'number') {
+            gmCfg.associationMatrix.learningRate = this.config.associationMatrix.learningRate;
+          }
+          if (typeof this.config.associationMatrix.warmupFeedbacks === 'number') {
+            gmCfg.associationMatrix.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
+            gmCfg.warmup.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
+          }
+          const am = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
+            path: this.config.associationMatrix.persistPath,
+          });
+          if (am) {
+            this._recaller.setAssociationMatrix(am);
+            this._associationMatrix = am;
+            this.logger?.info?.('[graph-adapter] AssociationMatrix injected into Recaller (online learning on)', {
+              dim,
+              persistedRestored: (am as any).__persistLoaded ?? false,
+            });
+          }
+        } else {
+          this.logger?.warn?.('[graph-adapter] AssociationMatrix skipped: no embed dim or API unavailable');
+        }
+      } catch (amErr) {
+        this.logger?.warn?.('[graph-adapter] AssociationMatrix inject failed (M learning degraded)', { err: String(amErr) });
+        this._associationMatrix = null;
+      }
+    }
+  }
+
+  /** 探测嵌入维度（优先用 config.embeddingDimensions，否则对 embedFn 调用一次） */
+  private async _probeEmbedDimension(): Promise<number> {
+    if (typeof this.config.embeddingDimensions === 'number' && this.config.embeddingDimensions > 0) {
+      return this.config.embeddingDimensions;
+    }
+    if (!this._embedFn) return 0;
+    try {
+      const vec = await Promise.race([
+        this._embedFn('graph-memory-pro dimension probe'),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]);
+      return Array.isArray(vec) ? vec.length : 0;
+    } catch {
+      return 0;
+    }
   }
 
   /**
@@ -1430,6 +1571,123 @@ export class GraphAdapter {
 
   setLlm(llm: (system: string, user: string) => Promise<string>): void {
     this._llm = llm;
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // v2.3.6 反馈闭环方法（链路 2：agent_end 自动采集 → processFeedback）
+  // ═══════════════════════════════════════════════════════════════
+
+  /** JudgeManager 是否已注入（供诊断/健康检查） */
+  get judgeInjected(): boolean {
+    return !!this._judgeManager && !!this._recaller?.getJudgeManager?.();
+  }
+
+  /** 在线学习 M 矩阵是否已启用并在用 */
+  get associationMatrixEnabled(): boolean {
+    return !!this._associationMatrix?.isEnabled?.();
+  }
+
+  /**
+   * 记录一次召回节点到 SessionRecallCache（链路 2 采集端）。
+   * 由 afterTurn 预取 / assemble 在当前轮实际使用 L3 结果后调用。
+   */
+  recordRecallToSessionCache(sessionKey: string, query: string, nodeIds: string[]): void {
+    if (!sessionKey || !nodeIds?.length) return;
+    try {
+      const cache = this.mod?.getSessionRecallCache?.();
+      cache?.recordRecall?.(sessionKey, query, nodeIds);
+    } catch (err) {
+      this.logger?.debug?.('[graph-adapter] recordRecallToSessionCache failed (non-fatal)', { err: String(err) });
+    }
+  }
+
+  /**
+   * 消费该 session 的召回记录（链路 2 消费端）。
+   * 返回 { query, nodeIds, getNodeIds, recallCount } 或 null。
+   */
+  consumeSessionRecall(sessionKey: string): { query: string; nodeIds: string[]; getNodeIds?: string[]; recallCount?: number } | null {
+    if (!sessionKey) return null;
+    try {
+      const cache = this.mod?.getSessionRecallCache?.();
+      const rec = cache?.consume?.(sessionKey);
+      return rec ?? null;
+    } catch (err) {
+      this.logger?.debug?.('[graph-adapter] consumeSessionRecall failed (non-fatal)', { err: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * 按 ID 加载召回节点（JudgeManager 需要 GmNode[] 做 heuristic 匹配）。
+   * 与 gm-pro index.ts agent_end 的 findById 加载逻辑一致。
+   */
+  async loadNodesByIds(nodeIds: string[]): Promise<any[]> {
+    if (!nodeIds?.length || !this.mod?.findById || !this.driver) return [];
+    try {
+      const nodes = await Promise.all(
+        nodeIds.map((id: string) => this.mod!.findById(this.driver, id)),
+      );
+      return nodes.filter(Boolean);
+    } catch (err) {
+      this.logger?.debug?.('[graph-adapter] loadNodesByIds failed (non-fatal)', { err: String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * 完整反馈闭环（链路 2 一站式）：consume 该 session 召回 → 按 ID 加载节点 →
+   * processFeedback（JudgeManager 判定 → upsertFeedback → incrementFeedback → M 更新）。
+   * 由 afterTurn 在 agent_end 时机调用，全程 fire-and-forget 不阻塞会话。
+   */
+  async consumeAndProcessFeedback(
+    sessionKey: string,
+    assistantReply: string,
+    sessionId?: string,
+  ): Promise<void> {
+    if (!sessionKey || !assistantReply?.trim()) return;
+    const rec = this.consumeSessionRecall(sessionKey);
+    if (!rec || rec.nodeIds.length === 0) return;
+    const recalledNodes = await this.loadNodesByIds(rec.nodeIds);
+    if (recalledNodes.length === 0) return;
+    const query = rec.query || '';
+    await this.processFeedback(query, recalledNodes, assistantReply, sessionId);
+  }
+
+  /**
+   * 执行一次反馈闭环（链路 2 核心）：JudgeManager 判定 → upsertFeedback →
+   * incrementFeedback → updateAssociationMatrix(M 更新)。
+   * 若 Recaller 未注入 JudgeManager 则静默跳过（非致命）。
+   */
+  async processFeedback(
+    query: string,
+    recalledNodes: any[],
+    assistantReply: string,
+    sessionId?: string,
+  ): Promise<void> {
+    if (!this._recaller || typeof this._recaller.processFeedback !== 'function') return;
+    try {
+      await this._recaller.processFeedback(query, recalledNodes, assistantReply, sessionId);
+    } catch (err) {
+      this.logger?.debug?.('[graph-adapter] processFeedback failed (non-fatal)', { err: String(err) });
+    }
+  }
+
+  /**
+   * 持久化关联矩阵 M（链路 3）。由 dispose / 维护周期调用。
+   * 未启用 M 时返回 null。
+   */
+  async saveAssociationMatrix(): Promise<{ path?: string; bytes?: number } | null> {
+    const mod = this.mod;
+    if (!mod || typeof mod.saveRecallerAssociationMatrix !== 'function') return null;
+    try {
+      const saved = await mod.saveRecallerAssociationMatrix(this._recaller, {
+        path: this.config.associationMatrix?.persistPath,
+      });
+      return saved ? { path: saved.path, bytes: saved.bytes } : null;
+    } catch (err) {
+      this.logger?.debug?.('[graph-adapter] saveAssociationMatrix failed (non-fatal)', { err: String(err) });
+      return null;
+    }
   }
 
   getDiagnostics(): {
