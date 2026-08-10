@@ -185,3 +185,37 @@ export function matchEntityScore(
 
   return { match, score, matchedTerms };
 }
+/**
+ * Phase 2: 置信度级别
+ */
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
+/**
+ * 根据实体匹配分数返回置信度级别
+ * 
+ * 分级标准：
+ * - high (>=0.6): 命中术语/专有名词，主题高度相关
+ * - medium (>=0.3): 命中技术术语或通用token，主题可能相关
+ * - low (<0.3): 仅微弱匹配或完全不匹配，仅供参考
+ */
+export function getConfidenceLevel(score: number): ConfidenceLevel {
+  if (score >= 0.6) return 'high';
+  if (score >= 0.3) return 'medium';
+  return 'low';
+}
+
+/**
+ * 将置信度级别转换为中文标签，用于注入 LLM 提示词
+ */
+export function confidenceLabel(level: ConfidenceLevel): string {
+  const labels = { high: '[高置信度]', medium: '[中置信度]', low: '[低置信度]' };
+  return labels[level];
+}
+
+/**
+ * 将置信度级别转换为英文标签（用于结构化输出场景）
+ */
+export function confidenceLabelEn(level: ConfidenceLevel): string {
+  const labels = { high: '[HIGH_CONFIDENCE]', medium: '[MEDIUM_CONFIDENCE]', low: '[LOW_CONFIDENCE]' };
+  return labels[level];
+}

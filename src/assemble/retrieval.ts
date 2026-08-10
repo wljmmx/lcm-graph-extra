@@ -22,6 +22,7 @@ import type { RetrievalResult } from '../types.js';
 
 import { randomUUID } from 'node:crypto';
 import { extractEntities, matchEntityScore } from '../entity-extract.js';
+import { needsQueryRewrite, rewriteQuery } from './query-rewrite.js';
 
 /** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */
 function toRetrievalResult(r: any): RetrievalResult {
@@ -88,6 +89,33 @@ export async function performRetrieval(
     }
   } catch (e) {
     ctx.logger?.debug?.('[assemble] Phase 1: entity extraction failed (non-fatal)', { err: String(e) });
+  }
+
+  // ---- Phase 3: 查询重构（可选） ----
+  // 当实体提取质量差时，用 LLM 将模糊查询改写为更精确的查询
+  let queryRewriteResult = null;
+  try {
+    if (needsQueryRewrite(extractedEntities, qmdQuery)) {
+      ctx.logger?.debug?.('[assemble] Phase 3: query rewrite triggered, entities empty, rewriting query', { original: qmdQuery });
+      queryRewriteResult = await rewriteQuery(qmdQuery, ctx);
+      if (queryRewriteResult.wasRewritten) {
+        qmdQuery = queryRewriteResult.rewrittenQuery;
+        // 用改写后的查询重新提取实体
+        try {
+          extractedEntities = extractEntities(qmdQuery);
+          if (extractedEntities.tokens.length > 0) {
+            ctx.logger?.debug?.('[assemble] Phase 3: re-extracted entities from rewritten query', {
+              terms: extractedEntities.terms.slice(0, 5),
+              totalTokens: extractedEntities.tokens.length,
+            });
+          }
+        } catch (reExtractErr) {
+          ctx.logger?.debug?.('[assemble] Phase 3: re-extraction failed (non-fatal)', { err: String(reExtractErr) });
+        }
+      }
+    }
+  } catch (rwErr) {
+    ctx.logger?.debug?.('[assemble] Phase 3: query rewrite failed (non-fatal)', { err: String(rwErr) });
   }
 
   // ---- v2.8.0 O7: 异步预取架构 ----
@@ -534,6 +562,7 @@ export async function performRetrieval(
     availableTools,
     qmdQuery,
     extractedEntities,
+    queryRewriteResult,
     filteredQmdCount,
     filteredGraphCount,
     filteredExpCount,

@@ -39,6 +39,10 @@ export interface AssembleContext {
   prefetchCache: Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; query: string; ts: number }>;
   /** Phase 1: 实体提取结果（三层主题锚定） */
   extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] };
+  filteredQmdCount?: number;
+  filteredGraphCount?: number;
+  filteredExpCount?: number;
+  queryRewriteResult?: { rewrittenQuery: string; originalQuery: string; wasRewritten: boolean; reason: string };
 }
 
 /**
@@ -83,6 +87,11 @@ export interface RetrievalOutput {
   hasExperienceTool: boolean;
   availableTools: string[];
   qmdQuery: string;
+  queryRewriteResult: any;
+  extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] };
+  filteredQmdCount?: number;
+  filteredGraphCount?: number;
+  filteredExpCount?: number;
 }
 
 /**
@@ -97,4 +106,8 @@ export interface InjectionOutput {
   scenario: string | null;
   /** Phase 1: 实体提取结果（用于注入层动态过滤） */
   extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] };
+  filteredQmdCount?: number;
+  filteredGraphCount?: number;
+  filteredExpCount?: number;
+  queryRewriteResult?: { rewrittenQuery: string; originalQuery: string; wasRewritten: boolean; reason: string };
 }

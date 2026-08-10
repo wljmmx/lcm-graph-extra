@@ -927,6 +927,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       retrievalOutput.qmdQuery,
       retrievalOutput.scenario ?? null,
     retrievalOutput.extractedEntities,
+    retrievalOutput.queryRewriteResult,
     );
 
     systemPromptAddition = injectionOutput.systemPromptAddition;
