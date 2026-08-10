@@ -87,9 +87,10 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
  */
 export async function invokeBootstrap(limit: number = 100): Promise<McpInvokeResponse> {
   try {
+    // graph-memory-pro 的 /api/feedback/bootstrap 读取的是 maxNodes 参数（非 limit）
     const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(
       '/api/gm-pro/proxy/feedback/bootstrap',
-      { limit },
+      { maxNodes: limit },
     );
     if (resp.ok) {
       return { ok: true, result: resp.data };

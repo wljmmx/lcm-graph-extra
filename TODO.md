@@ -180,6 +180,13 @@
 - [x] **AM-7**: 对接 SessionRecallCache，agent_end 自动采集反馈 → `processFeedback` 闭环
 - [x] **AM-8**: 插件 dispose 时持久化关联矩阵 M（`saveRecallerAssociationMatrix`）
 
+### 🔍 P0 — 前端与 gm-pro 接口对齐核实（2026-08-10）
+- [x] **IF-1**: 逐一核对 dashboard 代理白名单（GET 19 项 / POST 3 项）与 graph-memory-pro 全部 59 条路由，路径/方法全部对齐
+- [x] **IF-2**: 修复 `invokeBootstrap` 参数名错配：前端发送 `{ limit }` 但 gm-pro `handleFeedbackBootstrap` 读取 `maxNodes` → 改为 `{ maxNodes: limit }`
+- [x] **IF-3**: 确认 `fetchGmProMetrics` 为未使用的死代码（`/api/metrics` 返回 Prometheus text，proxy 现强制 JSON，若启用需放宽 Content-Type 校验）
+- [x] **IF-4**: 确认关联矩阵 save/load/history/visual 与学习曲线/热力网格前端类型契约一致
+- [x] **IF-5**: dashboard 类型检查（tsc --noEmit）通过
+
 ---
 
 ## 📋 当前进度统计

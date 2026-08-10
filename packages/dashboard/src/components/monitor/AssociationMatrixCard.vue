@@ -86,11 +86,18 @@ const persistText = computed(() => {
 });
 
 // ── AM-5: 学习曲线（独立端点，跨重启历史） ─────────────────────────────
-const { data: historyRes, isFetching: historyFetching } = useQuery({
+const {
+  data: historyRes,
+  isFetching: historyFetching,
+  isError: historyIsError,
+  refetch: refetchHistory,
+} = useQuery({
   queryKey: ['gm-pro-association-matrix-history'],
   queryFn: () => fetchGmProAssociationMatrixHistory(120),
-  refetchInterval: 120_000,
+  // 失败/不可达时停止无意义轮询，避免"一直读取中"
+  refetchInterval: (query) => (query.state.data?.ok ? 120_000 : false),
   staleTime: 60_000,
+  retry: 1,
 });
 const historySamples = computed<GmProLearningSample[]>(() =>
   historyRes.value?.ok ? (historyRes.value.data?.samples ?? []) : [],
@@ -115,11 +122,18 @@ const historyOption = computed<Record<string, unknown>>(() => {
 
 // ── AM-6: 热力网格（独立端点，降采样） ─────────────────────────────────
 const visualMax = 48; // 降采样网格尺寸（避免 1024×1024 全量传输）
-const { data: visualRes, isFetching: visualFetching } = useQuery({
+const {
+  data: visualRes,
+  isFetching: visualFetching,
+  isError: visualIsError,
+  refetch: refetchVisual,
+} = useQuery({
   queryKey: ['gm-pro-association-matrix-visual', visualMax],
   queryFn: () => fetchGmProAssociationMatrixVisual(visualMax),
-  refetchInterval: 180_000,
+  // 失败/不可达时停止无意义轮询，避免"一直读取中"
+  refetchInterval: (query) => (query.state.data?.ok ? 180_000 : false),
   staleTime: 120_000,
+  retry: 1,
 });
 const visual = computed<GmProAssociationMatrixVisual | null>(() =>
   visualRes.value?.ok ? (visualRes.value.data ?? null) : null,
@@ -280,7 +294,11 @@ const visualScalars = computed(() => {
               <span class="mono" style="font-size:var(--fs-caption)">{{ historySamples.length }} 点</span>
             </NSpin>
           </div>
-          <NEmpty v-if="!historySamples.length" description="暂无采样" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
+          <div v-if="historyIsError">
+            <NEmpty description="学习曲线加载失败" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
+            <NButton size="tiny" secondary @click="refetchHistory">重试</NButton>
+          </div>
+          <NEmpty v-else-if="!historySamples.length" description="暂无采样" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
           <EChart v-else :option="historyOption" height="180px" aria-label="关联矩阵M学习曲线：已应用/被拒/反馈数随时间变化" />
         </div>
 
@@ -290,9 +308,13 @@ const visualScalars = computed(() => {
             <span class="muted" style="font-size:var(--fs-caption)">热力网格（{{ visual?.grid ?? '—' }}×{{ visual?.grid ?? '—' }} 降采样）</span>
             <NSpin :show="visualFetching" size="small" style="width:14px" />
           </div>
-          <NEmpty v-if="!visual?.grid" description="暂无网格数据" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
+          <div v-if="visualIsError">
+            <NEmpty description="热力网格加载失败" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
+            <NButton size="tiny" secondary @click="refetchVisual">重试</NButton>
+          </div>
+          <NEmpty v-else-if="!visual?.grid" description="暂无网格数据" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
           <EChart v-else :option="heatmapOption" height="220px" aria-label="关联矩阵M降采样热力网格" />
-          <div v-if="visualScalars" style="display:flex;gap:12px;margin-top:4px;flex-wrap:wrap">
+          <div v-if="visualScalars && !visualIsError" style="display:flex;gap:12px;margin-top:4px;flex-wrap:wrap">
             <span v-for="s in visualScalars" :key="s.label" class="muted" style="font-size:var(--fs-caption)">
               {{ s.label }}: <span class="mono">{{ s.value }}</span>
             </span>
