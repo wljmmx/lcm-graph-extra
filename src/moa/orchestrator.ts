@@ -285,7 +285,7 @@ export function isLocalRefConfig(cfg: ReferenceModelConfig): boolean {
     try {
       const u = new URL(cfg.baseURL);
       const host = u.hostname;
-      if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') return true;
       if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.')) return true;
     } catch { /* ignore malformed */ }
   }

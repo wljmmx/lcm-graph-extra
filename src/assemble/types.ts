@@ -37,6 +37,12 @@ export interface AssembleContext {
   conflictCache: Map<string, { conflicts: any[]; ts: number }>;
   /** v2.8.0 O7: 异步预取缓存 — afterTurn 预取 L2/L3/L4 完整结果，assemble 直接使用 */
   prefetchCache: Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; query: string; ts: number }>;
+  /** Phase 1: 实体提取结果（三层主题锚定） */
+  extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] };
+  filteredQmdCount?: number;
+  filteredGraphCount?: number;
+  filteredExpCount?: number;
+  queryRewriteResult?: { rewrittenQuery: string; originalQuery: string; wasRewritten: boolean; reason: string };
 }
 
 /**
@@ -81,6 +87,11 @@ export interface RetrievalOutput {
   hasExperienceTool: boolean;
   availableTools: string[];
   qmdQuery: string;
+  queryRewriteResult: any;
+  extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] };
+  filteredQmdCount?: number;
+  filteredGraphCount?: number;
+  filteredExpCount?: number;
 }
 
 /**
@@ -93,4 +104,10 @@ export interface InjectionOutput {
   expResults: any[];
   /** 当前场景标识（来自 detectScenarioAndAdjustLimits），供智能工具引导使用 */
   scenario: string | null;
+  /** Phase 1: 实体提取结果（用于注入层动态过滤） */
+  extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] };
+  filteredQmdCount?: number;
+  filteredGraphCount?: number;
+  filteredExpCount?: number;
+  queryRewriteResult?: { rewrittenQuery: string; originalQuery: string; wasRewritten: boolean; reason: string };
 }

@@ -19,6 +19,7 @@ import {
   isMoaAggregatorPending,
   buildMoaToolInstruction,
   defaultMoaConfig,
+  isLocalRefConfig,
 } from './orchestrator.js';
 import type { MoaConfig, MoaPreset } from './types.js';
 
@@ -309,5 +310,105 @@ describe('defaultMoaConfig', () => {
     for (const ref of config.referenceModels) {
       expect(config.aggregatorModel.temperature).toBeLessThan(ref.temperature);
     }
+  });
+});
+
+// ============================================================================
+
+// ============================================================================
+// isLocalRefConfig
+// ============================================================================
+describe('isLocalRefConfig', () => {
+  it('ollama provider 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'ollama', model: 'qwen3.5:4b', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+    })).toBe(true);
+  });
+
+  it('unsloth provider 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'unsloth' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+    })).toBe(true);
+  });
+
+  it('baseURL 为 localhost 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'http://localhost:11434/v1',
+    })).toBe(true);
+  });
+
+  it('baseURL 为 127.0.0.1 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'http://127.0.0.1:11434/v1',
+    })).toBe(true);
+  });
+
+  it('baseURL 为 ::1 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'http://[::1]:11434/v1',
+    })).toBe(true);
+  });
+
+  it('baseURL 为 192.168.x.x 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'http://192.168.1.100:8080',
+    })).toBe(true);
+  });
+
+  it('baseURL 为 10.x.x.x 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'http://10.0.0.5:8080',
+    })).toBe(true);
+  });
+
+  it('baseURL 为 172.16-31.x.x 返回 true', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'http://172.16.0.1:8080',
+    })).toBe(true);
+  });
+
+  it('baseURL 为公网地址返回 false', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'https://api.openai.com',
+    })).toBe(false);
+  });
+
+  it('baseURL 为 azure/azureus 返回 false', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'https://models.inference.ai.azure.com',
+    })).toBe(false);
+  });
+
+  it('无 baseURL 且非本地 provider 返回 false', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai', model: 'gpt-4', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+    })).toBe(false);
+  });
+
+  it('malformed baseURL 不抛异常，返回 false', () => {
+    expect(isLocalRefConfig({
+      provider: 'openai' as any, model: 'test', temperature: 0.5,
+      systemPrompt: 'test', timeoutMs: 30000,
+      baseURL: 'not a valid url',
+    })).toBe(false);
   });
 });
