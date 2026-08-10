@@ -416,24 +416,44 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
             }
 
             // 写入预取缓存（LRU 上限保护）
+            // v2.8.1 非MoA 修复: 仅当至少一层有数据才覆盖缓存; 若三层全空(检索失败),
+            // 保留上一份非空条目(last-known-good), 避免用空结果"毒化"缓存导致下一轮
+            // 伪命中空数据 → 模型反复"我再查"。
+            const hasAnyData = results.qmd.length > 0 || results.graph.length > 0 || results.exp.length > 0;
             if (ctx.prefetchCache) {
-              if (ctx.prefetchCache.size >= 200) {
-                const oldest = ctx.prefetchCache.keys().next().value;
-                if (oldest !== undefined) ctx.prefetchCache.delete(oldest);
+              if (hasAnyData) {
+                if (ctx.prefetchCache.size >= 200) {
+                  const oldest = ctx.prefetchCache.keys().next().value;
+                  if (oldest !== undefined) ctx.prefetchCache.delete(oldest);
+                }
+                ctx.prefetchCache.set(sessionKey, {
+                  qmdResults: results.qmd,
+                  graphResults: results.graph,
+                  expResults: results.exp,
+                  query,
+                  ts: Date.now(),
+                });
+                ctx.logger?.info?.('[afterTurn] O7: prefetch cache written', {
+                  sessionKey: sessionKey.slice(0, 16),
+                  qmdCount: results.qmd.length,
+                  graphCount: results.graph.length,
+                  expCount: results.exp.length,
+                });
+              } else {
+                const existing = ctx.prefetchCache.get(sessionKey);
+                if (existing && (Date.now() - existing.ts < 10 * 60 * 1000)) {
+                  ctx.logger?.warn?.('[afterTurn] O7: prefetch empty, retaining last-known-good cache', {
+                    sessionKey: sessionKey.slice(0, 16),
+                    qmdCount: existing.qmdResults?.length,
+                    graphCount: existing.graphResults?.length,
+                    expCount: existing.expResults?.length,
+                  });
+                } else {
+                  ctx.logger?.warn?.('[afterTurn] O7: prefetch empty (all layers failed), no cache written', {
+                    sessionKey: sessionKey.slice(0, 16),
+                  });
+                }
               }
-              ctx.prefetchCache.set(sessionKey, {
-                qmdResults: results.qmd,
-                graphResults: results.graph,
-                expResults: results.exp,
-                query,
-                ts: Date.now(),
-              });
-              ctx.logger?.info?.('[afterTurn] O7: prefetch cache written', {
-                sessionKey: sessionKey.slice(0, 16),
-                qmdCount: results.qmd.length,
-                graphCount: results.graph.length,
-                expCount: results.exp.length,
-              });
             }
           })().catch((err) => {
             ctx.logger?.debug?.('[afterTurn] O7: prefetch task failed (non-fatal)', {

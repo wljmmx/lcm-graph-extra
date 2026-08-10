@@ -24,6 +24,35 @@ import { randomUUID } from 'node:crypto';
 import { extractEntities, matchEntityScore } from '../entity-extract.js';
 import { needsQueryRewrite, rewriteQuery } from './query-rewrite.js';
 
+/**
+ * v2.8.1 非MoA 修复: 查询主题相似度。
+ * O7 预取结果按 sessionKey 缓存, 但消费时若不校验生成查询, 会把"上一问的预取"喂给"本问",
+ * 导致检索错位、模型反复"我再查"。用归一化 token / CJK 二元组重叠判定是否可复用。
+ */
+function querySimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  const norm = (s: string) => s.toLowerCase().trim();
+  const x = norm(a);
+  const y = norm(b);
+  if (x === y) return 1;
+  // 拉丁/空格分词
+  const split = (s: string) => s.split(/[\s\p{P}\p{S}]+/u).filter(Boolean);
+  const tokensA = split(x);
+  if (tokensA.length > 0 && split(y).length > 0) {
+    const setB = new Set(split(y));
+    let inter = 0;
+    for (const t of tokensA) if (setB.has(t)) inter++;
+    return inter / Math.max(Math.max(tokensA.length, split(y).length), 1);
+  }
+  // 纯 CJK 等无空格文本: 用字符二元组重叠
+  const big = (s: string) => { const out = new Set<string>(); for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2)); return out; };
+  const ba = big(x), bb = big(y);
+  if (ba.size === 0 || bb.size === 0) return 0;
+  let bi = 0;
+  for (const c of ba) if (bb.has(c)) bi++;
+  return bi / Math.max(ba.size, bb.size);
+}
+
 /** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */
 function toRetrievalResult(r: any): RetrievalResult {
   return {
@@ -147,12 +176,17 @@ export async function performRetrieval(
 
   const PREFETCH_CACHE_TTL = 10 * 60 * 1000; // 10min
   const cached = sessionKey ? ctx.prefetchCache?.get(sessionKey) : undefined;
-  const cacheHit = cached && (Date.now() - cached.ts < PREFETCH_CACHE_TTL);
+  // v2.8.1 非MoA 修复: 查询一致性校验 —— 预取结果仅当生成查询与本轮 qmdQuery 主题相关时
+  // 才可消费(相似度 >= 0.3), 否则视为 miss。修复前按 sessionKey 无条件消费, 会把
+  // "上一问的预取"喂给"本问", 导致检索错位、模型反复"我再查"。
+  const cacheUsable = !!cached
+    && (Date.now() - cached.ts < PREFETCH_CACHE_TTL)
+    && querySimilarity(cached.query, qmdQuery) >= 0.3;
 
   let rawQmd: any[] = [];
   let rawGraph: any[] = [];
 
-  if (cacheHit && cached) {
+  if (cacheUsable && cached) {
     // 使用上一轮 afterTurn 预取的全量结果
     rawQmd = cached.qmdResults || [];
     rawGraph = cached.graphResults || [];
@@ -168,12 +202,37 @@ export async function performRetrieval(
       cachedQuery: cached.query?.slice(0, 60),
     });
   } else {
-    // 首轮或缓存过期：返回空结果，afterTurn 预取后下一轮才有数据
-    ctx.logger?.debug?.('[assemble] O7: prefetch cache miss, next turn will have data', {
-      sessionKey: sessionKey.slice(0, 16),
-      hasCache: !!cached,
-      cacheAgeMs: cached ? Date.now() - cached.ts : -1,
-    });
+    if (cached && !cacheUsable) {
+      ctx.logger?.debug?.('[assemble] O7: prefetch cache rejected (query mismatch or expired)', {
+        sessionKey: sessionKey.slice(0, 16),
+        cachedQuery: cached.query?.slice(0, 60),
+        currentQuery: qmdQuery.slice(0, 60),
+        sim: querySimilarity(cached.query, qmdQuery).toFixed(2),
+        cacheAgeMs: Date.now() - cached.ts,
+      });
+    } else {
+      // 首轮或缓存过期：返回空结果，afterTurn 预取后下一轮才有数据
+      ctx.logger?.debug?.('[assemble] O7: prefetch cache miss, next turn will have data', {
+        sessionKey: sessionKey.slice(0, 16),
+        hasCache: !!cached,
+        cacheAgeMs: cached ? Date.now() - cached.ts : -1,
+      });
+    }
+
+    // v2.8.1 非MoA 修复: 保持异步(慢速 L2/L3 仍由 afterTurn 预取), 但保证不空结果 ——
+    // cache miss 时用快速 L4 经验检索挡底(50-200ms, 带 800ms 超时), 避免模型在无任何
+    // 上下文时反复"承诺再查"。MoA 场景有 reference 层兜底, 此处主要护住非 MoA 主模型。
+    if (ctx.expStore) {
+      try {
+        const expStart = Date.now();
+        const expRes = await Promise.race([
+          ctx.expStore.searchByQuery({ query: qmdQuery, limit: retrievalLimits.exp, minScore: 0.3 }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 800)),
+        ]);
+        l4_ms = Date.now() - expStart;
+        if (Array.isArray(expRes) && expRes.length > 0) expResults = expRes;
+      } catch { /* non-fatal */ }
+    }
   }
 
   // 同步更新 RetrievalGateway.stats，确保 Dashboard 检索性能摘要反映真实数据
