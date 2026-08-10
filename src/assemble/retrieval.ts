@@ -21,6 +21,7 @@ import type { AssembleContext, RetrievalOutput } from './types.js';
 import type { RetrievalResult } from '../types.js';
 
 import { randomUUID } from 'node:crypto';
+import { extractEntities, matchEntityScore } from '../entity-extract.js';
 
 /** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */
 function toRetrievalResult(r: any): RetrievalResult {
@@ -71,6 +72,23 @@ export async function performRetrieval(
     }
   }
   ctx.setLastRetrievalQuery(qmdQuery);
+
+  // ---- Phase 1: 实体提取（三层主题锚定） ----
+  // 从查询中提取关键实体，用于后续检索结果的主题一致性过滤
+  let extractedEntities: ReturnType<typeof extractEntities> = { terms: [], properNouns: [], techTerms: [], tokens: [] };
+  try {
+    extractedEntities = extractEntities(qmdQuery);
+    if (extractedEntities.tokens.length > 0) {
+      ctx.logger?.debug?.('[assemble] Phase 1: extracted entities', {
+        terms: extractedEntities.terms.slice(0, 5),
+        properNouns: extractedEntities.properNouns.slice(0, 5),
+        techTerms: extractedEntities.techTerms.slice(0, 5),
+        totalTokens: extractedEntities.tokens.length,
+      });
+    }
+  } catch (e) {
+    ctx.logger?.debug?.('[assemble] Phase 1: entity extraction failed (non-fatal)', { err: String(e) });
+  }
 
   // ---- v2.8.0 O7: 异步预取架构 ----
   // 当前轮永远只使用上一轮 afterTurn 预取的结果，不再发起同步检索。
@@ -266,6 +284,47 @@ export async function performRetrieval(
     ctx.logger?.warn?.("Merger dedup failed, using raw results", { err: serializeError(mergeErr) });
     qmdResults = rawQmd;
     graphResults = rawGraph;
+  }
+
+  // ---- Phase 1: 实体匹配过滤（三层主题锚定） ----
+  // 对每层检索结果按实体匹配度过滤，过滤无关结果，保留高相关结果
+  const ENTITY_FILTER_THRESHOLD = 0.15; // 至少匹配到 0.15 分才认为相关
+  let filteredQmdCount = 0, filteredGraphCount = 0, filteredExpCount = 0;
+  if (extractedEntities.tokens.length > 0) {
+    // QMD: filter by content match
+    const beforeCount = qmdResults.length;
+    qmdResults = qmdResults.filter((r: any) => {
+      const content = r.content ?? r.title ?? '';
+      const { match, score } = matchEntityScore(content, extractedEntities);
+      return match;
+    });
+    filteredQmdCount = beforeCount - qmdResults.length;
+
+    // Graph: filter by content/matchCount
+    const beforeGraphCount = graphResults.length;
+    graphResults = graphResults.filter((r: any) => {
+      const content = r.content ?? r.name ?? r.summary ?? r.id ?? '';
+      const { match, score } = matchEntityScore(content, extractedEntities);
+      return match;
+    });
+    filteredGraphCount = beforeGraphCount - graphResults.length;
+
+    // Experience: filter by summary/tags
+    const beforeExpCount = expResults.length;
+    expResults = expResults.filter((e: any) => {
+      const content = e.experience?.summary ?? e.experience?.content ?? e.summary ?? '';
+      const { match, score } = matchEntityScore(content, extractedEntities);
+      return match;
+    });
+    filteredExpCount = beforeExpCount - expResults.length;
+
+    if (filteredQmdCount > 0 || filteredGraphCount > 0 || filteredExpCount > 0) {
+      ctx.logger?.info?.('[assemble] Phase 1: entity-filtered irrelevant results', {
+        qmd: { before: beforeCount, after: qmdResults.length, filtered: filteredQmdCount },
+        graph: { before: beforeGraphCount, after: graphResults.length, filtered: filteredGraphCount },
+        exp: { before: beforeExpCount, after: expResults.length, filtered: filteredExpCount },
+      });
+    }
   }
 
   const parallelMs = Date.now() - parallelStart;
@@ -474,5 +533,9 @@ export async function performRetrieval(
     hasExperienceTool,
     availableTools,
     qmdQuery,
+    extractedEntities,
+    filteredQmdCount,
+    filteredGraphCount,
+    filteredExpCount,
   };
 }

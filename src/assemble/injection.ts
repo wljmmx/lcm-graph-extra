@@ -19,6 +19,7 @@ import { buildKnowledgeGuidance } from './guidance.js';
 // P1-1: 动态 import 提升为静态导入，避免每次 injectContext 的 await import 开销
 import { backgroundTasks } from '../async/task-registry.js';
 import { detectConflicts } from '../merger.js';
+import { matchEntityScore } from '../entity-extract.js';
 import { getGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
@@ -62,6 +63,7 @@ export async function injectContext(
   modelFullId: string,
   qmdQuery: string,
   scenario: string | null,
+  extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] },
 ): Promise<InjectionOutput> {
   // Session-isolated cross-round dedup
   const sessionKey = typeof params.sessionKey === 'string'
@@ -125,6 +127,16 @@ export async function injectContext(
   // Layer 4: Experience
   let finalExpResults = expResults;
   if (expResults.length > 0) {
+    // Phase 1: 实体匹配度过滤 — 经验注入前过滤无关经验
+    const expEntityMatchFilter = (e: any): boolean => {
+      if (!extractedEntities || extractedEntities.tokens.length === 0) return true;
+      const content = e.experience?.summary ?? e.experience?.content ?? e.summary ?? '';
+      const { match, score } = matchEntityScore(content, extractedEntities);
+      return match;
+    };
+
+    expResults = expResults.filter(expEntityMatchFilter);
+
     let personalizedResults = expResults;
     try {
       const topTech = ctx.userProfile.getTopTechStack(3);
@@ -175,13 +187,33 @@ export async function injectContext(
 
   // Layer 3: Neo4j knowledge graph
   if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
-    const graphBody = graphResults.slice(0, budgetedLimits.graph).map((r: any) => '- ' + (r.content ?? r.id ?? '')).join('\n');
+    // Phase 1: 实体匹配度过滤
+    const graphEntityMatchFilter = (r: any): boolean => {
+      if (!extractedEntities || extractedEntities.tokens.length === 0) return true;
+      const content = r.content ?? r.name ?? r.summary ?? r.id ?? '';
+      const { match, score } = matchEntityScore(content, extractedEntities);
+      return match;
+    };
+
+    const graphBody = graphResults
+      .filter(graphEntityMatchFilter)
+      .slice(0, budgetedLimits.graph)
+      .map((r: any) => '- ' + (r.content ?? r.id ?? '')).join('\n');
     addSection('## 🔗 知识图谱（历史知识参考）', graphBody, 4);
   }
 
   // Layer 2: qmd search snippet results
   if (qmdResults && Array.isArray(qmdResults) && qmdResults.length > 0) {
+    // Phase 1: 实体匹配度过滤 — 低置信度+低实体匹配度的结果权重降低
+    const entityMatchFilter = (r: any): boolean => {
+      if (!extractedEntities || extractedEntities.tokens.length === 0) return true;
+      const content = r.content ?? r.title ?? '';
+      const { match, score } = matchEntityScore(content, extractedEntities);
+      return match;
+    };
+
     const qmdItems = qmdResults
+      .filter(entityMatchFilter)
       .slice(0, budgetedLimits.qmd)
       // P-CP-3: 增加 content 长度下限过滤，减少无意义碎片（< 20 字符的片段对 LLM 无参考价值）
       .filter((r: any) => (r.score == null || r.score >= 0.3) && String(r.content ?? '').trim().length >= 20)
