@@ -135,10 +135,11 @@ const {
   staleTime: 120_000,
   retry: 1,
 });
-// 热力网格加载图标：仅"尚无数据"的首次加载时显示，
-// 数据就绪后的后台 refetch 不再触发转圈（isFetching 在后台轮询时也为 true）。
-const visualLoading = computed(() => visualFetching.value && !visualRes.value?.ok);
-const historyLoading = computed(() => historyFetching.value && !historyRes.value?.ok);
+// 热力网格加载图标：仅"尚无数据"的首次加载时显示。
+// 只要已有数据（visual?.grid）或已出错，就绝不显示转圈，
+// 避免数据就绪后的后台 refetch（isFetching 在轮询时也为 true）再次触发。
+const visualLoading = computed(() => visualFetching.value && !visual.value?.grid && !visualIsError.value);
+const historyLoading = computed(() => historyFetching.value && !historySamples.value.length && !historyIsError.value);
 const visual = computed<GmProAssociationMatrixVisual | null>(() =>
   visualRes.value?.ok ? (visualRes.value.data ?? null) : null,
 );
