@@ -150,7 +150,13 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
       ctx.logger?.debug?.("userProfile.observe failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
 
-    const wordRatio = (userContent.match(/[\w]+/g) || []).length / userContent.trim().length;
+    // "有意义字符"占比过滤：排除纯标点/emoji/符号的垃圾内容。
+    // 原实现仅统计 ASCII 词 (\w)，对纯中文内容占比恒为 0，导致 afterTurn 在
+    // triplet/experience/O7 预取 L2-L4 等 enrichment 之前提前 return，整条链路静默无日志。
+    // 改用 Unicode 字母(\p{L}，含 CJK) + 数字(\p{N}) 统计，中文查询可正常通过。
+    const meaningfulChars = userContent.match(/[\p{L}\p{N}]/gu) || [];
+    const contentLen = userContent.trim().length;
+    const wordRatio = contentLen > 0 ? meaningfulChars.length / contentLen : 0;
     if (wordRatio < 0.3) return;
 
     // Triplet extraction
@@ -328,7 +334,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           const query = userContent.slice(0, 500); // 截断查询，避免过长
           const retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
 
-          ctx.logger?.debug?.('[afterTurn] O7: full prefetch starting', {
+          ctx.logger?.info?.('[afterTurn] O7: full prefetch starting', {
             sessionKey: sessionKey.slice(0, 16),
             queryLen: query.length,
             limits: retrievalLimits,
@@ -366,9 +372,17 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                     }
                   }
                 }
+                ctx.logger?.info?.('[afterTurn] O7: L2 qmd prefetched', {
+                  sessionKey: sessionKey.slice(0, 16),
+                  lexOk: lexRes.status === 'fulfilled',
+                  vecOk: vecRes.status === 'fulfilled',
+                  mergedCount: results.qmd.length,
+                });
+              } else {
+                ctx.logger?.info?.('[afterTurn] O7: L2 skipped (qmdClient not present)', { sessionKey: sessionKey.slice(0, 16) });
               }
             } catch (l2Err) {
-              ctx.logger?.debug?.('[afterTurn] O7: L2 prefetch failed (non-fatal)', {
+              ctx.logger?.warn?.('[afterTurn] O7: L2 prefetch failed (non-fatal)', {
                 err: (l2Err as Error).message,
               });
             }
@@ -378,6 +392,10 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
               if (ctx.graphAdapter) {
                 const graphRes = await ctx.graphAdapter.searchWithCache(query, retrievalLimits.graph);
                 if (Array.isArray(graphRes)) results.graph = graphRes;
+                ctx.logger?.info?.('[afterTurn] O7: L3 graph prefetched', {
+                  sessionKey: sessionKey.slice(0, 16),
+                  count: results.graph.length,
+                });
                 // v2.3.6 链路 2 采集端：把本次 L3 召回节点录入 SessionRecallCache，
                 // 供下一轮 agent_end consume() 后 processFeedback 自动判定（Tier 1 零 LLM 成本）。
                 if (graphRes?.length && ctx.graphAdapter.recordRecallToSessionCache) {
@@ -392,9 +410,11 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                     }
                   }
                 }
+              } else {
+                ctx.logger?.info?.('[afterTurn] O7: L3 skipped (graphAdapter not present)', { sessionKey: sessionKey.slice(0, 16) });
               }
             } catch (l3Err) {
-              ctx.logger?.debug?.('[afterTurn] O7: L3 prefetch failed (non-fatal)', {
+              ctx.logger?.warn?.('[afterTurn] O7: L3 prefetch failed (non-fatal)', {
                 err: (l3Err as Error).message,
               });
             }
@@ -408,9 +428,15 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                   minScore: 0.3,
                 });
                 if (Array.isArray(expRes)) results.exp = expRes;
+                ctx.logger?.info?.('[afterTurn] O7: L4 experience prefetched', {
+                  sessionKey: sessionKey.slice(0, 16),
+                  count: results.exp.length,
+                });
+              } else {
+                ctx.logger?.info?.('[afterTurn] O7: L4 skipped (expStore not present)', { sessionKey: sessionKey.slice(0, 16) });
               }
             } catch (l4Err) {
-              ctx.logger?.debug?.('[afterTurn] O7: L4 prefetch failed (non-fatal)', {
+              ctx.logger?.warn?.('[afterTurn] O7: L4 prefetch failed (non-fatal)', {
                 err: (l4Err as Error).message,
               });
             }
