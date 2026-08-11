@@ -32,7 +32,7 @@ const abnormalCount = computed(() => {
       :has-data="!!doctor"
       empty-text="暂无诊断报告"
       error-text="系统诊断请求失败"
-      empty-hint="请确认 GM_PRO_AUTH_TOKEN 已配置（/api/doctor 为敏感路径需鉴权）。"
+      empty-hint="请确认 openclaw.json 中 graph-memory-pro 的 apiServer.authToken 已配置（/api/doctor 为敏感路径需鉴权）。"
       @retry="emit('retry')"
     >
       <div style="margin-bottom: 8px">

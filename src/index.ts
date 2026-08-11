@@ -2055,6 +2055,10 @@ const pluginEntry: any = definePluginEntry({
     // 清理孤儿债务（会话已删除）与 7 天前墓碑，防止 conversation_compaction_maintenance 无限增长。
     let lastDebtReconcileRun = 0;
     const DEBT_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+    // 关联矩阵 M 定时持久化节流。默认 30min 一次，避免学习到的最新 M 在重启后丢失
+    //（dispose 时也会保存，但日常运行仍需周期性落盘）。
+    let lastMPersistRun = 0;
+    const M_PERSIST_INTERVAL_MS = 30 * 60 * 1000;
     // RetrievalGateway 心跳恢复重试计数器（用于诊断恢复失败原因）
     let _retrievalGatewayRecoveryAttempts = 0;
     let _retrievalGatewayLastRecoveryError: string | null = null;
@@ -2803,6 +2807,30 @@ const pluginEntry: any = definePluginEntry({
             logger?.debug?.("heartbeat: prefetch cache cleanup", { cleanedPrefetchCache });
           }
           hbSessionCleanupCounter = 0;
+        }
+
+        // ── 关联矩阵 M 定时持久化（节流 30min）──────────────────────────────
+        // 背景：M 仅在 dispose 时落盘，日常运行数小时学习到的最新矩阵可能丢失。
+        // 这里在心跳里周期性调用 saveAssociationMatrix，将内存 Recaller 的 M 落盘。
+        if (graphAdapter && typeof (graphAdapter as any).saveAssociationMatrix === 'function') {
+          const mPersistElapsed = Date.now() - lastMPersistRun;
+          if (mPersistElapsed >= M_PERSIST_INTERVAL_MS) {
+            lastMPersistRun = Date.now();
+            backgroundTasks.register('hb:association-matrix-persist', (async () => {
+              try {
+                const saved = await (graphAdapter as any).saveAssociationMatrix();
+                if (saved && (saved.path || saved.bytes)) {
+                  logger?.info?.("heartbeat: association matrix M persisted", {
+                    path: saved.path, bytes: saved.bytes,
+                  });
+                }
+              } catch (e) {
+                logger?.debug?.("heartbeat: association matrix persist failed (non-fatal)", {
+                  err: e instanceof Error ? e.message : String(e),
+                });
+              }
+            })());
+          }
         }
       } catch (hbErr) {
         logger?.error?.("heartbeat: cycle failed", { err: hbErr instanceof Error ? hbErr.message : String(hbErr) });

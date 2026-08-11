@@ -17,27 +17,37 @@
  * 配置：
  *   GM_PRO_HTTP_URL —— graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850）
  *   GM_PRO_HTTP_TIMEOUT —— 代理超时（ms），默认 10s
- *   GM_PRO_AUTH_TOKEN —— graph-memory-pro apiServer.authToken，用于 X-Auth-Token 鉴权
+ *   鉴权令牌 —— 从 openclaw.json 中 graph-memory-pro 配置段 apiServer.authToken 读取（无需环境变量）
  *
  * 安全：
  *   - GET 仅允许只读路径（白名单校验），拒绝其他写操作
  *   - POST 仅允许白名单中的写路径（如 /api/feedback/bootstrap）
  *   - 路径白名单校验，防止 SSRF 遍历
- *   - 携带 X-Auth-Token 头（若配置了 GM_PRO_AUTH_TOKEN），对应 graph-memory-pro 的 authToken 配置
+ *   - 携带 X-Auth-Token 头（取自 openclaw.json 的 apiServer.authToken），对应 graph-memory-pro 的 authToken 配置
  *   - 独立服务器自带 CORS 支持，不依赖 Gateway 的 Basic Auth
  *
  * ⚠️ 鉴权依赖：
  *   graph-memory-pro HTTP 服务器将以下路径标记为敏感读路径（需 X-Auth-Token 鉴权）：
  *     /api/health, /api/metrics, /api/usage, /api/doctor
- *   若 GM_PRO_AUTH_TOKEN 未配置而 graph-memory-pro 配置了 authToken，
+ *   若 openclaw.json 未配置 apiServer.authToken 而 graph-memory-pro 配置了 authToken，
  *   这些路径将返回 401 Unauthorized。请确保两端配置一致。
  */
 import type { FastifyInstance } from 'fastify';
+import { readGmProRawConfig } from './config';
 
 /** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
 const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL ?? 'http://127.0.0.1:7850';
 const GM_PRO_HTTP_TIMEOUT = Number(process.env.GM_PRO_HTTP_TIMEOUT ?? 10_000);
-const GM_PRO_AUTH_TOKEN = process.env.GM_PRO_AUTH_TOKEN ?? '';
+
+/**
+ * graph-memory-pro 鉴权令牌（X-Auth-Token）。
+ * 来源：openclaw.json 中 graph-memory-pro 插件配置段 apiServer.authToken，
+ * 与 graph-memory-pro 独立 HTTP 服务使用同一配置，无需额外环境变量。
+ */
+function resolveGmProAuthToken(): string {
+  const cfg = readGmProRawConfig();
+  return (cfg.apiServer as { authToken?: string } | undefined)?.authToken ?? '';
+}
 
 /** graph-memory-pro 已知的只读 API 路径白名单 */
 const ALLOWED_GM_PRO_PATHS = new Set([
@@ -104,9 +114,10 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
     const headers: Record<string, string> = {
       'Accept': 'application/json',
     };
-    // graph-memory-pro 独立服务器使用 X-Auth-Token 鉴权（对应 apiServer.authToken 配置）
-    if (GM_PRO_AUTH_TOKEN) {
-      headers['x-auth-token'] = GM_PRO_AUTH_TOKEN;
+    // 携带 graph-memory-pro 独立服务器鉴权令牌（X-Auth-Token，来自 openclaw.json 配置）
+    const authToken = resolveGmProAuthToken();
+    if (authToken) {
+      headers['x-auth-token'] = authToken;
     }
 
     try {
@@ -169,8 +180,9 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     };
-    if (GM_PRO_AUTH_TOKEN) {
-      headers['x-auth-token'] = GM_PRO_AUTH_TOKEN;
+    const authToken = resolveGmProAuthToken();
+    if (authToken) {
+      headers['x-auth-token'] = authToken;
     }
 
     try {

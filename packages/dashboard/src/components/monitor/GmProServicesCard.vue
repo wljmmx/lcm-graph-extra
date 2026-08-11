@@ -71,7 +71,7 @@ const svcRows = computed<SvcRow[]>(() => (props.services?.services ?? []) as Svc
       :has-data="!!services"
       empty-text="暂无 gm-pro 服务数据"
       error-text="gm-pro 服务请求失败"
-      empty-hint="请确认 graph-memory-pro HTTP 服务（端口 7850）已启动且 GM_PRO_AUTH_TOKEN 配置正确。"
+      empty-hint="请确认 graph-memory-pro HTTP 服务（端口 7850）已启动，且 openclaw.json 中 apiServer.authToken 配置正确。"
       @retry="emit('retry')"
     >
       <div class="svc-header-row">

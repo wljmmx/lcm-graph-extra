@@ -135,6 +135,10 @@ const {
   staleTime: 120_000,
   retry: 1,
 });
+// 热力网格加载图标：仅"尚无数据"的首次加载时显示，
+// 数据就绪后的后台 refetch 不再触发转圈（isFetching 在后台轮询时也为 true）。
+const visualLoading = computed(() => visualFetching.value && !visualRes.value?.ok);
+const historyLoading = computed(() => historyFetching.value && !historyRes.value?.ok);
 const visual = computed<GmProAssociationMatrixVisual | null>(() =>
   visualRes.value?.ok ? (visualRes.value.data ?? null) : null,
 );
@@ -290,7 +294,7 @@ const visualScalars = computed(() => {
         <div style="margin-top:12px">
           <div class="ratio-label">
             <span class="muted" style="font-size:var(--fs-caption)">学习曲线（跨重启）</span>
-            <NSpin :show="historyFetching" size="small" style="width:14px">
+            <NSpin :show="historyLoading" size="small" style="width:14px">
               <span class="mono" style="font-size:var(--fs-caption)">{{ historySamples.length }} 点</span>
             </NSpin>
           </div>
@@ -306,7 +310,7 @@ const visualScalars = computed(() => {
         <div style="margin-top:12px">
           <div class="ratio-label">
             <span class="muted" style="font-size:var(--fs-caption)">热力网格（{{ visual?.grid ?? '—' }}×{{ visual?.grid ?? '—' }} 降采样）</span>
-            <NSpin :show="visualFetching" size="small" style="width:14px" />
+            <NSpin :show="visualLoading" size="small" style="width:14px" />
           </div>
           <div v-if="visualIsError">
             <NEmpty description="热力网格加载失败" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />

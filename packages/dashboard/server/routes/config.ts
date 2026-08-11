@@ -85,6 +85,29 @@ export function writeRawConfig(updates: Record<string, unknown>): void {
   writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
 }
 
+/** graph-memory-pro 插件 ID（模块级，供 readGmProRawConfig 复用） */
+const GM_PRO_PLUGIN_ID = 'graph-memory-pro';
+
+/**
+ * 读取 openclaw.json 中 graph-memory-pro 插件配置段。
+ * 模块级导出，供 gm-pro 代理路由等复用（鉴权令牌来源）。
+ */
+export function readGmProRawConfig(): Record<string, unknown> {
+  const path = getConfigPath();
+  if (!existsSync(path)) return {};
+  try {
+    const raw = readFileSync(path, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const entriesConfig = parsed?.plugins?.entries?.[GM_PRO_PLUGIN_ID]?.config;
+    if (entriesConfig && typeof entriesConfig === 'object') {
+      return entriesConfig as Record<string, unknown>;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // v1.1.0-2: 可热更新的白名单字段
 // 仅允许调整性能/行为参数，禁止修改安全相关字段（password/apiKey/token/webhook.url 等）
@@ -727,25 +750,6 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
   // =========================================================================
   // v2.1.13: graph-memory-pro 插件配置管理
   // =========================================================================
-
-  const GM_PRO_PLUGIN_ID = 'graph-memory-pro';
-
-  /** 读取 openclaw.json 中 graph-memory-pro 插件配置段 */
-  function readGmProRawConfig(): Record<string, unknown> {
-    const path = getConfigPath();
-    if (!existsSync(path)) return {};
-    try {
-      const raw = readFileSync(path, 'utf-8');
-      const parsed = JSON.parse(raw);
-      const entriesConfig = parsed?.plugins?.entries?.[GM_PRO_PLUGIN_ID]?.config;
-      if (entriesConfig && typeof entriesConfig === 'object') {
-        return entriesConfig as Record<string, unknown>;
-      }
-      return {};
-    } catch {
-      return {};
-    }
-  }
 
   /** 写回 openclaw.json（保留其他字段，仅更新 graph-memory-pro 配置段） */
   function writeGmProRawConfig(updates: Record<string, unknown>): void {

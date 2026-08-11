@@ -494,18 +494,30 @@ function buildModelBreakdown(): MoaModelBreakdown[] {
 
 /**
  * 错误分类：将错误信息归类为简短类型标签。
+ *
+ * 增强：覆盖 MoA 管道常见的失败场景，避免过多错误落入 "other"。
+ * 注意：当所有参考模型失败时，错误信息为
+ *   "All reference models failed (modelA: <err1>; modelB: <err2>)"
+ * 这里会先提取具体错误正文再分类，从而把 timeout / auth / rate_limit 等正确归类。
  */
 function classifyError(error?: string): string {
   if (!error) return 'unknown';
   const lower = error.toLowerCase();
-  if (lower.includes('timeout')) return 'timeout';
-  if (lower.includes('abort') || lower.includes('cancel')) return 'aborted';
-  if (lower.includes('connect') || lower.includes('network') || lower.includes('econnrefused')) return 'connection';
-  if (lower.includes('rate') || lower.includes('limit') || lower.includes('429')) return 'rate_limit';
-  if (lower.includes('auth') || lower.includes('401') || lower.includes('403')) return 'auth_error';
-  if (lower.includes('model') && (lower.includes('not found') || lower.includes('404'))) return 'model_not_found';
-  if (lower.includes('parse') || lower.includes('json') || lower.includes('syntax')) return 'parse_error';
-  if (lower.includes('empty') || lower.includes('no result')) return 'empty_response';
+  // 提取 "All reference models failed (...)" 括号内的具体错误正文，优先按真实错误分类
+  const refBody = (lower.match(/all reference models failed \(([\s\S]*)\)/) ?? [])[1] ?? lower;
+  const haystack = refBody || lower;
+
+  if (haystack.includes('timeout') || haystack.includes('timed out') || haystack.includes('deadline')) return 'timeout';
+  if (haystack.includes('abort') || haystack.includes('cancel') || haystack.includes('aborted or missing')) return 'aborted';
+  if (haystack.includes('connect') || haystack.includes('network') || haystack.includes('econnrefused') || haystack.includes('socket') || haystack.includes('fetch failed') || haystack.includes('unreachable')) return 'connection';
+  if (haystack.includes('rate') || haystack.includes('limit') || haystack.includes('429') || haystack.includes('quota') || haystack.includes('too many request')) return 'rate_limit';
+  if (haystack.includes('auth') || haystack.includes('401') || haystack.includes('403') || haystack.includes('unauthorized') || haystack.includes('forbidden') || haystack.includes('api key') || haystack.includes('invalid key')) return 'auth_error';
+  if (haystack.includes('model') && (haystack.includes('not found') || haystack.includes('404') || haystack.includes('does not exist') || haystack.includes('unknown model'))) return 'model_not_found';
+  if (haystack.includes('context') && (haystack.includes('length') || haystack.includes('exceed') || haystack.includes('too long') || haystack.includes('max token'))) return 'context_length';
+  if (haystack.includes('overloaded') || haystack.includes('unavailable') || haystack.includes('service unavailable') || haystack.includes('503')) return 'overloaded';
+  if (haystack.includes('parse') || haystack.includes('json') || haystack.includes('syntax') || haystack.includes('unexpected token')) return 'parse_error';
+  if (haystack.includes('empty') || haystack.includes('no result') || haystack.includes('no content') || haystack.includes('empty response')) return 'empty_response';
+  if (haystack.includes('budget') || haystack.includes('sync budget')) return 'sync_budget_exceeded';
   return 'other';
 }
 

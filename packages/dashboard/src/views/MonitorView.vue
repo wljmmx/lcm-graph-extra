@@ -205,6 +205,15 @@ const gmProCommunities = computed<GmProCommunitySummary[]>(() =>
   gmProCommunitiesRes.value?.ok ? (gmProCommunitiesRes.value.data?.summaries ?? []) : [],
 );
 
+// 社区总数：优先取社区概览接口的 count，回退到健康接口的 communities 数。
+// 用于"有社区但暂无摘要"时回退展示，避免与健康概览社区数=1 相矛盾的空态。
+const gmProCommunityCount = computed<number>(() => {
+  const fromSummaries = gmProCommunitiesRes.value?.ok ? (gmProCommunitiesRes.value.data?.count ?? 0) : 0;
+  if (fromSummaries > 0) return fromSummaries;
+  // 健康接口的 communities 字段（健康概览已展示）
+  return gmProHealth?.communities ?? 0;
+});
+
 // G-5.5: gm-pro LLM Token 用量
 const { data: gmProUsageRes } = useQuery({
   queryKey: ['gm-pro-usage'],
@@ -1820,7 +1829,7 @@ const moaLatencyPhaseOption = computed(() => {
           </template>
           <NEmpty v-else description="gm-pro 服务不可达" style="padding:12px 0">
             <template #extra>
-              <span class="muted" style="font-size:var(--fs-caption)">请确认 graph-memory-pro HTTP 服务 (端口 7850) 已启动且 GM_PRO_AUTH_TOKEN 配置正确。</span>
+              <span class="muted" style="font-size:var(--fs-caption)">请确认 graph-memory-pro HTTP 服务 (端口 7850) 已启动，且 openclaw.json 中 apiServer.authToken 配置正确。</span>
             </template>
           </NEmpty>
         </NCard>
@@ -2017,6 +2026,17 @@ const moaLatencyPhaseOption = computed(() => {
                 </div>
                 <div v-if="gmProCommunities.length > 10" class="muted" style="font-size:var(--fs-caption);margin-top:4px">共 {{ gmProCommunities.length }} 个社区，仅显示前 10 个</div>
               </template>
+              <!-- 有社区但暂无摘要（gm-pro 尚未生成 summaries）时回退展示数量，
+                   避免与上方健康概览"社区数=N"矛盾地显示"暂无社区数据" -->
+              <NEmpty
+                v-else-if="gmProCommunityCount > 0"
+                :description="`共 ${gmProCommunityCount} 个社区（暂无摘要）`"
+                style="padding:12px 0"
+              >
+                <template #extra>
+                  <span class="muted" style="font-size:var(--fs-caption)">社区已检测到，但摘要尚未生成，请稍后刷新。</span>
+                </template>
+              </NEmpty>
               <NEmpty v-else description="暂无社区数据" style="padding:12px 0" />
             </NCard>
           </NGi>
@@ -2098,7 +2118,7 @@ const moaLatencyPhaseOption = computed(() => {
               </template>
               <NEmpty v-else description="暂无诊断报告" style="padding:12px 0">
                 <template #extra>
-                  <span class="muted" style="font-size:var(--fs-caption)">请确认 GM_PRO_AUTH_TOKEN 已配置（/api/doctor 为敏感路径需鉴权）。</span>
+                  <span class="muted" style="font-size:var(--fs-caption)">请确认 openclaw.json 中 graph-memory-pro 的 apiServer.authToken 已配置（/api/doctor 为敏感路径需鉴权）。</span>
                 </template>
               </NEmpty>
             </NCard>
@@ -2140,7 +2160,11 @@ const moaLatencyPhaseOption = computed(() => {
                   </NDescriptionsItem>
                 </NDescriptions>
               </template>
-              <NEmpty v-else description="暂无用量数据" style="padding:12px 0" />
+              <NEmpty v-else description="暂无用量数据" style="padding:12px 0">
+                <template #extra>
+                  <span class="muted" style="font-size:var(--fs-caption)">数据来自 graph-memory-pro /api/usage，每 60s 自动刷新。若持续为空，请确认 gm-pro 已启用 usage 采集（metricsEnabled）。</span>
+                </template>
+              </NEmpty>
             </NCard>
           </NGi>
 
@@ -2160,7 +2184,11 @@ const moaLatencyPhaseOption = computed(() => {
                 <EChart v-if="cascadeTopArms.length" :option="betaOption" height="220px" aria-label="Cascade Top 10 臂分布" />
                 <NEmpty v-else size="small" description="无 arm 数据" style="margin:12px 0" />
               </template>
-              <NEmpty v-else description="插件未响应" style="padding:12px 0" />
+              <NEmpty v-else description="插件未响应" style="padding:12px 0">
+                <template #extra>
+                  <span class="muted" style="font-size:var(--fs-caption)">Cascade 臂数据来自插件健康快照（memory.health），每 10s 自动刷新。若持续为空，请确认插件已启用 Cascade / JudgeManager。</span>
+                </template>
+              </NEmpty>
             </NCard>
           </NGi>
 

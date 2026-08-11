@@ -28,6 +28,25 @@ import {
 } from './types.js';
 import { recordMoaRun } from './perf-tracker.js';
 
+/**
+ * 从参考模型结果中提取具体失败信息（模型名 + 错误正文），
+ * 用于"所有参考模型失败"时记录可诊断的错误细节，而非笼统的 "All reference models failed"。
+ * 这样 Dashboard 错误类型分布能区分出真正的错误（timeout / auth / rate_limit 等），
+ * 而不是全部归为 other。
+ */
+function buildReferenceModelErrorSummary(referenceResults: LlmCallResult[]): string {
+  const failed = referenceResults.filter((r) => r.text.startsWith('[Reference model error:'));
+  if (failed.length === 0) return 'All reference models failed';
+  const details = failed.map((r) => {
+    const msg = r.text
+      .replace(/^\[Reference model error:\s*/, '')
+      .replace(/\]\s*$/, '')
+      .trim();
+    return `${r.model}: ${msg}`;
+  });
+  return `All reference models failed (${details.join('; ')})`;
+}
+
 // ============================================================================
 // 预设管理
 // ============================================================================
@@ -628,7 +647,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
   const validRefs = referenceResults.filter((r) => !r.text.startsWith('[Reference model error:'));
   if (validRefs.length === 0) {
     logger?.warn?.('[moa] All reference models failed, skipping aggregation');
-    recordMoaRun(query, null, 'All reference models failed', {
+    recordMoaRun(query, null, buildReferenceModelErrorSummary(referenceResults), {
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
@@ -806,7 +825,7 @@ export async function runMoaRefsSync(
   const validRefs = referenceResults.filter((r) => !r.text.startsWith('[Reference model error:'));
   if (validRefs.length === 0) {
     logger?.warn?.('[moa] All reference models failed');
-    recordMoaRun(query, null, 'All reference models failed', {
+    recordMoaRun(query, null, buildReferenceModelErrorSummary(referenceResults), {
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
