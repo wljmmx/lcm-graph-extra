@@ -303,21 +303,26 @@ export const PluginConfigSchema = Type.Object({
     compactTokenBudget: Type.Number({ default: 154_624, minimum: 0 }),
     compactTimeout: Type.Number({ default: 60_000, minimum: 0 }),
     maxSummaryTokenRatio: Type.Number({ default: 0.45, minimum: 0, maximum: 1 }),
+    // v2.5.1: 消除 retrieval 配置冗余。
+    // 此处不再设置 low/medium/high 的字段默认值，仅保留 schema 结构校验。
+    // 单一数据源：pluginConfig.retrieval.limits（低压默认值）→ 运行时 resolveContextProfile
+    //   按优先级 wm.retrievalLimits.xxx > retrieval.limits > adaptiveLimits 计算，
+    //   中/高压未显式配置时，基于低压默认按比例折扣回退（见 resolveContextProfile + assemble/index.ts）。
     retrievalLimits: Type.Optional(Type.Object({
       low: Type.Object({
-        qmd: Type.Number({ default: 5, minimum: 1 }),
-        graph: Type.Number({ default: 5, minimum: 1 }),
-        exp: Type.Number({ default: 3, minimum: 0 }),
+        qmd: Type.Number({ minimum: 1 }),
+        graph: Type.Number({ minimum: 1 }),
+        exp: Type.Number({ minimum: 0 }),
       }),
       medium: Type.Object({
-        qmd: Type.Number({ default: 3, minimum: 1 }),
-        graph: Type.Number({ default: 3, minimum: 1 }),
-        exp: Type.Number({ default: 1, minimum: 0 }),
+        qmd: Type.Number({ minimum: 1 }),
+        graph: Type.Number({ minimum: 1 }),
+        exp: Type.Number({ minimum: 0 }),
       }),
       high: Type.Object({
-        qmd: Type.Number({ default: 1, minimum: 1 }),
-        graph: Type.Number({ default: 1, minimum: 1 }),
-        exp: Type.Number({ default: 0, minimum: 0 }),
+        qmd: Type.Number({ minimum: 1 }),
+        graph: Type.Number({ minimum: 1 }),
+        exp: Type.Number({ minimum: 0 }),
       }),
     })),
     maxContextChars: Type.Optional(Type.Object({
@@ -402,6 +407,7 @@ export const SDK_OVERHEAD_TOKENS = 55_000;
 export function resolveContextProfile(
   providerModelCtx?: number,
   wm?: WindowMonitorConfig,
+  retrievalBaseLimits?: RetrievalLimits,
 ): Pick<ResolvedWindowConfig, 'contextWindow' | 'compactTokenBudget' | 'retrievalLimits' | 'maxContextChars'> {
   const ctxWindow = providerModelCtx ?? wm?.contextWindow ?? 262_144;
   const base = 262_144;
@@ -419,24 +425,51 @@ export function resolveContextProfile(
   const compactTokenBudget = wm?.compactTokenBudget
     ?? Math.round(summaryCtxWindow * COMPACT_RATIO);
 
+  // v2.5.1: 消除 retrieval 配置冗余。
+  // retrieval.limits（顶层检索条数默认值）与 lcmMonitor.retrievalLimits.low
+  // 两套配置默认值完全相同。新增 retrievalBaseLimits 参数（取自 retrieval.limits），
+  // 作为低压的"上游默认"，用户只配 retrieval.limits 即可自动生效：
+  //   优先级：wm.retrievalLimits.low.xxx > retrievalBaseLimits.xxx > adaptiveLimits.xxx
+  // 中压、高压若用户未显式配值，则基于"低压上游默认"按比例打折扣。
+  const lowDefaults = {
+    qmd: wm?.retrievalLimits?.low?.qmd ?? retrievalBaseLimits?.qmd ?? adaptiveLimits.qmd,
+    graph: wm?.retrievalLimits?.low?.graph ?? retrievalBaseLimits?.graph ?? adaptiveLimits.graph,
+    exp: wm?.retrievalLimits?.low?.exp ?? retrievalBaseLimits?.exp ?? adaptiveLimits.exp,
+  };
+
   // P0-2 BUG-1: 修复 ?? 链失效死代码。
-  // 原代码 `Math.round(...) ?? wm?.x` 中 Math.round 永远返回 number，导致用户在
-  // lcmMonitor 中显式配置的 compactTokenBudget / retrievalLimits / maxContextChars 全部被忽略。
-  // 修复策略：用户显式配置优先 → 自适应默认 → 兜底常量。
+  // 修复策略：用户显式配置优先 → 基于低压上游默认的中/高压折扣 → 自适应默认 → 兜底常量。
+  const mediumDefaultsFromLow = {
+    qmd: Math.max(1, Math.round(lowDefaults.qmd * 0.6)),
+    graph: Math.max(1, Math.round(lowDefaults.graph * 0.6)),
+    exp: Math.max(0, Math.round(lowDefaults.exp * 0.3)),
+  };
+  const highDefaultsFromLow = {
+    qmd: Math.max(1, Math.round(lowDefaults.qmd * 0.2)),
+    graph: Math.max(1, Math.round(lowDefaults.graph * 0.2)),
+    exp: 0,
+  };
+
   return {
     contextWindow: ctxWindow,
     compactTokenBudget,
     retrievalLimits: {
-      qmd: wm?.retrievalLimits?.low?.qmd ?? adaptiveLimits.qmd,
-      graph: wm?.retrievalLimits?.low?.graph ?? adaptiveLimits.graph,
-      exp: wm?.retrievalLimits?.low?.exp ?? adaptiveLimits.exp,
+      qmd: lowDefaults.qmd,
+      graph: lowDefaults.graph,
+      exp: lowDefaults.exp,
     },
     maxContextChars: {
       low: wm?.maxContextChars?.low ?? adaptiveChars.low,
       medium: wm?.maxContextChars?.medium ?? adaptiveChars.medium,
       high: wm?.maxContextChars?.high ?? adaptiveChars.high,
     },
-  };
+    // 未在此返回中压高压：assemble/index.ts 内走 getRetrievalLimitsForTier
+    //   tierLimits → 基于 wm.retrievalLimits.{low,medium,high}。
+    //   我们会在 assemble 调用点把 medium/high 的回退默认补齐为基于 retrievalBaseLimits。
+    _tierLowDefaults: lowDefaults,
+    _tierMediumDefaultsFromLow: mediumDefaultsFromLow,
+    _tierHighDefaultsFromLow: highDefaultsFromLow,
+  } as any;
 }
 
 export function getDefaultConfigPath(): string {

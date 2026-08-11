@@ -325,7 +325,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         }
       }
     }
-    const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined);
+    const retrievalBase = (ctx.api?.pluginConfig?.retrieval?.limits) as { qmd?: number; graph?: number; exp?: number } | undefined;
+    const retrievalBaseLimits = retrievalBase && typeof retrievalBase === 'object'
+      ? { qmd: retrievalBase.qmd ?? 5, graph: retrievalBase.graph ?? 5, exp: retrievalBase.exp ?? 3 }
+      : undefined;
+    const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined, retrievalBaseLimits);
     contextWindow = resolvedCtx.contextWindow;
     _overheadCacheKey = (params as any).sessionKey ?? (params as any).conversationId ?? "default";
     const overheadTokens = getOverhead(_overheadCacheKey);
@@ -373,10 +377,28 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         highPressureThreshold: wm.highPressureThreshold ?? 0.85,
         mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
       });
+
+      // v2.5.1: 低压基于 retrievalBase（retrieval.limits）→ 中/高压由 config 的
+      // retrievalLimits.{medium,high} 覆盖，未显式配时按 resolveContextProfile
+      // 给出的默认折扣回退（不再硬编码基于 resolvedCtx.retrievalLimits.low）。
+      const tierMedium = wm?.retrievalLimits?.medium
+        ? {
+          qmd: wm.retrievalLimits.medium.qmd,
+          graph: wm.retrievalLimits.medium.graph,
+          exp: wm.retrievalLimits.medium.exp,
+        }
+        : (resolvedCtx as any)._tierMediumDefaultsFromLow;
+      const tierHigh = wm?.retrievalLimits?.high
+        ? {
+          qmd: wm.retrievalLimits.high.qmd,
+          graph: wm.retrievalLimits.high.graph,
+          exp: wm.retrievalLimits.high.exp,
+        }
+        : (resolvedCtx as any)._tierHighDefaultsFromLow;
       retrievalLimits = getRetrievalLimitsForTier(tier, {
-        low: resolvedCtx.retrievalLimits,
-        medium: { qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)), graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)), exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)) },
-        high: { qmd: 1, graph: 1, exp: 0 },
+        low: (resolvedCtx as any)._tierLowDefaults ?? resolvedCtx.retrievalLimits,
+        medium: tierMedium,
+        high: tierHigh,
       });
 
       maxContextChars = getMaxContextCharsForTier(tier, {

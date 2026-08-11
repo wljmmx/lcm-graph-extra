@@ -11,7 +11,7 @@
  */
 import { computed } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
-import { NCard, NDescriptions, NDescriptionsItem, NProgress, NTag, NButton, NSpin, NEmpty } from 'naive-ui';
+import { NCard, NDescriptions, NDescriptionsItem, NProgress, NTag, NButton, NEmpty } from 'naive-ui';
 import CardState from './CardState.vue';
 import EChart from '../EChart.vue';
 import { useTheme } from '../../composables/useTheme';
@@ -295,9 +295,10 @@ const visualScalars = computed(() => {
         <div style="margin-top:12px">
           <div class="ratio-label">
             <span class="muted" style="font-size:var(--fs-caption)">学习曲线（跨重启）</span>
-            <NSpin :show="historyLoading" size="small" style="width:14px">
-              <span class="mono" style="font-size:var(--fs-caption)">{{ historySamples.length }} 点</span>
-            </NSpin>
+            <span class="mono" style="font-size:var(--fs-caption)">
+              {{ historySamples.length }} 点
+              <span v-if="historyLoading && !historySamples.length && !historyIsError" class="muted"> · 加载中…</span>
+            </span>
           </div>
           <div v-if="historyIsError">
             <NEmpty description="学习曲线加载失败" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
@@ -311,7 +312,7 @@ const visualScalars = computed(() => {
         <div style="margin-top:12px">
           <div class="ratio-label">
             <span class="muted" style="font-size:var(--fs-caption)">热力网格（{{ visual?.grid ?? '—' }}×{{ visual?.grid ?? '—' }} 降采样）</span>
-            <NSpin :show="visualLoading" size="small" style="width:14px" />
+            <span v-if="visualLoading && !visual?.grid && !visualIsError" class="muted" style="font-size:var(--fs-caption)">加载中…</span>
           </div>
           <div v-if="visualIsError">
             <NEmpty description="热力网格加载失败" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
