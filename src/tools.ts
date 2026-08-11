@@ -48,6 +48,94 @@ export function registerOperationalToolsWithDashboard(api: any, dashboardContext
   _registerOperationalToolsImpl(api, dashboardContext);
 }
 
+/** 英文停用词集合（用于 MemoryFile 语义关键词提取） */
+const MEMORY_STOPWORDS = new Set([
+  'the','a','an','and','or','but','if','then','else','for','with','from','this','that','these',
+  'those','is','are','was','were','be','been','being','to','of','in','on','at','by','as','it',
+  'its','not','no','we','you','your','our','their','they','he','she','i','me','my','him','her',
+  'us','them','can','could','will','would','should','may','might','must','do','does','did','have',
+  'has','had','what','which','when','where','why','how','all','any','each','more','most','some',
+  'such','only','own','same','so','than','too','very','just','about','into','over','after','before',
+]);
+
+/**
+ * P1-孤立修复: 从 MemoryFile 内容提取用于建边的关键词。
+ * 拆分非单词字符 → 过滤停用词/过短词 → 去重 → 小写，上限 20 个。
+ * 仅英文分词（中文需外部提取，仍能匹配英文 name 的节点）。
+ */
+function extractMemoryKeywords(content: string): string[] {
+  const tokens = content
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 3 && t.length <= 40 && !MEMORY_STOPWORDS.has(t));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of tokens) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+/**
+ * P2-孤立修复: 重连孤立的 DAG_Summary 节点。
+ *
+ * DAG_Summary 由外部 gm-pro 生成，部分节点未建立 HAS_SUMMARY 边而孤立。
+ * 由于无法改动 gm-pro，本插件提供自发现重连：对每个无 HAS_SUMMARY 边的
+ * DAG_Summary，用其自身字符串属性值与图中候选父节点
+ * （Conversation/ConversationMessage/Task/Event/Skill/EXPERIENCE/GmFeedback）
+ * 的 id/name/title 做匹配，命中则创建 `(parent)-[:HAS_SUMMARY]->(summary)` 边。
+ *
+ * @returns 重连的 DAG_Summary 数量
+ */
+async function reconnectOrphanedDagSummaries(): Promise<number> {
+  const { driver, session } = await neo4jSession();
+  try {
+    // 1. 找出所有孤立的 DAG_Summary（无任何 HAS_SUMMARY 边），并收集其字符串属性作为候选匹配值
+    const orphanRows = await session.run(
+      `MATCH (s:DAG_Summary)
+       WHERE NOT EXISTS { (s)-[:HAS_SUMMARY]-() }
+       RETURN s.id AS id, [k IN keys(s) WHERE type(s[k]) = 'string' | trim(s[k])] AS props`,
+    );
+    let reconnected = 0;
+    for (const rec of orphanRows.records) {
+      const id = rec.get('id')?.toString();
+      const props: string[] = (rec.get('props') ?? [])
+        .map(String)
+        .filter((v: string) => v && v.trim().length > 0 && v.length <= 100)
+        .map((v: string) => v.trim());
+      if (!id || props.length === 0) continue;
+      // 2. 为该 DAG_Summary 寻找候选父节点并建 HAS_SUMMARY 边
+      const res = await session.run(
+        `MATCH (p)
+         WHERE (p:Conversation OR p:ConversationMessage OR p:Task OR p:Event OR p:Skill OR p:EXPERIENCE OR p:GmFeedback)
+           AND NOT p:DAG_Summary
+           AND NOT EXISTS { (p)-[:HAS_SUMMARY]->(:DAG_Summary {id: $id}) }
+         WITH p,
+              [v IN $props WHERE v <> '' AND (
+                 toLower(toString(coalesce(p.id, ''))) = toLower(v)
+                 OR toLower(toString(coalesce(p.name, ''))) = toLower(v)
+                 OR toLower(toString(coalesce(p.title, ''))) = toLower(v)
+              )] AS hits
+         WHERE size(hits) > 0
+         WITH p LIMIT 1
+         MERGE (p)-[r:HAS_SUMMARY]->(:DAG_Summary {id: $id})
+           ON CREATE SET r.reconnectedAt = timestamp()
+         RETURN count(r) AS n`,
+        { id, props },
+      );
+      const n = res.records[0]?.get('n');
+      reconnected += (typeof n?.toNumber === 'function') ? n.toNumber() : Number(n ?? 0);
+    }
+    return reconnected;
+  } finally {
+    await closeNeo4j(driver, session);
+  }
+}
+
 function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardToolContext | undefined): void {
   setSharedQmdClient(dashboardContext?.qmdClient ?? null);
   const originalRegisterTool = api.registerTool.bind(api);
@@ -634,6 +722,26 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             for (const file of files) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
               await session.run("MERGE (n:MemoryFile {id: $id}) SET n.name = $name, n.content = $content", { id: `file-${file}`, name: file, content });
+              // P1-孤立修复: 建立语义关联边 —— 从文件内容提取关键词，与图中
+              // 已有 Task/Skill/Event 节点按 name 匹配，创建 MENTIONS 边，
+              // 避免 MemoryFile 节点全部孤立于知识图谱之外。
+              const keywords = extractMemoryKeywords(content);
+              if (keywords.length > 0) {
+                try {
+                  await session.run(
+                    `MATCH (m:MemoryFile {id: $id})
+                     MATCH (n:Task|Skill|Event)
+                     WHERE n.name IS NOT NULL AND toLower(trim(n.name)) IN $keywords
+                     WITH m, n LIMIT $maxLinks
+                     MERGE (m)-[r:MENTIONS]->(n)
+                       ON CREATE SET r.createdAt = timestamp()
+                     RETURN count(r) AS linked`,
+                    { id: `file-${file}`, keywords, maxLinks: 10 },
+                  );
+                } catch (linkErr: any) {
+                  lines.push(`⚠ MemoryFile '${file}' semantic link skipped: ${linkErr?.message ?? String(linkErr)}`);
+                }
+              }
               fCount++;
               filesImported = fCount;
             }
@@ -1280,6 +1388,19 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         lines.push("Communities detected: " + (result?.community?.communities?.size ?? 0));
         lines.push("Community summaries: " + (result?.communitySummaries ?? 0));
 
+        // P2-孤立修复: 重连孤立的 DAG_Summary 节点（自发现匹配父节点建 HAS_SUMMARY 边）。
+        // DAG_Summary 由 gm-pro 生成，部分未建边导致孤立，此处兜底重连。
+        let reconnectCount = 0;
+        try {
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+          }
+          reconnectCount = await reconnectOrphanedDagSummaries();
+          lines.push("DAG_Summary reconnected: " + reconnectCount);
+        } catch (reconnectErr) {
+          lines.push("DAG_Summary reconnect skipped: " + (reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr)));
+        }
+
         // P0-3: 顺带对账债务表 —— 删除孤儿债务与过期墓碑，避免表无限增长。
         // lcmg_maintain 是手动维护入口，应覆盖债务表清理而不仅是图分析。
         try {
@@ -1311,6 +1432,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               pagerankTopK: result?.pagerank?.topK?.length ?? 0,
               communitiesDetected: result?.community?.communities?.size ?? 0,
               communitySummaries: result?.communitySummaries ?? 0,
+              dagSummaryReconnected: reconnectCount,
               orphansDeleted: debtReconciled ? parseInt((debtReconciled.match(/Orphans deleted: (\d+)/) || [])[1] || '0', 10) : 0,
               tombstonesDeleted: debtReconciled ? parseInt((lines.find(l => l.includes("Tombstones deleted"))?.match(/Tombstones deleted: (\d+)/) || [])[1] || '0', 10) : 0,
             },

@@ -612,7 +612,7 @@ export class ExperienceStorage {
           AND other.relatedConcepts IS NOT NULL
           AND size(other.relatedConcepts) > 0
         WITH e, other,
-             [c IN split(toLower(other.relatedConcepts), ',') WHERE c IN $concepts] AS overlap
+             [c IN [x IN split(toLower(other.relatedConcepts), ',') | trim(x)] WHERE c IN $concepts] AS overlap
         WHERE size(overlap) >= 1
         WITH e, other, size(overlap) AS overlapScore
         ORDER BY overlapScore DESC, other.relevanceScore DESC
@@ -662,7 +662,7 @@ export class ExperienceStorage {
           AND other.relatedConcepts IS NOT NULL
           AND size(other.relatedConcepts) > 0
         WITH other,
-             [c IN split(toLower(other.relatedConcepts), ',') WHERE c IN $concepts] AS overlap
+             [c IN [x IN split(toLower(other.relatedConcepts), ',') | trim(x)] WHERE c IN $concepts] AS overlap
         WHERE size(overlap) >= 1
         WITH other, size(overlap) AS overlapScore
         ORDER BY overlapScore DESC, other.relevanceScore DESC

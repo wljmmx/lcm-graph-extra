@@ -172,6 +172,11 @@ export async function distillOne(
         }
       : undefined;
     // S-11': 提取 relatedConcepts（Zettelkasten 关联概念）
+    // BUGFIX(P0-孤立根因): 本地模型常把 array 字段返回成逗号字符串而非 JSON 数组，
+    // 导致 `Array.isArray(parsed.relatedConcepts)` 为 false → relatedConcepts 恒为 undefined
+    // → 蒸馏流程 `concepts?.length` 为假，linkRelated 从不被调用，654 个经验全部孤立。
+    // 修复：兼容 string（逗号拆分）与 array 两种格式；若仍为空则用 freeTags/标签兜底，
+    // 确保蒸馏经验能进入 RELATED_TO 建边链路。
     let relatedConcepts: string[] | undefined;
     if (Array.isArray(parsed.relatedConcepts)) {
       const rc = parsed.relatedConcepts
@@ -179,6 +184,22 @@ export async function distillOne(
         .filter((s: string) => s.trim().length > 0 && s.length <= 50)
         .slice(0, 5);
       relatedConcepts = rc.length > 0 ? rc : undefined;
+    } else if (typeof parsed.relatedConcepts === 'string' && parsed.relatedConcepts.trim()) {
+      const rc = parsed.relatedConcepts
+        .split(/[,，|]/)
+        .map((s: string) => s.trim())
+        .filter((s: string) => s.length > 0 && s.length <= 50)
+        .slice(0, 5);
+      relatedConcepts = rc.length > 0 ? rc : undefined;
+    }
+    // 兜底：relatedConcepts 为空时，用 freeTags / tags 作为关联概念，保证能建边
+    if (!relatedConcepts || relatedConcepts.length === 0) {
+      const fallback = [
+        ...(freeTags ?? []),
+        ...(filterArr(parsed.scenario, SCENARIO_SET) ?? []),
+        ...(filterArr(parsed.techStack, TECH_SET) ?? []),
+      ].filter((s) => s && s.trim().length > 0).slice(0, 5);
+      relatedConcepts = fallback.length > 0 ? fallback : undefined;
     }
 
     // 校验 relevanceScore 范围 [0,1]，越界回退 0.5
