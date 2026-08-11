@@ -296,6 +296,8 @@ export class GraphAdapter {
   private neo4jConfig: Neo4jConfig;
   private logger: Logger;
   private _recaller: any = null;
+  /** 是否复用 gm-pro 模块级 Recaller 单例(A)；false 表示回退自建(B) */
+  private _recallerFromGmPro = false;
   private _embedFn: any = null;
   private _llm?: (system: string, user: string) => Promise<string>;
   // v2.3.6 在线学习：JudgeManager + AssociationMatrix 注入 Recaller，形成反馈闭环
@@ -345,44 +347,10 @@ export class GraphAdapter {
         return false;
       }
 
-      // - Initialize Recaller (gm-pro dual-path recall) -
+      // - Initialize / reuse Recaller (gm-pro dual-path recall) -
       try {
-        // P2-17: 用 buildGmConfig 统一构建，避免重复硬编码
-        this._recaller = new mod.Recaller(this.driver, buildGmConfig(this.neo4jConfig));
-
-        // Set embedding function for community generalized recall
-        try {
-          const ecfg = this.config.embedding;
-          if (ecfg) {
-            // 优先使用自带的 createLocalEmbedFn —— 明确在 HTTP body 中传递 keep_alive，
-            // 确保 Ollama 保持模型驻留内存（默认 keep_alive=-1，永不过期）。
-            // graph-memory-pro 的 createEmbedFn 无法保证 keep_alive 被转发，仅作为 fallback。
-            try {
-              this._embedFn = createLocalEmbedFn(ecfg);
-              this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
-            } catch (localErr) {
-              // 自带创建失败时 fallback 到 graph-memory-pro 的 createEmbedFn
-              if (mod.createEmbedFn) {
-                this._embedFn = mod.createEmbedFn({ ...ecfg });
-                this.logger?.warn?.('[graph-adapter] Local embed fn failed, using graph-memory-pro createEmbedFn (keep_alive not guaranteed)', { err: localErr });
-              } else {
-                throw localErr;
-              }
-            }
-            if (this._embedFn) {
-              this._recaller.setEmbedFn(this._embedFn);
-            }
-          } else {
-            this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
-          }
-        } catch (embedErr) {
-          this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller', { err: embedErr });
-        }
-
-        // v2.3.6: 注入 JudgeManager + AssociationMatrix（反馈闭环 + 在线学习）
-        await this._configureRecallerOnline(mod);
-
-        this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
+        await this._initRecaller();
+        this.logger?.info?.('[graph-adapter] Recaller ready (dual-path recall enabled)');
       } catch (initErr) {
         this.logger?.warn?.('[graph-adapter] Recaller init failed, falling back to searchNodes', { err: initErr });
         this._recaller = null;
@@ -418,49 +386,93 @@ export class GraphAdapter {
   private async _ensureRecaller(): Promise<void> {
     if (!this.mod || !this.driver) return;
     if (this._recaller) return;
-    this._recaller = new this.mod.Recaller(this.driver, buildGmConfig(this.neo4jConfig));
-    const ecfg = this.config.embedding;
-    if (ecfg) {
-      try {
-        this._embedFn = createLocalEmbedFn(ecfg);
-        this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
-      } catch (localErr) {
-        if (this.mod.createEmbedFn) {
-          this._embedFn = this.mod.createEmbedFn({ ...ecfg });
-          this.logger?.warn?.('[graph-adapter] Local embed fn failed, using graph-memory-pro createEmbedFn (keep_alive not guaranteed)', { err: localErr instanceof Error ? localErr.message : String(localErr) });
-        } else {
-          throw localErr;
-        }
-      }
-      if (this._embedFn) {
-        this._recaller.setEmbedFn(this._embedFn);
-      }
-    } else {
-      this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
-    }
-    // v2.3.6: 注入 JudgeManager + AssociationMatrix（反馈闭环 + 在线学习）
-    await this._configureRecallerOnline(this.mod);
-    this.logger?.info?.('[graph-adapter] Recaller initialized (dual-path recall enabled)');
+    await this._initRecaller();
+    this.logger?.info?.('[graph-adapter] Recaller ready (dual-path recall enabled)');
   }
 
   /**
-   * v2.3.6 在线学习闭环：向 Recaller 注入 JudgeManager + AssociationMatrix。
+   * 初始化/复用 Recaller —— 优先复用 gm-pro 模块级单例(A)，避免自建(B)造成双实例/M 分叉。
+   * 仅在 gm-pro 未导出 getRecaller 或 A 未就绪时回退自建，并打降级日志。
+   * 随后统一注入/复用 embedding + JudgeManager + AssociationMatrix。
+   */
+  private async _initRecaller(): Promise<void> {
+    const mod = this.mod;
+    if (!mod || !this.driver) return;
+
+    // 1) 优先复用 gm-pro 模块级 Recaller(A)
+    if (typeof mod.getRecaller === 'function') {
+      let shared = mod.getRecaller();
+      // A 可能尚未由 gm-pro 自 init 创建，短暂轮询提高复用命中率
+      for (let i = 0; i < 5 && !shared; i++) {
+        await new Promise((r) => setTimeout(r, 300));
+        shared = mod.getRecaller();
+      }
+      if (shared) {
+        this._recaller = shared;
+        this._recallerFromGmPro = true;
+        this.logger?.info?.('[graph-adapter] reusing gm-pro module-level Recaller (single source of truth)');
+      } else {
+        this.logger?.warn?.('[graph-adapter] gm-pro getRecaller() returned null, falling back to self-built Recaller');
+      }
+    } else {
+      this.logger?.warn?.('[graph-adapter] gm-pro getRecaller() unavailable (old version), falling back to self-built Recaller');
+    }
+
+    // 2) 回退：自建 Recaller(B)——仅当无法复用 A 时（保证 L3 双路径召回与反馈不空）
+    if (!this._recaller) {
+      this._recaller = new mod.Recaller(this.driver, buildGmConfig(this.neo4jConfig));
+      this._recallerFromGmPro = false;
+    }
+
+    // 3) 设置 embedding（复用 A 时覆盖为 lcm 的 embed，保证 keep_alive 与维度一致）
+    try {
+      const ecfg = this.config.embedding;
+      if (ecfg) {
+        try {
+          this._embedFn = createLocalEmbedFn(ecfg);
+          this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
+        } catch (localErr) {
+          if (mod.createEmbedFn) {
+            this._embedFn = mod.createEmbedFn({ ...ecfg });
+            this.logger?.warn?.('[graph-adapter] Local embed fn failed, using graph-memory-pro createEmbedFn (keep_alive not guaranteed)', { err: localErr instanceof Error ? localErr.message : String(localErr) });
+          } else {
+            throw localErr;
+          }
+        }
+        if (this._embedFn) {
+          this._recaller.setEmbedFn(this._embedFn);
+        }
+      } else {
+        this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
+      }
+    } catch (embedErr) {
+      this.logger?.warn?.('[graph-adapter] Failed to init embedding for Recaller', { err: embedErr });
+    }
+
+    // 4) 复用/补齐 JudgeManager + AssociationMatrix（反馈闭环 + 在线学习）
+    await this._configureRecallerOnline(mod);
+  }
+
+  /**
+   * v2.3.6 在线学习闭环：复用 gm-pro 已注入的 JudgeManager + AssociationMatrix；
+   * 仅在缺失时按 lcm 配置补齐注入到 Recaller（复用其实例，不重复搭建）。
    *
    * 对应 gm-pro 链路：
    *   - 链路 1（召回）：Recaller.setEmbedFn → setJudgeManager → setAssociationMatrix → recall()
    *   - 链路 3（M 持久化）：createAssociationMatrixPersisted 启动自动 load 恢复
    *
-   * 幂等：_recaller 缺失或已注入过则跳过。失败不致命（仅降级为无反馈召回）。
+   * 幂等：_recaller 缺失则跳过；已注入则复用。失败不致命（仅降级为无反馈召回），均输出去降级日志。
    */
   private async _configureRecallerOnline(mod: any): Promise<void> {
     if (!mod || !this._recaller) return;
-    // 已注入 JudgeManager 则跳过（recovery/多次 connect 时不重复 bootstrap）
-    if (this._judgeManager && this._recaller.getJudgeManager?.()) return;
 
     // ── 1. JudgeManager（I-2：启发式/LLM 裁判）─────────────────
     try {
-      const JudgeManager = mod.JudgeManager;
-      if (typeof JudgeManager === 'function' && this.config.judge?.enabled !== false) {
+      const existingJudge = this._recaller.getJudgeManager?.() ?? null;
+      if (existingJudge) {
+        this._judgeManager = existingJudge;
+        this.logger?.info?.('[graph-adapter] reusing existing JudgeManager from gm-pro (feedback loop enabled)');
+      } else if (typeof mod.JudgeManager === 'function' && this.config.judge?.enabled !== false) {
         const judgeCfg: Record<string, any> = {
           enabled: this.config.judge?.enabled ?? true,
           tier: this.config.judge?.tier ?? 1,
@@ -475,7 +487,7 @@ export class GraphAdapter {
         if (typeof this.config.judge?.llmJudgeTimeoutMs === 'number') {
           judgeCfg.llmJudgeTimeoutMs = this.config.judge.llmJudgeTimeoutMs;
         }
-        const jm = new JudgeManager(judgeCfg);
+        const jm = new mod.JudgeManager(judgeCfg);
         // 从 Neo4j 恢复累计反馈计数，避免冷启动反复
         if (typeof mod.getFeedbackCount === 'function') {
           try {
@@ -486,7 +498,9 @@ export class GraphAdapter {
         }
         this._recaller.setJudgeManager(jm);
         this._judgeManager = jm;
-        this.logger?.info?.('[graph-adapter] JudgeManager injected into Recaller (feedback loop enabled)');
+        this.logger?.info?.('[graph-adapter] injected JudgeManager into Recaller (feedback loop enabled)');
+      } else if (!existingJudge) {
+        this.logger?.warn?.('[graph-adapter] JudgeManager unavailable — feedback loop degraded (no online learning)');
       }
     } catch (judgeErr) {
       this.logger?.warn?.('[graph-adapter] JudgeManager inject failed (feedback loop degraded)', { err: String(judgeErr) });
@@ -496,38 +510,55 @@ export class GraphAdapter {
     // ── 2. AssociationMatrix（L-1：在线学习 M 矩阵，默认关闭）─────
     if (this.config.associationMatrix?.enabled === true) {
       try {
-        const dim = await this._probeEmbedDimension();
-        if (dim > 0 && typeof mod.createAssociationMatrixPersisted === 'function') {
-          const gmCfg: Record<string, any> = {
-            associationMatrix: { enabled: true },
-            warmup: {},
-          };
-          if (typeof this.config.associationMatrix.learningRate === 'number') {
-            gmCfg.associationMatrix.learningRate = this.config.associationMatrix.learningRate;
-          }
-          if (typeof this.config.associationMatrix.warmupFeedbacks === 'number') {
-            gmCfg.associationMatrix.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
-            gmCfg.warmup.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
-          }
-          const am = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
-            path: this.config.associationMatrix.persistPath,
-          });
-          if (am) {
-            this._recaller.setAssociationMatrix(am);
-            this._associationMatrix = am;
-            this.logger?.info?.('[graph-adapter] AssociationMatrix injected into Recaller (online learning on)', {
-              dim,
-              persistedRestored: (am as any).__persistLoaded ?? false,
-            });
-          }
+        const existingAm = this._recaller.getAssociationMatrix?.() ?? null;
+        if (existingAm) {
+          this._associationMatrix = existingAm;
+          this.logger?.info?.('[graph-adapter] reusing existing AssociationMatrix from gm-pro (online learning on)');
         } else {
-          this.logger?.warn?.('[graph-adapter] AssociationMatrix skipped: no embed dim or API unavailable');
+          const dim = await this._probeEmbedDimension();
+          if (dim > 0 && typeof mod.createAssociationMatrixPersisted === 'function') {
+            const gmCfg: Record<string, any> = {
+              associationMatrix: { enabled: true },
+              warmup: {},
+            };
+            if (typeof this.config.associationMatrix.learningRate === 'number') {
+              gmCfg.associationMatrix.learningRate = this.config.associationMatrix.learningRate;
+            }
+            if (typeof this.config.associationMatrix.warmupFeedbacks === 'number') {
+              gmCfg.associationMatrix.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
+              gmCfg.warmup.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
+            }
+            const am = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
+              path: this.config.associationMatrix.persistPath,
+            });
+            if (am) {
+              this._recaller.setAssociationMatrix(am);
+              this._associationMatrix = am;
+              this.logger?.info?.('[graph-adapter] injected AssociationMatrix into Recaller (online learning on)', {
+                dim,
+                persistedRestored: (am as any).__persistLoaded ?? false,
+              });
+            }
+          } else {
+            this.logger?.warn?.('[graph-adapter] AssociationMatrix skipped: no embed dim or API unavailable');
+          }
         }
       } catch (amErr) {
         this.logger?.warn?.('[graph-adapter] AssociationMatrix inject failed (M learning degraded)', { err: String(amErr) });
         this._associationMatrix = null;
       }
+    } else {
+      this.logger?.debug?.('[graph-adapter] AssociationMatrix disabled (associationMatrix.enabled !== true), M learning off');
     }
+
+    // 配置对齐可观测提示（Phase 2 保障）
+    this.logger?.debug?.('[graph-adapter] online-learning readiness', {
+      sharedRecaller: this._recallerFromGmPro,
+      judgeReady: !!this._recaller.getJudgeManager?.(),
+      matrixReady: !!this._recaller.getAssociationMatrix?.(),
+      embedReady: !!this._embedFn,
+      matrixEnabled: this.config.associationMatrix?.enabled === true,
+    });
   }
 
   /** 探测嵌入维度（优先用 config.embeddingDimensions，否则对 embedFn 调用一次） */

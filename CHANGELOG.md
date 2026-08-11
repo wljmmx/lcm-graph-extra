@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-11
+
+### Changed
+
+- **Recaller 复用以消除关联矩阵 M 分叉**：`graph-adapter` 不再各自 `new Recaller`，而是优先复用 gm-pro 模块级单例(A)（`getRecaller()`），仅当 A 未就绪/未导出时回退自建(B) 并打降级日志。
+  - 新增 `_initRecaller()`：优先复用 A（含 5×300ms 轮询提升命中率）→ 自建 B 兜底 → 统一注入/复用 embedding。
+  - 重构 `_configureRecallerOnline()`：JudgeManager / AssociationMatrix 已由 gm-pro 注入则直接复用，缺失时才按 lcm 配置补齐，避免双实例导致 M 矩阵在线学习数据不共享。
+  - 新增 `online-learning readiness` 配置对齐日志（sharedRecaller / judgeReady / matrixReady / embedReady / matrixEnabled）。
+  - 依赖 gm-pro 侧新增 `getRecaller()` 导出（gm-pro 仓库单独提交，未包含于本仓库）。
+
 ## [2.1.12] - 2026-07-23
 
 ### Added

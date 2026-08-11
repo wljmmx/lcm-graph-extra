@@ -158,6 +158,115 @@ describe('GraphAdapter', () => {
     });
   });
 
+  // ===================== Recaller 复用（关联矩阵 M 分叉修复）==============
+
+  function makeRecaller() {
+    return {
+      setEmbedFn: vi.fn(),
+      setJudgeManager: vi.fn(),
+      setAssociationMatrix: vi.fn(),
+      getJudgeManager: vi.fn().mockReturnValue(null),
+      getAssociationMatrix: vi.fn().mockReturnValue(null),
+    };
+  }
+
+  describe('_initRecaller: 复用 gm-pro 模块级 Recaller(A)', () => {
+    it('getRecaller 命中时复用 A，不 new Recaller，_recallerFromGmPro=true', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const shared = makeRecaller();
+      const RecallerCtor = vi.fn();
+      (a as any).mod = {
+        getRecaller: vi.fn().mockReturnValue(shared),
+        Recaller: RecallerCtor,
+      };
+      (a as any).driver = {};
+
+      await (a as any)._initRecaller();
+
+      expect((a as any)._recaller).toBe(shared);
+      expect((a as any)._recallerFromGmPro).toBe(true);
+      expect(RecallerCtor).not.toHaveBeenCalled();
+    });
+
+    it('getRecaller 返回 null 时回退自建 B，_recallerFromGmPro=false', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const selfBuilt = makeRecaller();
+      const RecallerCtor = vi.fn().mockImplementation(() => selfBuilt);
+      (a as any).mod = {
+        // 5×300ms 轮询后仍返回 null → 触发自建兜底
+        getRecaller: vi.fn().mockReturnValue(null),
+        Recaller: RecallerCtor,
+      };
+      (a as any).driver = {};
+
+      await (a as any)._initRecaller();
+
+      expect((a as any)._recallerFromGmPro).toBe(false);
+      expect(RecallerCtor).toHaveBeenCalledTimes(1);
+      expect((a as any)._recaller).toBe(selfBuilt);
+    });
+
+    it('gm-pro 未导出 getRecaller 时回退自建 B', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const selfBuilt = makeRecaller();
+      const RecallerCtor = vi.fn().mockImplementation(() => selfBuilt);
+      (a as any).mod = { Recaller: RecallerCtor };
+      (a as any).driver = {};
+
+      await (a as any)._initRecaller();
+
+      expect((a as any)._recallerFromGmPro).toBe(false);
+      expect(RecallerCtor).toHaveBeenCalledTimes(1);
+    });
+
+    it('复用 A 时复用其已有的 JudgeManager / AssociationMatrix（不重复注入）', async () => {
+      const a = new GraphAdapter(nc, { ...ac, associationMatrix: { enabled: true } });
+      const judge = { tier: 1 };
+      const am = { isEnabled: () => true };
+      const shared = {
+        setEmbedFn: vi.fn(),
+        setJudgeManager: vi.fn(),
+        setAssociationMatrix: vi.fn(),
+        getJudgeManager: vi.fn().mockReturnValue(judge),
+        getAssociationMatrix: vi.fn().mockReturnValue(am),
+      };
+      (a as any).mod = { getRecaller: vi.fn().mockReturnValue(shared) };
+      (a as any).driver = {};
+
+      await (a as any)._initRecaller();
+
+      expect((a as any)._judgeManager).toBe(judge);
+      expect((a as any)._associationMatrix).toBe(am);
+      expect(shared.setJudgeManager).not.toHaveBeenCalled();
+      expect(shared.setAssociationMatrix).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('_ensureRecaller: 幂等（不重复 new）', () => {
+    it('_recaller 已存在时直接返回，不重复初始化', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const existing = makeRecaller();
+      (a as any)._recaller = existing;
+      const initSpy = vi.spyOn(a as any, '_initRecaller');
+
+      await (a as any)._ensureRecaller();
+
+      expect(initSpy).not.toHaveBeenCalled();
+      expect((a as any)._recaller).toBe(existing);
+    });
+
+    it('_recaller 不存在但 mod/driver 完整时初始化一次', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const initSpy = vi.spyOn(a as any, '_initRecaller').mockResolvedValue(undefined);
+      (a as any).mod = {};
+      (a as any).driver = {};
+
+      await (a as any)._ensureRecaller();
+
+      expect(initSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
   // ===================== _withSession 重试机制 ========================
 
   describe('_withSession: session 重试机制', () => {

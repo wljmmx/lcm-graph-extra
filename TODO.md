@@ -189,6 +189,35 @@
 
 ---
 
+## 🧠 Recaller 复用以消除关联矩阵 M 分叉（2026-08-11）
+
+> 背景：lcm-graph-extra 自建 Recaller(B) 与 gm-pro HTTP 服务器的模块级 Recaller(A) 为两个独立实例，
+> 导致关联矩阵 M 的在线学习数据在 lcm 与 dashboard 之间不共享（dashboard 学习曲线/热力网络为空）。
+> 基于"能复用 gm-pro 能力和流程的尽量复用，而不是自己搭建"原则，改为复用 gm-pro 模块级 Recaller 单例(A)。
+
+### 🔧 Phase 0 — gm-pro 提供模块级 Recaller 导出（gm-pro 仓库单独提交）✅ 已完成
+- [x] **P0**: gm-pro `index.ts` 新增 `getRecaller()` 导出，返回模块级 `_recaller` 单例(A)；未初始化返回 null
+
+### 🔧 Phase 1 — graph-adapter 复用 A（lcm-graph-extra，本仓库）✅ 已完成
+- [x] **1a**: 新增 `_initRecaller()` 优先复用 A（含 5×300ms 轮询 + 自建 B 兜底），并记录 `_recallerFromGmPro`
+- [x] **1b**: 重构 `_configureRecallerOnline()` 为复用/校验/补齐注入（JudgeManager + AssociationMatrix 缺失时按 lcm 配置补齐）
+- [x] **1c**: `connect()` / `_ensureRecaller()` 改调 `_initRecaller()`，删除重复自建逻辑
+
+### 🔍 Phase 2 — 配置对齐校验日志 ✅ 已完成
+- [x] **2**: `online-learning readiness` 日志（sharedRecaller / judgeReady / matrixReady / embedReady / matrixEnabled）
+
+### 🧪 Phase 4 — 测试覆盖 ✅ 已完成
+- [x] **4a**: `graph-adapter.test.ts` 覆盖复用 A（getRecaller 命中）
+- [x] **4b**: 覆盖自建 B 兜底（getRecaller 返回 null / 未导出）
+- [x] **4c**: 覆盖幂等（connect 重复调用不重复 new）
+- [x] **4d**: 覆盖复用 A 时复用其已有 JudgeManager / AssociationMatrix（20 tests 全部通过）
+
+### 🚀 Phase 5 — 编译自检 + 文档 ✅ 已完成
+- [x] **5a**: `tsc --noEmit` 类型检查通过
+- [x] **5b**: CHANGELOG / TODO 进度更新
+
+---
+
 ## 📋 当前进度统计
 
 | 版本 | 总任务 | 完成 | 进行中 | 待开始 | 完成率 |
