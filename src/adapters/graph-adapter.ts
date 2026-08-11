@@ -347,6 +347,24 @@ export class GraphAdapter {
         return false;
       }
 
+      // v2.5.2: 竞态修复 —— driver 对象存在 ≠ Neo4j 连接池就绪。
+      // graph-adapter 拿到 driver 引用时（尤其是 gm-pro getDriver() 在冷启动阶段
+      // 返回的引用），底层连接池可能仍在建立，第一个 session:query 就会触发连接错误，
+      // 随后 _tryRecoverConnection 恢复成功但第一次 retry 仍失败（日志
+      // "session:query: retry after recovery failed"）。这里在返回 true 前用
+      // verifyConnectivity() 验证连接真正可用，失败则刷新 driver 引用重试。
+      const verified = await this._verifyDriverReady();
+      if (!verified) {
+        this._connectRetryCount++;
+        this._lastError = `connect: driver acquired but connectivity verification failed (Neo4j pool still warming up)`;
+        this.logger?.warn?.(`[graph-adapter] ${this._lastError}`);
+        if (this._connectRetryCount >= this.maxRetries) {
+          this._connectFailed = true;
+          this._lastFailTime = Date.now();
+        }
+        return false;
+      }
+
       // - Initialize / reuse Recaller (gm-pro dual-path recall) -
       try {
         await this._initRecaller();
@@ -640,6 +658,62 @@ export class GraphAdapter {
       || lowerMsg.includes('failed to connect')
       || lowerMsg.includes('session closed')
       || lowerMsg.includes('service is not available');
+  }
+
+  /**
+   * v2.5.2: 验证 driver 底层连接池是否真正就绪。
+   *
+   * 竞态修复：connect() 拿到 driver 引用时（尤其是 gm-pro getDriver() 在冷启动阶段
+   * 返回的引用），Neo4j 连接池可能仍在建立。driver 对象存在 ≠ 连接可用。
+   * 这里强制 verifyConnectivity()，失败则尝试刷新 driver 引用（gm-pro 可能在
+   * 后台建立连接池，重新 getDriver() 可能拿到就绪的引用）并短暂等待后重试。
+   *
+   * @returns 连接验证是否通过
+   */
+  private async _verifyDriverReady(maxAttempts = 3): Promise<boolean> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (this.driver) {
+        try {
+          await this.driver.verifyConnectivity();
+          return true;
+        } catch (err) {
+          this.logger?.debug?.(
+            `[graph-adapter] verifyDriverReady attempt ${attempt}/${maxAttempts} failed`,
+            { err: err instanceof Error ? err.message : String(err) },
+          );
+        }
+      }
+
+      // 刷新 driver 引用：gm-pro 连接池可能仍在冷启动，重新 getDriver() 可能拿到就绪引用。
+      // 若当前 driver 来自 acquireDriver 且验证失败，先 releaseDriver 避免 refCount 失衡。
+      if (this._driverFromGmPro) {
+        if (this.mod && typeof this.mod.getDriver === 'function') {
+          try {
+            const fresh = this.mod.getDriver();
+            if (fresh && fresh !== this.driver) {
+              this.driver = fresh;
+              this.logger?.info?.('[graph-adapter] verifyDriverReady: re-acquired driver from graph-memory-pro');
+            }
+          } catch { /* ignore */ }
+        }
+      } else if (this.driver) {
+        try {
+          await releaseDriver(this.neo4jConfig);
+        } catch { /* ignore */ }
+        this.driver = null;
+        try {
+          this.driver = await acquireDriver(this.neo4jConfig);
+        } catch (acquireErr) {
+          this.logger?.debug?.('[graph-adapter] verifyDriverReady: re-acquire own driver failed', { err: String(acquireErr) });
+        }
+      }
+
+      // 给连接池冷启动留出短暂时间后重试
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    return false;
   }
 
   private async _tryRecoverConnection(context: string): Promise<boolean> {

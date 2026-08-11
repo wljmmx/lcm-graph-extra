@@ -434,4 +434,40 @@ describe('GraphAdapter', () => {
       expect(mockSession.close).toHaveBeenCalled();
     });
   });
+
+  // ===================== 竞态修复: _verifyDriverReady ========================
+
+  describe('_verifyDriverReady: connect 时验证连接池真正就绪', () => {
+    it('verifyConnectivity 成功时立即返回 true', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const driver = { verifyConnectivity: vi.fn().mockResolvedValue(undefined) };
+      (a as any).driver = driver;
+      expect(await (a as any)._verifyDriverReady()).toBe(true);
+      expect(driver.verifyConnectivity).toHaveBeenCalledTimes(1);
+    });
+
+    it('首次失败后从 gm-pro 刷新 driver 并重试成功', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const coldDriver = { verifyConnectivity: vi.fn().mockRejectedValue(new Error('pool warming up')) };
+      const readyDriver = { verifyConnectivity: vi.fn().mockResolvedValue(undefined) };
+      (a as any).driver = coldDriver;
+      (a as any)._driverFromGmPro = true;
+      // 模拟 gm-pro 冷启动：第一次 getDriver 仍返回 cold，第二次返回 ready
+      let gmDriverCount = 0;
+      (a as any).mod = {
+        getDriver: () => (++gmDriverCount === 1 ? coldDriver : readyDriver),
+      };
+      expect(await (a as any)._verifyDriverReady(3)).toBe(true);
+      expect(a.driver).toBe(readyDriver);
+    });
+
+    it('多次刷新仍失败则返回 false（连接池始终未就绪）', async () => {
+      const a = new GraphAdapter(nc, ac);
+      const badDriver = { verifyConnectivity: vi.fn().mockRejectedValue(new Error('unreachable')) };
+      (a as any).driver = badDriver;
+      (a as any)._driverFromGmPro = false;
+      (a as any).mod = {};
+      expect(await (a as any)._verifyDriverReady(2)).toBe(false);
+    });
+  });
 });
