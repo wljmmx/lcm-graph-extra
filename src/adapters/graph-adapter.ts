@@ -424,10 +424,13 @@ export class GraphAdapter {
       this._recallerFromGmPro = false;
     }
 
-    // 3) 设置 embedding（复用 A 时覆盖为 lcm 的 embed，保证 keep_alive 与维度一致）
+    // 3) 设置 embedding —— 优先沿用 gm-pro 已注入的 embed（避免重复维护一套 embedding 配置）。
+    //    仅当 lcm 显式配置了 embedding（model/apiKey/baseURL 任一存在）时才覆盖，
+    //    keep_alive 与维度以 lcm 为准；否则复用 A 的 embed，不重复 setEmbedFn。
     try {
       const ecfg = this.config.embedding;
-      if (ecfg) {
+      const hasExplicitEmbed = !!(ecfg && (ecfg.model || ecfg.apiKey || ecfg.baseURL));
+      if (hasExplicitEmbed) {
         try {
           this._embedFn = createLocalEmbedFn(ecfg);
           this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
@@ -442,6 +445,9 @@ export class GraphAdapter {
         if (this._embedFn) {
           this._recaller.setEmbedFn(this._embedFn);
         }
+      } else if (this._recallerFromGmPro) {
+        // 复用 A：gm-pro 已注入自己的 embed，直接沿用，不重复覆盖
+        this.logger?.debug?.('[graph-adapter] reusing graph-memory-pro embedFn (no explicit local embedding config)');
       } else {
         this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
       }
@@ -455,7 +461,12 @@ export class GraphAdapter {
 
   /**
    * v2.3.6 在线学习闭环：复用 gm-pro 已注入的 JudgeManager + AssociationMatrix；
-   * 仅在缺失时按 lcm 配置补齐注入到 Recaller（复用其实例，不重复搭建）。
+   * 仅在缺失时补齐注入到 Recaller（复用其实例，不重复搭建）。
+   *
+   * 配置来源（v2.5.0 配置复用）：优先使用 gm-pro 的生效配置（getEffectiveConfig，
+   * 即 openclaw.json 中 plugins.entries["graph-memory-pro"].config 的值），
+   * 仅当 gm-pro 未导出/未就绪时才回退到 lcm 自身配置，避免重复维护一套 Judge /
+   * AssociationMatrix 默认值（默认值易漂移）。
    *
    * 对应 gm-pro 链路：
    *   - 链路 1（召回）：Recaller.setEmbedFn → setJudgeManager → setAssociationMatrix → recall()
@@ -466,27 +477,33 @@ export class GraphAdapter {
   private async _configureRecallerOnline(mod: any): Promise<void> {
     if (!mod || !this._recaller) return;
 
+    // 优先取 gm-pro 的生效配置；未导出/未就绪时为 null（回退 lcm 配置）
+    const gmProCfg = typeof mod.getEffectiveConfig === 'function' ? mod.getEffectiveConfig() : null;
+    const useGmProConfig = !!gmProCfg;
+    const gmJudge = gmProCfg?.judge ?? null;
+    const gmAm = gmProCfg?.associationMatrix ?? null;
+    const lcmJudge = this.config.judge ?? null;
+    const lcmAm = this.config.associationMatrix ?? null;
+
     // ── 1. JudgeManager（I-2：启发式/LLM 裁判）─────────────────
     try {
       const existingJudge = this._recaller.getJudgeManager?.() ?? null;
       if (existingJudge) {
         this._judgeManager = existingJudge;
         this.logger?.info?.('[graph-adapter] reusing existing JudgeManager from gm-pro (feedback loop enabled)');
-      } else if (typeof mod.JudgeManager === 'function' && this.config.judge?.enabled !== false) {
+      } else if (typeof mod.JudgeManager === 'function' && (gmJudge?.enabled ?? lcmJudge?.enabled ?? true) !== false) {
+        // 从 gm-pro 生效配置取值，缺失字段回退 lcm 配置（避免重复维护一套默认值）
         const judgeCfg: Record<string, any> = {
-          enabled: this.config.judge?.enabled ?? true,
-          tier: this.config.judge?.tier ?? 1,
-          heuristicMatch: this.config.judge?.heuristicMatch ?? 'both',
+          enabled: gmJudge?.enabled ?? lcmJudge?.enabled ?? true,
+          tier: gmJudge?.tier ?? lcmJudge?.tier ?? 1,
+          heuristicMatch: gmJudge?.heuristicMatch ?? lcmJudge?.heuristicMatch ?? 'both',
         };
-        if (typeof this.config.judge?.judgeWarmupFeedbacks === 'number') {
-          judgeCfg.judgeWarmupFeedbacks = this.config.judge.judgeWarmupFeedbacks;
-        }
-        if (typeof this.config.judge?.llmJudgeMaxNodes === 'number') {
-          judgeCfg.llmJudgeMaxNodes = this.config.judge.llmJudgeMaxNodes;
-        }
-        if (typeof this.config.judge?.llmJudgeTimeoutMs === 'number') {
-          judgeCfg.llmJudgeTimeoutMs = this.config.judge.llmJudgeTimeoutMs;
-        }
+        const jw = gmJudge?.judgeWarmupFeedbacks ?? lcmJudge?.judgeWarmupFeedbacks;
+        if (typeof jw === 'number') judgeCfg.judgeWarmupFeedbacks = jw;
+        const lmn = gmJudge?.llmJudgeMaxNodes ?? lcmJudge?.llmJudgeMaxNodes;
+        if (typeof lmn === 'number') judgeCfg.llmJudgeMaxNodes = lmn;
+        const lmt = gmJudge?.llmJudgeTimeoutMs ?? lcmJudge?.llmJudgeTimeoutMs;
+        if (typeof lmt === 'number') judgeCfg.llmJudgeTimeoutMs = lmt;
         const jm = new mod.JudgeManager(judgeCfg);
         // 从 Neo4j 恢复累计反馈计数，避免冷启动反复
         if (typeof mod.getFeedbackCount === 'function') {
@@ -498,7 +515,9 @@ export class GraphAdapter {
         }
         this._recaller.setJudgeManager(jm);
         this._judgeManager = jm;
-        this.logger?.info?.('[graph-adapter] injected JudgeManager into Recaller (feedback loop enabled)');
+        this.logger?.info?.('[graph-adapter] injected JudgeManager into Recaller (feedback loop enabled)', {
+          configSource: useGmProConfig ? 'graph-memory-pro' : 'lcm',
+        });
       } else if (!existingJudge) {
         this.logger?.warn?.('[graph-adapter] JudgeManager unavailable — feedback loop degraded (no online learning)');
       }
@@ -508,7 +527,9 @@ export class GraphAdapter {
     }
 
     // ── 2. AssociationMatrix（L-1：在线学习 M 矩阵，默认关闭）─────
-    if (this.config.associationMatrix?.enabled === true) {
+    //    是否启用以 gm-pro 生效配置为准（缺省才参考 lcm 配置）
+    const amEnabled = gmAm?.enabled === true || lcmAm?.enabled === true;
+    if (amEnabled) {
       try {
         const existingAm = this._recaller.getAssociationMatrix?.() ?? null;
         if (existingAm) {
@@ -521,21 +542,22 @@ export class GraphAdapter {
               associationMatrix: { enabled: true },
               warmup: {},
             };
-            if (typeof this.config.associationMatrix.learningRate === 'number') {
-              gmCfg.associationMatrix.learningRate = this.config.associationMatrix.learningRate;
-            }
-            if (typeof this.config.associationMatrix.warmupFeedbacks === 'number') {
-              gmCfg.associationMatrix.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
-              gmCfg.warmup.warmupFeedbacks = this.config.associationMatrix.warmupFeedbacks;
+            const lr = gmAm?.learningRate ?? lcmAm?.learningRate;
+            if (typeof lr === 'number') gmCfg.associationMatrix.learningRate = lr;
+            const wf = gmAm?.warmupFeedbacks ?? lcmAm?.warmupFeedbacks;
+            if (typeof wf === 'number') {
+              gmCfg.associationMatrix.warmupFeedbacks = wf;
+              gmCfg.warmup.warmupFeedbacks = wf;
             }
             const am = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
-              path: this.config.associationMatrix.persistPath,
+              path: lcmAm?.persistPath,
             });
             if (am) {
               this._recaller.setAssociationMatrix(am);
               this._associationMatrix = am;
               this.logger?.info?.('[graph-adapter] injected AssociationMatrix into Recaller (online learning on)', {
                 dim,
+                configSource: useGmProConfig && gmAm?.enabled === true ? 'graph-memory-pro' : 'lcm',
                 persistedRestored: (am as any).__persistLoaded ?? false,
               });
             }
@@ -548,16 +570,18 @@ export class GraphAdapter {
         this._associationMatrix = null;
       }
     } else {
-      this.logger?.debug?.('[graph-adapter] AssociationMatrix disabled (associationMatrix.enabled !== true), M learning off');
+      this.logger?.debug?.('[graph-adapter] AssociationMatrix disabled (enabled !== true), M learning off');
     }
 
     // 配置对齐可观测提示（Phase 2 保障）
     this.logger?.debug?.('[graph-adapter] online-learning readiness', {
       sharedRecaller: this._recallerFromGmPro,
+      configSource: useGmProConfig ? 'graph-memory-pro' : 'lcm',
+      judgeEnabled: (gmJudge?.enabled ?? lcmJudge?.enabled ?? true) !== false,
       judgeReady: !!this._recaller.getJudgeManager?.(),
+      matrixEnabled: amEnabled,
       matrixReady: !!this._recaller.getAssociationMatrix?.(),
       embedReady: !!this._embedFn,
-      matrixEnabled: this.config.associationMatrix?.enabled === true,
     });
   }
 

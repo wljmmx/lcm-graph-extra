@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增 `online-learning readiness` 配置对齐日志（sharedRecaller / judgeReady / matrixReady / embedReady / matrixEnabled）。
   - 依赖 gm-pro 侧新增 `getRecaller()` 导出（gm-pro 仓库单独提交，未包含于本仓库）。
 
+### Changed
+
+- **配置复用，消除重复维护一套 Judge/AssociationMatrix/Embedding 默认值**：`graph-adapter` 不再以 lcm 自己的默认值二次覆盖 gm-pro 的生效配置，改为优先使用 gm-pro 在 openclaw.json 中配置的参数值。
+  - 依赖 gm-pro 侧新增 `getEffectiveConfig()` 导出（返回模块级生效 `GmConfig`，即 `plugins.entries["graph-memory-pro"].config` 填充默认值后的值）。
+  - `_configureRecallerOnline()`：JudgeManager / AssociationMatrix 的取值来源改为 `getEffectiveConfig()`（gm-pro 生效配置）优先，缺失字段才回退 lcm 配置；已由 gm-pro 注入的实例直接复用，不重复构建。
+  - embedding：仅当 lcm 显式配置了 `model/apiKey/baseURL` 时才覆盖，否则复用 gm-pro 已注入的 embed，避免重复维护 embedding 配置。
+  - 新增 `configSource: 'graph-memory-pro' | 'lcm'` 对齐日志，便于诊断实际生效的配置来源。
+
 ## [2.1.12] - 2026-07-23
 
 ### Added

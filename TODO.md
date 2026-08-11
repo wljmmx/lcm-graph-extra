@@ -212,6 +212,16 @@
 - [x] **4c**: 覆盖幂等（connect 重复调用不重复 new）
 - [x] **4d**: 覆盖复用 A 时复用其已有 JudgeManager / AssociationMatrix（20 tests 全部通过）
 
+### 🔧 Phase 6 — 配置复用，消除重复维护一套默认值（2026-08-11）✅ 已完成
+> 背景：lcm 仍以自身 `DEFAULT_GM_CONFIG` / `config.ts` 默认值二次覆盖 gm-pro 的生效配置，
+> 且默认值已漂移（如 recallMaxNodes 8 vs 6、learningRate 0.1 vs 0.01）。
+> 基于"能复用 gm-pro 能力和流程的尽量复用"原则，改为复用 gm-pro 在 openclaw.json 配置的参数值。
+- [x] **6a**: gm-pro `index.ts` 新增 `getEffectiveConfig()` 导出，返回模块级生效 `_cfg`（gm-pro 仓库单独提交）
+- [x] **6b**: `_configureRecallerOnline()` 取值来源改为 `getEffectiveConfig()` 优先，缺失字段回退 lcm 配置
+- [x] **6c**: embedding 仅当 lcm 显式配置 model/apiKey/baseURL 时才覆盖，否则复用 gm-pro 已注入 embed
+- [x] **6d**: 新增 `configSource: 'graph-memory-pro' | 'lcm'` 对齐日志
+- [x] **6e**: 测试覆盖（gm-pro 配置值优先 / 复用 A 时仍复用已有实例）+ `tsc --noEmit` 通过
+
 ### 🚀 Phase 5 — 编译自检 + 文档 ✅ 已完成
 - [x] **5a**: `tsc --noEmit` 类型检查通过
 - [x] **5b**: CHANGELOG / TODO 进度更新

@@ -240,6 +240,62 @@ describe('GraphAdapter', () => {
       expect(shared.setJudgeManager).not.toHaveBeenCalled();
       expect(shared.setAssociationMatrix).not.toHaveBeenCalled();
     });
+
+    it('getEffectiveConfig 存在时，自建 B 的 JudgeManager 用 gm-pro 配置值（而非 lcm 默认值）', async () => {
+      const a = new GraphAdapter(nc, ac); // lcm 未配置 judge
+      const selfBuilt = makeRecaller();
+      const RecallerCtor = vi.fn().mockImplementation(() => selfBuilt);
+      const JudgeManagerCtor = vi.fn().mockImplementation(() => ({ tier: 2 }));
+      (a as any).mod = {
+        getRecaller: vi.fn().mockReturnValue(null), // 触发自建 B
+        Recaller: RecallerCtor,
+        JudgeManager: JudgeManagerCtor,
+        getFeedbackCount: vi.fn().mockResolvedValue(0),
+        getEffectiveConfig: vi.fn().mockReturnValue({
+          judge: { enabled: true, tier: 2, judgeWarmupFeedbacks: 40, llmJudgeMaxNodes: 10, llmJudgeTimeoutMs: 8000, heuristicMatch: 'both' },
+          associationMatrix: { enabled: false },
+        }),
+      };
+      (a as any).driver = {};
+
+      await (a as any)._initRecaller();
+
+      // JudgeManager 应使用 gm-pro 生效配置值，而非 lcm 默认值
+      expect(JudgeManagerCtor).toHaveBeenCalledTimes(1);
+      const judgeCfg = JudgeManagerCtor.mock.calls[0][0];
+      expect(judgeCfg.tier).toBe(2);
+      expect(judgeCfg.judgeWarmupFeedbacks).toBe(40);
+      expect(judgeCfg.llmJudgeMaxNodes).toBe(10);
+      expect(judgeCfg.llmJudgeTimeoutMs).toBe(8000);
+    });
+
+    it('复用 A 且 getEffectiveConfig 存在时，仍复用其已有 JudgeManager / AssociationMatrix', async () => {
+      const a = new GraphAdapter(nc, { ...ac, associationMatrix: { enabled: true } });
+      const judge = { tier: 2 };
+      const am = { isEnabled: () => true };
+      const shared = {
+        setEmbedFn: vi.fn(),
+        setJudgeManager: vi.fn(),
+        setAssociationMatrix: vi.fn(),
+        getJudgeManager: vi.fn().mockReturnValue(judge),
+        getAssociationMatrix: vi.fn().mockReturnValue(am),
+      };
+      (a as any).mod = {
+        getRecaller: vi.fn().mockReturnValue(shared),
+        getEffectiveConfig: vi.fn().mockReturnValue({
+          judge: { enabled: true, tier: 1, judgeWarmupFeedbacks: 20 },
+          associationMatrix: { enabled: true, learningRate: 0.01 },
+        }),
+      };
+      (a as any).driver = {};
+
+      await (a as any)._initRecaller();
+
+      expect((a as any)._judgeManager).toBe(judge);
+      expect((a as any)._associationMatrix).toBe(am);
+      expect(shared.setJudgeManager).not.toHaveBeenCalled();
+      expect(shared.setAssociationMatrix).not.toHaveBeenCalled();
+    });
   });
 
   describe('_ensureRecaller: 幂等（不重复 new）', () => {
