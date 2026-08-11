@@ -546,6 +546,7 @@ const effectiveModeLabel = computed(() => {
                   <NSpace>
                     <NCheckbox value="low">低压力</NCheckbox>
                     <NCheckbox value="medium">中压力</NCheckbox>
+                    <NCheckbox value="high">高压力</NCheckbox>
                   </NSpace>
                 </NCheckboxGroup>
               </div>

@@ -408,6 +408,11 @@ export function resolveContextProfile(
   providerModelCtx?: number,
   wm?: WindowMonitorConfig,
   retrievalBaseLimits?: RetrievalLimits,
+  profileTierLimits?: {
+    low: RetrievalLimits;
+    medium: RetrievalLimits;
+    high: RetrievalLimits;
+  },
 ): Pick<ResolvedWindowConfig, 'contextWindow' | 'compactTokenBudget' | 'retrievalLimits' | 'maxContextChars'> {
   const ctxWindow = providerModelCtx ?? wm?.contextWindow ?? 262_144;
   const base = 262_144;
@@ -429,25 +434,33 @@ export function resolveContextProfile(
   // retrieval.limits（顶层检索条数默认值）与 lcmMonitor.retrievalLimits.low
   // 两套配置默认值完全相同。新增 retrievalBaseLimits 参数（取自 retrieval.limits），
   // 作为低压的"上游默认"，用户只配 retrieval.limits 即可自动生效：
-  //   优先级：wm.retrievalLimits.low.xxx > retrievalBaseLimits.xxx > adaptiveLimits.xxx
-  // 中压、高压若用户未显式配值，则基于"低压上游默认"按比例打折扣。
+  // v2.5.2: 接入 capability profile 的 retrievalLimits（热更新档次切换）。
+  // 最终 ?? 链优先级：
+  //   1. wm.retrievalLimits.low.xxx（用户显式配 lcmMonitor.retrievalLimits.low）
+  //   2. retrievalBaseLimits.xxx（用户配顶层 retrieval.limits）
+  //   3. profileTierLimits?.low?.xxx（当前能力档次预设 minimal/balanced/performance/full）
+  //   4. adaptiveLimits.xxx（按 contextWindow 比例自适应）
+  // 中压、高压：同样接入 profileTierLimits.medium/high 作为"显式配置"之外的第一个
+  // 回退，再无则基于 resolveContextProfile 给出的低压默认按比例打折扣。
   const lowDefaults = {
-    qmd: wm?.retrievalLimits?.low?.qmd ?? retrievalBaseLimits?.qmd ?? adaptiveLimits.qmd,
-    graph: wm?.retrievalLimits?.low?.graph ?? retrievalBaseLimits?.graph ?? adaptiveLimits.graph,
-    exp: wm?.retrievalLimits?.low?.exp ?? retrievalBaseLimits?.exp ?? adaptiveLimits.exp,
+    qmd: wm?.retrievalLimits?.low?.qmd ?? retrievalBaseLimits?.qmd ?? profileTierLimits?.low.qmd ?? adaptiveLimits.qmd,
+    graph: wm?.retrievalLimits?.low?.graph ?? retrievalBaseLimits?.graph ?? profileTierLimits?.low.graph ?? adaptiveLimits.graph,
+    exp: wm?.retrievalLimits?.low?.exp ?? retrievalBaseLimits?.exp ?? profileTierLimits?.low.exp ?? adaptiveLimits.exp,
   };
+  const mediumDefaultsFromProfile = profileTierLimits?.medium;
+  const highDefaultsFromProfile = profileTierLimits?.high;
 
   // P0-2 BUG-1: 修复 ?? 链失效死代码。
-  // 修复策略：用户显式配置优先 → 基于低压上游默认的中/高压折扣 → 自适应默认 → 兜底常量。
+  // 修复策略：用户显式配置优先 → capability profile 档次预设 → 基于低压上游默认的中/高压折扣 → 自适应默认 → 兜底常量。
   const mediumDefaultsFromLow = {
-    qmd: Math.max(1, Math.round(lowDefaults.qmd * 0.6)),
-    graph: Math.max(1, Math.round(lowDefaults.graph * 0.6)),
-    exp: Math.max(0, Math.round(lowDefaults.exp * 0.3)),
+    qmd: wm?.retrievalLimits?.medium?.qmd ?? mediumDefaultsFromProfile?.qmd ?? Math.max(1, Math.round(lowDefaults.qmd * 0.6)),
+    graph: wm?.retrievalLimits?.medium?.graph ?? mediumDefaultsFromProfile?.graph ?? Math.max(1, Math.round(lowDefaults.graph * 0.6)),
+    exp: wm?.retrievalLimits?.medium?.exp ?? (mediumDefaultsFromProfile?.exp != null ? mediumDefaultsFromProfile.exp : Math.max(0, Math.round(lowDefaults.exp * 0.3))),
   };
   const highDefaultsFromLow = {
-    qmd: Math.max(1, Math.round(lowDefaults.qmd * 0.2)),
-    graph: Math.max(1, Math.round(lowDefaults.graph * 0.2)),
-    exp: 0,
+    qmd: wm?.retrievalLimits?.high?.qmd ?? highDefaultsFromProfile?.qmd ?? Math.max(1, Math.round(lowDefaults.qmd * 0.2)),
+    graph: wm?.retrievalLimits?.high?.graph ?? highDefaultsFromProfile?.graph ?? Math.max(1, Math.round(lowDefaults.graph * 0.2)),
+    exp: wm?.retrievalLimits?.high?.exp ?? (highDefaultsFromProfile?.exp != null ? highDefaultsFromProfile.exp : 0),
   };
 
   return {

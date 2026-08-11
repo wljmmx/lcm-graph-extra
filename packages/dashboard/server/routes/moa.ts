@@ -184,8 +184,8 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
         rejected.push({ path: key, reason: 'expected "auto" | "parallel" | "serial"' });
         continue;
       }
-      if (key === 'enabledTiers' && (!Array.isArray(value) || !value.every((v: unknown) => v === 'low' || v === 'medium'))) {
-        rejected.push({ path: key, reason: 'expected array of "low" | "medium"' });
+      if (key === 'enabledTiers' && (!Array.isArray(value) || !value.every((v: unknown) => v === 'low' || v === 'medium' || v === 'high'))) {
+        rejected.push({ path: key, reason: 'expected array of "low" | "medium" | "high"' });
         continue;
       }
       applied.push(key);
