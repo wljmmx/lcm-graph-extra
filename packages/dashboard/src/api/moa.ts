@@ -108,6 +108,8 @@ export interface MoaRunRecord {
 export interface MoaModelBreakdown {
   model: string;
   provider: string;
+  /** 角色：ref=参考模型 / agg=聚合模型 */
+  role: 'ref' | 'agg';
   runCount: number;
   successCount: number;
   failureCount: number;

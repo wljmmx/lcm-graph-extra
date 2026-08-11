@@ -698,6 +698,9 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
     totalMs,
     referenceTimings: referenceResults.map((r) => r.ms),
     aggregatorTiming: aggMs,
+    referenceTokens: referenceResults.map((r) => r.tokensUsed),
+    aggregatorTokens: aggregatorResult.tokensUsed,
+    referenceModels: referenceResults.map((r) => r.model),
   };
 
   // 存入缓存（供 lcmg_moa_reply 工具读取）
@@ -985,11 +988,14 @@ ${refSections}
       totalMs,
       referenceTimings: entry.refTimings,
       aggregatorTiming: aggMs,
+      referenceTokens: entry.refTokens,
+      aggregatorTokens: aggregatorResult.tokensUsed,
+      referenceModels: entry.refModels,
     };
 
     recordMoaRun(entry.query, result, null, {
       mode: entry.mode,
-      referenceModels: [], // 参考模型详情在 ref cache 中
+      referenceModels: entry.refModels.map((m) => ({ model: m })),
       aggregatorModel: entry.aggregatorModel,
     }, entry.complexityScore);
 

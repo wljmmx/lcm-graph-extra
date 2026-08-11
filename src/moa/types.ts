@@ -135,6 +135,12 @@ export interface MoaPipelineResult {
   referenceTimings: number[];
   /** 聚合模型耗时（ms） */
   aggregatorTiming: number;
+  /** 各参考模型 token 消耗（与 referenceTimings 一一对应） */
+  referenceTokens?: number[];
+  /** 聚合模型 token 消耗 */
+  aggregatorTokens?: number;
+  /** 各参考模型名称（与 referenceTimings 一一对应，用于模型级指标） */
+  referenceModels?: string[];
 }
 
 /** MoA 管道执行上下文 */

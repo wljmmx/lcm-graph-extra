@@ -96,6 +96,30 @@ const moaSuccessRateType = computed(() => {
   return r >= 90 ? 'success' : r >= 70 ? 'warning' : 'error';
 });
 
+// ── 错误类型中文说明 ──
+const errorTypeLabels: Record<string, string> = {
+  timeout: '超时',
+  aborted: '中止/取消',
+  sync_budget_exceeded: '同步预算超限',
+  dns_error: 'DNS解析失败',
+  ssl_error: 'SSL/TLS证书错误',
+  connection: '连接/网络错误',
+  rate_limit: '限流/配额超限',
+  auth_error: '认证/授权失败',
+  model_not_found: '模型不存在',
+  context_length: '上下文长度超限',
+  server_error: '服务端错误(500/502/504)',
+  overloaded: '服务过载(503)',
+  content_filter: '内容安全拦截',
+  parse_error: '解析错误',
+  empty_response: '空响应',
+  stream_error: '流式传输错误',
+  memory_error: '内存不足',
+  config_error: '配置错误',
+  unknown: '未知错误',
+  other: '其他',
+};
+
 const moaErrorItems = computed(() => {
   if (!moaPerf.value?.errorBreakdown) return [];
   return Object.entries(moaPerf.value.errorBreakdown).sort((a, b) => b[1] - a[1]);
@@ -377,18 +401,98 @@ const moaLatencyPhaseOption = computed(() => {
     title: undefined,
     tooltip: { trigger: 'axis', formatter: (params: any) => {
       let h = params[0].name + '<br/>';
-      for (const p of params) h += `${p.marker}${p.seriesName}: ${Number(p.value).toFixed(0)}ms<br/>`;
+      for (const p of params) h += `${p.marker}${p.seriesName}: ${(Number(p.value) / 1000).toFixed(2)}s<br/>`;
       return h;
     }},
     legend: { data: ['参考模型', '聚合模型'], bottom: 0 },
     xAxis: { type: 'category', data: data.map((r) => r.queryPreview.slice(0, 16) + (r.queryPreview.length > 16 ? '...' : '')), axisLabel: { fontSize: 10, rotate: 30 } },
-    yAxis: { type: 'value', name: '耗时 (ms)' },
+    yAxis: { type: 'value', name: '耗时 (s)', axisLabel: { formatter: (v: number) => (v / 1000).toFixed(1) } },
     series: [
       { name: '参考模型', type: 'bar', stack: 'total', data: data.map((r) => r.refMs), itemStyle: { color: CHART.value.primary } },
       { name: '聚合模型', type: 'bar', stack: 'total', data: data.map((r) => r.aggMs), itemStyle: { color: CHART.value.success } },
     ],
     grid: { left: 60, right: 30, bottom: 60, top: 45 },
   };
+});
+
+// ── Token 按模型分布（饼图）──
+const moaTokenByModelOption = computed(() => {
+  const breakdown = moaPerf.value?.modelBreakdown;
+  if (!breakdown || breakdown.length === 0) return {};
+  const items = (breakdown as any[])
+    .filter((m) => m.totalTokens > 0)
+    .map((m) => ({ name: m.model, value: m.totalTokens }));
+  if (items.length === 0) return {};
+  const total = items.reduce((s, i) => s + i.value, 0);
+  const palette = [CHART.value.primary, CHART.value.success, CHART.value.warning, CHART.value.danger, CHART.value.info, CHART.value.neutral];
+  return {
+    title: undefined,
+    tooltip: {
+      trigger: 'item',
+      formatter: (p: any) => {
+        const pct = total > 0 ? ((p.value / total) * 100).toFixed(1) : '0.0';
+        return `${p.name}<br/>${p.marker}Token: ${formatTokens(p.value)} (${pct}%)`;
+      },
+    },
+    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 'center', textStyle: { fontSize: 11 } },
+    series: [
+      {
+        name: 'Token 占比',
+        type: 'pie',
+        radius: ['40%', '70%'],
+        center: ['38%', '50%'],
+        avoidLabelOverlap: true,
+        itemStyle: { borderColor: '#fff', borderWidth: 2 },
+        label: { show: true, formatter: '{d}%' },
+        data: items.map((i, idx) => ({ ...i, itemStyle: { color: palette[idx % palette.length] } })),
+      },
+    ],
+  };
+});
+
+// ── 响应时间按模型分布（横向柱状图）──
+const moaLatencyByModelOption = computed(() => {
+  const breakdown = moaPerf.value?.modelBreakdown;
+  if (!breakdown || breakdown.length === 0) return {};
+  const items = (breakdown as any[])
+    .filter((m) => m.avgLatencyMs > 0)
+    .sort((a, b) => a.avgLatencyMs - b.avgLatencyMs)
+    .slice(-10);
+  if (items.length === 0) return {};
+  return {
+    title: undefined,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params;
+        return `${p.name}<br/>${p.marker}平均耗时: ${(Number(p.value) / 1000).toFixed(2)}s`;
+      },
+    },
+    grid: { left: 10, right: 50, bottom: 10, top: 30, containLabel: true },
+    xAxis: { type: 'value', name: '耗时 (s)', axisLabel: { formatter: (v: number) => (v / 1000).toFixed(1) } },
+    yAxis: { type: 'category', data: items.map((m) => m.model), axisLabel: { fontSize: 10 } },
+    series: [
+      {
+        name: '平均响应时间',
+        type: 'bar',
+        data: items.map((m) => m.avgLatencyMs),
+        itemStyle: { color: CHART.value.primary },
+        label: { show: true, position: 'right', formatter: (p: any) => `${(Number(p.value) / 1000).toFixed(2)}s` },
+      },
+    ],
+  };
+});
+
+// ── 模型级图表数据可用性（用于模板 v-if）──
+const moaHasTokenByModel = computed(() => {
+  const breakdown = moaPerf.value?.modelBreakdown as any[] | undefined;
+  return !!breakdown && breakdown.length > 0 && breakdown.some((m) => m.totalTokens > 0);
+});
+
+const moaHasLatencyByModel = computed(() => {
+  const breakdown = moaPerf.value?.modelBreakdown as any[] | undefined;
+  return !!breakdown && breakdown.length > 0 && breakdown.some((m) => m.avgLatencyMs > 0);
 });
 
 // ── 最近运行表格列 ──
@@ -469,6 +573,14 @@ const moaRunsColumns = computed(() => [
         </NGi>
       </NGrid>
 
+      <!-- Token 按模型分布 -->
+      <NCard title="Token 消耗按模型分布" size="small" style="margin-bottom: 16px">
+        <template v-if="moaHasTokenByModel">
+          <EChart :option="moaTokenByModelOption" height="280px" :skip-theme="true" aria-label="MoA Token 消耗按模型分布饼图：每个模型的 Token 占比" />
+        </template>
+        <NEmpty v-else description="暂无模型级 Token 数据" style="padding: 12px 0" />
+      </NCard>
+
       <!-- 复杂度百分位 -->
       <NCard title="复杂度百分位" size="small" style="margin-bottom: 16px">
         <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="6" responsive="screen">
@@ -540,6 +652,14 @@ const moaRunsColumns = computed(() => [
         </NGi>
       </NGrid>
 
+      <!-- 响应时间按模型分布 -->
+      <NCard title="平均响应时间按模型分布" size="small" style="margin-bottom: 16px">
+        <template v-if="moaHasLatencyByModel">
+          <EChart :option="moaLatencyByModelOption" height="280px" :skip-theme="true" aria-label="MoA 平均响应时间按模型分布横向柱状图：每个模型的平均耗时（秒）" />
+        </template>
+        <NEmpty v-else description="暂无模型级延迟数据" style="padding: 12px 0" />
+      </NCard>
+
       <!-- 模型级指标 + 错误分布 -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
         <NGi>
@@ -550,16 +670,24 @@ const moaRunsColumns = computed(() => [
                   <thead>
                     <tr>
                       <th>模型</th>
+                      <th>角色</th>
                       <th>次数</th>
                       <th>成功率</th>
                       <th>P50</th>
                       <th>P95</th>
+                      <th>平均耗时</th>
                       <th>Avg Tokens</th>
+                      <th>总Token</th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr v-for="m in moaPerf.modelBreakdown" :key="m.model">
                       <td class="mono model-name-cell">{{ m.model }}</td>
+                      <td class="num">
+                        <NTag size="tiny" :type="m.role === 'agg' ? 'success' : 'info'" :title="m.role === 'agg' ? '聚合模型' : '参考模型'">
+                          {{ m.role === 'agg' ? '聚合' : '参考' }}
+                        </NTag>
+                      </td>
                       <td class="num">{{ m.runCount }}</td>
                       <td class="num">
                         <NTag size="tiny" :type="m.runCount > 0 && m.successCount / m.runCount >= 0.9 ? 'success' : 'warning'">
@@ -568,7 +696,9 @@ const moaRunsColumns = computed(() => [
                       </td>
                       <td class="num">{{ formatMs(m.p50LatencyMs) }}</td>
                       <td class="num">{{ formatMs(m.p95LatencyMs) }}</td>
+                      <td class="num">{{ formatMs(m.avgLatencyMs) }}</td>
                       <td class="num">{{ formatTokens(m.avgTokens) }}</td>
+                      <td class="num">{{ formatTokens(m.totalTokens) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -580,10 +710,15 @@ const moaRunsColumns = computed(() => [
 
         <NGi>
           <NCard title="错误类型分布" size="small">
+            <template #header-extra>
+              <span class="muted" style="font-size: var(--fs-caption)">悬停查看错误说明</span>
+            </template>
             <template v-if="moaErrorItems.length > 0">
               <div class="error-list">
                 <div v-for="[type, count] in moaErrorItems" :key="type" class="error-item">
-                  <NTag size="small" type="error">{{ type }}</NTag>
+                  <NTag size="small" type="error" :title="`${type} · ${errorTypeLabels[type] || type}`">
+                    {{ errorTypeLabels[type] || type }}
+                  </NTag>
                   <span class="error-count">{{ count }} 次</span>
                   <div class="error-bar-track">
                     <div class="error-bar-fill" :style="{ width: moaPerf.failedRuns > 0 ? ((count / moaPerf.failedRuns) * 100).toFixed(0) + '%' : '0%' }" />

@@ -61,6 +61,8 @@ export interface MoaRunRecord {
 export interface MoaModelBreakdown {
   model: string;
   provider: string;
+  /** 角色：ref=参考模型 / agg=聚合模型 */
+  role: 'ref' | 'agg';
   runCount: number;
   successCount: number;
   failureCount: number;
@@ -209,10 +211,12 @@ export function recordMoaRun(
     refCount: config.referenceModels.length,
     validRefCount: result?.referenceOutputs.length ?? 0,
     refTimings: result?.referenceTimings ?? [],
-    refModels: config.referenceModels.map((r) => r.model),
-    refTokens: [],
+    // v2.5.2: 使用 result 中的实际模型名和 token 数据，而非 config 中的配置名
+    // （异步路径 config.referenceModels 可能为空，但 result.referenceModels 有值）
+    refModels: result?.referenceModels ?? config.referenceModels.map((r) => r.model),
+    refTokens: result?.referenceTokens ?? [],
     aggModel: config.aggregatorModel.model,
-    aggTokens: 0,
+    aggTokens: result?.aggregatorTokens ?? 0,
     responseLen: result?.finalResponse.length ?? 0,
     success: !!result && !error,
     error: error ?? undefined,
@@ -444,24 +448,25 @@ export function getMoaPerformance(): MoaPerformanceSummary {
  * 构建模型级细粒度指标。
  */
 function buildModelBreakdown(): MoaModelBreakdown[] {
-  const modelMap = new Map<string, { provider: string; timings: number[]; tokens: number[]; success: boolean[] }>();
+  const modelMap = new Map<string, { role: 'ref' | 'agg'; provider: string; timings: number[]; tokens: number[]; success: boolean[] }>();
 
   for (const r of runRecords) {
     // 参考模型
     for (let i = 0; i < r.refModels.length; i++) {
       const key = `ref:${r.refModels[i]}`;
       if (!modelMap.has(key)) {
-        modelMap.set(key, { provider: 'unknown', timings: [], tokens: [], success: [] });
+        modelMap.set(key, { role: 'ref', provider: 'unknown', timings: [], tokens: [], success: [] });
       }
       const entry = modelMap.get(key)!;
       if (r.refTimings[i] !== undefined) entry.timings.push(r.refTimings[i]);
+      // v2.5.2: refTokens 现在有实际数据（从 result.referenceTokens 填充）
       if (r.refTokens[i] !== undefined) entry.tokens.push(r.refTokens[i]);
       entry.success.push(i < r.validRefCount);
     }
     // 聚合模型
     const aggKey = `agg:${r.aggModel}`;
     if (!modelMap.has(aggKey)) {
-      modelMap.set(aggKey, { provider: 'unknown', timings: [], tokens: [], success: [] });
+      modelMap.set(aggKey, { role: 'agg', provider: 'unknown', timings: [], tokens: [], success: [] });
     }
     const aggEntry = modelMap.get(aggKey)!;
     aggEntry.timings.push(r.aggMs);
@@ -478,6 +483,7 @@ function buildModelBreakdown(): MoaModelBreakdown[] {
     breakdown.push({
       model: modelName,
       provider: data.provider,
+      role,
       runCount: data.timings.length,
       successCount: data.success.filter(Boolean).length,
       failureCount: data.success.filter((s) => !s).length,
@@ -495,10 +501,26 @@ function buildModelBreakdown(): MoaModelBreakdown[] {
 /**
  * 错误分类：将错误信息归类为简短类型标签。
  *
- * 增强：覆盖 MoA 管道常见的失败场景，避免过多错误落入 "other"。
+ * v2.5.2 增强：覆盖 MoA 管道常见的失败场景，最大限度减少 "other" 占比。
  * 注意：当所有参考模型失败时，错误信息为
  *   "All reference models failed (modelA: <err1>; modelB: <err2>)"
  * 这里会先提取具体错误正文再分类，从而把 timeout / auth / rate_limit 等正确归类。
+ *
+ * 分类优先级（从高到低）：
+ *   1. 超时/截止时间（最常见的本地模型问题）
+ *   2. 中止/取消（用户取消或信号中断）
+ *   3. 同步预算超限（MoA 特有）
+ *   4. 连接/网络（DNS、SSL、TCP 层）
+ *   5. 限流/配额（API 调用频率）
+ *   6. 认证/授权（API Key 问题）
+ *   7. 模型不存在（404/unknown model）
+ *   8. 上下文长度超限
+ *   9. 服务端错误（500/502/504）
+ *   10. 过载/不可用（503/overloaded）
+ *   11. 内容过滤/安全拦截
+ *   12. 解析错误（JSON/格式）
+ *   13. 空响应
+ *   14. 其他（兜底）
  */
 function classifyError(error?: string): string {
   if (!error) return 'unknown';
@@ -507,17 +529,46 @@ function classifyError(error?: string): string {
   const refBody = (lower.match(/all reference models failed \(([\s\S]*)\)/) ?? [])[1] ?? lower;
   const haystack = refBody || lower;
 
-  if (haystack.includes('timeout') || haystack.includes('timed out') || haystack.includes('deadline')) return 'timeout';
+  // 超时（含 "MoA LLM call timeout after XXXms"）
+  if (haystack.includes('timeout') || haystack.includes('timed out') || haystack.includes('deadline') || haystack.includes('call timeout')) return 'timeout';
+  // 中止/取消
   if (haystack.includes('abort') || haystack.includes('cancel') || haystack.includes('aborted or missing')) return 'aborted';
-  if (haystack.includes('connect') || haystack.includes('network') || haystack.includes('econnrefused') || haystack.includes('socket') || haystack.includes('fetch failed') || haystack.includes('unreachable')) return 'connection';
-  if (haystack.includes('rate') || haystack.includes('limit') || haystack.includes('429') || haystack.includes('quota') || haystack.includes('too many request')) return 'rate_limit';
-  if (haystack.includes('auth') || haystack.includes('401') || haystack.includes('403') || haystack.includes('unauthorized') || haystack.includes('forbidden') || haystack.includes('api key') || haystack.includes('invalid key')) return 'auth_error';
-  if (haystack.includes('model') && (haystack.includes('not found') || haystack.includes('404') || haystack.includes('does not exist') || haystack.includes('unknown model'))) return 'model_not_found';
-  if (haystack.includes('context') && (haystack.includes('length') || haystack.includes('exceed') || haystack.includes('too long') || haystack.includes('max token'))) return 'context_length';
-  if (haystack.includes('overloaded') || haystack.includes('unavailable') || haystack.includes('service unavailable') || haystack.includes('503')) return 'overloaded';
-  if (haystack.includes('parse') || haystack.includes('json') || haystack.includes('syntax') || haystack.includes('unexpected token')) return 'parse_error';
-  if (haystack.includes('empty') || haystack.includes('no result') || haystack.includes('no content') || haystack.includes('empty response')) return 'empty_response';
+  // 同步预算超限（MoA 特有）
   if (haystack.includes('budget') || haystack.includes('sync budget')) return 'sync_budget_exceeded';
+  // DNS 解析失败
+  if (haystack.includes('enotfound') || haystack.includes('getaddrinfo') || haystack.includes('dns') || haystack.includes('name not resolved')) return 'dns_error';
+  // SSL/TLS 证书错误
+  if (haystack.includes('certificate') || haystack.includes('ssl') || haystack.includes('tls') || haystack.includes('self-signed') || haystack.includes('cert')) return 'ssl_error';
+  // 连接/网络层错误
+  if (haystack.includes('connect') || haystack.includes('network') || haystack.includes('econnrefused') || haystack.includes('socket') || haystack.includes('fetch failed') || haystack.includes('unreachable') || haystack.includes('ehostunreach') || haystack.includes('enetunreach')) return 'connection';
+  // 限流/配额
+  if (haystack.includes('rate') || haystack.includes('429') || haystack.includes('quota') || haystack.includes('too many request')) return 'rate_limit';
+  // "limit" 单独出现可能是 context_length，放后面
+  if (haystack.includes('limit') && !haystack.includes('context')) return 'rate_limit';
+  // 认证/授权
+  if (haystack.includes('auth') || haystack.includes('401') || haystack.includes('403') || haystack.includes('unauthorized') || haystack.includes('forbidden') || haystack.includes('api key') || haystack.includes('invalid key') || haystack.includes('permission')) return 'auth_error';
+  // 模型不存在
+  if (haystack.includes('model') && (haystack.includes('not found') || haystack.includes('404') || haystack.includes('does not exist') || haystack.includes('unknown model') || haystack.includes('no such model'))) return 'model_not_found';
+  // 404 单独出现
+  if (haystack.includes('404') || haystack.includes('not found')) return 'model_not_found';
+  // 上下文长度超限
+  if (haystack.includes('context') && (haystack.includes('length') || haystack.includes('exceed') || haystack.includes('too long') || haystack.includes('max token') || haystack.includes('limit'))) return 'context_length';
+  // 服务端错误（500/502/504）
+  if (haystack.includes('500') || haystack.includes('502') || haystack.includes('504') || haystack.includes('internal server error') || haystack.includes('bad gateway') || haystack.includes('gateway timeout')) return 'server_error';
+  // 过载/不可用（503）
+  if (haystack.includes('overloaded') || haystack.includes('unavailable') || haystack.includes('service unavailable') || haystack.includes('503')) return 'overloaded';
+  // 内容过滤/安全拦截
+  if (haystack.includes('content filter') || haystack.includes('safety') || haystack.includes('blocked') || haystack.includes('moderation') || haystack.includes('policy') || haystack.includes('inappropriate')) return 'content_filter';
+  // 解析错误
+  if (haystack.includes('parse') || haystack.includes('json') || haystack.includes('syntax') || haystack.includes('unexpected token') || haystack.includes('invalid response body')) return 'parse_error';
+  // 空响应
+  if (haystack.includes('empty') || haystack.includes('no result') || haystack.includes('no content') || haystack.includes('empty response') || haystack.includes('no data')) return 'empty_response';
+  // 流式传输错误
+  if (haystack.includes('stream') || haystack.includes('sse') || haystack.includes('chunk') || haystack.includes('partial')) return 'stream_error';
+  // 内存不足
+  if (haystack.includes('out of memory') || haystack.includes('oom') || haystack.includes('memory allocation')) return 'memory_error';
+  // 配置错误
+  if (haystack.includes('config') || haystack.includes('not configured') || haystack.includes('missing') || haystack.includes('undefined')) return 'config_error';
   return 'other';
 }
 
