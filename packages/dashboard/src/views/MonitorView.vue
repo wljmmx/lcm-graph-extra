@@ -252,6 +252,36 @@ const { data: gmProDoctorRes } = useQuery({
 });
 const gmProDoctor = computed(() => gmProDoctorRes.value?.ok ? (gmProDoctorRes.value.data ?? null) : null);
 
+// G-5.8: Doctor 报告解析（/api/doctor 返回 checks[] 数组，非顶层 neo4j/llm 对象）
+const gmProDoctorChecks = computed<any[]>(() => {
+  const list = (gmProDoctor as any)?.checks;
+  return Array.isArray(list) ? list : [];
+});
+const gmProDoctorSummary = computed<{ ok: number; warn: number; error: number; total: number }>(() => {
+  const s = (gmProDoctor as any)?.summary;
+  if (s && typeof s === 'object') return { ok: s.ok ?? 0, warn: s.warn ?? 0, error: s.error ?? 0, total: s.total ?? 0 };
+  const checks = gmProDoctorChecks.value;
+  return {
+    ok: checks.filter((c) => c.status === 'ok').length,
+    warn: checks.filter((c) => c.status === 'warn').length,
+    error: checks.filter((c) => c.status === 'error').length,
+    total: checks.length,
+  };
+});
+const gmProDoctorAbnormalCount = computed(() => gmProDoctorSummary.value.error);
+function doctorCheckTagType(s: string): 'success' | 'warning' | 'error' | 'default' {
+  if (s === 'ok') return 'success';
+  if (s === 'warn') return 'warning';
+  if (s === 'error') return 'error';
+  return 'default';
+}
+function doctorCheckLabel(s: string): string {
+  if (s === 'ok') return '正常';
+  if (s === 'warn') return '警告';
+  if (s === 'error') return '异常';
+  return s;
+}
+
 // G-5.9: gm-pro 关联矩阵 M 状态
 const { data: gmProAmRes, isFetching: gmProAmFetching, isError: gmProAmError } = useQuery({
   queryKey: ['gm-pro-association-matrix'],
@@ -2101,18 +2131,20 @@ const moaLatencyPhaseOption = computed(() => {
           <NGi>
             <NCard title="系统诊断 (Doctor)" size="small">
               <template v-if="gmProDoctor">
+                <div style="margin-bottom:8px">
+                  <NTag :type="gmProDoctorAbnormalCount === 0 ? 'success' : 'error'" size="small">
+                    {{ gmProDoctorAbnormalCount === 0 ? '全部正常' : `${gmProDoctorAbnormalCount} 项异常` }}
+                  </NTag>
+                  <span v-if="gmProDoctorSummary.total" class="muted" style="margin-left:6px;font-size:var(--fs-caption)">
+                    正常 {{ gmProDoctorSummary.ok }} · 警告 {{ gmProDoctorSummary.warn }} · 异常 {{ gmProDoctorSummary.error }}
+                  </span>
+                </div>
                 <NDescriptions :column="1" size="small" label-placement="left" bordered>
-                  <NDescriptionsItem label="Neo4j">
-                    <NTag :type="(gmProDoctor as any).neo4j?.ok ? 'success' : 'error'" size="small">{{ (gmProDoctor as any).neo4j?.ok ? '连通' : '异常' }}</NTag>
-                  </NDescriptionsItem>
-                  <NDescriptionsItem label="LLM">
-                    <NTag :type="(gmProDoctor as any).llm?.ok ? 'success' : 'error'" size="small">{{ (gmProDoctor as any).llm?.ok ? '连通' : '异常' }}</NTag>
-                  </NDescriptionsItem>
-                  <NDescriptionsItem label="Embedding">
-                    <NTag :type="(gmProDoctor as any).embedding?.ok ? 'success' : 'error'" size="small">{{ (gmProDoctor as any).embedding?.ok ? '连通' : '异常' }}</NTag>
-                  </NDescriptionsItem>
-                  <NDescriptionsItem v-if="(gmProDoctor as any).issues?.length" label="问题">
-                    <NSpace :size="4"><NTag v-for="(issue, i) in (gmProDoctor as any).issues" :key="i" size="small" type="warning">{{ issue }}</NTag></NSpace>
+                  <NDescriptionsItem v-for="c in gmProDoctorChecks" :key="c.name" :label="c.name">
+                    <NTag :type="doctorCheckTagType(c.status)" size="small">{{ doctorCheckLabel(c.status) }}</NTag>
+                    <span v-if="c.latencyMs != null" class="muted mono" style="margin-left:6px;font-size:var(--fs-caption)">{{ c.latencyMs }}ms</span>
+                    <div v-if="c.detail" class="muted" style="font-size:var(--fs-caption);word-break:break-all">{{ c.detail }}</div>
+                    <div v-if="c.hint" class="muted" style="font-size:var(--fs-caption);color:var(--color-warning);word-break:break-all">{{ c.hint }}</div>
                   </NDescriptionsItem>
                 </NDescriptions>
               </template>

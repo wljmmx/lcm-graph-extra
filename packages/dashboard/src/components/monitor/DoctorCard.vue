@@ -11,17 +11,53 @@ const props = defineProps<{
 
 const emit = defineEmits<{ retry: [] }>();
 
-// 整体健康摘要：统计 neo4j/llm/embedding/auto_feedback 中的异常项数
-const abnormalCount = computed(() => {
+/**
+ * graph-memory-pro /api/doctor 返回格式：
+ *   { status, version, timestamp,
+ *     summary: { ok, warn, error, total },
+ *     checks: [{ name, status: "ok"|"warn"|"error", latencyMs?, detail?, hint? }] }
+ * 前端按 checks 数组渲染，而非旧版 top-level 的 neo4j/llm/embedding 对象。
+ */
+interface DoctorCheck {
+  name: string;
+  status: 'ok' | 'warn' | 'error';
+  latencyMs?: number;
+  detail?: string;
+  hint?: string;
+}
+
+const checks = computed<DoctorCheck[]>(() => {
   const d = props.doctor;
-  if (!d) return 0;
-  let n = 0;
-  if (!d.neo4j?.ok) n++;
-  if (!d.llm?.ok) n++;
-  if (!d.embedding?.ok) n++;
-  if (d.auto_feedback && !d.auto_feedback.ok) n++;
-  return n;
+  const list = d?.checks;
+  return Array.isArray(list) ? (list as DoctorCheck[]) : [];
 });
+
+const summary = computed(() => {
+  const d = props.doctor;
+  return d?.summary ?? {
+    ok: checks.value.filter((c) => c.status === 'ok').length,
+    warn: checks.value.filter((c) => c.status === 'warn').length,
+    error: checks.value.filter((c) => c.status === 'error').length,
+    total: checks.value.length,
+  };
+});
+
+// 异常项数（status === "error"）
+const abnormalCount = computed(() => summary.value.error ?? 0);
+
+const checkTagType = (s: string): 'success' | 'warning' | 'error' | 'default' => {
+  if (s === 'ok') return 'success';
+  if (s === 'warn') return 'warning';
+  if (s === 'error') return 'error';
+  return 'default';
+};
+
+const checkLabel = (s: string): string => {
+  if (s === 'ok') return '正常';
+  if (s === 'warn') return '警告';
+  if (s === 'error') return '异常';
+  return s;
+};
 </script>
 
 <template>
@@ -39,29 +75,18 @@ const abnormalCount = computed(() => {
         <NTag :type="abnormalCount === 0 ? 'success' : 'error'" size="small">
           {{ abnormalCount === 0 ? '全部正常' : `${abnormalCount} 项异常` }}
         </NTag>
+        <span v-if="summary.total" class="muted" style="margin-left:6px;font-size:var(--fs-caption)">
+          正常 {{ summary.ok }} · 警告 {{ summary.warn }} · 异常 {{ summary.error }}
+        </span>
       </div>
       <NDescriptions :column="1" size="small" label-placement="left" bordered>
-        <NDescriptionsItem label="Neo4j">
-          <NTag :type="doctor.neo4j?.ok ? 'success' : 'error'" size="small">{{ doctor.neo4j?.ok ? '连通' : '异常' }}</NTag>
-        </NDescriptionsItem>
-        <NDescriptionsItem label="LLM">
-          <NTag :type="doctor.llm?.ok ? 'success' : 'error'" size="small">{{ doctor.llm?.ok ? '连通' : '异常' }}</NTag>
-        </NDescriptionsItem>
-        <NDescriptionsItem label="Embedding">
-          <NTag :type="doctor.embedding?.ok ? 'success' : 'error'" size="small">{{ doctor.embedding?.ok ? '连通' : '异常' }}</NTag>
-        </NDescriptionsItem>
-        <NDescriptionsItem v-if="doctor.auto_feedback" label="Auto-Feedback">
-          <NTag :type="doctor.auto_feedback?.ok ? 'success' : 'error'" size="small">
-            {{ doctor.auto_feedback?.ok ? '正常' : '异常' }}
-          </NTag>
-          <span v-if="doctor.auto_feedback?.sessionCacheSize != null" class="muted" style="margin-left:8px; font-size:var(--fs-caption)">
-            cache: {{ doctor.auto_feedback.sessionCacheSize }}
+        <NDescriptionsItem v-for="c in checks" :key="c.name" :label="c.name">
+          <NTag :type="checkTagType(c.status)" size="small">{{ checkLabel(c.status) }}</NTag>
+          <span v-if="c.latencyMs != null" class="muted mono" style="margin-left:6px;font-size:var(--fs-caption)">
+            {{ c.latencyMs }}ms
           </span>
-        </NDescriptionsItem>
-        <NDescriptionsItem v-if="doctor.issues?.length" label="问题">
-          <NSpace :size="4">
-            <NTag v-for="(issue, i) in doctor.issues" :key="i" size="small" type="warning">{{ issue }}</NTag>
-          </NSpace>
+          <div v-if="c.detail" class="muted" style="font-size:var(--fs-caption);word-break:break-all">{{ c.detail }}</div>
+          <div v-if="c.hint" class="muted" style="font-size:var(--fs-caption);color:var(--color-warning);word-break:break-all">{{ c.hint }}</div>
         </NDescriptionsItem>
       </NDescriptions>
     </CardState>
