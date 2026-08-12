@@ -186,6 +186,7 @@ export const PluginConfigSchema = Type.Object({
   moa: Type.Optional(Type.Object({
     enabled: Type.Boolean({ default: false }),
     complexityThreshold: Type.Number({ default: 0.6, minimum: 0, maximum: 1 }),
+    benefitThreshold: Type.Optional(Type.Number({ default: 0.15, minimum: 0, maximum: 1, description: 'MoA 最低期望净收益门槛，低于该值不触发（默认 0.15 = 期望提升 ≥15%）' })),
     mode: Type.Union([Type.Literal('auto'), Type.Literal('parallel'), Type.Literal('serial')], { default: 'auto' }),
     referenceModels: Type.Array(Type.Object({
       provider: LlmProviderUnion({ default: 'ollama', description: '参考模型 LLM provider 类型，见 LLM_PROVIDERS 常量' }),

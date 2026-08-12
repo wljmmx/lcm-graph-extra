@@ -991,10 +991,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     let cleanedQuery = '';
     let moaPresetOverride: string | undefined;
     let classificationContext = '';
+    // MoA 收益基准决策结果（在复杂度评估阶段计算，供触发判断与日志使用）
+    let moaDecision: import('../moa/complexity.js').MoaDecision | undefined;
 
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
-      const { computeTaskComplexity } = await import('../moa/complexity.js');
+      const { computeTaskComplexity, decideMoa, DEFAULT_BENEFIT_THRESHOLD } = await import('../moa/complexity.js');
       const { recordAllComplexity } = await import('../moa/perf-tracker.js');
 
       // 提取查询文本
@@ -1054,6 +1056,30 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       // 记录全量复杂度评分（每轮 assemble 都记录，无论 MoA 是否启用/触发）
       recordAllComplexity(complexity.score);
 
+      // ── 收益基准决策：结合主模型能力 + 复杂度 + 参考模型数量，判断 MoA 是否值得 ──
+      // 只有当 MoA 相较"直接主模型单次回答"能带来 ≥benefitThreshold 的净质量提升时才触发，
+      // 避免 MoA 的模型消耗与时间开销反而超过非 MoA 场景。
+      moaDecision = undefined;
+      if (moaConfig?.enabled
+          && Array.isArray(moaConfig?.referenceModels)
+          && moaConfig.referenceModels.length >= 2) {
+        try {
+          moaDecision = decideMoa({
+            complexity,
+            mainModel: modelFullId || (ctx.api?.pluginConfig as any)?.llmProvider?.model || 'default',
+            mainModelBaseURL: (ctx.api?.pluginConfig as any)?.llmProvider?.baseURL,
+            referenceModels: (moaConfig.referenceModels ?? []).map((r: any) => ({ model: r?.model, baseURL: r?.baseURL })),
+            aggregatorModel: moaConfig.aggregatorModel ? { model: moaConfig.aggregatorModel.model, baseURL: moaConfig.aggregatorModel.baseURL } : null,
+            configThreshold: moaConfig?.complexityThreshold ?? 0.6,
+            referenceModelCount: moaConfig.referenceModels.length,
+            benefitThreshold: moaConfig?.benefitThreshold ?? DEFAULT_BENEFIT_THRESHOLD,
+          });
+        } catch {
+          // 决策模块异常时回退到旧阈值逻辑（不阻断 MoA pipeline）
+          moaDecision = undefined;
+        }
+      }
+
       // ── 自动分类：根据用户输入确定任务领域，生成分类上下文补充到参考模型 prompt ──
       // 注意：自动分类不覆盖模型选择，仅补充领域上下文帮助参考模型聚焦分析方向
       classificationContext = '';
@@ -1079,9 +1105,19 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       ctx.logger?.info?.('[assemble] MoA complexity check', {
         score: complexity.score,
         threshold: moaConfig?.complexityThreshold ?? 0.6,
+        benefitThreshold: moaConfig?.benefitThreshold ?? DEFAULT_BENEFIT_THRESHOLD,
         reasons: complexity.reasons,
         tier,
-        triggerMoA: complexity.score >= (moaConfig?.complexityThreshold ?? 0.6),
+        triggerMoA: moaDecision?.trigger ?? (complexity.score >= (moaConfig?.complexityThreshold ?? 0.6)),
+        decision: moaDecision ? {
+          mainModelStrength: moaDecision.mainModelStrength.toFixed(3),
+          aggregateStrength: moaDecision.aggregateStrength.toFixed(3),
+          capabilityGap: moaDecision.capabilityGap.toFixed(3),
+          effectiveThreshold: moaDecision.effectiveThreshold.toFixed(3),
+          expectedUplift: moaDecision.expectedUplift.toFixed(3),
+          costPenalty: moaDecision.costPenalty.toFixed(3),
+          netValue: moaDecision.netValue.toFixed(3),
+        } : undefined,
       });
     } catch {
       // 复杂度评估模块加载失败，不影响主流程
@@ -1112,15 +1148,23 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           systemPromptAddition = buildMoaToolInstruction() + '\n\n' + systemPromptAddition;
         }
 
-        // 当前轮触发 MoA（复杂度达标或 /moa 命令强制）
-        if (complexityScore >= moaConfig.complexityThreshold || forceMoa) {
+        // 当前轮触发 MoA（收益基准决策达标；/moa 命令强制触发不受阈值约束）
+        const shouldTriggerMoa = forceMoa || (moaDecision?.trigger ?? (complexityScore >= moaConfig.complexityThreshold));
+        if (shouldTriggerMoa) {
           ctx.logger?.info?.('[assemble] MoA triggered (async split)', {
             complexity: complexityScore,
-            reasons: forceMoa ? ['/moa command'] : complexityReasons,
+            reasons: forceMoa ? ['/moa command'] : (moaDecision?.reasons ?? complexityReasons),
             forceMoa,
             mode: moaConfig.mode,
             refCount: moaConfig.referenceModels?.length ?? 0,
             syncBudgetMs: moaConfig.syncBudgetMs ?? 240_000,
+            decision: moaDecision ? {
+              mainModelStrength: moaDecision.mainModelStrength,
+              effectiveThreshold: moaDecision.effectiveThreshold,
+              expectedUplift: moaDecision.expectedUplift,
+              costPenalty: moaDecision.costPenalty,
+              netValue: moaDecision.netValue,
+            } : undefined,
           });
 
             // 提取查询文本（/moa 命令时使用清理后的文本）

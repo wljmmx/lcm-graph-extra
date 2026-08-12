@@ -728,6 +728,13 @@
             "maximum": 1,
             "description": "任务复杂度阈值，超过此值触发 MoA"
           },
+          "benefitThreshold": {
+            "type": "number",
+            "default": 0.15,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "MoA 最低期望净收益门槛，低于该值不触发（默认 0.15 = 期望提升 ≥15%）；结合主模型能力与参考模型数量摊薄成本后判定"
+          },
           "mode": {
             "type": "string",
             "enum": ["auto", "parallel", "serial"],

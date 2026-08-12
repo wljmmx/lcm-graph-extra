@@ -6,7 +6,7 @@
  * - 边界条件：空查询、不同长度、各种场景标签
  */
 import { describe, it, expect } from 'vitest';
-import { computeTaskComplexity } from './complexity.js';
+import { computeTaskComplexity, decideMoa, estimateAggregateStrength, estimateMainModelStrength, DEFAULT_BENEFIT_THRESHOLD } from './complexity.js';
 
 // ============================================================================
 // computeTaskComplexity
@@ -194,5 +194,130 @@ describe('computeTaskComplexity', () => {
       const result = computeTaskComplexity('写代码', [], null, 'low');
       expect(result.score).toBeGreaterThanOrEqual(0);
     });
+  });
+});
+
+// ============================================================================
+// decideMoa —— 收益基准 + 主模型/聚合后能力感知决策
+// ============================================================================
+describe('decideMoa', () => {
+  const baseComplexity = { score: 0.7, reasons: ['复杂场景'] };
+
+  it('复杂度低于基准门槛 (0.3) 时必定不触发', () => {
+    const d = decideMoa({
+      complexity: { score: 0.2, reasons: [] },
+      mainModel: 'gpt-4o',
+      configThreshold: 0.6,
+      referenceModels: [{ model: 'qwen3.6:27b' }],
+    });
+    expect(d.trigger).toBe(false);
+    expect(d.expectedUplift).toBe(0);
+  });
+
+  it('强主模型 + 弱参考模型时，即使复杂度偏高也不触发（能力差距≈0）', () => {
+    // 主模型 gpt-4o(0.85)，参考模型为本地小参数(0.35)，聚合后能力难以超过主模型
+    const d = decideMoa({
+      complexity: { score: 0.7, reasons: ['复杂场景'] },
+      mainModel: 'gpt-4o',
+      configThreshold: 0.6,
+      referenceModels: [
+        { model: 'llama3.2:1b' },
+        { model: 'qwen2.5:1.5b' },
+      ],
+      aggregatorModel: { model: 'qwen2.5:1.5b' },
+    });
+    // 强主模型有效阈值更高（0.85 → 阈值 0.72），0.7 不够
+    expect(d.effectiveThreshold).toBeGreaterThan(0.6);
+    expect(d.capabilityGap).toBeLessThan(0.1);
+    expect(d.trigger).toBe(false);
+  });
+
+  it('弱主模型 + 强参考模型时触发，且净收益 ≥ 15%', () => {
+    const d = decideMoa({
+      complexity: { score: 0.7, reasons: ['复杂场景'] },
+      mainModel: 'qwen2.5:7b',
+      configThreshold: 0.6,
+      referenceModels: [
+        { model: 'gpt-4o' },
+        { model: 'claude-sonnet-4' },
+      ],
+      aggregatorModel: { model: 'gpt-4o' },
+    });
+    expect(d.capabilityGap).toBeGreaterThan(0.1);
+    expect(d.netValue).toBeGreaterThanOrEqual(DEFAULT_BENEFIT_THRESHOLD);
+    expect(d.trigger).toBe(true);
+  });
+
+  it('参考模型越多，成本摊薄越大，净收益越低', () => {
+    const mk = (refCount: number) => decideMoa({
+      complexity: baseComplexity,
+      mainModel: 'qwen2.5:7b',
+      configThreshold: 0.6,
+      referenceModels: Array.from({ length: refCount }, () => ({ model: 'gpt-4o' })),
+      aggregatorModel: { model: 'gpt-4o' },
+    });
+    const two = mk(2);
+    const four = mk(4);
+    expect(four.costPenalty).toBeLessThan(two.costPenalty);
+    expect(four.netValue).toBeLessThan(two.netValue);
+  });
+
+  it('净收益不足 15% 时即使复杂度达标也不触发', () => {
+    // 主模型中性(0.5)，参考模型也是中性(0.5)，能力差距小；复杂度 0.35 仅略高于基准门槛
+    const d = decideMoa({
+      complexity: { score: 0.35, reasons: ['复杂场景'] },
+      mainModel: 'unknown-model',
+      configThreshold: 0.6,
+      referenceModels: [{ model: 'another-unknown' }, { model: 'yet-another' }],
+      aggregatorModel: { model: 'agg-unknown' },
+      benefitThreshold: 0.15,
+    });
+    // 期望提升 = 0.35*0.4 + 差距(≈0) = 0.14，再摊薄后 < 0.15
+    expect(d.netValue).toBeLessThan(0.15);
+    expect(d.trigger).toBe(false);
+  });
+
+  it('/moa 强制场景由调用方绕过 decideMoa，不受收益门槛限制', () => {
+    // decideMoa 本身返回 false，但调用方可结合 forceMoa 强制触发
+    const d = decideMoa({
+      complexity: { score: 0.2, reasons: [] },
+      mainModel: 'gpt-4o',
+      configThreshold: 0.6,
+      referenceModels: [{ model: 'qwen3.6:27b' }, { model: 'qwen3.6:32b' }],
+    });
+    expect(d.trigger).toBe(false);
+  });
+});
+
+// ============================================================================
+// estimateMainModelStrength / estimateAggregateStrength
+// ============================================================================
+describe('estimateMainModelStrength', () => {
+  it('远程旗舰模型为强', () => {
+    expect(estimateMainModelStrength('gpt-4o')).toBeGreaterThan(0.8);
+    expect(estimateMainModelStrength('claude-sonnet-4')).toBeGreaterThan(0.8);
+  });
+  it('远程中端模型中等偏强', () => {
+    expect(estimateMainModelStrength('gpt-4o-mini')).toBe(0.7);
+  });
+  it('本地大参数模型中等', () => {
+    expect(estimateMainModelStrength('qwen3.6:32b')).toBe(0.5);
+  });
+  it('本地小参数模型偏弱', () => {
+    expect(estimateMainModelStrength('llama3.2:1b')).toBe(0.35);
+  });
+  it('未知模型中性', () => {
+    expect(estimateMainModelStrength('unknown-model')).toBe(0.5);
+  });
+});
+
+describe('estimateAggregateStrength', () => {
+  it('强主模型 + 弱参与模型时聚合后能力受参与模型上限约束', () => {
+    const agg = estimateAggregateStrength(0.85, [{ model: 'llama3.2:1b' }, { model: 'qwen2.5:1.5b' }]);
+    expect(agg).toBeLessThan(0.85);
+  });
+  it('弱主模型 + 强参与模型时聚合后能力显著提升', () => {
+    const agg = estimateAggregateStrength(0.35, [{ model: 'gpt-4o' }, { model: 'claude-sonnet-4' }]);
+    expect(agg).toBeGreaterThan(0.5);
   });
 });
