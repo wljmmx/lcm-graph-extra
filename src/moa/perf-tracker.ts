@@ -76,6 +76,8 @@ export interface MoaRunRecord {
   netValue?: number;
   /** 动态生效门槛 */
   effectiveThreshold?: number;
+  /** 动态净收益门槛（净收益 ≥ 该值才算达标） */
+  effectiveBenefit?: number;
   /** 配置的基础门槛 */
   benefitThreshold?: number;
   /** 决策原因 */
@@ -230,14 +232,14 @@ export interface MoaPerformanceSummary {
 // 环形缓冲区
 // ============================================================================
 
-const MAX_RECORDS = 50;
+const MAX_RECORDS = 100;
 const runRecords: MoaRunRecord[] = [];
 
 // ============================================================================
 // 全量复杂度记录器（所有 assemble 调用，含未触发 MoA 的）
 // ============================================================================
 
-const MAX_ALL_COMPLEXITY = 50;
+const MAX_ALL_COMPLEXITY = 100;
 const allComplexityRecords: Array<{ timestamp: number; score: number }> = [];
 
 /** 记录每次 assemble 的复杂度评分（无论是否触发 MoA） */
@@ -297,6 +299,7 @@ export function recordMoaRun(
     costPenalty: decision?.costPenalty,
     netValue: decision?.netValue,
     effectiveThreshold: decision?.effectiveThreshold,
+    effectiveBenefit: decision?.effectiveBenefit,
     benefitThreshold: decision?.benefitThreshold,
     decisionReasons: decision?.reasons,
   };
@@ -533,7 +536,8 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     ? round3(decisionRecords.reduce((s, r) => s + (r.capabilityGap ?? 0), 0) / decisionRecords.length)
     : 0;
   // 达标率：净收益 >= 门槛 的触发占比
-  const belowTargetRecords = decisionRecords.filter((r) => r.netValue! < (r.effectiveThreshold ?? r.benefitThreshold ?? 0));
+  // 门槛取动态净收益门槛（effectiveBenefit），回退到配置的基础门槛（benefitThreshold）
+  const belowTargetRecords = decisionRecords.filter((r) => r.netValue! < benefitGate(r));
   const meetTargetRate = decisionRecords.length > 0
     ? round3((decisionRecords.length - belowTargetRecords.length) / decisionRecords.length)
     : 0;
@@ -545,6 +549,7 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     triggered: !!lastDecisionRecord.triggered,
     netValue: lastDecisionRecord.netValue!,
     effectiveThreshold: lastDecisionRecord.effectiveThreshold ?? lastDecisionRecord.benefitThreshold ?? 0,
+    effectiveBenefit: lastDecisionRecord.effectiveBenefit ?? lastDecisionRecord.benefitThreshold ?? 0,
     capabilityGap: lastDecisionRecord.capabilityGap ?? 0,
     expectedUplift: lastDecisionRecord.expectedUplift ?? 0,
     costPenalty: lastDecisionRecord.costPenalty ?? 0,
@@ -561,7 +566,7 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     taskMap.get(key)!.push(r);
   }
   const taskBreakdown = [...taskMap.entries()].map(([task, recs]) => {
-    const below = recs.filter((r) => r.netValue! < (r.effectiveThreshold ?? r.benefitThreshold ?? 0)).length;
+    const below = recs.filter((r) => r.netValue! < benefitGate(r)).length;
     return {
       task,
       runCount: recs.length,
@@ -870,6 +875,15 @@ function avg(arr: number[]): number {
 /** 保留 3 位小数的取整工具（用于净收益/能力等 0-1 浮点指标） */
 function round3(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+/**
+ * 达标门槛：优先使用动态净收益门槛（effectiveBenefit），回退到配置的基础门槛（benefitThreshold）。
+ * 注意：不能使用 effectiveThreshold —— 那是"复杂度"触发阈值（0.2-0.9），
+ * 与"净收益"（0-1）量纲不同，混用会导致达标率严重失真。
+ */
+function benefitGate(r: MoaRunRecord): number {
+  return r.effectiveBenefit ?? r.benefitThreshold ?? 0;
 }
 
 function percentiles(arr: number[]): { p50: number; p90: number; p95: number; p99: number } {

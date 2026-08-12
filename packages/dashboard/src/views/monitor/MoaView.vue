@@ -671,7 +671,7 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
         <NGi>
           <KpiCard label="平均能力提升" :value="moaPerf.avgExpectedUplift">
             <template #detail>
-              <span class="muted">期望提升 ≥ {{ moaPerf.lastDecision?.benefitThreshold ?? 0.10 }}</span>
+              <span class="muted">净收益门槛 ≥ {{ (moaPerf.lastDecision?.effectiveBenefit ?? moaPerf.lastDecision?.benefitThreshold ?? 0.10).toFixed(3) }}</span>
             </template>
           </KpiCard>
         </NGi>

@@ -1243,6 +1243,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 costPenalty: moaDecision.costPenalty,
                 netValue: moaDecision.netValue,
                 effectiveThreshold: moaDecision.effectiveThreshold,
+                effectiveBenefit: moaDecision.effectiveBenefit,
                 benefitThreshold: moaConfig?.benefitThreshold ?? 0.10,
                 reasons: moaDecision.reasons,
               } : undefined,

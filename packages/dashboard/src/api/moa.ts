@@ -116,6 +116,7 @@ export interface MoaRunRecord {
   costPenalty?: number;
   netValue?: number;
   effectiveThreshold?: number;
+  effectiveBenefit?: number;
   benefitThreshold?: number;
   decisionReasons?: string[];
 }
@@ -198,6 +199,7 @@ export interface MoaPerformanceData {
     triggered: boolean;
     netValue: number;
     effectiveThreshold: number;
+    effectiveBenefit: number;
     capabilityGap: number;
     expectedUplift: number;
     costPenalty: number;

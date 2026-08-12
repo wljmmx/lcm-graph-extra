@@ -190,6 +190,8 @@ export interface MoaDecisionSnapshot {
   netValue: number;
   /** 动态生效门槛 */
   effectiveThreshold: number;
+  /** 动态净收益门槛（净收益 ≥ 该值才算达标） */
+  effectiveBenefit: number;
   /** 配置的基础净收益门槛 */
   benefitThreshold: number;
   /** 决策原因 */

@@ -232,6 +232,8 @@ export interface MoaDecision {
   mainModelStrength: number;
   /** 经主模型能力调整后的有效触发阈值 */
   effectiveThreshold: number;
+  /** 动态净收益门槛（净收益需 ≥ 该值才算达标）：baseBenefitThreshold × (1 + sensitivity×主模型成本) */
+  effectiveBenefit: number;
   /** 期望质量提升（0-1） */
   expectedUplift: number;
   /** 聚合后能力评估（0-1） */
@@ -568,6 +570,7 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
       aggregateStrength: aggStrength,
       capabilityGap,
       effectiveThreshold: configThreshold,
+      effectiveBenefit: baseBenefitThreshold,
       expectedUplift: 0,
       costPenalty: 1,
       netValue: 0,
@@ -631,6 +634,7 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
     aggregateStrength: aggStrength,
     capabilityGap,
     effectiveThreshold,
+    effectiveBenefit,
     expectedUplift: rawUplift,
     costPenalty,
     netValue,

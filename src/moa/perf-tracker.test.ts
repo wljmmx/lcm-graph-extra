@@ -228,8 +228,8 @@ describe("MoA PerfTracker", () => {
 
   describe("环形缓冲区", () => {
     it("超过 MAX_RECORDS 时丢弃最旧记录", () => {
-      // 写入 55 条记录（MAX_RECORDS=50）
-      for (let i = 0; i < 55; i++) {
+      // 写入 105 条记录（MAX_RECORDS=100）
+      for (let i = 0; i < 105; i++) {
         recordMoaRun(
           `query_${i}`,
           {
@@ -249,7 +249,7 @@ describe("MoA PerfTracker", () => {
       }
 
       const perf = getMoaPerformance();
-      expect(perf.totalRuns).toBeLessThanOrEqual(50);
+      expect(perf.totalRuns).toBeLessThanOrEqual(100);
     });
   });
 
