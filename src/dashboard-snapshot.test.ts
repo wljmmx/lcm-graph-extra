@@ -651,4 +651,69 @@ describe('DashboardSnapshotServer', () => {
       expect(resp.status).toBe(405);
     });
   });
+
+  describe('稳定性加固（连接级错误不导致崩溃）', () => {
+    it('发送畸形/半截 HTTP 请求后，服务仍能正常响应（clientError 被兜底）', async () => {
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      // 注意：不 push 到 stoppers，手动管理，验证崩溃保护
+      expect(await waitForStartup(handle)).toBe(true);
+
+      // 用原生 socket 发一个非法 HTTP 请求（触发 clientError / socket error）
+      await new Promise<void>((resolve) => {
+        const net = require('node:net') as typeof import('node:net');
+        const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
+          // 立即发送畸形数据后直接断开（模拟对端异常断开，触发 socket error）
+          sock.write('GARBAGE\r\n\r\n');
+          sock.destroy();
+        });
+        sock.on('error', () => resolve());
+        sock.on('close', () => resolve());
+      });
+
+      // 等待错误处理完成
+      await new Promise((r) => setTimeout(r, 100));
+
+      // 服务必须仍然存活，能正常响应 health
+      const health = await fetch(`http://127.0.0.1:${port}/internal/health`);
+      expect(health.status).toBe(200);
+      const body = await health.json() as { ok?: boolean };
+      expect(body.ok).toBe(true);
+
+      await handle.stop();
+    });
+
+    it('provider 抛错被逐字段降级，服务仍存活并返回 200', async () => {
+      const port = getRandomPort();
+      // provider 抛错时应降级（buildSnapshot 内部逐字段隔离），验证整体不 crash
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: {
+          getCascadeSnapshot: () => { throw new Error('boom'); },
+          getUserProfile: () => ({ techStack: [], scenario: [], language: 'zh' as const }),
+          getGraphAdapterState: () => ({ connected: false, connectFailed: false }),
+          getDebtStats: () => ({ running: 0, pendingCount: 0, pollIntervalMs: 60000, maxConcurrent: 2 }),
+          getRetrievalState: () => ({ lastQuery: '', perfSummary: '' }),
+          getHealthLatest: () => null,
+        },
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      // buildSnapshot 对单个 provider 抛错做了降级，snapshot 仍返回 200（cascade 用 fallback）
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/snapshot`);
+      expect(resp.status).toBe(200);
+      const body = await resp.json() as { cascade?: { armsCount: number } };
+      expect(body.cascade?.armsCount).toBe(0);
+
+      // 服务仍存活
+      const health = await fetch(`http://127.0.0.1:${port}/internal/health`);
+      expect(health.status).toBe(200);
+    });
+  });
 });

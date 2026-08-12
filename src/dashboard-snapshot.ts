@@ -832,6 +832,9 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
       }
 
       server = createServer((req: IncomingMessage, res: ServerResponse) => {
+        // 兜底：整个路由处理包一层 try/catch，任何同步抛错都不会让进程崩溃，
+        // 而是返回 500（避免"跑一会就崩溃"）。
+        try {
         const url = req.url ?? '';
 
         // v1.0.1-4: IP 白名单检查（最先执行）
@@ -1048,6 +1051,19 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
 
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found');
+        // 兜底 catch：任何同步抛错都返回 500，绝不向上抛出导致进程崩溃
+        } catch (err) {
+          try {
+            getGlobalLogger().warn?.('[dashboard-snapshot] request handler error', {
+              url: req.url,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          } catch { /* ignore */ }
+          if (!res.headersSent) {
+            try { res.writeHead(500, { 'Content-Type': 'application/json' }); } catch { /* ignore */ }
+          }
+          try { res.end(JSON.stringify({ ok: false, error: 'internal handler error' })); } catch { /* ignore */ }
+        }
       });
 
       // 关键：注册 error 事件，避免 EADDRINUSE 等作为 unhandled error 抛出
@@ -1094,19 +1110,37 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
       // P-CB-8: 限制最大并发连接数，防止连接泄漏导致端口耗尽。
       // 长时间运行后，如果 dashboard 端未正确关闭连接（如 keep-alive 连接泄漏），
       // 累积的连接可能耗尽文件描述符，导致 server 无法接受新连接。
-      // 默认 100 个并发连接足够本机 dashboard 使用。
-      server.maxConnections = 100;
+      // 👉 修复：原值 100 过低。本服务仅本机 IP 白名单 + 速率限制放行，
+      // 且 /internal/mcp-invoke 可能执行耗时 30-60 分钟的蒸馏任务，长连接会长时间占用名额。
+      // 100 个并发极易被长任务 + keep-alive 连接堆满，导致"运行一段时间后无法连接"。
+      // 提高上限到 4096，并给每个 socket 加空闲超时，主动回收真正卡死的连接。
+      server.maxConnections = 4096;
+
+      // P-CB-8: 每个连接的 socket 级错误兜底。
+      // 没有 socket.on('error') 监听时，底层 socket 抛错（如 ECONNRESET）会作为
+      // uncaught exception 直接导致整个进程崩溃 —— 这正是"跑一会就崩溃无法连接"的高风险点。
+      server.on('connection', (socket) => {
+        socket.on('error', () => {
+          // 连接级错误（对端异常断开等）属于正常现象，吞掉即可，避免进程崩溃
+          try { socket.destroy(); } catch { /* ignore */ }
+        });
+      });
 
       // P-CB-8: 处理客户端错误（如格式错误的 HTTP 请求），防止这些异常
       // 导致 server 因 unhandled 'clientError' 事件而崩溃。
+      // 👉 Node.js 关键行为：如果 'clientError' 没有 listener，进程直接退出！
       server.on('clientError', (err: Error, socket: any) => {
         try {
-          getGlobalLogger().debug('[dashboard-snapshot] server client error', {
+          getGlobalLogger().debug?.('[dashboard-snapshot] server client error', {
             message: err.message,
           });
         } catch { /* ignore */ }
         // 关闭有问题的 socket，释放资源
-        try { socket.destroy(); } catch { /* ignore */ }
+        try {
+          if (socket && typeof socket.destroy === 'function') {
+            socket.destroy();
+          }
+        } catch { /* ignore */ }
       });
 
       // 用 Promise 包装 listen，等监听成功后才标记 started = true

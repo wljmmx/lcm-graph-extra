@@ -2341,6 +2341,9 @@ const pluginEntry: any = definePluginEntry({
                 }).catch(() => null);
                 if (!pingResp || !pingResp.ok) {
                   _snapshotPingOk = false;
+                } else {
+                  // 消费响应体，避免 keep-alive 连接被未读取的 body 长时间占用（连接泄漏）
+                  try { await pingResp.arrayBuffer(); } catch { /* ignore */ }
                 }
               } catch {
                 _snapshotPingOk = false;
