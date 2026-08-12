@@ -37,6 +37,9 @@ interface MoaModelConfig {
 interface MoaConfigResponse {
   enabled: boolean;
   complexityThreshold: number;
+  benefitThreshold?: number;
+  thresholdCostSensitivity?: number;
+  tokenCosts?: Record<string, unknown>;
   mode: string;
   enabledTiers: string[];
   referenceModels: MoaModelConfig[];
@@ -64,6 +67,9 @@ function readMoaConfig(): MoaConfigResponse {
   return {
     enabled: typeof moa.enabled === 'boolean' ? moa.enabled : false,
     complexityThreshold: typeof moa.complexityThreshold === 'number' ? moa.complexityThreshold : 0.6,
+    benefitThreshold: typeof moa.benefitThreshold === 'number' ? moa.benefitThreshold : 0.10,
+    thresholdCostSensitivity: typeof moa.thresholdCostSensitivity === 'number' ? moa.thresholdCostSensitivity : 0.8,
+    tokenCosts: (moa.tokenCosts && typeof moa.tokenCosts === 'object') ? moa.tokenCosts as Record<string, unknown> : undefined,
     mode,
     enabledTiers: Array.isArray(moa.enabledTiers) ? moa.enabledTiers as string[] : ['low'],
     referenceModels: referenceModels.map((m) => ({
@@ -161,6 +167,7 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
     const allowedKeys = new Set([
       'enabled', 'complexityThreshold', 'mode', 'enabledTiers',
       'referenceModels', 'aggregatorModel', 'syncBudgetMs',
+      'benefitThreshold', 'thresholdCostSensitivity', 'tokenCosts',
     ]);
 
     const applied: string[] = [];
@@ -186,6 +193,18 @@ export async function registerMoaRoutes(app: FastifyInstance): Promise<void> {
       }
       if (key === 'enabledTiers' && (!Array.isArray(value) || !value.every((v: unknown) => v === 'low' || v === 'medium' || v === 'high'))) {
         rejected.push({ path: key, reason: 'expected array of "low" | "medium" | "high"' });
+        continue;
+      }
+      if (key === 'benefitThreshold' && (typeof value !== 'number' || value < 0 || value > 1)) {
+        rejected.push({ path: key, reason: 'expected number 0-1' });
+        continue;
+      }
+      if (key === 'thresholdCostSensitivity' && (typeof value !== 'number' || value < 0 || value > 2)) {
+        rejected.push({ path: key, reason: 'expected number 0-2' });
+        continue;
+      }
+      if (key === 'tokenCosts' && (value == null || typeof value !== 'object' || Array.isArray(value))) {
+        rejected.push({ path: key, reason: 'expected object (model → number | {pricePerMToken,...})' });
         continue;
       }
       applied.push(key);

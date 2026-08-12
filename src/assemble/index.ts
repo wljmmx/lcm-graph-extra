@@ -996,7 +996,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
-      const { computeTaskComplexity, decideMoa, DEFAULT_BENEFIT_THRESHOLD } = await import('../moa/complexity.js');
+      const { computeTaskComplexity, decideMoa, DEFAULT_BENEFIT_THRESHOLD, DEFAULT_COST_SENSITIVITY } = await import('../moa/complexity.js');
       const { recordAllComplexity } = await import('../moa/perf-tracker.js');
 
       // 提取查询文本
@@ -1100,7 +1100,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             tokenCosts: moaConfig?.tokenCosts,
             configThreshold: moaConfig?.complexityThreshold ?? 0.6,
             referenceModelCount: moaConfig.referenceModels.length,
-            benefitThreshold: moaConfig?.benefitThreshold ?? DEFAULT_BENEFIT_THRESHOLD,
+            baseBenefitThreshold: moaConfig?.benefitThreshold ?? DEFAULT_BENEFIT_THRESHOLD,
+            thresholdCostSensitivity: moaConfig?.thresholdCostSensitivity ?? DEFAULT_COST_SENSITIVITY,
           });
         } catch {
           // 决策模块异常时回退到旧阈值逻辑（不阻断 MoA pipeline）

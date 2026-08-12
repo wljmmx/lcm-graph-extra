@@ -12,6 +12,7 @@ import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { recordModelOutcome, recordTokenUsage } from './learning-model.js';
 
 // ============================================================================
 // 类型定义
@@ -199,6 +200,7 @@ export function recordMoaRun(
   error: string | null,
   config: { mode: string; referenceModels: Array<{ model: string; provider?: string }>; aggregatorModel: { model: string; provider?: string } },
   complexityScore?: number,
+  task?: string,
 ): void {
   const record: MoaRunRecord = {
     id: generateId(),
@@ -228,6 +230,29 @@ export function recordMoaRun(
   runRecords.push(record);
   if (runRecords.length > MAX_RECORDS) {
     runRecords.shift();
+  }
+
+  // 自适应学习：记录实际 token 消耗（优化点 3）与模型成败（优化点 1）
+  // - token 学习：让成本预估随真实 token 量收敛，替代"相对单价"粗估
+  // - 能力学习：让能力分档随实测可靠性校准，替代纯启发式
+  if (result) {
+    const refModels = result.referenceModels ?? [];
+    const refTokens = result.referenceTokens ?? [];
+    for (let i = 0; i < refModels.length; i++) {
+      recordTokenUsage(refModels[i], 0, refTokens[i] ?? 0);
+      recordModelOutcome(refModels[i], i < result.referenceOutputs.length, task);
+    }
+    if (config.aggregatorModel?.model) {
+      recordTokenUsage(config.aggregatorModel.model, 0, result.aggregatorTokens ?? 0);
+      recordModelOutcome(config.aggregatorModel.model, true, task);
+    }
+  } else {
+    for (const r of config.referenceModels) {
+      recordModelOutcome(r.model, false, task);
+    }
+    if (config.aggregatorModel?.model) {
+      recordModelOutcome(config.aggregatorModel.model, false, task);
+    }
   }
 
   // H4: 新数据写入时清除缓存，确保下次 getMoaPerformance() 返回最新结果

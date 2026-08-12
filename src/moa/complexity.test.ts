@@ -344,7 +344,7 @@ describe('decideMoa', () => {
       configThreshold: 0.6,
       referenceModels: [{ model: 'another-unknown' }, { model: 'yet-another' }],
       aggregatorModel: { model: 'agg-unknown' },
-      benefitThreshold: 0.15,
+      baseBenefitThreshold: 0.15,
     });
     // 期望提升 = 0.35*0.4 + 差距(≈0) = 0.14，再摊薄后 < 0.15
     expect(d.netValue).toBeLessThan(0.15);

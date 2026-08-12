@@ -48,6 +48,7 @@ const editConfig = reactive({
   enabled: false,
   complexityThreshold: 0.6,
   benefitThreshold: 0.10,
+  thresholdCostSensitivity: 0.8,
   tokenCostsText: '',
   mode: 'auto' as string,
   enabledTiers: [] as string[],
@@ -67,6 +68,7 @@ watch(moaConfig, (cfg) => {
     editConfig.enabled = cfg.enabled;
     editConfig.complexityThreshold = cfg.complexityThreshold;
     editConfig.benefitThreshold = cfg.benefitThreshold ?? 0.10;
+    editConfig.thresholdCostSensitivity = cfg.thresholdCostSensitivity ?? 0.8;
     editConfig.tokenCostsText = cfg.tokenCosts && Object.keys(cfg.tokenCosts).length > 0
       ? JSON.stringify(cfg.tokenCosts, null, 0)
       : '';
@@ -94,7 +96,7 @@ const configMutation = useMutation({
 });
 
 function saveConfig(): void {
-  let tokenCosts: Record<string, number> | undefined;
+  let tokenCosts: Record<string, unknown> | undefined;
   if (editConfig.tokenCostsText.trim()) {
     try {
       const parsed = JSON.parse(editConfig.tokenCostsText);
@@ -113,6 +115,7 @@ function saveConfig(): void {
     enabled: editConfig.enabled,
     complexityThreshold: editConfig.complexityThreshold,
     benefitThreshold: editConfig.benefitThreshold,
+    thresholdCostSensitivity: editConfig.thresholdCostSensitivity,
     tokenCosts,
     mode: editConfig.mode,
     enabledTiers: editConfig.enabledTiers,
@@ -538,19 +541,39 @@ const effectiveModeLabel = computed(() => {
               </div>
             </NGi>
 
+            <!-- 门槛放大系数（随主模型成本动态调整） -->
+            <NGi>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">门槛放大系数</div>
+                  <div class="setting-desc">
+                    0=固定门槛；0.8=GPT-4o 门槛自动升到约 15%（主模型越贵要求越高）
+                  </div>
+                </div>
+                <NInputNumber
+                  v-model:value="editConfig.thresholdCostSensitivity"
+                  :min="0"
+                  :max="2"
+                  :step="0.1"
+                  size="small"
+                  style="width: 120px"
+                />
+              </div>
+            </NGi>
+
             <!-- 远程模型相对单价表（JSON 对象） -->
             <NGi>
               <div class="setting-row">
                 <div>
-                  <div class="setting-label">远程模型相对单价</div>
+                  <div class="setting-label">远程模型成本</div>
                   <div class="setting-desc">
-                    JSON 对象（模型名 → 相对成本，最贵≈1，本地模型不计），空则用默认表
+                    JSON：模型名 → 相对成本或 {pricePerMToken, avgInputTokens, avgOutputTokens}，空则用默认表+自动学习
                   </div>
                 </div>
                 <NTextarea
                   v-model:value="editConfig.tokenCostsText"
                   size="small"
-                  placeholder='{"gpt-4o": 0.6, "gpt-4o-mini": 0.1}'
+                  placeholder='{"gpt-4o": {"pricePerMToken": 0.6, "avgInputTokens": 1000, "avgOutputTokens": 2000}}'
                   :rows="4"
                   style="width: 240px"
                 />

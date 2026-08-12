@@ -186,8 +186,16 @@ export const PluginConfigSchema = Type.Object({
   moa: Type.Optional(Type.Object({
     enabled: Type.Boolean({ default: false }),
     complexityThreshold: Type.Number({ default: 0.6, minimum: 0, maximum: 1 }),
-    benefitThreshold: Type.Optional(Type.Number({ default: 0.10, minimum: 0, maximum: 1, description: 'MoA 最低期望净收益门槛，低于该值不触发（默认 0.10 = 期望提升 ≥10%）' })),
-    tokenCosts: Type.Optional(Type.Record(Type.String(), Type.Number(), { default: {}, description: '远程模型相对单价表（模型名 → 每百万 token 相对成本，最贵模型建议设为最高值）。不配置时使用内置默认表；本地模型(ollama/本地baseURL)不计此表' })),
+    benefitThreshold: Type.Optional(Type.Number({ default: 0.10, minimum: 0, maximum: 1, description: 'MoA 最低期望净收益门槛，低于该值不触发（默认 0.10 = 期望提升 ≥10%）；会被主模型成本动态放大' })),
+    thresholdCostSensitivity: Type.Optional(Type.Number({ default: 0.8, minimum: 0, maximum: 2, description: '净收益门槛放大系数：主模型成本越高，门槛越高（默认 0.8；0 表示不放大，固定用 benefitThreshold）' })),
+    tokenCosts: Type.Optional(Type.Record(Type.String(), Type.Union([
+      Type.Number(),
+      Type.Object({
+        pricePerMToken: Type.Optional(Type.Number({ description: '每百万 token 相对价格（相对最贵模型归一为 1）' })),
+        avgInputTokens: Type.Optional(Type.Number({ description: '平均输入 token 数（缺省用默认或实测均值）' })),
+        avgOutputTokens: Type.Optional(Type.Number({ description: '平均输出 token 数（缺省用默认或实测均值）' })),
+      }),
+    ]), { default: {}, description: '远程模型成本配置：模型名 → 相对单价(number)，或 { pricePerMToken, avgInputTokens, avgOutputTokens }。不配置时使用内置默认表；本地模型不计此表' })),
     mode: Type.Union([Type.Literal('auto'), Type.Literal('parallel'), Type.Literal('serial')], { default: 'auto' }),
     referenceModels: Type.Array(Type.Object({
       provider: LlmProviderUnion({ default: 'ollama', description: '参考模型 LLM provider 类型，见 LLM_PROVIDERS 常量' }),
@@ -540,7 +548,7 @@ export function validateConfig(input: unknown): PluginConfig {
   // distillationLlm 未配置时保持 undefined，由 resolveDistillationLlm 的 fallback 处理
   // （优先复用主模型 → LLM_MODEL 环境变量 → gpt-4o-mini）
   if (!config.neo4j) config.neo4j = { uri: 'bolt://localhost:7687', user: 'neo4j', password: '' };
-  if (!config.moa) config.moa = { enabled: false, complexityThreshold: 0.6, mode: 'auto', referenceModels: [], aggregatorModel: undefined, enabledTiers: ['low'] };
+  if (!config.moa) config.moa = { enabled: false, complexityThreshold: 0.6, benefitThreshold: 0.10, thresholdCostSensitivity: 0.8, mode: 'auto', referenceModels: [], aggregatorModel: undefined, enabledTiers: ['low'] };
 
   const result = Value.Errors(PluginConfigSchema, config);
 

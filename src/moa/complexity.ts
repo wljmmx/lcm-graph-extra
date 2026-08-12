@@ -9,6 +9,7 @@
  */
 
 import type { ComplexityScore } from './types.js';
+import { getCalibratedStrength, getExpectedTokens } from './learning-model.js';
 
 /** 复杂场景标签集合 */
 const COMPLEX_SCENARIOS = new Set([
@@ -204,15 +205,22 @@ export function computeTaskComplexity(
 //   capabilityGap        = aggStrength - mainStrength
 //   complexityUplift     = score * 0.4
 //   rawUplift            = clamp(complexityUplift + capabilityGap, 0, 1)
-//   costUnit             = 本地 0.1 / 远程 getModelCostUnit(m)（默认1，可配单价）
+//   costUnit             = 本地 0.1 / 远程 effectiveCostUnit（相对单价 × token 量修正）
 //   costPenalty          = 1 / (1 + 0.5 * Σ costUnit)
 //   netValue             = rawUplift * costPenalty
+//   dynamicBenefit       = benefitThreshold * (1 + k * mainModelCostUnit)   // 主模型越贵门槛越高
 //   effectiveThreshold   = clamp(threshold + (strength - 0.55) * 0.4, 0.2, 0.9)
-//   trigger              = score >= effectiveThreshold && netValue >= benefitThreshold
+//   trigger              = score >= effectiveThreshold && netValue >= dynamicBenefit
 // ============================================================================
 
 /** 默认最低净收益门槛：期望提升不足 10% 不触发 MoA */
 export const DEFAULT_BENEFIT_THRESHOLD = 0.10;
+
+/** 默认门槛放大系数：主模型成本越高，动态门槛越高（与 costPenalty 中本地权重保持一致） */
+export const DEFAULT_COST_SENSITIVITY = 0.8;
+
+/** 本地模型成本权重（token/时间不敏感，几乎不计成本） */
+export const LOCAL_COST_WEIGHT = 0.1;
 
 /** MoA 触发决策结果 */
 export interface MoaDecision {
@@ -331,21 +339,89 @@ const DEFAULT_TOKEN_COSTS: Record<string, number> = {
 };
 
 /**
+ * 单条目 token 成本配置。
+ * - number：相对单价（沿用旧语义，配合默认 token 量估算）
+ * - object：可配置每百万 token 价格 + 平均输入/输出 token 量，更精确
+ */
+export type TokenCostEntry = number | {
+  /** 每百万 token 相对价格（相对最贵模型归一为 1，与 number 语义一致） */
+  pricePerMToken?: number;
+  /** 平均输入 token 数（缺省用默认或实测均值） */
+  avgInputTokens?: number;
+  /** 平均输出 token 数（缺省用默认或实测均值） */
+  avgOutputTokens?: number;
+};
+export type TokenCostConfig = Record<string, TokenCostEntry>;
+
+/** 无 token 数据时的默认单次调用 token 量（输入/输出） */
+const DEFAULT_INPUT_TOKENS = 1000;
+const DEFAULT_OUTPUT_TOKENS = 2000;
+/** 成本归一基线 token 量：默认调用规模，用于相对单价 → 成本单位换算 */
+const BASELINE_TOKENS = DEFAULT_INPUT_TOKENS + DEFAULT_OUTPUT_TOKENS;
+
+/**
  * 获取模型的相对成本单位（0-1，越大越贵）。
  *
- * 优先使用人工配置的 moa.tokenCosts（子串匹配），其次内置默认表，最后兜底 1。
+ * 优先使用人工配置的 moa.tokenCosts（子串匹配；支持 number 或 { pricePerMToken } 对象），
+ * 其次内置默认表，最后兜底 1。
  */
-export function getModelCostUnit(model: string, tokenCosts?: Record<string, number>): number {
-  const m = (model || '').toLowerCase();
-  if (tokenCosts && typeof tokenCosts === 'object') {
-    for (const [k, v] of Object.entries(tokenCosts)) {
-      if (m.includes(k.toLowerCase())) return Number(v) || 1;
-    }
+export function getModelCostUnit(model: string, tokenCosts?: TokenCostConfig): number {
+  const entry = lookupTokenCostEntry(model, tokenCosts);
+  if (typeof entry === 'number') return entry || 1;
+  if (entry && typeof entry === 'object' && typeof entry.pricePerMToken === 'number') {
+    return entry.pricePerMToken || 1;
   }
+  const m = (model || '').toLowerCase();
   for (const [k, v] of Object.entries(DEFAULT_TOKEN_COSTS)) {
     if (m.includes(k)) return v;
   }
   return 1;
+}
+
+/** 在 tokenCosts 中按子串匹配查找条目（区分 number / object） */
+function lookupTokenCostEntry(model: string, tokenCosts?: TokenCostConfig): TokenCostEntry | undefined {
+  const m = (model || '').toLowerCase();
+  if (tokenCosts && typeof tokenCosts === 'object') {
+    for (const [k, v] of Object.entries(tokenCosts)) {
+      if (m.includes(k.toLowerCase())) return v;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 计算远程模型的有效成本单位（0-1，越大越贵）。
+ *
+ * 优化点 3：在相对单价基础上，按"实际/预估 token 量"调整——
+ *   effectiveUnit = relativeUnit × (预估输入+输出 / 基线 token 量)
+ * 这样"便宜但长输出"的模型成本被上调，"贵但短输出"的模型被下调，
+ * 替代原先"只看相对单价、忽略 token 量"的粗估。
+ *
+ * token 量优先级：配置 avgInput/avgOutput > 实测均值（learning-model）> 默认值。
+ */
+export function effectiveCostUnit(
+  model: string,
+  tokenCosts?: TokenCostConfig,
+  expectedTokens?: { input: number; output: number },
+): number {
+  const entry = lookupTokenCostEntry(model, tokenCosts);
+  let relUnit: number;
+  let cfgInput: number | undefined;
+  let cfgOutput: number | undefined;
+  if (typeof entry === 'number') {
+    relUnit = entry || 1;
+  } else if (entry && typeof entry === 'object') {
+    relUnit = typeof entry.pricePerMToken === 'number' ? (entry.pricePerMToken || 1) : getModelCostUnit(model, tokenCosts);
+    cfgInput = typeof entry.avgInputTokens === 'number' ? entry.avgInputTokens : undefined;
+    cfgOutput = typeof entry.avgOutputTokens === 'number' ? entry.avgOutputTokens : undefined;
+  } else {
+    relUnit = getModelCostUnit(model, tokenCosts);
+  }
+
+  const input = cfgInput ?? expectedTokens?.input ?? DEFAULT_INPUT_TOKENS;
+  const output = cfgOutput ?? expectedTokens?.output ?? DEFAULT_OUTPUT_TOKENS;
+  const toks = (input || 0) + (output || 0);
+  return relUnit * (toks / BASELINE_TOKENS);
 }
 
 export interface DecideMoaParams {
@@ -363,14 +439,17 @@ export interface DecideMoaParams {
   aggregatorModel?: MoaModelProfile | null;
   /** 任务类型（来自 moa/classifier：code-review/architecture/security，可选） */
   task?: string;
-  /** 远程模型相对单价表（moa.tokenCosts，可选；覆盖内置默认表） */
-  tokenCosts?: Record<string, number>;
+  /** 远程模型成本配置（moa.tokenCosts，可选；支持 number 或 { pricePerMToken, avgInputTokens, avgOutputTokens }） */
+  tokenCosts?: TokenCostConfig;
   /** 配置的复杂度阈值（moa.complexityThreshold，默认 0.6） */
   configThreshold: number;
   /** 参考模型数量（≥2 才可能触发；缺省时取 referenceModels 长度） */
   referenceModelCount?: number;
-  /** 最低净收益门槛（默认 0.10，即期望提升 ≥10%） */
-  benefitThreshold?: number;
+  /** 最低净收益门槛（默认 0.10，即期望提升 ≥10%）；会被主模型成本动态调整 */
+  baseBenefitThreshold?: number;
+  /** 门槛放大系数：主模型成本越高，门槛越高（推荐 0.5-1.2）。
+   *  k=0 → 固定门槛不放大；k=0.8 → GPT-4o 门槛自动升到约 15%，符合"主模型本身越贵，要求越高"。 */
+  thresholdCostSensitivity?: number;
 }
 
 /**
@@ -389,8 +468,10 @@ export function estimateAggregateStrength(
   task?: string,
 ): number {
   const eff = (mp: MoaModelProfile): number => {
-    const base = estimateMainModelStrength(mp.model, mp.baseURL);
-    return clamp(base * modelDomainFit(mp.model, task), 0, 1);
+    const heuristic = estimateMainModelStrength(mp.model, mp.baseURL);
+    // 优化点 1：用实测数据校准启发式能力分档（样本少时基本不偏离启发式）
+    const calibrated = getCalibratedStrength(mp.model, mp.baseURL, task, heuristic);
+    return clamp(calibrated * modelDomainFit(mp.model, task), 0, 1);
   };
 
   // 参考模型平均有效能力（缺省时按中性 0.5 * 默认适配 0.85 计）
@@ -414,18 +495,18 @@ export function estimateAggregateStrength(
  *
  * 区分本地/远程：
  * - 本地模型（ollama / 本地 baseURL）：token 与时间成本不敏感，成本权重极小（0.1）；
- * - 远程模型：按 getModelCostUnit 计的相对单价。
- * 远程参与越多/越贵，摊薄越重，迫使 MoA 必须带来足够能力提升才值得。
+ * - 远程模型：按 effectiveCostUnit 计（相对单价 × token 量修正，实测均值优先）。
+ * 远程参与越多/越贵/输出越长，摊薄越重，迫使 MoA 必须带来足够能力提升才值得。
  */
 export function computeCostPenalty(
   participants: MoaModelProfile[],
-  tokenCosts?: Record<string, number>,
+  tokenCosts?: TokenCostConfig,
   localWeight = 0.1,
 ): number {
   let cost = 0;
   for (const p of participants) {
     if (isLocalModel(p.provider, p.baseURL)) cost += localWeight;
-    else cost += getModelCostUnit(p.model, tokenCosts);
+    else cost += effectiveCostUnit(p.model, tokenCosts, getExpectedTokens(p.model));
   }
   return 1 / (1 + 0.5 * cost);
 }
@@ -455,12 +536,19 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
     tokenCosts,
     configThreshold,
     referenceModelCount,
-    benefitThreshold = DEFAULT_BENEFIT_THRESHOLD,
+    baseBenefitThreshold = DEFAULT_BENEFIT_THRESHOLD,
+    thresholdCostSensitivity = DEFAULT_COST_SENSITIVITY,
   } = params;
 
   const reasons = [...(complexity.reasons ?? [])];
   const score = complexity.score;
-  const strength = estimateMainModelStrength(mainModel, mainModelBaseURL);
+  // 优化点 1：主模型能力用实测数据校准（样本少时≈启发式）
+  const strength = getCalibratedStrength(
+    mainModel,
+    mainModelBaseURL,
+    task,
+    estimateMainModelStrength(mainModel, mainModelBaseURL),
+  );
 
   // 参考模型数量（缺省取列表长度）
   const refCount = Math.max(2, referenceModelCount ?? referenceModels?.length ?? 2);
@@ -491,7 +579,7 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
   const complexityUplift = score * 0.4;
   const rawUplift = clamp(complexityUplift + capabilityGap, 0, 1);
 
-  // 成本摊薄：本地模型几乎不计(token/时间不敏感)，远程模型按单价计
+  // 成本摊薄：本地模型几乎不计(token/时间不敏感)，远程模型按 effectiveCostUnit 计（token 量修正）
   const participants: MoaModelProfile[] = [
     ...(referenceModels ?? []),
     ...(aggregatorModel?.model ? [aggregatorModel] : []),
@@ -503,8 +591,15 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
   // 强主模型 → 提高有效阈值（更保守）；弱主模型 → 降低有效阈值（更积极）
   const effectiveThreshold = clamp(configThreshold + (strength - 0.55) * 0.4, 0.2, 0.9);
 
+  // 优化点 2：净收益门槛随主模型成本动态浮动。
+  // 主模型本身越贵（远程/高单价/长输出），要求 MoA 带来的净提升越高才值得额外花钱；
+  // 主模型是本地/便宜 → 门槛几乎不放大，MoA 更容易触发。
+  const mainLocal = isLocalModel(mainModelProvider, mainModelBaseURL);
+  const mainCostUnit = mainLocal ? LOCAL_COST_WEIGHT : effectiveCostUnit(mainModel, tokenCosts, getExpectedTokens(mainModel));
+  const effectiveBenefit = baseBenefitThreshold * (1 + thresholdCostSensitivity * mainCostUnit);
+
   const complexityOk = score >= effectiveThreshold;
-  const benefitOk = netValue >= benefitThreshold;
+  const benefitOk = netValue >= effectiveBenefit;
 
   const localCount = participants.filter((p) => isLocalModel(p.provider, p.baseURL)).length;
   const remoteCount = participants.length - localCount;
@@ -521,11 +616,12 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
   }
   reasons.push(`聚合后能力 ${aggStrength.toFixed(2)}，能力差距 ${capabilityGap >= 0 ? '+' : ''}${capabilityGap.toFixed(2)}${task ? `（任务类型 ${task}）` : ''}`);
   reasons.push(`成本构成: 本地${localCount}×0.1 + 远程${remoteCount}（摊薄系数 ${costPenalty.toFixed(2)}）`);
+  reasons.push(`净收益门槛(动态): ${(effectiveBenefit * 100).toFixed(1)}% = ${(baseBenefitThreshold * 100).toFixed(0)}% × (1 + ${thresholdCostSensitivity}×主模型成本 ${mainCostUnit.toFixed(2)})`);
 
   if (benefitOk) {
-    reasons.push(`净收益达标: ${netValue.toFixed(3)} >= ${benefitThreshold}（期望提升 ${(rawUplift * 100).toFixed(1)}% × 成本系数 ${costPenalty.toFixed(2)}）`);
+    reasons.push(`净收益达标: ${netValue.toFixed(3)} >= ${effectiveBenefit.toFixed(3)}（期望提升 ${(rawUplift * 100).toFixed(1)}% × 成本系数 ${costPenalty.toFixed(2)}）`);
   } else {
-    reasons.push(`净收益不足: ${netValue.toFixed(3)} < ${benefitThreshold}，MoA 成本无法换取 ≥${(benefitThreshold * 100).toFixed(0)}% 质量提升`);
+    reasons.push(`净收益不足: ${netValue.toFixed(3)} < ${effectiveBenefit.toFixed(3)}，MoA 成本无法换取 ≥${(effectiveBenefit * 100).toFixed(0)}% 质量提升`);
   }
 
   return {
