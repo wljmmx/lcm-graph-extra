@@ -66,7 +66,10 @@ async function main(): Promise<void> {
         done();
         return;
       }
-      if (path.startsWith('/api/') || (isProd && (path === '/' || path.endsWith('.html') || path.endsWith('.js') || path.endsWith('.css') || path.endsWith('.svg') || path.endsWith('.png')))) {
+      // 生产模式：除 ping 外所有路径（含 SPA history 路由如 /settings、静态资源）都需要鉴权。
+      // 修复前：仅 '/' 与 .html/.js/.css/.svg/.png 需要鉴权，直接访问 /settings 等
+      // SPA 路由会绕过鉴权直接命中回退后的 index.html。
+      if (path.startsWith('/api/') || isProd) {
         requireAuth(req, reply, done);
       } else {
         done();
@@ -146,6 +149,18 @@ async function main(): Promise<void> {
     await app.register(fastifyStatic, {
       root: clientDist,
       prefix: '/',
+    });
+    // SPA history 路由回退（直接输入 /settings、/moa 等地址时，服务端要返回 index.html）。
+    // 修复前：fastify-static 找不到对应文件 → 404；只有通过前端菜单跳转（客户端路由）才正常。
+    // 仅对"非 /api、非静态资源文件"的 GET 请求回退到 index.html；
+    // /api 或带扩展名的资源找不到时仍返回真正的 404。
+    app.setNotFoundHandler((req, reply) => {
+      const path = req.url.split('?')[0];
+      if (req.method !== 'GET' || path === '/api' || path.startsWith('/api/') || path.includes('.')) {
+        reply.code(404).send({ error: 'Not Found', path });
+        return;
+      }
+      reply.type('text/html').sendFile('index.html');
     });
     app.log.info(`生产模式：serve 静态资源 ${clientDist}`);
   } else {
