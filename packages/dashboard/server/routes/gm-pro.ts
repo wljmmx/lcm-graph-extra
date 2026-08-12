@@ -161,12 +161,17 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const contentType = resp.headers.get('content-type') ?? '';
-      if (!contentType.includes('application/json')) {
-        return { ok: false, error: `graph-memory-pro 响应非 JSON (Content-Type: ${contentType || '空'})` };
+      // JSON：解析为结构化对象
+      if (contentType.includes('application/json')) {
+        const data = await resp.json();
+        return { ok: true, data };
       }
-
-      const data = await resp.json();
-      return { ok: true, data };
+      // Prometheus 文本（/api/metrics）：透传原始文本，由前端解析
+      if (contentType.includes('text/plain')) {
+        const text = await resp.text();
+        return { ok: true, data: text };
+      }
+      return { ok: false, error: `graph-memory-pro 响应非 JSON (Content-Type: ${contentType || '空'})` };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isTimeout = err instanceof Error && err.name === 'AbortError';

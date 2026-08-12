@@ -26,6 +26,7 @@ import {
   fetchGmProServices,
   fetchGmProDoctor,
   fetchGmProAssociationMatrixState,
+  fetchGmProMetrics,
   type GmProCommunitySummary,
   type GmProServiceStatus,
 } from '../api/gm-pro';
@@ -162,6 +163,15 @@ export function useMonitorData() {
   });
   const gmProAm = computed(() => gmProAmRes.value?.ok ? (gmProAmRes.value.data ?? null) : null);
 
+  // ── 13.5 gm-pro-metrics (30s) — Prometheus 文本性能指标 ──
+  const { data: gmProMetricsRes, isLoading: gmProMetricsLoading, isError: gmProMetricsIsError } = useQuery({
+    queryKey: ['gm-pro-metrics'],
+    queryFn: fetchGmProMetrics,
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  });
+  const gmProMetrics = computed(() => (gmProMetricsRes.value?.ok ? (gmProMetricsRes.value.data ?? null) : null));
+
   // ── 14. moa-performance (30s) ──
   const { data: moaPerfData, isLoading: moaPerfLoading } = useQuery({
     queryKey: ['moa-performance'],
@@ -211,6 +221,7 @@ export function useMonitorData() {
     gmProServices, gmProServicesLoading, gmProServicesIsError,
     gmProDoctor, gmProDoctorLoading, gmProDoctorIsError,
     gmProAm, gmProAmLoading, gmProAmIsError,
+    gmProMetrics, gmProMetricsLoading, gmProMetricsIsError,
     // status
     isAnyLoading, isAnyError, refreshStatus,
     CHART,

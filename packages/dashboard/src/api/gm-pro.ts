@@ -186,7 +186,13 @@ export function fetchGmProNodesByType(
 
 // ─── 指标 ──────────────────────────────────────────────────────────────────
 
+/**
+ * graph-memory-pro /api/metrics 返回 Prometheus 文本格式（Content-Type: text/plain）。
+ * 后端代理已对 text/plain 透传原始文本，故此处 data 为字符串。
+ */
 export interface GmProMetrics {
+  /** 原始 Prometheus 文本 */
+  text?: string;
   [key: string]: unknown;
 }
 
