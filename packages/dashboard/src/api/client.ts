@@ -105,3 +105,25 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return (await resp.json()) as T;
 }
 
+/** DELETE 请求 */
+export async function apiDelete<T>(path: string): Promise<T> {
+  const resp = await fetch(path, {
+    method: 'DELETE',
+    headers: { accept: 'application/json' },
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      detail = await resp.text();
+    } catch {
+      // 忽略读取错误
+    }
+    throw new ApiError(
+      `DELETE ${path} 失败: HTTP ${resp.status}${detail ? ` - ${detail}` : ''}`,
+      resp.status,
+      path,
+    );
+  }
+  return (await resp.json()) as T;
+}
+

@@ -12,7 +12,7 @@
  *   fetchGmProStatus() → GET /api/gm-pro/proxy/status  → GET {GM_PRO_HTTP_URL}/api/status
  *   fetchGmProStats()  → GET /api/gm-pro/proxy/stats   → GET {GM_PRO_HTTP_URL}/api/stats
  */
-import { apiGet, apiPost } from './client';
+import { apiGet, apiPost, apiDelete } from './client';
 
 // ─── 通用代理响应 ──────────────────────────────────────────────────────────
 
@@ -450,9 +450,38 @@ export function fetchGmProSchema(): Promise<GmProProxyResponse<GmProSchemaResult
 
 // ─── 运行时配置（graph-memory-pro 直接查询，区别于 config.ts 的配置管理 API） ──
 
+/**
+ * v2.4.0 检索质量与输出增强配置（recall 段）。
+ * 来自 graph-memory-pro src/types.ts GmConfig.recall。
+ */
+export interface GmProRecallConfig {
+  /** 点2：嵌入文本记忆切片长度（默认 800） */
+  memorySliceChars?: number;
+  /** 点6：长文本分段嵌入 */
+  chunking?: {
+    enabled?: boolean;
+    /** 单段字符数（默认 400） */
+    chunkSize?: number;
+    /** 段间重叠字符数（默认 40） */
+    chunkOverlap?: number;
+  };
+  /** 点5：多阶段检索（FTS 种子 → graphWalk 邻域筛选 → 候选内向量排序） */
+  multiStage?: boolean;
+  /** 点4：时序权重（0~1，默认 0.3），与关联矩阵 M 共同加权 */
+  temporalWeight?: number;
+  /** 点3：标准格式化输出（注入简洁/贴近原文/减少篡改 policy） */
+  outputFormat?: {
+    enabled?: boolean;
+    /** 是否要求简洁（默认 true） */
+    concise?: boolean;
+    /** 是否要求贴近原文表述（默认 true） */
+    faithful?: boolean;
+  };
+}
+
 export interface GmProRuntimeConfigResult {
   version?: string;
-  config?: Record<string, unknown>;
+  config?: Record<string, unknown> & { recall?: GmProRecallConfig };
 }
 
 /** 获取 graph-memory-pro 运行时配置（脱敏后），通过代理直连 gm-pro HTTP API */
@@ -470,4 +499,98 @@ export interface GmProServiceStatus {
 
 export function fetchGmProServices(): Promise<GmProProxyResponse<GmProServiceStatus>> {
   return apiGet<GmProProxyResponse<GmProServiceStatus>>('/api/gm-pro/proxy/ops/services');
+}
+
+// ─── 运维操作（v2.4.0：熔断器重置 / 缓存清空 / Neo4j 重连）──────────────────
+
+/** POST /api/ops/circuit-breakers/reset 响应：重置全部熔断器 */
+export interface GmProOpsResetBreakersResult {
+  message?: string;
+  resetCount?: number;
+  previousStates?: Array<{ name: string; state: string; failureCount?: number }>;
+}
+
+/** 重置 graph-memory-pro 全部熔断器（CLOSED + 清零失败计数） */
+export function postGmProOpsResetBreakers(): Promise<GmProProxyResponse<GmProOpsResetBreakersResult>> {
+  return apiPost<GmProProxyResponse<GmProOpsResetBreakersResult>>('/api/gm-pro/proxy/ops/circuit-breakers/reset', {});
+}
+
+/** DELETE /api/ops/cache 响应：清空查询缓存 + 重置召回计时 */
+export interface GmProOpsClearCacheResult {
+  message?: string;
+  entriesRemoved?: number;
+  recallTimingReset?: boolean;
+}
+
+/** 清空 graph-memory-pro 查询缓存（QueryCache LRU + 召回计时统计） */
+export function deleteGmProOpsCache(): Promise<GmProProxyResponse<GmProOpsClearCacheResult>> {
+  return apiDelete<GmProProxyResponse<GmProOpsClearCacheResult>>('/api/gm-pro/proxy/ops/cache');
+}
+
+/** POST /api/ops/reconnect 响应：手动触发 Neo4j 重连 */
+export interface GmProOpsReconnectResult {
+  connected?: boolean;
+  pool?: { activeSessions?: number; totalCreated?: number; driverActive?: number };
+}
+
+/** 手动触发 graph-memory-pro 的 Neo4j 连接重连与连通性校验 */
+export function postGmProOpsReconnect(): Promise<GmProProxyResponse<GmProOpsReconnectResult>> {
+  return apiPost<GmProProxyResponse<GmProOpsReconnectResult>>('/api/gm-pro/proxy/ops/reconnect', {});
+}
+
+// ─── 维护触发（v2.4.0：全量 / 增量 / 标脏 / 清脏）──────────────────────────
+
+/** 触发全量维护（POST /api/maintain） */
+export function postGmProMaintain(): Promise<GmProProxyResponse<Record<string, unknown>>> {
+  return apiPost<GmProProxyResponse<Record<string, unknown>>>('/api/gm-pro/proxy/maintain', {});
+}
+
+/** 触发增量维护，仅处理 markDirty 标记的脏节点（POST /api/maintain/incremental） */
+export function postGmProMaintainIncremental(): Promise<GmProProxyResponse<Record<string, unknown>>> {
+  return apiPost<GmProProxyResponse<Record<string, unknown>>>('/api/gm-pro/proxy/maintain/incremental', {});
+}
+
+/** 标记节点为脏（POST /api/maintain/mark-dirty，body: { nodeIds: string[] }） */
+export function postGmProMarkDirty(nodeIds: string[]): Promise<GmProProxyResponse<{ marked?: number }>> {
+  return apiPost<GmProProxyResponse<{ marked?: number }>>('/api/gm-pro/proxy/maintain/mark-dirty', { nodeIds });
+}
+
+/** DELETE /api/maintain/dirty-nodes 响应：清空脏节点标记 */
+export interface GmProClearDirtyResult {
+  cleared?: number | 'all';
+}
+
+/** 清空全部脏节点标记（DELETE /api/maintain/dirty-nodes，不传 nodeIds 即清全部） */
+export function deleteGmProDirtyNodes(): Promise<GmProProxyResponse<GmProClearDirtyResult>> {
+  return apiDelete<GmProProxyResponse<GmProClearDirtyResult>>('/api/gm-pro/proxy/maintain/dirty-nodes');
+}
+
+// ─── 自动调优触发（v2.4.0：POST /api/auto-tuner/tune）──────────────────────
+
+export interface GmProAutoTunerTuneResult {
+  rounds?: unknown[];
+  finalAction?: unknown;
+  totalRounds?: number;
+  snapshots?: number;
+}
+
+/** 触发 AutoTuner 调优轮次（rounds 默认 1，上限 autoTuner.maxRounds） */
+export function postGmProAutoTunerTune(rounds?: number): Promise<GmProProxyResponse<GmProAutoTunerTuneResult>> {
+  return apiPost<GmProProxyResponse<GmProAutoTunerTuneResult>>(
+    '/api/gm-pro/proxy/auto-tuner/tune',
+    rounds != null ? { rounds } : {},
+  );
+}
+
+// ─── Recall 触发（v2.4.0：POST /api/recall）─────────────────────────────────
+
+/** POST /api/recall 请求体 */
+export interface GmProRecallParams {
+  /** 检索 query（必填） */
+  query: string;
+}
+
+/** 触发一次 recall（用于检索质量回归测试 / 人工验证） */
+export function postGmProRecall(params: GmProRecallParams): Promise<GmProProxyResponse<unknown>> {
+  return apiPost<GmProProxyResponse<unknown>>('/api/gm-pro/proxy/recall', params);
 }

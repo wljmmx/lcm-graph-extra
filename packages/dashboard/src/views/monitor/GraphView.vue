@@ -11,6 +11,7 @@ import TopNodesChartCard from '../../components/monitor/TopNodesChartCard.vue';
 import DirtyNodesCard from '../../components/monitor/DirtyNodesCard.vue';
 import CommunitiesCard from '../../components/monitor/CommunitiesCard.vue';
 import RetrievalStatusCard from '../../components/monitor/RetrievalStatusCard.vue';
+import RecallConfigCard from '../../components/monitor/RecallConfigCard.vue';
 
 const {
   graphHealth,
@@ -78,6 +79,9 @@ const {
       </NGi>
       <NGi>
         <RetrievalStatusCard :memory="memory" />
+      </NGi>
+      <NGi>
+        <RecallConfigCard />
       </NGi>
     </NGrid>
   </div>

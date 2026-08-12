@@ -32,7 +32,7 @@
  *   若 openclaw.json 未配置 apiServer.authToken 而 graph-memory-pro 配置了 authToken，
  *   这些路径将返回 401 Unauthorized。请确保两端配置一致。
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { readGmProRawConfig } from './config';
 
 /** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
@@ -73,126 +73,86 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/ops/services',
 ]);
 
-/** graph-memory-pro 允许的 POST 写 API 路径白名单（v2.3.5+） */
+/**
+ * graph-memory-pro 允许的 POST 写 API 路径白名单。
+ * v2.3.5: feedback/bootstrap + 关联矩阵持久化。
+ * v2.4.0: 补齐 ops（熔断器重置 / 重连）、维护触发（增量 / 全量 / 标脏）、
+ *         重新向量化、反馈提交、自动调优触发、recall 触发、graph/walk POST 版本。
+ */
 const ALLOWED_GM_PRO_POST_PATHS = new Set([
   '/api/feedback/bootstrap',
   // 关联矩阵 M 持久化（save / load）
   '/api/association-matrix/save',
   '/api/association-matrix/load',
+  // v2.4.0: 运维操作
+  '/api/ops/circuit-breakers/reset',
+  '/api/ops/reconnect',
+  // v2.4.0: 维护触发
+  '/api/maintain',
+  '/api/maintain/incremental',
+  '/api/maintain/mark-dirty',
+  '/api/staleness/refresh',
+  // v2.4.0: 重新向量化 / 反馈 / 调优 / recall
+  '/api/reembed',
+  '/api/feedback',
+  '/api/auto-tuner/tune',
+  '/api/recall',
+  // v2.4.0: graph/walk POST 版本（seedIds 较多时）
+  '/api/graph/walk',
 ]);
+
+/**
+ * graph-memory-pro 允许的 DELETE 写 API 路径白名单（v2.4.0 新增）。
+ * 精确匹配，不支持前缀。
+ */
+const ALLOWED_GM_PRO_DELETE_PATHS = new Set([
+  '/api/ops/cache',              // 清空查询缓存
+  '/api/maintain/dirty-nodes',   // 清空脏节点标记
+]);
+
+/** 将 /api/gm-pro/proxy/<...> 还原为 graph-memory-pro 的真实路径 /api/<...> */
+function extractProxyPath(reqUrl: string): { proxyPath: string; query: string } {
+  const urlPath = reqUrl.split('?')[0];
+  // v2.7.0 P1-FIX: 仅 strip /gm-pro/proxy，保留 /api 前缀
+  const proxyPath = urlPath.replace('/gm-pro/proxy', '');
+  const query = reqUrl.includes('?') ? '?' + reqUrl.split('?')[1] : '';
+  return { proxyPath, query };
+}
+
+/** 白名单前缀匹配（/api/nodes/abc 匹配 /api/nodes） */
+function matchesReadWhitelist(proxyPath: string): boolean {
+  return [...ALLOWED_GM_PRO_PATHS].some(
+    (allowed) => proxyPath === allowed || proxyPath.startsWith(allowed + '/'),
+  );
+}
 
 export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
   /**
-   * GET /api/gm-pro/proxy/*
-   *
-   * 将请求路径中 /api/gm-pro/proxy/ 之后的部分拼接到 Gateway HTTP URL。
+   * 共享转发逻辑：构造出站请求、鉴权头、超时、JSON 解析与错误归一化。
+   * 返回结构 { ok, data? | error?, detail? }，HTTP 始终 200 以便前端解析结构化错误。
    */
-  app.get('/api/gm-pro/proxy/*', async (req, reply) => {
-    // 提取代理路径：/api/gm-pro/proxy/status → /api/status
-    // 示例：GET /api/gm-pro/proxy/status → proxy to {GM_PRO_HTTP_URL}/api/status
-    // v2.7.0 P1-FIX: 修复前 urlPath.replace('/api/gm-pro/proxy', '') 把 /api 也 strip 了，
-    // 导致 proxyPath = /status 而非 /api/status，白名单校验失败返回 403。
-    const urlPath = req.url.split('?')[0];
-    const proxyPath = urlPath.replace('/gm-pro/proxy', '');
-
-    // 路径白名单校验（前缀匹配，/api/nodes/abc 匹配 /api/nodes）
-    const basePath = '/' + proxyPath.split('/').filter(Boolean).slice(0, 3).join('/');
-    const isAllowed = [...ALLOWED_GM_PRO_PATHS].some(
-      (allowed) => proxyPath === allowed || proxyPath.startsWith(allowed + '/'),
-    );
-    if (!isAllowed) {
-      reply.code(403);
-      return { ok: false, error: `路径不在白名单中: ${proxyPath}` };
-    }
-
-    const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}${req.url.includes('?') ? '?' + req.url.split('?')[1] : ''}`;
+  async function forwardToGmPro(
+    req: FastifyRequest,
+    method: 'GET' | 'POST' | 'DELETE',
+    proxyPath: string,
+    query: string,
+  ): Promise<{ ok: boolean; data?: unknown; error?: string; detail?: unknown }> {
+    const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}${query}`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GM_PRO_HTTP_TIMEOUT);
 
-    // 构建出站请求头
     const headers: Record<string, string> = {
       'Accept': 'application/json',
     };
+    if (method !== 'GET') headers['Content-Type'] = 'application/json';
     // 携带 graph-memory-pro 独立服务器鉴权令牌（X-Auth-Token，来自 openclaw.json 配置）
     const authToken = resolveGmProAuthToken();
-    if (authToken) {
-      headers['x-auth-token'] = authToken;
-    }
+    if (authToken) headers['x-auth-token'] = authToken;
 
     try {
-      const resp = await fetch(targetUrl, {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      });
-
-      if (!resp.ok) {
-        let body: unknown;
-        try { body = await resp.json(); } catch { body = { error: `graph-memory-pro returned ${resp.status}` }; }
-        return { ok: false, error: `graph-memory-pro HTTP ${resp.status}`, detail: body };
-      }
-
-      const contentType = resp.headers.get('content-type') ?? '';
-      if (!contentType.includes('application/json')) {
-        return { ok: false, error: `graph-memory-pro 响应非 JSON (Content-Type: ${contentType || '空'})` };
-      }
-
-      const data = await resp.json();
-      return { ok: true, data };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isTimeout = err instanceof Error && err.name === 'AbortError';
-      const error = isTimeout
-        ? `graph-memory-pro 请求超时（${GM_PRO_HTTP_TIMEOUT}ms）`
-        : `graph-memory-pro 不可达: ${msg}`;
-      req.log.warn({ err: error, targetUrl }, 'graph-memory-pro 代理失败');
-      // 返回 200 让前端能解析结构化错误信息，而非被 apiGet 直接 throw
-      return { ok: false, error };
-    } finally {
-      clearTimeout(timer);
-    }
-  });
-
-  /**
-   * POST /api/gm-pro/proxy/*
-   *
-   * 代理 graph-memory-pro 的写 API 请求。
-   * 仅允许 ALLOWED_GM_PRO_POST_PATHS 白名单中的路径。
-   * v2.3.5 新增：用于 Bootstrap 反馈工具（POST /api/feedback/bootstrap）。
-   */
-  app.post('/api/gm-pro/proxy/*', async (req, reply) => {
-    const urlPath = req.url.split('?')[0];
-    const proxyPath = urlPath.replace('/gm-pro/proxy', '');
-
-    // POST 白名单校验（精确匹配，不支持前缀）
-    if (!ALLOWED_GM_PRO_POST_PATHS.has(proxyPath)) {
-      reply.code(403);
-      return { ok: false, error: `POST 路径不在白名单中: ${proxyPath}` };
-    }
-
-    const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}`;
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GM_PRO_HTTP_TIMEOUT);
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    };
-    const authToken = resolveGmProAuthToken();
-    if (authToken) {
-      headers['x-auth-token'] = authToken;
-    }
-
-    try {
-      const body = req.body ? JSON.stringify(req.body) : undefined;
-      const resp = await fetch(targetUrl, {
-        method: 'POST',
-        headers,
-        body,
-        signal: controller.signal,
-      });
+      const body = method !== 'GET' && req.body ? JSON.stringify(req.body) : undefined;
+      const resp = await fetch(targetUrl, { method, headers, body, signal: controller.signal });
 
       if (!resp.ok) {
         let errBody: unknown;
@@ -213,10 +173,50 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       const error = isTimeout
         ? `graph-memory-pro 请求超时（${GM_PRO_HTTP_TIMEOUT}ms）`
         : `graph-memory-pro 不可达: ${msg}`;
-      req.log.warn({ err: error, targetUrl }, 'graph-memory-pro POST 代理失败');
+      req.log.warn({ err: error, targetUrl }, `graph-memory-pro ${method} 代理失败`);
       return { ok: false, error };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * GET /api/gm-pro/proxy/* — 只读路径代理（前缀白名单）。
+   * 示例：GET /api/gm-pro/proxy/status → {GM_PRO_HTTP_URL}/api/status
+   */
+  app.get('/api/gm-pro/proxy/*', async (req, reply) => {
+    const { proxyPath, query } = extractProxyPath(req.url);
+    if (!matchesReadWhitelist(proxyPath)) {
+      reply.code(403);
+      return { ok: false, error: `路径不在白名单中: ${proxyPath}` };
+    }
+    return forwardToGmPro(req, 'GET', proxyPath, query);
+  });
+
+  /**
+   * POST /api/gm-pro/proxy/* — 写 API 代理（精确白名单）。
+   * v2.3.5: feedback/bootstrap + 关联矩阵持久化。
+   * v2.4.0: ops / 维护 / reembed / feedback / tune / recall / graph-walk。
+   */
+  app.post('/api/gm-pro/proxy/*', async (req, reply) => {
+    const { proxyPath, query } = extractProxyPath(req.url);
+    if (!ALLOWED_GM_PRO_POST_PATHS.has(proxyPath)) {
+      reply.code(403);
+      return { ok: false, error: `POST 路径不在白名单中: ${proxyPath}` };
+    }
+    return forwardToGmPro(req, 'POST', proxyPath, query);
+  });
+
+  /**
+   * DELETE /api/gm-pro/proxy/* — 删除类 API 代理（v2.4.0 新增，精确白名单）。
+   * 用于清空查询缓存（/api/ops/cache）与脏节点标记（/api/maintain/dirty-nodes）。
+   */
+  app.delete('/api/gm-pro/proxy/*', async (req, reply) => {
+    const { proxyPath, query } = extractProxyPath(req.url);
+    if (!ALLOWED_GM_PRO_DELETE_PATHS.has(proxyPath)) {
+      reply.code(403);
+      return { ok: false, error: `DELETE 路径不在白名单中: ${proxyPath}` };
+    }
+    return forwardToGmPro(req, 'DELETE', proxyPath, query);
   });
 }

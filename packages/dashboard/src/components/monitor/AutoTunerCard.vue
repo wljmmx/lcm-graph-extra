@@ -1,12 +1,15 @@
 <script setup lang="ts">
 /**
  * AutoTuner 调优：状态标签 + 调优轮次/快照 + sparkline 进度图。
+ * v2.4.0 新增动作：触发调优轮次（POST /api/auto-tuner/tune）。
  */
-import { computed } from 'vue';
-import { NCard, NTag, NDescriptions, NDescriptionsItem } from 'naive-ui';
+import { computed, ref } from 'vue';
+import { useQueryClient } from '@tanstack/vue-query';
+import { NCard, NTag, NDescriptions, NDescriptionsItem, NButton, NPopconfirm, useMessage } from 'naive-ui';
 import EChart from '../EChart.vue';
 import CardState from './CardState.vue';
 import { useTheme } from '../../composables/useTheme';
+import { postGmProAutoTunerTune } from '../../api/gm-pro';
 
 const props = defineProps<{
   tuner: any | null;
@@ -16,6 +19,32 @@ const props = defineProps<{
 
 const emit = defineEmits<{ retry: [] }>();
 const { isDark } = useTheme();
+
+const message = useMessage();
+const queryClient = useQueryClient();
+const tuning = ref(false);
+
+const tunerEnabled = computed(() => props.tuner?.enabled === true);
+
+/** v2.4.0: 触发一轮 AutoTuner 调优 */
+async function handleTune(): Promise<void> {
+  if (tuning.value) return;
+  tuning.value = true;
+  try {
+    const res = await postGmProAutoTunerTune(1);
+    if (res.ok) {
+      const total = (res.data as { totalRounds?: number } | undefined)?.totalRounds;
+      message.success(`调优已触发${total != null ? `（累计 ${total} 轮）` : ''}`);
+      queryClient.invalidateQueries({ queryKey: ['gm-pro-auto-tuner'] });
+    } else {
+      message.error(`调优失败: ${res.error || '未知错误'}`);
+    }
+  } catch (err: any) {
+    message.error(`调优失败: ${err?.message || String(err)}`);
+  } finally {
+    tuning.value = false;
+  }
+}
 
 /** 从快照列表中提取 metric 序列用于 sparkline */
 const sparklineOption = computed(() => {
@@ -103,6 +132,27 @@ const sparklineOption = computed(() => {
       <div v-if="sparklineOption" style="margin-top:8px">
         <div class="muted" style="font-size:var(--fs-caption);margin-bottom:2px">调优进度趋势</div>
         <EChart :option="sparklineOption" :height="60" aria-label="AutoTuner 调优进度趋势" />
+      </div>
+
+      <!-- v2.4.0 动作：触发调优轮次 -->
+      <div style="margin-top:10px">
+        <NPopconfirm @positive-click="handleTune">
+          <template #trigger>
+            <NButton
+              size="tiny"
+              type="primary"
+              secondary
+              :disabled="!tunerEnabled || tuning"
+              :loading="tuning"
+            >
+              触发调优
+            </NButton>
+          </template>
+          确定触发一轮 AutoTuner 调优？将运行一次 tune cycle 并持久化状态。
+        </NPopconfirm>
+        <span v-if="!tunerEnabled" class="muted" style="font-size:var(--fs-caption);margin-left:6px">
+          需先在 openclaw.json 中启用 autoTuner。
+        </span>
       </div>
     </CardState>
   </NCard>
