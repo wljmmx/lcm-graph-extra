@@ -6,7 +6,17 @@
  * - 边界条件：空查询、不同长度、各种场景标签
  */
 import { describe, it, expect } from 'vitest';
-import { computeTaskComplexity, decideMoa, estimateAggregateStrength, estimateMainModelStrength, DEFAULT_BENEFIT_THRESHOLD } from './complexity.js';
+import {
+  computeTaskComplexity,
+  decideMoa,
+  estimateAggregateStrength,
+  estimateMainModelStrength,
+  modelDomainFit,
+  isLocalModel,
+  getModelCostUnit,
+  computeCostPenalty,
+  DEFAULT_BENEFIT_THRESHOLD,
+} from './complexity.js';
 
 // ============================================================================
 // computeTaskComplexity
@@ -232,7 +242,7 @@ describe('decideMoa', () => {
     expect(d.trigger).toBe(false);
   });
 
-  it('弱主模型 + 强参考模型时触发，且净收益 ≥ 15%', () => {
+  it('弱主模型 + 强参考模型时触发，且净收益 ≥ 默认门槛(10%)', () => {
     const d = decideMoa({
       complexity: { score: 0.7, reasons: ['复杂场景'] },
       mainModel: 'qwen2.5:7b',
@@ -246,6 +256,70 @@ describe('decideMoa', () => {
     expect(d.capabilityGap).toBeGreaterThan(0.1);
     expect(d.netValue).toBeGreaterThanOrEqual(DEFAULT_BENEFIT_THRESHOLD);
     expect(d.trigger).toBe(true);
+  });
+
+  it('本地参考模型 (provider=ollama) 成本几乎不计，微弱提升即可触发', () => {
+    // 主模型本地弱(qwen2.5:7b=0.35)，参考模型同为本地小模型，能力差距小
+    const d = decideMoa({
+      complexity: { score: 0.6, reasons: ['复杂场景'] },
+      mainModel: 'qwen2.5:7b',
+      mainModelProvider: 'ollama',
+      configThreshold: 0.6,
+      referenceModels: [
+        { model: 'qwen2.5:14b', provider: 'ollama' },
+        { model: 'qwen2.5:32b', provider: 'ollama' },
+      ],
+      aggregatorModel: { model: 'qwen2.5:32b', provider: 'ollama' },
+    });
+    // 全本地 → 成本摊薄系数接近 1
+    expect(d.costPenalty).toBeGreaterThan(0.8);
+    expect(d.trigger).toBe(true);
+  });
+
+  it('相同模型组合下游本地 vs 远程：远程成本摊薄重，需更高提升才触发', () => {
+    const local = decideMoa({
+      complexity: { score: 0.5, reasons: ['复杂场景'] },
+      mainModel: 'qwen2.5:7b', mainModelProvider: 'ollama',
+      configThreshold: 0.6,
+      referenceModels: [{ model: 'gpt-4o', provider: 'ollama' }, { model: 'claude-sonnet-4', provider: 'ollama' }],
+      aggregatorModel: { model: 'gpt-4o', provider: 'ollama' },
+    });
+    const remote = decideMoa({
+      complexity: { score: 0.5, reasons: ['复杂场景'] },
+      mainModel: 'qwen2.5:7b',
+      configThreshold: 0.6,
+      referenceModels: [{ model: 'gpt-4o' }, { model: 'claude-sonnet-4' }],
+      aggregatorModel: { model: 'gpt-4o' },
+    });
+    expect(local.costPenalty).toBeGreaterThan(remote.costPenalty);
+    expect(local.netValue).toBeGreaterThan(remote.netValue);
+  });
+
+  it('远程单价配置 (tokenCosts) 可覆盖内置默认表', () => {
+    const defaultCost = getModelCostUnit('my-gpt-4o-proxy');
+    const configuredCost = getModelCostUnit('my-gpt-4o-proxy', { 'gpt-4o': 0.9 });
+    expect(configuredCost).toBe(0.9);
+    expect(defaultCost).toBe(0.6);
+  });
+
+  it('domainFit：擅长当前任务的模型适配度更高', () => {
+    expect(modelDomainFit('qwen-coder', 'code-review')).toBe(1.0);
+    expect(modelDomainFit('llama3.2:1b', 'code-review')).toBe(0.7);
+    expect(modelDomainFit('deepseek-r1', 'architecture')).toBe(1.0);
+    expect(modelDomainFit('gpt-4o', undefined)).toBe(0.85);
+  });
+
+  it('isLocalModel：ollama provider 与本地 baseURL 判定为本地', () => {
+    expect(isLocalModel('ollama')).toBe(true);
+    expect(isLocalModel('openai', 'http://localhost:11434')).toBe(true);
+    expect(isLocalModel('openai', 'http://192.168.1.10:8080')).toBe(true);
+    expect(isLocalModel('openai', 'https://api.openai.com')).toBe(false);
+  });
+
+  it('computeCostPenalty：本地模型成本远低于远程', () => {
+    const local = computeCostPenalty([{ model: 'a', provider: 'ollama' }, { model: 'b', provider: 'ollama' }]);
+    const remote = computeCostPenalty([{ model: 'gpt-4o' }, { model: 'gpt-4o' }]);
+    expect(local).toBeGreaterThan(remote);
   });
 
   it('参考模型越多，成本摊薄越大，净收益越低', () => {

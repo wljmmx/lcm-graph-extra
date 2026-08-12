@@ -182,28 +182,37 @@ export function computeTaskComplexity(
 }
 
 // ============================================================================
-// MoA 触发决策 —— 收益基准 + 主模型能力感知
+// MoA 触发决策 —— 收益基准 + 主模型/聚合后能力感知 + 本地/远程成本区分
 // ============================================================================
 //
 // 目标：只有当 MoA 相较"直接用主模型单次回答"能带来真实、可衡量的质量增益时
 // 才触发，避免 MoA 的模型消耗与时间开销反而超过非 MoA 场景。
 //
-// 三个关键洞察：
+// 关键洞察：
 //   1. 主模型能力越强，MoA「多视角聚合」的边际提升越小（强模型自己就能答好）。
 //   2. 复杂度越高，多视角分工的价值越大（不同角色的参考模型能补足盲区）。
-//   3. 参考模型数量越多，token 与时间成本越高，净收益会被稀释。
+//   3. 聚合后能力 = 主模型 + 参考/聚合能力上限交叠，收益本质 = 聚合后能力 − 主模型能力；
+//      任务类型适配（domainFit）让擅长当前任务的模型贡献更大。
+//   4. 成本区分本地/远程：
+//      - 本地模型（ollama / 本地 baseURL）：token 与时间成本不敏感，成本权重极小（0.1）；
+//      - 远程模型：按 token 单价计费（默认表 + 人工配置覆盖）。
+//      远程参与必须带来足够能力提升才值得，避免"远程 token 白花"。
 //
 // 决策公式：
-//   weakness           = 1 - mainModelStrength        // 主模型越弱，MoA 提升空间越大
-//   rawUplift          = score * (0.35 + 0.65 * weakness)   // 期望质量提升（0-1）
-//   costPenalty        = 1 / (1 + 0.3 * (refCount - 1))     // 模型越多成本越高
-//   netValue           = rawUplift * costPenalty            // 成本摊薄后的净收益
-//   effectiveThreshold = clamp(threshold + (strength - 0.55) * 0.4, 0.2, 0.9)
-//   trigger            = score >= effectiveThreshold && netValue >= benefitThreshold
+//   effectiveStrength(m) = baseStrength(m) * modelDomainFit(m, task)
+//   aggStrength          = mainStrength * 0.4 + max(参考均值, 聚合能力) * 0.6
+//   capabilityGap        = aggStrength - mainStrength
+//   complexityUplift     = score * 0.4
+//   rawUplift            = clamp(complexityUplift + capabilityGap, 0, 1)
+//   costUnit             = 本地 0.1 / 远程 getModelCostUnit(m)（默认1，可配单价）
+//   costPenalty          = 1 / (1 + 0.5 * Σ costUnit)
+//   netValue             = rawUplift * costPenalty
+//   effectiveThreshold   = clamp(threshold + (strength - 0.55) * 0.4, 0.2, 0.9)
+//   trigger              = score >= effectiveThreshold && netValue >= benefitThreshold
 // ============================================================================
 
-/** 默认最低净收益门槛：期望提升不足 15% 不触发 MoA */
-export const DEFAULT_BENEFIT_THRESHOLD = 0.15;
+/** 默认最低净收益门槛：期望提升不足 10% 不触发 MoA */
+export const DEFAULT_BENEFIT_THRESHOLD = 0.10;
 
 /** MoA 触发决策结果 */
 export interface MoaDecision {
@@ -266,12 +275,77 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
 
-/** 参与 MoA 的模型能力描述（用于评估聚合后能力） */
+/** 参与 MoA 的模型能力描述（用于评估聚合后能力与成本） */
 export interface MoaModelProfile {
   /** 模型标识 */
   model: string;
-  /** baseURL（可选，用于本地/远程判断） */
+  /** provider（可选，用于本地/远程判断：ollama 判定为本地） */
+  provider?: string;
+  /** baseURL（可选，本地地址判定为本地） */
   baseURL?: string;
+}
+
+/**
+ * 模型对当前任务类型的适配度（0.6-1.0）。
+ *
+ * 用于提升能力评估的准确性：同一模型在不同任务上表现不同——
+ * 擅长当前任务的模型（如 coder 类模型于代码任务、reasoner 类模型于架构/安全）贡献更大。
+ * 无任务类型时返回默认 0.85（中性）。
+ */
+export function modelDomainFit(model: string, task?: string): number {
+  const m = (model || '').toLowerCase();
+  if (!task) return 0.85;
+  if (task === 'code-review') {
+    if (/(coder|code|deepseek-coder|qwen-coder|o1|o3|gpt-5|claude)/.test(m)) return 1.0;
+    if (/(mini|flash|haiku|1\.5b|1b|2b|3b|4b|6b|7b|8b)/.test(m)) return 0.7;
+  } else if (task === 'architecture' || task === 'security') {
+    if (/(o1|o3|reasoner|r1|deepseek|claude|gpt-4o|gpt-5|gemini)/.test(m)) return 1.0;
+    if (/(mini|flash|haiku|1\.5b|1b|2b|3b|4b|6b|7b|8b)/.test(m)) return 0.7;
+  }
+  return 0.85;
+}
+
+/**
+ * 判断模型是否本地部署（token/时间成本不敏感）。
+ *
+ * - provider === 'ollama' → 本地
+ * - baseURL 指向本机/内网 → 本地
+ * - 其余视为远程（按 token 计费）
+ */
+export function isLocalModel(provider?: string, baseURL?: string): boolean {
+  if (provider === 'ollama') return true;
+  if (baseURL && /localhost|127\.0\.0\.1|0\.0\.0\.0|:11434|:8080|:8001|192\.168\.|10\.|172\.(1[6-9]|2\d|3[0-1])\./.test(baseURL)) return true;
+  return false;
+}
+
+/**
+ * 默认远程模型相对单价表（每百万 token 的相对成本，最贵归一为 1）。
+ *
+ * 仅用于远程模型；本地模型不计此表。可通过 moa.tokenCosts 配置覆盖。
+ */
+const DEFAULT_TOKEN_COSTS: Record<string, number> = {
+  'gpt-5': 1, 'claude-4': 1, 'claude-opus-4': 1, 'claude-opus': 1,
+  'o1': 0.8, 'o3': 0.8,
+  'gpt-4o': 0.6, 'claude-sonnet-4': 0.6, 'claude-3-7': 0.6, 'claude-3-5-sonnet': 0.6, 'gemini-2': 0.5, 'kimi-k2': 0.4, 'qwen3-max': 0.4, 'glm-4.5': 0.4,
+  'gpt-4o-mini': 0.1, 'claude-haiku': 0.08, 'gemini-2.0-flash': 0.08, 'deepseek-v3': 0.05, 'deepseek-chat': 0.03, 'qwen-coder': 0.03, 'doubao-lite': 0.05,
+};
+
+/**
+ * 获取模型的相对成本单位（0-1，越大越贵）。
+ *
+ * 优先使用人工配置的 moa.tokenCosts（子串匹配），其次内置默认表，最后兜底 1。
+ */
+export function getModelCostUnit(model: string, tokenCosts?: Record<string, number>): number {
+  const m = (model || '').toLowerCase();
+  if (tokenCosts && typeof tokenCosts === 'object') {
+    for (const [k, v] of Object.entries(tokenCosts)) {
+      if (m.includes(k.toLowerCase())) return Number(v) || 1;
+    }
+  }
+  for (const [k, v] of Object.entries(DEFAULT_TOKEN_COSTS)) {
+    if (m.includes(k)) return v;
+  }
+  return 1;
 }
 
 export interface DecideMoaParams {
@@ -279,17 +353,23 @@ export interface DecideMoaParams {
   complexity: ComplexityScore;
   /** 主模型标识（如 'gpt-4o'、'qwen3.6:27b'） */
   mainModel: string;
+  /** 主模型 provider（可选，用于本地/远程判断） */
+  mainModelProvider?: string;
   /** 主模型 baseURL（可选） */
   mainModelBaseURL?: string;
-  /** 参考模型列表（用于评估聚合后能力，可选） */
+  /** 参考模型列表（用于评估聚合后能力与成本，可选） */
   referenceModels?: MoaModelProfile[];
-  /** 聚合模型（用于评估聚合后能力，可选） */
+  /** 聚合模型（用于评估聚合后能力与成本，可选） */
   aggregatorModel?: MoaModelProfile | null;
+  /** 任务类型（来自 moa/classifier：code-review/architecture/security，可选） */
+  task?: string;
+  /** 远程模型相对单价表（moa.tokenCosts，可选；覆盖内置默认表） */
+  tokenCosts?: Record<string, number>;
   /** 配置的复杂度阈值（moa.complexityThreshold，默认 0.6） */
   configThreshold: number;
   /** 参考模型数量（≥2 才可能触发；缺省时取 referenceModels 长度） */
   referenceModelCount?: number;
-  /** 最低净收益门槛（默认 0.15，即期望提升 ≥15%） */
+  /** 最低净收益门槛（默认 0.10，即期望提升 ≥10%） */
   benefitThreshold?: number;
 }
 
@@ -297,24 +377,31 @@ export interface DecideMoaParams {
  * 估算 MoA 聚合后的整体能力强度（0-1）。
  *
  * 思路：MoA 通过多个模型的视角分工 + 聚合模型收敛裁决，能逼近"最强参与模型"，
- * 但受限于参与模型的天花板。聚合后能力取：
+ * 但受限于参与模型的天花板。每个参与模型的有效能力 = 基础能力 × 任务适配度（domainFit），
+ * 擅长当前任务的模型贡献更大。聚合后能力取：
  *    主模型能力 × 0.4 + max(参考模型均值, 聚合模型能力) × 0.6
- * 即：参与模型越强，聚合后越好；主模型再强，也受参考层上限影响。
+ * 即：参与模型越强、越适配当前任务，聚合后越好。
  */
 export function estimateAggregateStrength(
   mainStrength: number,
   refModels: MoaModelProfile[],
   aggregatorModel?: MoaModelProfile | null,
+  task?: string,
 ): number {
-  // 参考模型平均能力（缺省时按中性 0.5 计）
+  const eff = (mp: MoaModelProfile): number => {
+    const base = estimateMainModelStrength(mp.model, mp.baseURL);
+    return clamp(base * modelDomainFit(mp.model, task), 0, 1);
+  };
+
+  // 参考模型平均有效能力（缺省时按中性 0.5 * 默认适配 0.85 计）
   const refs = Array.isArray(refModels) && refModels.length > 0 ? refModels : [];
   const refStrength = refs.length > 0
-    ? refs.reduce((sum, r) => sum + estimateMainModelStrength(r.model, r.baseURL), 0) / refs.length
-    : 0.5;
+    ? refs.reduce((sum, r) => sum + eff(r), 0) / refs.length
+    : 0.5 * 0.85;
 
-  // 聚合模型能力（缺省时退化为参考均值）
+  // 聚合模型有效能力（缺省时退化为参考均值）
   const aggStrength = aggregatorModel?.model
-    ? estimateMainModelStrength(aggregatorModel.model, aggregatorModel.baseURL)
+    ? eff(aggregatorModel)
     : refStrength;
 
   // 聚合后能力 = 主模型(0.4) + 参考/聚合上限(0.6)
@@ -323,13 +410,36 @@ export function estimateAggregateStrength(
 }
 
 /**
- * 收益基准 + 主模型/聚合后能力感知的 MoA 触发决策。
+ * 计算 MoA 参与模型的成本摊薄系数（0-1，越大成本越低）。
+ *
+ * 区分本地/远程：
+ * - 本地模型（ollama / 本地 baseURL）：token 与时间成本不敏感，成本权重极小（0.1）；
+ * - 远程模型：按 getModelCostUnit 计的相对单价。
+ * 远程参与越多/越贵，摊薄越重，迫使 MoA 必须带来足够能力提升才值得。
+ */
+export function computeCostPenalty(
+  participants: MoaModelProfile[],
+  tokenCosts?: Record<string, number>,
+  localWeight = 0.1,
+): number {
+  let cost = 0;
+  for (const p of participants) {
+    if (isLocalModel(p.provider, p.baseURL)) cost += localWeight;
+    else cost += getModelCostUnit(p.model, tokenCosts);
+  }
+  return 1 / (1 + 0.5 * cost);
+}
+
+/**
+ * 收益基准 + 主模型/聚合后能力感知 + 本地/远程成本感知的 MoA 触发决策。
  *
  * 相比旧的"复杂度 ≥ 固定阈值"逻辑，本函数额外考虑：
  * - 主模型能力：强主模型提高有效阈值并压低期望提升，避免为可轻易解决的任务浪费多模型成本；
- * - 聚合后能力：MoA 的收益本质 = 聚合后能力 − 主模型能力。若参与模型都不强，聚合提升有限，
- *   即使复杂度高也不值得触发；
- * - 成本摊薄：参考模型越多，token/时间成本越高，净收益越低，避免"多模型消耗反而比不上非 MoA"。
+ * - 聚合后能力：MoA 的收益本质 = 聚合后能力 − 主模型能力。若参与模型都不强或不适配当前任务，
+ *   聚合提升有限，即使复杂度高也不值得触发；
+ * - 任务适配（domainFit）：擅长当前任务的模型贡献更大，能力评价更贴合实际；
+ * - 本地/远程成本：本地模型时间/token 成本不敏感（权重 0.1），远程按单价摊薄，
+ *   避免"远程 token 白花"，也避免误伤"用本地模型做脚手架"的场景。
  *
  * @returns 触发决策（含可解释的指标与原因）
  */
@@ -337,9 +447,12 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
   const {
     complexity,
     mainModel,
+    mainModelProvider,
     mainModelBaseURL,
     referenceModels,
     aggregatorModel,
+    task,
+    tokenCosts,
     configThreshold,
     referenceModelCount,
     benefitThreshold = DEFAULT_BENEFIT_THRESHOLD,
@@ -352,8 +465,8 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
   // 参考模型数量（缺省取列表长度）
   const refCount = Math.max(2, referenceModelCount ?? referenceModels?.length ?? 2);
 
-  // 聚合后能力评估：收益 = 聚合后能力 − 主模型能力
-  const aggStrength = estimateAggregateStrength(strength, referenceModels ?? [], aggregatorModel);
+  // 聚合后能力评估：收益 = 聚合后能力 − 主模型能力（主模型基线不缩 domainFit，非 MoA 时原样跑）
+  const aggStrength = estimateAggregateStrength(strength, referenceModels ?? [], aggregatorModel, task);
   const capabilityGap = clamp(aggStrength - strength, -0.05, 0.5);
 
   // 基准门槛：复杂度过低时，任何配置下 MoA 都不值得
@@ -365,7 +478,7 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
       complexity: score,
       mainModelStrength: strength,
       aggregateStrength: aggStrength,
-      capabilityGap: capabilityGap,
+      capabilityGap,
       effectiveThreshold: configThreshold,
       expectedUplift: 0,
       costPenalty: 1,
@@ -374,13 +487,16 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
     };
   }
 
-  // 期望提升 = 复杂度驱动（多视角分工对复杂任务的价值）× 能力差距驱动（聚合赶上主模型盲区）
-  // 能力差距越大 → MoA 提升越明显；主模型已很强且参与模型不强时，capabilityGap≈0，收益仅剩复杂度成分
+  // 期望提升 = 复杂度驱动（多视角分工对复杂任务的价值）+ 能力差距驱动（聚合赶上主模型盲区）
   const complexityUplift = score * 0.4;
   const rawUplift = clamp(complexityUplift + capabilityGap, 0, 1);
 
-  // 成本摊薄：参考模型越多，token/时间成本越高
-  const costPenalty = 1 / (1 + 0.3 * (refCount - 1));
+  // 成本摊薄：本地模型几乎不计(token/时间不敏感)，远程模型按单价计
+  const participants: MoaModelProfile[] = [
+    ...(referenceModels ?? []),
+    ...(aggregatorModel?.model ? [aggregatorModel] : []),
+  ];
+  const costPenalty = computeCostPenalty(participants, tokenCosts);
 
   const netValue = rawUplift * costPenalty;
 
@@ -389,6 +505,9 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
 
   const complexityOk = score >= effectiveThreshold;
   const benefitOk = netValue >= benefitThreshold;
+
+  const localCount = participants.filter((p) => isLocalModel(p.provider, p.baseURL)).length;
+  const remoteCount = participants.length - localCount;
 
   if (complexityOk) {
     reasons.push(`复杂度达标: ${score.toFixed(2)} >= 有效阈值 ${effectiveThreshold.toFixed(2)}`);
@@ -400,7 +519,8 @@ export function decideMoa(params: DecideMoaParams): MoaDecision {
   } else if (strength <= 0.4) {
     reasons.push(`主模型较弱(${strength.toFixed(2)})，MoA 多视角协作价值较高`);
   }
-  reasons.push(`聚合后能力 ${aggStrength.toFixed(2)}，能力差距 ${capabilityGap >= 0 ? '+' : ''}${capabilityGap.toFixed(2)}`);
+  reasons.push(`聚合后能力 ${aggStrength.toFixed(2)}，能力差距 ${capabilityGap >= 0 ? '+' : ''}${capabilityGap.toFixed(2)}${task ? `（任务类型 ${task}）` : ''}`);
+  reasons.push(`成本构成: 本地${localCount}×0.1 + 远程${remoteCount}（摊薄系数 ${costPenalty.toFixed(2)}）`);
 
   if (benefitOk) {
     reasons.push(`净收益达标: ${netValue.toFixed(3)} >= ${benefitThreshold}（期望提升 ${(rawUplift * 100).toFixed(1)}% × 成本系数 ${costPenalty.toFixed(2)}）`);

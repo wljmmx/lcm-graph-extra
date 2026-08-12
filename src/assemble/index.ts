@@ -1056,38 +1056,17 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       // 记录全量复杂度评分（每轮 assemble 都记录，无论 MoA 是否启用/触发）
       recordAllComplexity(complexity.score);
 
-      // ── 收益基准决策：结合主模型能力 + 复杂度 + 参考模型数量，判断 MoA 是否值得 ──
-      // 只有当 MoA 相较"直接主模型单次回答"能带来 ≥benefitThreshold 的净质量提升时才触发，
-      // 避免 MoA 的模型消耗与时间开销反而超过非 MoA 场景。
-      moaDecision = undefined;
-      if (moaConfig?.enabled
-          && Array.isArray(moaConfig?.referenceModels)
-          && moaConfig.referenceModels.length >= 2) {
-        try {
-          moaDecision = decideMoa({
-            complexity,
-            mainModel: modelFullId || (ctx.api?.pluginConfig as any)?.llmProvider?.model || 'default',
-            mainModelBaseURL: (ctx.api?.pluginConfig as any)?.llmProvider?.baseURL,
-            referenceModels: (moaConfig.referenceModels ?? []).map((r: any) => ({ model: r?.model, baseURL: r?.baseURL })),
-            aggregatorModel: moaConfig.aggregatorModel ? { model: moaConfig.aggregatorModel.model, baseURL: moaConfig.aggregatorModel.baseURL } : null,
-            configThreshold: moaConfig?.complexityThreshold ?? 0.6,
-            referenceModelCount: moaConfig.referenceModels.length,
-            benefitThreshold: moaConfig?.benefitThreshold ?? DEFAULT_BENEFIT_THRESHOLD,
-          });
-        } catch {
-          // 决策模块异常时回退到旧阈值逻辑（不阻断 MoA pipeline）
-          moaDecision = undefined;
-        }
-      }
-
       // ── 自动分类：根据用户输入确定任务领域，生成分类上下文补充到参考模型 prompt ──
-      // 注意：自动分类不覆盖模型选择，仅补充领域上下文帮助参考模型聚焦分析方向
+      // 注意：自动分类不覆盖模型选择，仅补充领域上下文帮助参考模型聚焦分析方向；
+      // 分类结果同时用于收益基准决策的 domainFit（任务适配度）
       classificationContext = '';
+      let moaTask: string | undefined;
       if (!moaPresetOverride && moaConfig?.enabled) {
         try {
           const { classifyTaskType } = await import('../moa/classifier.js');
           const classification = classifyTaskType(queryText);
           if (classification.preset && classification.confidence >= 0.5) {
+            moaTask = classification.preset;
             classificationContext = classification.context ?? '';
             if (classificationContext) {
               ctx.logger?.info?.('[assemble] Auto-classified task domain, context injected', {
@@ -1099,6 +1078,33 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           }
         } catch {
           // 分类器加载失败，不影响主流程
+        }
+      }
+
+      // ── 收益基准决策：结合主模型能力 + 聚合后能力 + 复杂度 + 本地/远程成本，判断 MoA 是否值得 ──
+      // 只有当 MoA 相较"直接主模型单次回答"能带来 ≥benefitThreshold 的净质量提升时才触发，
+      // 避免 MoA 的模型消耗与时间开销反而超过非 MoA 场景。
+      moaDecision = undefined;
+      if (moaConfig?.enabled
+          && Array.isArray(moaConfig?.referenceModels)
+          && moaConfig.referenceModels.length >= 2) {
+        try {
+          moaDecision = decideMoa({
+            complexity,
+            mainModel: modelFullId || (ctx.api?.pluginConfig as any)?.llmProvider?.model || 'default',
+            mainModelProvider: (ctx.api?.pluginConfig as any)?.llmProvider?.provider,
+            mainModelBaseURL: (ctx.api?.pluginConfig as any)?.llmProvider?.baseURL,
+            referenceModels: (moaConfig.referenceModels ?? []).map((r: any) => ({ model: r?.model, provider: r?.provider, baseURL: r?.baseURL })),
+            aggregatorModel: moaConfig.aggregatorModel ? { model: moaConfig.aggregatorModel.model, provider: moaConfig.aggregatorModel.provider, baseURL: moaConfig.aggregatorModel.baseURL } : null,
+            task: moaTask,
+            tokenCosts: moaConfig?.tokenCosts,
+            configThreshold: moaConfig?.complexityThreshold ?? 0.6,
+            referenceModelCount: moaConfig.referenceModels.length,
+            benefitThreshold: moaConfig?.benefitThreshold ?? DEFAULT_BENEFIT_THRESHOLD,
+          });
+        } catch {
+          // 决策模块异常时回退到旧阈值逻辑（不阻断 MoA pipeline）
+          moaDecision = undefined;
         }
       }
 

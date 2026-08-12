@@ -23,6 +23,8 @@ export interface MoaModelConfig {
 export interface MoaConfig {
   enabled: boolean;
   complexityThreshold: number;
+  benefitThreshold?: number;
+  tokenCosts?: Record<string, number>;
   mode: string;
   enabledTiers: string[];
   referenceModels: MoaModelConfig[];

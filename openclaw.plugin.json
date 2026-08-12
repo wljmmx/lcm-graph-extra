@@ -730,10 +730,16 @@
           },
           "benefitThreshold": {
             "type": "number",
-            "default": 0.15,
+            "default": 0.10,
             "minimum": 0,
             "maximum": 1,
-            "description": "MoA 最低期望净收益门槛，低于该值不触发（默认 0.15 = 期望提升 ≥15%）；结合主模型能力与参考模型数量摊薄成本后判定"
+            "description": "MoA 最低期望净收益门槛，低于该值不触发（默认 0.10 = 期望提升 ≥10%）；结合主模型能力、参考模型数量与本地/远程成本摊薄后判定"
+          },
+          "tokenCosts": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "远程模型相对单价表（模型名 → 每百万 token 相对成本，最贵模型建议设为最高值）。不配置时使用内置默认表；本地模型(ollama/本地baseURL)不计此表",
+            "default": {}
           },
           "mode": {
             "type": "string",

@@ -186,7 +186,8 @@ export const PluginConfigSchema = Type.Object({
   moa: Type.Optional(Type.Object({
     enabled: Type.Boolean({ default: false }),
     complexityThreshold: Type.Number({ default: 0.6, minimum: 0, maximum: 1 }),
-    benefitThreshold: Type.Optional(Type.Number({ default: 0.15, minimum: 0, maximum: 1, description: 'MoA 最低期望净收益门槛，低于该值不触发（默认 0.15 = 期望提升 ≥15%）' })),
+    benefitThreshold: Type.Optional(Type.Number({ default: 0.10, minimum: 0, maximum: 1, description: 'MoA 最低期望净收益门槛，低于该值不触发（默认 0.10 = 期望提升 ≥10%）' })),
+    tokenCosts: Type.Optional(Type.Record(Type.String(), Type.Number(), { default: {}, description: '远程模型相对单价表（模型名 → 每百万 token 相对成本，最贵模型建议设为最高值）。不配置时使用内置默认表；本地模型(ollama/本地baseURL)不计此表' })),
     mode: Type.Union([Type.Literal('auto'), Type.Literal('parallel'), Type.Literal('serial')], { default: 'auto' }),
     referenceModels: Type.Array(Type.Object({
       provider: LlmProviderUnion({ default: 'ollama', description: '参考模型 LLM provider 类型，见 LLM_PROVIDERS 常量' }),

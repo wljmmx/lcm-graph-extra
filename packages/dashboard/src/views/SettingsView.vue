@@ -47,6 +47,8 @@ const moaConfig = computed<MoaConfig | null>(() => configData.value?.config ?? n
 const editConfig = reactive({
   enabled: false,
   complexityThreshold: 0.6,
+  benefitThreshold: 0.10,
+  tokenCostsText: '',
   mode: 'auto' as string,
   enabledTiers: [] as string[],
   syncBudgetMs: 240_000,
@@ -64,6 +66,10 @@ watch(moaConfig, (cfg) => {
   if (cfg) {
     editConfig.enabled = cfg.enabled;
     editConfig.complexityThreshold = cfg.complexityThreshold;
+    editConfig.benefitThreshold = cfg.benefitThreshold ?? 0.10;
+    editConfig.tokenCostsText = cfg.tokenCosts && Object.keys(cfg.tokenCosts).length > 0
+      ? JSON.stringify(cfg.tokenCosts, null, 0)
+      : '';
     editConfig.mode = cfg.mode;
     editConfig.enabledTiers = [...cfg.enabledTiers];
     editConfig.syncBudgetMs = cfg.syncBudgetMs ?? 240_000;
@@ -88,9 +94,26 @@ const configMutation = useMutation({
 });
 
 function saveConfig(): void {
+  let tokenCosts: Record<string, number> | undefined;
+  if (editConfig.tokenCostsText.trim()) {
+    try {
+      const parsed = JSON.parse(editConfig.tokenCostsText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        tokenCosts = parsed;
+      } else {
+        message.error('tokenCosts 需为 JSON 对象，如 {"gpt-4o": 0.6}');
+        return;
+      }
+    } catch {
+      message.error('tokenCosts 不是合法 JSON，如 {"gpt-4o": 0.6}');
+      return;
+    }
+  }
   configMutation.mutate({
     enabled: editConfig.enabled,
     complexityThreshold: editConfig.complexityThreshold,
+    benefitThreshold: editConfig.benefitThreshold,
+    tokenCosts,
     mode: editConfig.mode,
     enabledTiers: editConfig.enabledTiers,
     syncBudgetMs: editConfig.syncBudgetMs,
@@ -491,6 +514,45 @@ const effectiveModeLabel = computed(() => {
                   :step="0.05"
                   size="small"
                   style="width: 120px"
+                />
+              </div>
+            </NGi>
+
+            <!-- 净收益门槛 -->
+            <NGi>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">净收益门槛</div>
+                  <div class="setting-desc">
+                    当前：{{ (editConfig.benefitThreshold * 100).toFixed(0) }}% · 低于该值不触发（本地模型成本低，门槛放低；纯远程需严格）
+                  </div>
+                </div>
+                <NInputNumber
+                  v-model:value="editConfig.benefitThreshold"
+                  :min="0"
+                  :max="0.5"
+                  :step="0.05"
+                  size="small"
+                  style="width: 120px"
+                />
+              </div>
+            </NGi>
+
+            <!-- 远程模型相对单价表（JSON 对象） -->
+            <NGi>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">远程模型相对单价</div>
+                  <div class="setting-desc">
+                    JSON 对象（模型名 → 相对成本，最贵≈1，本地模型不计），空则用默认表
+                  </div>
+                </div>
+                <NTextarea
+                  v-model:value="editConfig.tokenCostsText"
+                  size="small"
+                  placeholder='{"gpt-4o": 0.6, "gpt-4o-mini": 0.1}'
+                  :rows="4"
+                  style="width: 240px"
                 />
               </div>
             </NGi>
