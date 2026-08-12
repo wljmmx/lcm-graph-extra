@@ -116,6 +116,7 @@ describe('openclaw.plugin.json ↔ src/config.ts Schema 一致性', () => {
       { name: 'moa.mode', path: 'moa.mode', expected: ['auto', 'parallel', 'serial'] },
       { name: 'summaryStrategy', path: 'summaryStrategy', expected: ['strategy', 'hybrid', 'full'] },
       { name: 'experience.summaryMode', path: 'experience.summaryMode', expected: ['async', 'sync'] },
+      { name: 'moa.enabledTiers', path: 'moa.enabledTiers.items', expected: ['low', 'medium', 'high'] },
     ];
 
     for (const c of enumCases) {

@@ -829,7 +829,7 @@
             "description": "仅在指定压力层级下触发 MoA",
             "items": {
               "type": "string",
-              "enum": ["low", "medium"]
+              "enum": ["low", "medium", "high"]
             },
             "default": ["low"]
           },

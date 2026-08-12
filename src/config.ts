@@ -208,7 +208,7 @@ export const PluginConfigSchema = Type.Object({
       keepAlive: Type.Optional(Type.String({ default: '1h' })),
     })),
     enabledTiers: Type.Array(
-      Type.Union([Type.Literal('low'), Type.Literal('medium')]),
+      Type.Union([Type.Literal('low'), Type.Literal('medium'), Type.Literal('high')]),
       { default: ['low'] },
     ),
     syncBudgetMs: Type.Optional(Type.Number({ default: 240_000, minimum: 30_000 })),
