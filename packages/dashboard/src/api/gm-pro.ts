@@ -594,3 +594,31 @@ export interface GmProRecallParams {
 export function postGmProRecall(params: GmProRecallParams): Promise<GmProProxyResponse<unknown>> {
   return apiPost<GmProProxyResponse<unknown>>('/api/gm-pro/proxy/recall', params);
 }
+
+// ─── 过时刷新 / 重新向量化（v2.4.0，代理白名单已有、前端函数原先缺失）────────
+
+/** POST /api/staleness/refresh 响应：刷新节点过时标记 */
+export interface GmProStalenessRefreshResult {
+  refreshed?: number;
+  count?: number;
+  total?: number;
+  message?: string;
+}
+
+/** 触发节点过时状态重算（相对轻量，不做内容更新） */
+export function postGmProStalenessRefresh(): Promise<GmProProxyResponse<GmProStalenessRefreshResult>> {
+  return apiPost<GmProProxyResponse<GmProStalenessRefreshResult>>('/api/gm-pro/proxy/staleness/refresh', {});
+}
+
+/** POST /api/reembed 响应：触发全节点重新向量化 */
+export interface GmProReembedResult {
+  count?: number;
+  total?: number;
+  submitted?: number;
+  message?: string;
+}
+
+/** 触发全节点重新向量化（高成本，消耗 embedding 配额） */
+export function postGmProReembed(): Promise<GmProProxyResponse<GmProReembedResult>> {
+  return apiPost<GmProProxyResponse<GmProReembedResult>>('/api/gm-pro/proxy/reembed', {});
+}
