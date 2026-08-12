@@ -106,6 +106,18 @@ export interface MoaRunRecord {
   error?: string;
   mode: string;
   complexityScore?: number;
+  // v2: 决策价值指标
+  task?: string;
+  triggered?: boolean;
+  mainModelStrength?: number;
+  aggregateStrength?: number;
+  capabilityGap?: number;
+  expectedUplift?: number;
+  costPenalty?: number;
+  netValue?: number;
+  effectiveThreshold?: number;
+  benefitThreshold?: number;
+  decisionReasons?: string[];
 }
 
 export interface MoaModelBreakdown {
@@ -174,6 +186,36 @@ export interface MoaPerformanceData {
   allComplexityHistory: Array<{ timestamp: number; score: number }>;
   complexityHourlyBuckets: Array<{ hour: string; avg: number; count: number; min: number; max: number }>;
   complexityDailyBuckets: Array<{ date: string; avg: number; count: number; min: number; max: number }>;
+  // v2: 价值指标（能力提升 vs 成本）
+  avgNetValue: number;
+  avgExpectedUplift: number;
+  avgCapabilityGap: number;
+  meetTargetRate: number;
+  belowTargetCount: number;
+  netValueHistory: Array<{ timestamp: number; netValue: number; threshold: number; triggered: boolean }>;
+  lastDecision?: {
+    timestamp: number;
+    triggered: boolean;
+    netValue: number;
+    effectiveThreshold: number;
+    capabilityGap: number;
+    expectedUplift: number;
+    costPenalty: number;
+    mainModelStrength: number;
+    aggregateStrength: number;
+    reasons: string[];
+  };
+  taskBreakdown: Array<{
+    task: string;
+    runCount: number;
+    avgNetValue: number;
+    meetTargetRate: number;
+    avgCapabilityGap: number;
+  }>;
+  learning: {
+    capability: Array<{ model: string; task?: string; reliability: number; total: number }>;
+    tokens: Array<{ model: string; avgInput: number; avgOutput: number; calls: number }>;
+  };
 }
 
 export interface MoaPerformanceResponse {

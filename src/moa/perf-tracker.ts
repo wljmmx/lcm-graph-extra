@@ -6,13 +6,13 @@
  * 持久化：每次记录后写入 ~/.openclaw/moa-perf.json，Dashboard 服务读取。
  */
 
-import type { MoaPipelineResult, LlmCallResult } from './types.js';
+import type { MoaPipelineResult, LlmCallResult, MoaDecisionSnapshot } from './types.js';
 import { mkdirSync, existsSync } from 'node:fs';
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { recordModelOutcome, recordTokenUsage } from './learning-model.js';
+import { recordModelOutcome, recordTokenUsage, getLearningSummary } from './learning-model.js';
 
 // ============================================================================
 // 类型定义
@@ -57,6 +57,29 @@ export interface MoaRunRecord {
   mode: string;
   /** 复杂度评分 */
   complexityScore?: number;
+  // ===== v2: 决策价值指标 =====
+  /** 任务类型（code-review/architecture/security 等） */
+  task?: string;
+  /** 是否触发 MoA */
+  triggered?: boolean;
+  /** 主模型能力基线 */
+  mainModelStrength?: number;
+  /** 聚合后能力 */
+  aggregateStrength?: number;
+  /** 能力差距（聚合能力 - 主模型能力） */
+  capabilityGap?: number;
+  /** 期望提升 */
+  expectedUplift?: number;
+  /** 成本摊薄系数 */
+  costPenalty?: number;
+  /** 净收益 */
+  netValue?: number;
+  /** 动态生效门槛 */
+  effectiveThreshold?: number;
+  /** 配置的基础门槛 */
+  benefitThreshold?: number;
+  /** 决策原因 */
+  decisionReasons?: string[];
 }
 
 export interface MoaModelBreakdown {
@@ -162,6 +185,45 @@ export interface MoaPerformanceSummary {
   complexityHourlyBuckets: Array<{ hour: string; avg: number; count: number; min: number; max: number }>;
   /** 按天聚合的复杂度（最近 7 天） */
   complexityDailyBuckets: Array<{ date: string; avg: number; count: number; min: number; max: number }>;
+  // ===== v2: 价值指标（能力提升 vs 成本） =====
+  /** 平均净收益（仅统计有决策数据的触发） */
+  avgNetValue: number;
+  /** 平均期望提升 */
+  avgExpectedUplift: number;
+  /** 平均能力差距 */
+  avgCapabilityGap: number;
+  /** 净收益达标率（netValue >= effectiveThreshold 的触发占比，0-1） */
+  meetTargetRate: number;
+  /** 误触发次数（触发但净收益 < 门槛） */
+  belowTargetCount: number;
+  /** 净收益历史（最近 N 次触发，用于趋势图） */
+  netValueHistory: Array<{ timestamp: number; netValue: number; threshold: number; triggered: boolean }>;
+  /** 最近一次决策详情 */
+  lastDecision?: {
+    timestamp: number;
+    triggered: boolean;
+    netValue: number;
+    effectiveThreshold: number;
+    capabilityGap: number;
+    expectedUplift: number;
+    costPenalty: number;
+    mainModelStrength: number;
+    aggregateStrength: number;
+    reasons: string[];
+  };
+  /** 按任务类型分组的价值指标 */
+  taskBreakdown: Array<{
+    task: string;
+    runCount: number;
+    avgNetValue: number;
+    meetTargetRate: number;
+    avgCapabilityGap: number;
+  }>;
+  /** 模型能力校准学习摘要（贝叶斯平滑可靠性 + 实测 token） */
+  learning: {
+    capability: Array<{ model: string; task?: string; reliability: number; total: number }>;
+    tokens: Array<{ model: string; avgInput: number; avgOutput: number; calls: number }>;
+  };
 }
 
 // ============================================================================
@@ -201,6 +263,7 @@ export function recordMoaRun(
   config: { mode: string; referenceModels: Array<{ model: string; provider?: string }>; aggregatorModel: { model: string; provider?: string } },
   complexityScore?: number,
   task?: string,
+  decision?: Partial<MoaDecisionSnapshot>,
 ): void {
   const record: MoaRunRecord = {
     id: generateId(),
@@ -224,6 +287,18 @@ export function recordMoaRun(
     error: error ?? undefined,
     mode: config.mode,
     complexityScore,
+    // v2: 决策价值指标
+    task,
+    triggered: decision?.trigger,
+    mainModelStrength: decision?.mainModelStrength,
+    aggregateStrength: decision?.aggregateStrength,
+    capabilityGap: decision?.capabilityGap,
+    expectedUplift: decision?.expectedUplift,
+    costPenalty: decision?.costPenalty,
+    netValue: decision?.netValue,
+    effectiveThreshold: decision?.effectiveThreshold,
+    benefitThreshold: decision?.benefitThreshold,
+    decisionReasons: decision?.reasons,
   };
 
   // 环形缓冲区
@@ -434,6 +509,68 @@ export function getMoaPerformance(): MoaPerformanceSummary {
   // 降级回退次数：MoA 触发但最终没有结果（失败）
   const fallbackCount = failedRecords.length;
 
+  // ===== v2: 价值指标（能力提升 vs 成本） =====
+  // 净收益历史：所有带决策数据的记录（触发与未触发都保留，便于观察趋势）
+  const netValueHistory = runRecords
+    .filter((r) => r.netValue !== undefined)
+    .slice(-30)
+    .map((r) => ({
+      timestamp: r.timestamp,
+      netValue: r.netValue!,
+      threshold: r.effectiveThreshold ?? r.benefitThreshold ?? 0,
+      triggered: !!r.triggered,
+    }));
+
+  // 触发且有净收益数据的记录（能力提升评价的对象）
+  const decisionRecords = runRecords.filter((r) => r.netValue !== undefined && r.triggered);
+  const avgNetValue = decisionRecords.length > 0
+    ? round3(decisionRecords.reduce((s, r) => s + r.netValue!, 0) / decisionRecords.length)
+    : 0;
+  const avgExpectedUplift = decisionRecords.length > 0
+    ? round3(decisionRecords.reduce((s, r) => s + (r.expectedUplift ?? 0), 0) / decisionRecords.length)
+    : 0;
+  const avgCapabilityGap = decisionRecords.length > 0
+    ? round3(decisionRecords.reduce((s, r) => s + (r.capabilityGap ?? 0), 0) / decisionRecords.length)
+    : 0;
+  // 达标率：净收益 >= 门槛 的触发占比
+  const belowTargetRecords = decisionRecords.filter((r) => r.netValue! < (r.effectiveThreshold ?? r.benefitThreshold ?? 0));
+  const meetTargetRate = decisionRecords.length > 0
+    ? round3((decisionRecords.length - belowTargetRecords.length) / decisionRecords.length)
+    : 0;
+
+  // 最近一次决策详情
+  const lastDecisionRecord = [...runRecords].reverse().find((r) => r.netValue !== undefined);
+  const lastDecision = lastDecisionRecord ? {
+    timestamp: lastDecisionRecord.timestamp,
+    triggered: !!lastDecisionRecord.triggered,
+    netValue: lastDecisionRecord.netValue!,
+    effectiveThreshold: lastDecisionRecord.effectiveThreshold ?? lastDecisionRecord.benefitThreshold ?? 0,
+    capabilityGap: lastDecisionRecord.capabilityGap ?? 0,
+    expectedUplift: lastDecisionRecord.expectedUplift ?? 0,
+    costPenalty: lastDecisionRecord.costPenalty ?? 0,
+    mainModelStrength: lastDecisionRecord.mainModelStrength ?? 0,
+    aggregateStrength: lastDecisionRecord.aggregateStrength ?? 0,
+    reasons: lastDecisionRecord.decisionReasons ?? [],
+  } : undefined;
+
+  // 按任务类型分组的价值指标
+  const taskMap = new Map<string, Array<MoaRunRecord>>();
+  for (const r of decisionRecords) {
+    const key = r.task ?? 'default';
+    if (!taskMap.has(key)) taskMap.set(key, []);
+    taskMap.get(key)!.push(r);
+  }
+  const taskBreakdown = [...taskMap.entries()].map(([task, recs]) => {
+    const below = recs.filter((r) => r.netValue! < (r.effectiveThreshold ?? r.benefitThreshold ?? 0)).length;
+    return {
+      task,
+      runCount: recs.length,
+      avgNetValue: round3(recs.reduce((s, r) => s + r.netValue!, 0) / recs.length),
+      meetTargetRate: round3((recs.length - below) / recs.length),
+      avgCapabilityGap: round3(recs.reduce((s, r) => s + (r.capabilityGap ?? 0), 0) / recs.length),
+    };
+  });
+
   const result = {
     totalRuns: runRecords.length,
     successRuns: successRecords.length,
@@ -463,6 +600,15 @@ export function getMoaPerformance(): MoaPerformanceSummary {
     allComplexityHistory,
     complexityHourlyBuckets,
     complexityDailyBuckets,
+    avgNetValue,
+    avgExpectedUplift,
+    avgCapabilityGap,
+    meetTargetRate,
+    belowTargetCount: belowTargetRecords.length,
+    netValueHistory,
+    lastDecision,
+    taskBreakdown,
+    learning: getLearningSummary(),
   };
 
   performanceCache = { timestamp: Date.now(), data: result };
@@ -602,7 +748,9 @@ function classifyError(error?: string): string {
 // ============================================================================
 
 const PERF_FILE = join(homedir(), '.openclaw', 'moa-perf.json');
-const PERF_FILE_VERSION = 1;
+// v1: 初始格式，无价值指标
+// v2: 新增决策价值指标（netValue/mainModelStrength/...）
+const PERF_FILE_VERSION = 2;
 
 let lastPersistTime = 0;
 const PERSIST_THROTTLE_MS = 5_000;
@@ -675,7 +823,8 @@ async function loadFromDisk(): Promise<void> {
     const parsed = JSON.parse(raw) as Partial<PersistedPerfFile>;
 
     // 兼容性：旧格式仅写入 MoaPerformanceSummary（无 version / runRecords 字段）
-    if (typeof parsed.version !== 'number' || parsed.version !== PERF_FILE_VERSION) {
+    // v1 与 v2 均接受（v2 新增决策价值字段，可选，向后兼容）；其余版本跳过
+    if (typeof parsed.version !== 'number' || (parsed.version !== 1 && parsed.version !== PERF_FILE_VERSION)) {
       return;
     }
 
@@ -716,6 +865,11 @@ function generateId(): string {
 function avg(arr: number[]): number {
   if (arr.length === 0) return 0;
   return Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+}
+
+/** 保留 3 位小数的取整工具（用于净收益/能力等 0-1 浮点指标） */
+function round3(n: number): number {
+  return Math.round(n * 1000) / 1000;
 }
 
 function percentiles(arr: number[]): { p50: number; p90: number; p95: number; p99: number } {

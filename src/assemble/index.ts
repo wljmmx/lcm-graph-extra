@@ -993,6 +993,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     let classificationContext = '';
     // MoA 收益基准决策结果（在复杂度评估阶段计算，供触发判断与日志使用）
     let moaDecision: import('../moa/complexity.js').MoaDecision | undefined;
+    // 自动分类出的任务类型（供 domainFit 计算与按任务维度记录）
+    let moaTask: string | undefined;
 
     try {
       const moaConfig = (ctx.api?.pluginConfig as any)?.moa;
@@ -1060,7 +1062,6 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       // 注意：自动分类不覆盖模型选择，仅补充领域上下文帮助参考模型聚焦分析方向；
       // 分类结果同时用于收益基准决策的 domainFit（任务适配度）
       classificationContext = '';
-      let moaTask: string | undefined;
       if (!moaPresetOverride && moaConfig?.enabled) {
         try {
           const { classifyTaskType } = await import('../moa/classifier.js');
@@ -1233,6 +1234,19 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               logger: ctx.logger,
               signal,
               complexityScore,
+              decision: moaDecision ? {
+                trigger: moaDecision.trigger,
+                mainModelStrength: moaDecision.mainModelStrength,
+                aggregateStrength: moaDecision.aggregateStrength,
+                capabilityGap: moaDecision.capabilityGap,
+                expectedUplift: moaDecision.expectedUplift,
+                costPenalty: moaDecision.costPenalty,
+                netValue: moaDecision.netValue,
+                effectiveThreshold: moaDecision.effectiveThreshold,
+                benefitThreshold: moaConfig?.benefitThreshold ?? 0.10,
+                reasons: moaDecision.reasons,
+              } : undefined,
+              task: moaTask,
               classificationContext,
             }, moaSessionKey, moaConfig.syncBudgetMs ?? 240_000);
 

@@ -161,8 +161,39 @@ export interface MoaPipelineContext {
   signal?: AbortSignal;
   /** 任务复杂度评分（供性能追踪器记录） */
   complexityScore?: number;
+  /** v2: MoA 触发决策快照（供性能追踪器记录能力提升与净收益） */
+  decision?: MoaDecisionSnapshot;
+  /** v2: 任务类型（code-review/architecture/security 等），供按任务维度分析 */
+  task?: string;
   /** 自动分类后的领域上下文补充说明（注入各参考模型 system prompt，不覆盖模型选择） */
   classificationContext?: string;
+}
+
+/**
+ * v2: MoA 决策快照 —— 记录 decideMoa 的"能力提升/净收益"价值指标，
+ * 从决策层透传到性能追踪器，供 dashboard 展示 MoA 是否物有所值。
+ */
+export interface MoaDecisionSnapshot {
+  /** 是否触发 MoA */
+  trigger: boolean;
+  /** 主模型能力基线（0-1） */
+  mainModelStrength: number;
+  /** 聚合后能力（0-1） */
+  aggregateStrength: number;
+  /** 能力差距（聚合能力 - 主模型能力） */
+  capabilityGap: number;
+  /** 期望提升（原始增值） */
+  expectedUplift: number;
+  /** 成本摊薄系数（0-1，越大成本越低） */
+  costPenalty: number;
+  /** 净收益 = 期望提升 × 成本摊薄 */
+  netValue: number;
+  /** 动态生效门槛 */
+  effectiveThreshold: number;
+  /** 配置的基础净收益门槛 */
+  benefitThreshold: number;
+  /** 决策原因 */
+  reasons?: string[];
 }
 
 /** LLM 调用结果 */

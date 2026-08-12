@@ -48,6 +48,16 @@ const moaPerf = computed(() => {
     modelBreakdown: d.modelBreakdown ?? [],
     errorBreakdown: d.errorBreakdown ?? {},
     recentRuns: d.recentRuns ?? [],
+    // v2: 价值指标默认值
+    avgNetValue: d.avgNetValue ?? 0,
+    avgExpectedUplift: d.avgExpectedUplift ?? 0,
+    avgCapabilityGap: d.avgCapabilityGap ?? 0,
+    meetTargetRate: d.meetTargetRate ?? 0,
+    belowTargetCount: d.belowTargetCount ?? 0,
+    netValueHistory: d.netValueHistory ?? [],
+    lastDecision: d.lastDecision ?? null,
+    taskBreakdown: d.taskBreakdown ?? [],
+    learning: d.learning ?? { capability: [], tokens: [] },
   };
 });
 
@@ -507,6 +517,75 @@ const moaRunsColumns = computed(() => [
   { title: '聚合', key: 'aggMs', width: 100, render: (row: any) => h('span', { class: 'mono' }, formatMs(row.aggMs)) },
   { title: 'Tokens', key: 'totalTokens', width: 80, render: (row: any) => h('span', { class: 'mono' }, formatTokens(row.totalTokens)) },
 ]);
+
+// ── v2: 价值指标（能力提升 vs 成本）──
+const moaMeetTargetRateType = computed(() => {
+  const r = moaPerf.value.meetTargetRate * 100;
+  return r >= 90 ? 'success' : r >= 70 ? 'warning' : 'error';
+});
+
+// 净收益趋势图（净收益 vs 动态门槛线，误触发标红）
+const moaNetValueTrendOption = computed(() => {
+  const history = moaPerf.value.netValueHistory;
+  if (!history || history.length === 0) return {};
+  const times = history.map((h) => formatTimeHMS(h.timestamp));
+  const netValues = history.map((h) => h.netValue);
+  const thresholds = history.map((h) => h.threshold);
+  return {
+    title: undefined,
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const list = Array.isArray(params) ? params : [params];
+        const i = list[0]?.dataIndex ?? 0;
+        const rec = history[i];
+        const lines = list.map((p: any) => `${p.marker}${p.seriesName}: ${Number(p.value).toFixed(3)}`);
+        return `${formatTimeHMS(rec.timestamp)}<br/>${lines.join('<br/>')}<br/>触发: ${rec.triggered ? '是' : '否'}`;
+      },
+    },
+    legend: { data: ['净收益', '生效门槛'], top: 0, right: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 40, right: 16, bottom: 24, top: 28, containLabel: true },
+    xAxis: { type: 'category', data: times, axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'value', name: '净收益', axisLabel: { formatter: (v: number) => v.toFixed(2) } },
+    series: [
+      {
+        name: '净收益',
+        type: 'line',
+        data: netValues,
+        smooth: true,
+        symbolSize: 7,
+        itemStyle: {
+          color: (p: any) => {
+            const rec = history[p.dataIndex];
+            return rec.triggered && rec.netValue < rec.threshold ? CHART.value.danger : CHART.value.primary;
+          },
+        },
+      },
+      { name: '生效门槛', type: 'line', data: thresholds, lineStyle: { type: 'dashed', color: CHART.value.warning }, symbol: 'none' },
+    ],
+  };
+});
+
+const moaHasValueData = computed(() => moaPerf.value.netValueHistory.length > 0);
+
+// ── 模式分布（parallel/serial 等）──
+const moaModeDistribution = computed(() => {
+  const map: Record<string, number> = {};
+  for (const r of moaPerf.value.recentRuns) {
+    if (r.mode) map[r.mode] = (map[r.mode] ?? 0) + 1;
+  }
+  return Object.entries(map).sort((a, b) => b[1] - a[1]);
+});
+
+// ── 学习校准：capability 可靠性 / tokens ──
+const moaCalibratedModels = computed(() => {
+  const cap = moaPerf.value.learning.capability ?? [];
+  return cap
+    .filter((c) => c.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 12);
+});
+const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
 </script>
 
 <template>
@@ -570,6 +649,167 @@ const moaRunsColumns = computed(() => [
         </NGi>
         <NGi>
           <KpiCard label="平均响应" :value="moaPerf.avgResponseLen" unit="字符" />
+        </NGi>
+      </NGrid>
+
+      <!-- KPI 概览行 3：MoA 价值指标（能力提升 vs 成本） -->
+      <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+        <NGi>
+          <KpiCard label="净收益达标率" :value="moaPerf.meetTargetRate * 100" unit="%" :threshold="90">
+            <template #detail>
+              <span class="muted">达标次数 {{ (moaPerf.netValueHistory || []).filter((h: any) => h.netValue >= h.threshold).length }} / {{ (moaPerf.netValueHistory || []).length }}</span>
+            </template>
+          </KpiCard>
+        </NGi>
+        <NGi>
+          <KpiCard label="平均净收益" :value="moaPerf.avgNetValue">
+            <template #detail>
+              <span class="muted">生效门槛 {{ moaPerf.lastDecision?.effectiveThreshold ?? 0 }}</span>
+            </template>
+          </KpiCard>
+        </NGi>
+        <NGi>
+          <KpiCard label="平均能力提升" :value="moaPerf.avgExpectedUplift">
+            <template #detail>
+              <span class="muted">期望提升 ≥ {{ moaPerf.lastDecision?.benefitThreshold ?? 0.10 }}</span>
+            </template>
+          </KpiCard>
+        </NGi>
+        <NGi>
+          <KpiCard label="平均能力差距" :value="moaPerf.avgCapabilityGap">
+            <template #detail>
+              <NTag v-if="moaPerf.belowTargetCount > 0" size="tiny" type="warning">{{ moaPerf.belowTargetCount }} 次未达标</NTag>
+              <span v-else class="muted">主模型 vs 聚合后</span>
+            </template>
+          </KpiCard>
+        </NGi>
+      </NGrid>
+
+      <!-- 净收益趋势 + 最近决策 -->
+      <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+        <NGi>
+          <NCard title="净收益趋势（能力提升 − 成本惩罚）" size="small" :bordered="true">
+            <template #header-extra>
+              <span class="muted" style="font-size: var(--fs-caption)">红点为误触发（净收益低于门槛）</span>
+            </template>
+            <template v-if="moaHasValueData">
+              <EChart :option="moaNetValueTrendOption" height="260px" :skip-theme="true" aria-label="MoA 净收益趋势图：每次触发的净收益与生效门槛对比" />
+            </template>
+            <NEmpty v-else description="暂无价值决策数据，启用 MoA 后自动收集" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+        <NGi>
+          <NCard title="最近一次 MoA 决策" size="small" :bordered="true">
+            <template v-if="moaPerf.lastDecision">
+              <NDescriptions :column="2" size="small" label-placement="left" bordered>
+                <NDescriptionsItem label="触发时机">
+                  <NTag size="tiny" :type="moaPerf.lastDecision.triggered ? 'success' : 'default'">{{ moaPerf.lastDecision.triggered ? '已触发' : '未触发' }}</NTag>
+                </NDescriptionsItem>
+                <NDescriptionsItem label="时间">{{ formatTimeHMS(moaPerf.lastDecision.timestamp) }}</NDescriptionsItem>
+                <NDescriptionsItem label="主模型能力">{{ moaPerf.lastDecision.mainModelStrength?.toFixed(3) }}</NDescriptionsItem>
+                <NDescriptionsItem label="聚合后能力">{{ moaPerf.lastDecision.aggregateStrength?.toFixed(3) }}</NDescriptionsItem>
+                <NDescriptionsItem label="能力差距">{{ moaPerf.lastDecision.capabilityGap?.toFixed(3) }}</NDescriptionsItem>
+                <NDescriptionsItem label="期望提升">{{ moaPerf.lastDecision.expectedUplift?.toFixed(3) }}</NDescriptionsItem>
+                <NDescriptionsItem label="成本惩罚">{{ moaPerf.lastDecision.costPenalty?.toFixed(3) }}</NDescriptionsItem>
+                <NDescriptionsItem label="净收益">
+                  <NTag size="tiny" :type="moaPerf.lastDecision.netValue >= moaPerf.lastDecision.effectiveThreshold ? 'success' : 'error'">{{ moaPerf.lastDecision.netValue?.toFixed(3) }}</NTag>
+                </NDescriptionsItem>
+                <NDescriptionsItem v-if="moaPerf.lastDecision.reasons && moaPerf.lastDecision.reasons.length" label="决策原因" :span="2">
+                  <div class="reason-list">
+                    <NTag v-for="(r, i) in moaPerf.lastDecision.reasons" :key="i" size="tiny" type="info">{{ r }}</NTag>
+                  </div>
+                </NDescriptionsItem>
+              </NDescriptions>
+            </template>
+            <NEmpty v-else description="暂无决策记录" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+      </NGrid>
+
+      <!-- 任务类型维度价值指标 -->
+      <NCard title="任务类型净收益维度" size="small" style="margin-bottom: 16px">
+        <template v-if="moaPerf.taskBreakdown.length > 0">
+          <div class="model-table-wrap">
+            <table class="model-table">
+              <thead>
+                <tr>
+                  <th>任务类型</th>
+                  <th>运行次数</th>
+                  <th>平均能力差距</th>
+                  <th>平均净收益</th>
+                  <th>达标率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="t in moaPerf.taskBreakdown" :key="t.task">
+                  <td>{{ t.task || '未分类' }}</td>
+                  <td class="num">{{ t.runCount }}</td>
+                  <td class="num">{{ t.avgCapabilityGap.toFixed(3) }}</td>
+                  <td class="num">{{ t.avgNetValue.toFixed(3) }}</td>
+                  <td class="num">
+                    <NTag size="tiny" :type="t.meetTargetRate >= 0.9 ? 'success' : t.meetTargetRate >= 0.7 ? 'warning' : 'error'">
+                      {{ (t.meetTargetRate * 100).toFixed(0) }}%
+                    </NTag>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <NEmpty v-else description="暂无任务类型数据" style="padding: 12px 0" />
+      </NCard>
+
+      <!-- 模式分布 + 学习校准 -->
+      <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+        <NGi>
+          <NCard title="调度模式分布" size="small" :bordered="true">
+            <template v-if="moaModeDistribution.length > 0">
+              <div class="error-list">
+                <div v-for="[mode, count] in moaModeDistribution" :key="mode" class="error-item">
+                  <NTag size="small" :type="mode === 'parallel' ? 'info' : 'default'">{{ mode }}</NTag>
+                  <span class="error-count">{{ count }} 次</span>
+                  <div class="error-bar-track">
+                    <div class="error-bar-fill" :style="{ width: moaPerf.recentRuns.length > 0 ? ((count / moaPerf.recentRuns.length) * 100).toFixed(0) + '%' : '0%' }" />
+                  </div>
+                </div>
+              </div>
+            </template>
+            <NEmpty v-else description="暂无模式数据" style="padding: 12px 0" />
+          </NCard>
+        </NGi>
+        <NGi>
+          <NCard title="模型能力校准（贝叶斯可靠性）" size="small" :bordered="true">
+            <template #header-extra>
+              <span class="muted" style="font-size: var(--fs-caption)">随使用自动更新</span>
+            </template>
+            <template v-if="moaHasCalibration">
+              <div class="model-table-wrap">
+                <table class="model-table">
+                  <thead>
+                    <tr>
+                      <th>模型</th>
+                      <th>任务</th>
+                      <th>可靠性</th>
+                      <th>样本</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="c in moaCalibratedModels" :key="c.model + '::' + (c.task ?? '')">
+                      <td class="mono model-name-cell">{{ c.model }}</td>
+                      <td>{{ c.task || '—' }}</td>
+                      <td class="num">
+                        <NTag size="tiny" :type="c.reliability >= 0.8 ? 'success' : c.reliability >= 0.5 ? 'warning' : 'error'">
+                          {{ (c.reliability * 100).toFixed(0) }}%
+                        </NTag>
+                      </td>
+                      <td class="num">{{ c.total }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+            <NEmpty v-else description="暂无学习样本，使用后自动校准" style="padding: 12px 0" />
+          </NCard>
         </NGi>
       </NGrid>
 
@@ -815,6 +1055,11 @@ const moaRunsColumns = computed(() => [
 }
 .num {
   font-variant-numeric: tabular-nums;
+}
+.reason-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 .error-list {
   display: flex;

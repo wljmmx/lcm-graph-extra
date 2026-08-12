@@ -25,6 +25,7 @@ import {
   type AggregatorModelConfig,
   type LlmCallResult,
   type MoaPreset,
+  type MoaDecisionSnapshot,
 } from './types.js';
 import { recordMoaRun } from './perf-tracker.js';
 
@@ -231,6 +232,10 @@ interface MoaRefCacheEntry {
   mode: 'auto' | 'parallel' | 'serial';
   /** 复杂度评分 */
   complexityScore?: number;
+  /** v2: 决策快照（能力提升/净收益），供性能追踪器记录 */
+  decision?: MoaDecisionSnapshot;
+  /** 任务类型 */
+  task?: string;
   /** 创建时间 */
   createdAt: number;
 }
@@ -631,7 +636,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
-    }, complexityScore);
+    }, complexityScore, ctx.task, ctx.decision);
     return null;
   }
 
@@ -651,7 +656,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
-    }, complexityScore);
+    }, complexityScore, ctx.task, ctx.decision);
     return null;
   }
 
@@ -677,7 +682,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
-    }, complexityScore);
+    }, complexityScore, ctx.task, ctx.decision);
     return null;
   }
 
@@ -711,7 +716,7 @@ export async function runMoaPipeline(ctx: MoaPipelineContext): Promise<MoaPipeli
     mode: effectiveMode,
     referenceModels: effectiveRefModels,
     aggregatorModel: effectiveAggModel,
-  }, complexityScore);
+  }, complexityScore, ctx.task, ctx.decision);
 
   logger?.info?.('[moa] Pipeline completed', {
     totalMs,
@@ -818,7 +823,7 @@ export async function runMoaRefsSync(
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
-    }, ctx.complexityScore);
+    }, ctx.complexityScore, ctx.task, ctx.decision);
     return { completed: false, sessionKey, error: errMsg };
   }
 
@@ -832,7 +837,7 @@ export async function runMoaRefsSync(
       mode: effectiveMode,
       referenceModels: effectiveRefModels,
       aggregatorModel: effectiveAggModel,
-    }, ctx.complexityScore);
+    }, ctx.complexityScore, ctx.task, ctx.decision);
     return { completed: false, sessionKey, error: 'All reference models failed' };
   }
 
@@ -866,6 +871,8 @@ export async function runMoaRefsSync(
     aggregatorModel: effectiveAggModel,
     mode: effectiveMode,
     complexityScore: ctx.complexityScore,
+    decision: ctx.decision,
+    task: ctx.task,
     createdAt: now,
   });
 
@@ -967,7 +974,7 @@ ${refSections}
         mode: entry.mode,
         referenceModels: [], // 参考模型详情在 ref cache 中
         aggregatorModel: entry.aggregatorModel,
-      }, entry.complexityScore);
+      }, entry.complexityScore, entry.task, entry.decision);
       moaRefCache.delete(sessionKey);
       return;
     }
@@ -997,7 +1004,7 @@ ${refSections}
       mode: entry.mode,
       referenceModels: entry.refModels.map((m) => ({ model: m })),
       aggregatorModel: entry.aggregatorModel,
-    }, entry.complexityScore);
+    }, entry.complexityScore, entry.task, entry.decision);
 
     logger?.debug?.('[moa] Aggregator async completed', {
       sessionKey,
