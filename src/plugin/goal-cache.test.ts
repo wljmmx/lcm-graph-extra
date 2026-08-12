@@ -19,6 +19,8 @@ import {
   buildGoalAnchor,
   evictStaleGoalCache,
   clearGoalCache,
+  extractTaskEntities,
+  hasTaskTargetSwitch,
 } from './goal-cache.js';
 
 const TEST_SESSION = 'test-session-goal-cache';
@@ -380,6 +382,70 @@ describe('shouldUpdateGoal', () => {
       seedCache(TEST_SESSION, '写一个排序算法');
       // "啥？" → 长度<5(-3), 引用前文不匹配, 续问不匹配, 疑问词+≥6不满足 → -3
       expect(shouldUpdateGoal('啥？', TEST_SESSION)).toBe(false);
+    });
+  });
+
+  // ==========================================================================
+  // v2.7.1 目标实体强切换
+  // ==========================================================================
+  describe('目标实体强切换（v2.7.1）', () => {
+    it('模板化句式 + 替换目标插件名 → 强制切换为新任务', () => {
+      seedCache(TEST_SESSION,
+        '请根据graph-memory-pro最新参数配置建议，修改openclaw.json里面已经配置的参数\n必须加：recall 块\n建议改：pagerankIterations 15→20');
+      // 与旧目标句式几乎一致，仅目标插件名由 graph-memory-pro 换成 lcm-graph-extra
+      // 目标实体被替换 → 强制切换，避免旧目标锚点继续把 LLM 钉在上一个任务
+      expect(shouldUpdateGoal(
+        '请根据lcm-graph-extra最新参数配置建议，修改openclaw.json里面已经配置的参数',
+        TEST_SESSION,
+      )).toBe(true);
+    });
+
+    it('目标实体完全一致（同一插件继续）→ 不强制切换', () => {
+      // 同一插件 graph-memory-pro，仅为措辞补充 → 实体未被替换，实体规则不强制切换
+      expect(hasTaskTargetSwitch(
+        '请根据graph-memory-pro最新参数配置建议，修改openclaw.json',
+        '请根据graph-memory-pro最新参数配置建议，补充修改openclaw.json',
+      )).toBe(false);
+    });
+
+    it('仅新增实体（补充另一个文件）→ 不强制切换', () => {
+      seedCache(TEST_SESSION, '请根据graph-memory-pro建议修改openclaw.json');
+      // 新目标保留了旧实体，仅新增 openclaw.plugin.json → 非替换，不切换
+      expect(hasTaskTargetSwitch(
+        '请根据graph-memory-pro建议修改openclaw.json',
+        '请根据graph-memory-pro建议修改openclaw.json和openclaw.plugin.json',
+      )).toBe(false);
+    });
+  });
+
+  // ==========================================================================
+  // extractTaskEntities / hasTaskTargetSwitch
+  // ==========================================================================
+  describe('extractTaskEntities / hasTaskTargetSwitch', () => {
+    it('从中英混排中提取结构化命名实体', () => {
+      expect(extractTaskEntities('请根据graph-memory-pro最新参数配置建议，修改openclaw.json'))
+        .toEqual(expect.arrayContaining(['graph-memory-pro', 'openclaw.json']));
+    });
+
+    it('提取纯拉丁命名（命令名/模型名）', () => {
+      expect(extractTaskEntities('建议改pagerankIterations 15→20'))
+        .toContain('pagerankiterations');
+    });
+
+    it('无结构化命名 → 无实体', () => {
+      expect(extractTaskEntities('写一个排序算法')).toEqual([]);
+    });
+
+    it('替换式差异 → 判定为切换', () => {
+      expect(hasTaskTargetSwitch(
+        '请根据graph-memory-pro修改openclaw.json',
+        '请根据lcm-graph-extra修改openclaw.json',
+      )).toBe(true);
+    });
+
+    it('任一目标无实体 → 不判定切换', () => {
+      expect(hasTaskTargetSwitch('写一个排序算法', '请根据lcm-graph-extra修改')).toBe(false);
+      expect(hasTaskTargetSwitch('', '请根据lcm-graph-extra修改')).toBe(false);
     });
   });
 });

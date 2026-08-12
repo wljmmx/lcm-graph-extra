@@ -138,6 +138,71 @@ export function getGoal(sessionKey: string): string {
 }
 
 /**
+ * v2.7.1 T-S: 爆破中英混排，把粘连的中文与"结构化命名"（插件名/文件名/命令名）拆开。
+ *
+ * 原 extractFreeTags 仅按标点/空格切词，导致 "graph-memory-pro最新参数配置建议"
+ * 被当成一个整 token，无法把目标实体（graph-memory-pro）从措辞里独立出来。
+ * 这里在中文字符与相邻拉丁/数字字符之间插入空格，使结构化命名成为独立 token。
+ *
+ * @example splitHybrid('请根据graph-memory-pro最新参数配置建议')
+ *   → ['请根据', 'graph-memory-pro', '最新参数配置建议']
+ */
+function splitHybrid(text: string): string[] {
+  const spaced = text
+    .replace(/([\u4e00-\u9fff])([A-Za-z0-9])/g, '$1 $2')
+    .replace(/([A-Za-z0-9])([\u4e00-\u9fff])/g, '$1 $2');
+  return spaced.split(/\s+/).filter((t) => t.length > 0);
+}
+
+/**
+ * v2.7.1 T-S: 提取目标实体（任务的强语义载体）。
+ *
+ * 目标实体 = 结构化命名 token（含 `-`/`.`/`_`/`/`，或纯字母数字长度>=4 且非纯数字），
+ * 例如插件名 graph-memory-pro、lcm-graph-extra，文件名 openclaw.json，命令名 pagerankIterations。
+ * 这些是"目标名词"最可靠的载体，用于区分"换了个新目标"和"同一目标换个措辞"。
+ */
+export function extractTaskEntities(text: string): string[] {
+  if (!text) return [];
+  const entities = new Set<string>();
+  for (const t of splitHybrid(text)) {
+    const lower = t.toLowerCase();
+    if (!lower) continue;
+    const isStructural = /[._\-/]/.test(lower);
+    const isNameLike = /^[a-z0-9]{4,}$/.test(lower) && !/^\d+$/.test(lower);
+    if (isStructural || isNameLike) {
+      entities.add(lower);
+    }
+  }
+  return [...entities];
+}
+
+/**
+ * v2.7.1 T-S: 判断是否发生了"目标实体替换"（真正的任务切换）。
+ *
+ * 相比信号评分模型（把高措辞相似度当作"续问"），这里用目标实体做强信号：
+ * 当新目标引入了旧目标没有的实体，且旧目标也有被换掉的实体（替换而非补充），
+ * 即便措辞高度相似（模板化续问句式），也判定为切换到了新任务。
+ *
+ * 规则：
+ * - 无实体信息（任一侧为空）→ 无法判断，返回 false，交由信号评分模型处理。
+ * - 目标实体被"替换"（新有且旧无 + 旧有且新无）→ 判定为切换。
+ * - 仅新增实体（如补充另一个文件）→ 不强制切换，避免误把"同一任务补充"当新任务。
+ */
+export function hasTaskTargetSwitch(oldGoal: string, newGoal: string): boolean {
+  const oldEntities = extractTaskEntities(oldGoal);
+  const newEntities = extractTaskEntities(newGoal);
+  if (oldEntities.length === 0 || newEntities.length === 0) return false;
+
+  const oldSet = new Set(oldEntities);
+  const newSet = new Set(newEntities);
+  const newOnly = newEntities.filter((e) => !oldSet.has(e));
+  const oldOnly = oldEntities.filter((e) => !newSet.has(e));
+
+  // 替换：新目标引入了旧目标没有的实体，且旧目标也有被换掉的实体
+  return newOnly.length >= 1 && oldOnly.length >= 1;
+}
+
+/**
  * 判断新消息是否应该更新目标缓存。
  *
  * 设计原则：信号评分模型，多因子独立打分后阈值判定。
@@ -166,6 +231,13 @@ export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
 
   const entry = goalCache.get(sessionKey);
   if (!entry) return true; // 无现有目标，首次缓存
+
+  // v2.7.1 T-S: 目标实体强切换 —— 新目标替换了旧目标的结构化目标实体（插件名/文件名/命令名）。
+  // 即便措辞高度相似（模板化续问句式），只要目标实体被替换，就判为切换到新任务，
+  // 从而避免"旧目标锚点继续把 LLM 钉在上一个任务"。
+  if (hasTaskTargetSwitch(entry.goal, newGoal)) {
+    return true;
+  }
 
   const trimmed = newGoal.trim();
   let score = 0;
