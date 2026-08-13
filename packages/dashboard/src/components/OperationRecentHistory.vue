@@ -42,6 +42,7 @@ const TOOL_LABELS: Record<string, string> = {
   lcmg_restore: '恢复',
   lcmg_sync: '同步修复',
   lcmg_import: '历史导入',
+  gm_reembed: '重新向量化',
 };
 
 function toolLabel(tool: string): string {

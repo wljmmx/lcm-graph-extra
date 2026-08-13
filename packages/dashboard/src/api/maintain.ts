@@ -102,6 +102,28 @@ export async function invokeBootstrap(limit: number = 100): Promise<McpInvokeRes
   }
 }
 
+/**
+ * 触发 gm-pro 全节点重新向量化 / 清库重导。
+ * ⚠️ 走 gm-pro HTTP 代理（POST /api/gm-pro/proxy/reembed），非 MCP invoke。
+ * clear=true 时先清库再重导（推荐流程：clear → 导入数据 → 埋点）。
+ * v2.8.0 新增，与维护面板 dirty-nodes 卡内按钮对齐。
+ */
+export async function invokeReembed(opts: { clear?: boolean } = {}): Promise<McpInvokeResponse> {
+  try {
+    const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(
+      '/api/gm-pro/proxy/reembed',
+      opts,
+    );
+    if (resp.ok) {
+      return { ok: true, result: resp.data };
+    }
+    return { ok: false, error: resp.error ?? '重新向量化失败' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `重新向量化请求失败: ${msg}` };
+  }
+}
+
 // ===== 操作日志查询（对应后端 GET /api/operation-logs，读取 ~/.openclaw/operation_logs.db） =====
 
 /**

@@ -38,6 +38,7 @@ import {
   invokeSync,
   invokeImport,
   invokeBootstrap,
+  invokeReembed,
   fetchOperationLogs,
   type OperationLogRecord,
 } from '../api/maintain';
@@ -121,6 +122,9 @@ const importSourceOptions = [
 
 // 卡片 10：Bootstrap 反馈（v2.3.5 新增）
 const bootstrapLimit = ref<number>(100);
+
+// 卡片 11：重新向量化（gm-pro，clear 开关）
+const reembedClear = ref<boolean>(false);
 
 // ===== 路径安全校验（前端轻量校验，后端 POST /api/mcp/invoke 有硬墙兜底） =====
 
@@ -466,17 +470,26 @@ function executeBootstrap(): void {
     invokeFn: () => invokeBootstrap(bootstrapLimit.value),
   });
 }
+
+function executeReembed(): void {
+  runMutation({
+    cardKey: 'reembed',
+    tool: 'gm_reembed',
+    params: { clear: reembedClear.value },
+    invokeFn: () => invokeReembed({ clear: reembedClear.value }),
+  });
+}
 </script>
 
 <template>
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">13 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">14 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- 13 张操作卡片网格（2 列响应式） -->
+      <!-- 14 张操作卡片网格（2 列响应式） -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 卡片 1: 图谱维护 -->
         <NGi>
@@ -927,6 +940,32 @@ function executeBootstrap(): void {
             </template>
             <template #extra>
               <OperationRecentHistory :logs="historyOf('gm_bootstrap')" />
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 11: 重新向量化（gm-pro，v2.8.0 新增） -->
+        <NGi>
+          <OperationCard
+            title="重新向量化"
+            description="为图谱全部节点重新生成 embedding。开启「清库重导」会先清空节点库再重向量化（clear=true），推荐流程：清库重导 → 导入数据 → 重新向量化（埋点）。消耗大量 embedding 配额。"
+            icon="refresh"
+            :danger="reembedClear"
+            :confirm-level="reembedClear ? 2 : 1"
+            :loading="!!loadingMap.reembed"
+            tool-name="gm_reembed"
+            :last-status="lastResultMap.reembed?.status ?? null"
+            :last-details="lastResultMap.reembed?.details ?? null"
+            :last-text="lastResultMap.reembed?.text ?? null"
+            @execute="executeReembed"
+          >
+            <template #form>
+              <NFormItem label="清库重导 (clear=true)" size="small" :show-feedback="false">
+                <NSwitch v-model:value="reembedClear" size="small" />
+              </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('gm_reembed')" />
             </template>
           </OperationCard>
         </NGi>
