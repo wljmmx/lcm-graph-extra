@@ -550,9 +550,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               // （recordedAt/validFrom/source/state/scores）。ON CREATE SET 只在新建时
               // 填充默认值，不覆盖备份中已存在的时序数据。
               await session.run(
+                // Neo4j 语法：ON CREATE SET 必须紧跟 MERGE pattern，再跟 SET 子句
                 "MERGE (n {id: $id}) " +
-                "SET n.name = $name, n.labels = $labels " +
-                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores " +
+                "SET n.name = $name, n.labels = $labels",
                 { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [], now: Date.now(), source: 'lcm-restore', scores: '{}' },
               );
               nCount++;
@@ -726,8 +727,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 // 对齐 gm-pro batchUpsertNodes：导入时补齐时序默认字段（ON CREATE SET 仅在新建时填充）。
                 await session.run(
                   "MERGE (n:ConversationMessage {id: $id}) " +
-                  "SET n.role = $role, n.content = $content, n.sessionId = $sid, n.tokens = $tokens " +
-                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores " +
+                  "SET n.role = $role, n.content = $content, n.sessionId = $sid, n.tokens = $tokens",
                   { ...m, now: Date.now(), source: 'lcm-import', scores: '{}' }
                 );
                 total++;
@@ -761,8 +762,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
                 await session.run(
                   "MERGE (n:MemoryFile {id: $id}) " +
-                  "SET n.name = $name, n.content = $content " +
-                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores " +
+                  "SET n.name = $name, n.content = $content",
                   { id: `file-${file}`, name: file, content, now: Date.now(), source: 'lcm-import', scores: '{}' },
                 );
                 // P1-孤立修复: 建立语义关联边 —— 从文件内容提取关键词，与图中
