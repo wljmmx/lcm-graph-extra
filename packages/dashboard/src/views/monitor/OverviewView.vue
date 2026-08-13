@@ -41,7 +41,6 @@ const {
   agentIsError,
   graphHealthIsError,
   db, memory,
-  refreshStatus,
   CHART,
 } = useMonitorData();
 
@@ -50,6 +49,16 @@ const windowWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1024
 function onResize() { windowWidth.value = window.innerWidth; }
 onMounted(() => { window.addEventListener('resize', onResize); });
 onBeforeUnmount(() => { window.removeEventListener('resize', onResize); });
+
+// ── 错误告警汇总：把分散的多个 NAlert 收敛为一条可展开的汇总告警 ──
+const errorSources = computed(() => {
+  const items: { key: string; label: string; hint: string }[] = [];
+  if (latestIsError) items.push({ key: 'latest', label: '健康指标', hint: '/api/health/latest 不可达，请检查插件 snapshot 服务（:7423）' });
+  if (agentIsError) items.push({ key: 'agent', label: 'Agent 状态', hint: '/api/agent/status 不可达' });
+  if (graphHealthIsError) items.push({ key: 'graph', label: '图谱健康', hint: '/api/graph/health 不可达' });
+  if (historyIsError) items.push({ key: 'history', label: '时序历史', hint: '/api/health/history 不可达' });
+  return items;
+});
 
 // ── 时间范围 + 统计粒度 ──
 const timeRangeOptions = [
@@ -490,9 +499,6 @@ const chartCols = '1 s:1 m:2';
     <div class="overview-header">
       <h2 style="margin: 0">性能监控总览</h2>
       <div class="header-right">
-        <NTag :type="refreshStatus.type" size="small" :bordered="false">
-          {{ refreshStatus.label }}
-        </NTag>
         <span class="last-updated">最近更新: {{ lastUpdated }}</span>
       </div>
     </div>
@@ -523,18 +529,20 @@ const chartCols = '1 s:1 m:2';
       </span>
     </div>
 
-    <!-- 错误告警 -->
-    <NAlert v-if="latestIsError" type="error" :show-icon="true" title="健康指标加载失败" style="margin-top: 12px">
-      后端 /api/health/latest 不可达或返回错误。请检查插件 snapshot 服务（:7423）是否运行。
-    </NAlert>
-    <NAlert v-else-if="agentIsError" type="error" :show-icon="true" title="Agent 状态加载失败" style="margin-top: 12px">
-      后端 /api/agent/status 不可达。
-    </NAlert>
-    <NAlert v-else-if="graphHealthIsError" type="error" :show-icon="true" title="图谱健康加载失败" style="margin-top: 12px">
-      后端 /api/graph/health 不可达。
-    </NAlert>
-    <NAlert v-else-if="historyIsError" type="error" :show-icon="true" title="时序图历史加载失败" style="margin-top: 12px">
-      后端 /api/health/history 不可达。
+    <!-- 错误告警（收敛为单条汇总，逐项列明失败来源） -->
+    <NAlert
+      v-if="errorSources.length"
+      type="error"
+      :show-icon="true"
+      title="部分数据源加载失败"
+      style="margin-top: 12px"
+    >
+      <div class="alert-summary-list">
+        <div v-for="e in errorSources" :key="e.key" class="alert-summary-item">
+          <span class="alert-summary-label">{{ e.label }}</span>
+          <span class="alert-summary-hint">{{ e.hint }}</span>
+        </div>
+      </div>
     </NAlert>
     <NAlert v-if="latestLoading && !latestData" type="info" :show-icon="true" title="正在加载最新健康指标…" style="margin-top: 12px" />
 
@@ -654,10 +662,6 @@ const chartCols = '1 s:1 m:2';
         </NCard>
       </NGi>
     </NGrid>
-
-    <div style="margin-top: 4px; font-size: var(--fs-caption); color: var(--color-text-muted);">
-      最近更新: {{ lastUpdated || '—' }}
-    </div>
   </div>
 </template>
 
@@ -677,6 +681,23 @@ const chartCols = '1 s:1 m:2';
 }
 .last-updated {
   font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+}
+.alert-summary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.alert-summary-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.alert-summary-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.alert-summary-hint {
   color: var(--color-text-secondary);
 }
 .chart-loading {

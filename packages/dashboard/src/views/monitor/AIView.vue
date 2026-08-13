@@ -4,12 +4,13 @@
  */
 import { ref } from 'vue';
 import { useQueryClient } from '@tanstack/vue-query';
-import { NGrid, NGi, NTag, useMessage } from 'naive-ui';
+import { NGrid, NGi, useMessage } from 'naive-ui';
 import { useMonitorData } from '../../composables/useMonitorData';
 import { postGmProAssociationMatrixSave, postGmProAssociationMatrixLoad } from '../../api/gm-pro';
 import AutoTunerCard from '../../components/monitor/AutoTunerCard.vue';
 import DoctorCard from '../../components/monitor/DoctorCard.vue';
-import AssociationMatrixCard from '../../components/monitor/AssociationMatrixCard.vue';
+import AssociationMatrixStateCard from '../../components/monitor/AssociationMatrixStateCard.vue';
+import AssociationMatrixHeatmapCard from '../../components/monitor/AssociationMatrixHeatmapCard.vue';
 
 const {
   gmProTuner,
@@ -21,7 +22,6 @@ const {
   gmProAm,
   gmProAmLoading,
   gmProAmIsError,
-  refreshStatus,
 } = useMonitorData();
 
 // 关联矩阵 M 持久化操作（save / load）
@@ -68,7 +68,6 @@ async function handleAmLoad(): Promise<void> {
   <div class="view">
     <div class="view-header">
       <h2 class="view-title">智能引擎</h2>
-      <NTag :type="refreshStatus.type" size="small" :bordered="false">{{ refreshStatus.label }}</NTag>
     </div>
 
     <NGrid :cols="'1 s:1 m:2 l:3'" :x-gap="12" :y-gap="12" responsive="screen">
@@ -87,13 +86,24 @@ async function handleAmLoad(): Promise<void> {
         />
       </NGi>
       <NGi>
-        <AssociationMatrixCard
+        <AssociationMatrixStateCard
           :am="gmProAm"
           :loading="gmProAmLoading"
           :is-error="gmProAmIsError"
           :acting="amActing"
           @save="handleAmSave"
           @load="handleAmLoad"
+          @retry="queryClient.invalidateQueries({ queryKey: ['gm-pro-association-matrix'] })"
+        />
+      </NGi>
+    </NGrid>
+
+    <NGrid :cols="1" :x-gap="12" :y-gap="12" responsive="screen" style="margin-top: 12px">
+      <NGi>
+        <AssociationMatrixHeatmapCard
+          :am="gmProAm"
+          :loading="gmProAmLoading"
+          :is-error="gmProAmIsError"
           @retry="queryClient.invalidateQueries({ queryKey: ['gm-pro-association-matrix'] })"
         />
       </NGi>

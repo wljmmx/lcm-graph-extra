@@ -39,21 +39,24 @@ const extraFields = computed(() => {
       >
         {{ agent.error }}
       </NAlert>
-      <NDescriptions
-        v-if="extraFields.length"
-        :column="1"
-        size="small"
-        label-placement="left"
-        bordered
-      >
-        <NDescriptionsItem
-          v-for="f in extraFields"
-          :key="f.key"
-          :label="f.key"
+      <details v-if="extraFields.length" class="agent-diag">
+        <summary>详细字段（{{ extraFields.length }} · 诊断）</summary>
+        <NDescriptions
+          :column="1"
+          size="small"
+          label-placement="left"
+          bordered
+          style="margin-top:6px"
         >
-          <span class="mono">{{ f.value }}</span>
-        </NDescriptionsItem>
-      </NDescriptions>
+          <NDescriptionsItem
+            v-for="f in extraFields"
+            :key="f.key"
+            :label="f.key"
+          >
+            <span class="mono">{{ f.value }}</span>
+          </NDescriptionsItem>
+        </NDescriptions>
+      </details>
     </template>
     <NEmpty v-else description="无 Agent 数据" style="padding: 12px 0" />
   </NCard>
@@ -68,5 +71,14 @@ const extraFields = computed(() => {
 }
 .profile-section {
   margin-bottom: var(--space-sm);
+}
+.agent-diag {
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}
+.agent-diag summary {
+  cursor: pointer;
+  user-select: none;
+  color: var(--color-text-secondary);
 }
 </style>

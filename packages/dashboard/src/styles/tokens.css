@@ -46,6 +46,7 @@
   /* 边框（灰 + 5% 品牌蓝） */
   --color-border: #e4e8f5;          /* 偏蓝（原 #e5e6eb 偏中性） */
   --color-border-strong: #bcc6da;   /* 偏蓝（原 #c9cdd4） */
+  --color-border-subtle: #eef1f8;   /* 弱分隔线 / hover 底色（此前多处引用但未定义，补齐） */
 
   /* ===== 阴影（带品牌色温度：蓝色 rgba，含 0 0 0 1px 发丝边框） ===== */
   --shadow-sm: 0 1px 3px rgba(30, 50, 100, 0.08), 0 0 0 1px rgba(30, 50, 100, 0.04);
@@ -127,6 +128,7 @@
   /* 边框：偏蓝透明 */
   --color-border: rgba(255, 255, 255, 0.12);
   --color-border-strong: rgba(255, 255, 255, 0.2);
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
 
   /* 阴影：深色模式下用更深的蓝 + 发丝边框 */
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);

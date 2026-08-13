@@ -2,7 +2,7 @@
 /**
  * 核心服务监控：gm-pro 服务状态 + Agent + 熔断器 + 降级链路。
  */
-import { NGrid, NGi, NTag } from 'naive-ui';
+import { NGrid, NGi } from 'naive-ui';
 import { useMonitorData } from '../../composables/useMonitorData';
 import GmProServicesCard from '../../components/monitor/GmProServicesCard.vue';
 import AgentStatusCard from '../../components/monitor/AgentStatusCard.vue';
@@ -17,7 +17,6 @@ const {
   agentLoading,
   db,
   memory,
-  refreshStatus,
 } = useMonitorData();
 </script>
 
@@ -25,7 +24,6 @@ const {
   <div class="view">
     <div class="view-header">
       <h2 class="view-title">核心服务监控</h2>
-      <NTag :type="refreshStatus.type" size="small" :bordered="false">{{ refreshStatus.label }}</NTag>
     </div>
 
     <div style="margin-bottom: 12px">

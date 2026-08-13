@@ -17,6 +17,9 @@ import {
   NSelect,
   NButton,
   NTable,
+  NDataTable,
+  NCollapse,
+  NCollapseItem,
   NDescriptions,
   NDescriptionsItem,
 } from 'naive-ui';
@@ -518,6 +521,39 @@ const moaRunsColumns = computed(() => [
   { title: 'Tokens', key: 'totalTokens', width: 80, render: (row: any) => h('span', { class: 'mono' }, formatTokens(row.totalTokens)) },
 ]);
 
+// 任务类型净收益维度表（收敛自定义 model-table → NDataTable）
+const taskBreakdownColumns = [
+  { title: '任务类型', key: 'task', render: (row: any) => row.task || '未分类' },
+  { title: '运行次数', key: 'runCount', width: 90, align: 'right', render: (row: any) => h('span', { class: 'mono' }, row.runCount) },
+  { title: '平均能力差距', key: 'avgCapabilityGap', width: 110, align: 'right', render: (row: any) => h('span', { class: 'mono' }, row.avgCapabilityGap.toFixed(3)) },
+  { title: '平均净收益', key: 'avgNetValue', width: 110, align: 'right', render: (row: any) => h('span', { class: 'mono' }, row.avgNetValue.toFixed(3)) },
+  { title: '达标率', key: 'meetTargetRate', width: 90, align: 'right', render: (row: any) => h(NTag, { size: 'tiny', type: row.meetTargetRate >= 0.9 ? 'success' : row.meetTargetRate >= 0.7 ? 'warning' : 'error' }, { default: () => `${(row.meetTargetRate * 100).toFixed(0)}%` }) },
+];
+const taskBreakdownRows = computed(() => moaPerf.value.taskBreakdown ?? []);
+
+// 模型能力校准表（收敛自定义 model-table → NDataTable）
+const calibrationColumns = [
+  { title: '模型', key: 'model', render: (row: any) => h('span', { class: 'mono' }, row.model) },
+  { title: '任务', key: 'task', render: (row: any) => row.task || '—' },
+  { title: '可靠性', key: 'reliability', width: 90, align: 'right', render: (row: any) => h(NTag, { size: 'tiny', type: row.reliability >= 0.8 ? 'success' : row.reliability >= 0.5 ? 'warning' : 'error' }, { default: () => `${(row.reliability * 100).toFixed(0)}%` }) },
+  { title: '样本', key: 'total', width: 80, align: 'right', render: (row: any) => h('span', { class: 'mono' }, row.total) },
+];
+const calibrationRows = computed(() => moaCalibratedModels.value ?? []);
+
+// 模型级指标表（收敛自定义 model-table → NDataTable）
+const modelBreakdownColumns = [
+  { title: '模型', key: 'model', render: (row: any) => h('span', { class: 'mono' }, row.model) },
+  { title: '角色', key: 'role', width: 80, render: (row: any) => h(NTag, { size: 'tiny', type: row.role === 'agg' ? 'success' : 'info', title: row.role === 'agg' ? '聚合模型' : '参考模型' }, { default: () => row.role === 'agg' ? '聚合' : '参考' }) },
+  { title: '次数', key: 'runCount', width: 70, align: 'right', render: (row: any) => h('span', { class: 'mono' }, row.runCount) },
+  { title: '成功率', key: 'successRate', width: 80, align: 'right', render: (row: any) => row.runCount > 0 ? h(NTag, { size: 'tiny', type: row.successCount / row.runCount >= 0.9 ? 'success' : 'warning' }, { default: () => `${((row.successCount / row.runCount) * 100).toFixed(0)}%` }) : h('span', { class: 'mono' }, '--') },
+  { title: 'P50', key: 'p50LatencyMs', width: 80, align: 'right', render: (row: any) => h('span', { class: 'mono' }, formatMs(row.p50LatencyMs)) },
+  { title: 'P95', key: 'p95LatencyMs', width: 80, align: 'right', render: (row: any) => h('span', { class: 'mono' }, formatMs(row.p95LatencyMs)) },
+  { title: '平均耗时', key: 'avgLatencyMs', width: 90, align: 'right', render: (row: any) => h('span', { class: 'mono' }, formatMs(row.avgLatencyMs)) },
+  { title: 'Avg Tokens', key: 'avgTokens', width: 100, align: 'right', render: (row: any) => h('span', { class: 'mono' }, formatTokens(row.avgTokens)) },
+  { title: '总 Token', key: 'totalTokens', width: 100, align: 'right', render: (row: any) => h('span', { class: 'mono' }, formatTokens(row.totalTokens)) },
+];
+const modelBreakdownRows = computed(() => moaPerf.value.modelBreakdown ?? []);
+
 // ── v2: 价值指标（能力提升 vs 成本）──
 const moaMeetTargetRateType = computed(() => {
   const r = moaPerf.value.meetTargetRate * 100;
@@ -652,8 +688,11 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
         </NGi>
       </NGrid>
 
-      <!-- KPI 概览行 3：MoA 价值指标（能力提升 vs 成本） -->
-      <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
+      <!-- 价值指标（进阶，默认折叠以降低首屏信息密度） -->
+      <NCollapse :default-expanded-names="[]" style="margin-bottom: 16px">
+        <NCollapseItem name="value" title="MoA 价值指标（能力提升 vs 成本）">
+          <!-- KPI 概览行 3：MoA 价值指标 -->
+          <NGrid :cols="'1 s:2 m:4'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
         <NGi>
           <KpiCard label="净收益达标率" :value="moaPerf.meetTargetRate * 100" unit="%" :threshold="90">
             <template #detail>
@@ -729,35 +768,18 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
       <!-- 任务类型维度价值指标 -->
       <NCard title="任务类型净收益维度" size="small" style="margin-bottom: 16px">
         <template v-if="moaPerf.taskBreakdown.length > 0">
-          <div class="model-table-wrap">
-            <table class="model-table">
-              <thead>
-                <tr>
-                  <th>任务类型</th>
-                  <th>运行次数</th>
-                  <th>平均能力差距</th>
-                  <th>平均净收益</th>
-                  <th>达标率</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="t in moaPerf.taskBreakdown" :key="t.task">
-                  <td>{{ t.task || '未分类' }}</td>
-                  <td class="num">{{ t.runCount }}</td>
-                  <td class="num">{{ t.avgCapabilityGap.toFixed(3) }}</td>
-                  <td class="num">{{ t.avgNetValue.toFixed(3) }}</td>
-                  <td class="num">
-                    <NTag size="tiny" :type="t.meetTargetRate >= 0.9 ? 'success' : t.meetTargetRate >= 0.7 ? 'warning' : 'error'">
-                      {{ (t.meetTargetRate * 100).toFixed(0) }}%
-                    </NTag>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <NDataTable
+            :columns="taskBreakdownColumns"
+            :data="taskBreakdownRows"
+            :bordered="false"
+            size="small"
+            :scroll-x="580"
+          />
         </template>
         <NEmpty v-else description="暂无任务类型数据" style="padding: 12px 0" />
       </NCard>
+        </NCollapseItem>
+      </NCollapse>
 
       <!-- 模式分布 + 学习校准 -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen" style="margin-bottom: 16px">
@@ -783,30 +805,13 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
               <span class="muted" style="font-size: var(--fs-caption)">随使用自动更新</span>
             </template>
             <template v-if="moaHasCalibration">
-              <div class="model-table-wrap">
-                <table class="model-table">
-                  <thead>
-                    <tr>
-                      <th>模型</th>
-                      <th>任务</th>
-                      <th>可靠性</th>
-                      <th>样本</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="c in moaCalibratedModels" :key="c.model + '::' + (c.task ?? '')">
-                      <td class="mono model-name-cell">{{ c.model }}</td>
-                      <td>{{ c.task || '—' }}</td>
-                      <td class="num">
-                        <NTag size="tiny" :type="c.reliability >= 0.8 ? 'success' : c.reliability >= 0.5 ? 'warning' : 'error'">
-                          {{ (c.reliability * 100).toFixed(0) }}%
-                        </NTag>
-                      </td>
-                      <td class="num">{{ c.total }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+              <NDataTable
+                :columns="calibrationColumns"
+                :data="calibrationRows"
+                :bordered="false"
+                size="small"
+                :scroll-x="420"
+              />
             </template>
             <NEmpty v-else description="暂无学习样本，使用后自动校准" style="padding: 12px 0" />
           </NCard>
@@ -905,44 +910,13 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
         <NGi>
           <NCard title="模型级指标" size="small">
             <template v-if="moaPerf.modelBreakdown.length > 0">
-              <div class="model-table-wrap">
-                <table class="model-table">
-                  <thead>
-                    <tr>
-                      <th>模型</th>
-                      <th>角色</th>
-                      <th>次数</th>
-                      <th>成功率</th>
-                      <th>P50</th>
-                      <th>P95</th>
-                      <th>平均耗时</th>
-                      <th>Avg Tokens</th>
-                      <th>总Token</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="m in moaPerf.modelBreakdown" :key="m.model">
-                      <td class="mono model-name-cell">{{ m.model }}</td>
-                      <td class="num">
-                        <NTag size="tiny" :type="m.role === 'agg' ? 'success' : 'info'" :title="m.role === 'agg' ? '聚合模型' : '参考模型'">
-                          {{ m.role === 'agg' ? '聚合' : '参考' }}
-                        </NTag>
-                      </td>
-                      <td class="num">{{ m.runCount }}</td>
-                      <td class="num">
-                        <NTag size="tiny" :type="m.runCount > 0 && m.successCount / m.runCount >= 0.9 ? 'success' : 'warning'">
-                          {{ m.runCount > 0 ? ((m.successCount / m.runCount) * 100).toFixed(0) + '%' : '--' }}
-                        </NTag>
-                      </td>
-                      <td class="num">{{ formatMs(m.p50LatencyMs) }}</td>
-                      <td class="num">{{ formatMs(m.p95LatencyMs) }}</td>
-                      <td class="num">{{ formatMs(m.avgLatencyMs) }}</td>
-                      <td class="num">{{ formatTokens(m.avgTokens) }}</td>
-                      <td class="num">{{ formatTokens(m.totalTokens) }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+              <NDataTable
+                :columns="modelBreakdownColumns"
+                :data="modelBreakdownRows"
+                :bordered="false"
+                size="small"
+                :scroll-x="760"
+              />
             </template>
             <NEmpty v-else description="暂无模型级数据" style="padding: 12px 0" />
           </NCard>
@@ -1027,26 +1001,6 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
   align-items: center;
   gap: 6px;
 }
-.model-table-wrap {
-  overflow-x: auto;
-}
-.model-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--fs-caption);
-}
-.model-table th {
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--color-border);
-  color: var(--color-text-tertiary);
-  font-weight: 500;
-  white-space: nowrap;
-}
-.model-table td {
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--color-border-subtle);
-}
 .model-name-cell {
   max-width: 150px;
   overflow: hidden;
@@ -1098,16 +1052,6 @@ const moaHasCalibration = computed(() => moaCalibratedModels.value.length > 0);
   }
   .trend-selectors {
     width: 100%;
-  }
-  .model-table-wrap {
-    font-size: var(--fs-caption);
-  }
-  .model-table th,
-  .model-table td {
-    padding: 4px 4px;
-  }
-  .model-name-cell {
-    max-width: 80px;
   }
 }
 </style>

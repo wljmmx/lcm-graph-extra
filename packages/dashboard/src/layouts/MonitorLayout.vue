@@ -11,8 +11,6 @@ import { RouterView, useRouter } from 'vue-router';
 import {
   NTag,
   NSpace,
-  NBreadcrumb,
-  NBreadcrumbItem,
 } from 'naive-ui';
 import { useMonitorData } from '../composables/useMonitorData';
 
@@ -110,13 +108,6 @@ function goTo(route: string) {
       </NSpace>
     </div>
 
-    <!-- 面包屑导航 -->
-    <div class="monitor-breadcrumb">
-      <NBreadcrumb>
-        <NBreadcrumbItem clickable @click="router.push('/monitor/overview')">监控总览</NBreadcrumbItem>
-      </NBreadcrumb>
-    </div>
-
     <!-- 子路由内容区 -->
     <div class="monitor-content">
       <RouterView />
@@ -149,12 +140,6 @@ function goTo(route: string) {
 }
 .health-signal:hover {
   opacity: 0.8;
-}
-
-.monitor-breadcrumb {
-  padding: 4px 0 8px;
-  border-bottom: 1px solid var(--color-border-subtle);
-  margin-bottom: 12px;
 }
 
 .monitor-content {

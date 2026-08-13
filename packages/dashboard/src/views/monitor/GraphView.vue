@@ -15,7 +15,7 @@
  *   · 所有运维操作(维护/向量化等) → 自动触发相关数据刷新
  */
 import { ref } from 'vue';
-import { NGrid, NGi, NTag, NDivider } from 'naive-ui';
+import { NGrid, NGi, NDivider } from 'naive-ui';
 import { useMonitorData } from '../../composables/useMonitorData';
 import GraphHealthCard from '../../components/monitor/GraphHealthCard.vue';
 import GmProHealthCard from '../../components/monitor/GmProHealthCard.vue';
@@ -51,7 +51,6 @@ const {
   gmProCommunitiesLoading,
   gmProCommunitiesIsError,
   memory,
-  refreshStatus,
 } = useMonitorData();
 
 /**
@@ -68,7 +67,6 @@ function onCommunityOpenNode(nodeId: string): void {
     <!-- 视图标题 + 全局刷新状态 -->
     <div class="view-header">
       <h2 class="view-title">图谱健康中心</h2>
-      <NTag :type="refreshStatus.type" size="small" :bordered="false">{{ refreshStatus.label }}</NTag>
     </div>
 
     <!-- R1：感知层 — 健康指标（先看系统是否正常） -->
@@ -158,11 +156,14 @@ function onCommunityOpenNode(nodeId: string): void {
     </section>
 
     <NDivider style="margin: 16px 0 0" />
-    <div class="view-footer muted">
-      能力覆盖：/api/status · /api/health · /api/top · /api/communities · /api/schema ·
-      /api/maintain/* · /api/staleness/refresh · /api/reembed · /api/recall ·
-      /api/search · /api/nodes/:id · /api/graph/walk · /api/config
-    </div>
+    <details class="diag-details muted">
+      <summary>能力覆盖（诊断信息）</summary>
+      <div class="diag-body">
+        /api/status · /api/health · /api/top · /api/communities · /api/schema ·
+        /api/maintain/* · /api/staleness/refresh · /api/reembed · /api/recall ·
+        /api/search · /api/nodes/:id · /api/graph/walk · /api/config
+      </div>
+    </details>
   </div>
 </template>
 
@@ -186,10 +187,18 @@ function onCommunityOpenNode(nodeId: string): void {
   line-height: 1;
   padding-top: 1px;
 }
-.view-footer {
+.diag-details {
   font-size: var(--fs-caption);
   padding: 0 4px;
   line-height: 1.6;
+  cursor: pointer;
+}
+.diag-details summary {
+  cursor: pointer;
+  user-select: none;
+}
+.diag-body {
   word-break: break-word;
+  padding-top: 4px;
 }
 </style>
