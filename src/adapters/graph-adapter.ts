@@ -1138,7 +1138,10 @@ export class GraphAdapter {
       // 未携带 updatedAt 时默认 Date.now()（等价于原全量覆盖语义）。
       if (validEntities.length > 0) {
         const now = Date.now();
-        const nodeData = validEntities.map((e) => {
+        const nodeData: Array<{
+          id: string; label: string; name: string; description: string; content: string;
+          status: string; pagerank: number; updatedAt: number; embedding: number[] | null;
+        }> = validEntities.map((e) => {
           const t = mapEntityType(e.type);
           const nid = makeNodeId(e.name, t);
           const ts = typeof e.updatedAt === 'number' && e.updatedAt > 0 ? e.updatedAt : now;
@@ -1151,13 +1154,41 @@ export class GraphAdapter {
             status: 'active',
             pagerank: 0.5,
             updatedAt: ts,
+            embedding: null,
           };
         });
+
+        // 原生 VECTOR 写入（可选增强）：当 embedFn 可用时，为每个实体生成 embedding，
+        // 以原生 VECTOR 类型写入 n.embedding（配合 entity_embedding_idx 向量索引）。
+        // 记语：embedding 有 HTTP 往返，用受限并发批量生成；任一失败仅降级（该实体无向量），
+        // 不阻塞 upsert 主体。embedFn 未配置时整体跳过，保持原行为。
+        const embedFn = this._embedFn;
+        const embedDim = await this._probeEmbedDimension();
+        if (embedFn && embedDim > 0) {
+          const CONCURRENCY = 8;
+          let idx = 0;
+          const worker = async () => {
+            while (idx < nodeData.length) {
+              const cur = idx++;
+              const text = `${nodeData[cur].name} ${nodeData[cur].description}`.trim();
+              if (!text) continue;
+              try {
+                const vec = await embedFn(text);
+                if (Array.isArray(vec) && vec.length === embedDim) {
+                  nodeData[cur].embedding = vec;
+                }
+              } catch (e) {
+                this.logger?.debug?.('[graph-adapter] embedding gen failed for entity', { name: nodeData[cur].name, err: e instanceof Error ? e.message : String(e) });
+              }
+            }
+          };
+          await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+        }
 
         // P1-2 M-1: 节点存在性检查改为单条 UNWIND（原 per-node N 次 MATCH 查询）
         const existingResult = await session.run(
           `UNWIND $nodes AS node MATCH (n { id: node.id }) RETURN collect(node.id) AS existingIds`,
-          { nodes: nodeData },
+          { nodes: nodeData.map(({ embedding, ...rest }) => rest) },
         );
         cc += (existingResult.records[0]?.get('existingIds') ?? []).length;
 
@@ -1174,6 +1205,15 @@ export class GraphAdapter {
         }
 
         for (const [label, nodes] of nodesByLabel) {
+          // 原生 VECTOR 写入：embedding 非空时用 vector(node.embedding, $dim, FLOAT) 写入。
+          // vector() 维度参数必须是字面量（不支持参数绑定），故内联 embedDim。
+          const embedDimLocal = embedDim;
+          const embedSetOnCreate = embedDimLocal > 0
+            ? `, n.embedding = CASE WHEN node.embedding IS NOT NULL THEN vector(node.embedding, ${embedDimLocal}, FLOAT) END`
+            : '';
+          const embedSetOnMatch = embedDimLocal > 0
+            ? `, n.embedding = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) AND node.embedding IS NOT NULL THEN vector(node.embedding, ${embedDimLocal}, FLOAT) ELSE n.embedding END`
+            : '';
           const cypher = `
             UNWIND $nodes AS node
             MERGE (n:\`${label}\` { id: node.id })
@@ -1184,14 +1224,14 @@ export class GraphAdapter {
               n.status = node.status,
               n.pagerank = node.pagerank,
               n.updatedAt = node.updatedAt,
-              n.createdAt = node.updatedAt
+              n.createdAt = node.updatedAt${embedSetOnCreate}
             ON MATCH SET
               n.name = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.name ELSE n.name END,
               n.description = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.description ELSE n.description END,
               n.content = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.content ELSE n.content END,
               n.status = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.status ELSE n.status END,
               n.pagerank = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.pagerank ELSE n.pagerank END,
-              n.updatedAt = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.updatedAt ELSE n.updatedAt END
+              n.updatedAt = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.updatedAt ELSE n.updatedAt END${embedSetOnMatch}
             RETURN count(*) AS cnt
           `;
           const result = await session.run(cypher, { nodes });
