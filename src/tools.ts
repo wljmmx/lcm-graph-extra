@@ -7,7 +7,7 @@
 
 import { Type } from "typebox";
 import * as neo4jDriver from 'neo4j-driver';
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
@@ -20,6 +20,7 @@ import { registerDiagnoseTool } from './tools/diagnose.js';
 import {
   // state management
   setPluginNeo4jConfig, getPluginNeo4jConfig, setSharedQmdClient, setPluginApiRef,
+  getExtractTurnFn,
   // shared utilities
   acquireQmdClient, validateBackupPath, escapeFts5Query, parseTimeRange,
   generateExperienceSummary, openDb, closeSharedDb, getQmdBaseUrl, LCM_DB,
@@ -33,7 +34,7 @@ import {
   type DashboardToolContext,
 } from './tools/shared.js';
 
-export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange };
+export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange, setExtractTurnFn, getExtractTurnFn };
 export type { DashboardToolContext };
 
 export function registerOperationalTools(api: any): void {
@@ -78,6 +79,52 @@ function extractMemoryKeywords(content: string): string[] {
     if (out.length >= 20) break;
   }
   return out;
+}
+
+/**
+ * 将会话/文件时间转换为毫秒时间戳。
+ * 兼容：数字（视为 ms，若 <1e12 则视为秒）、ISO 字符串（Date.parse）、
+ * Date 对象。解析失败回退 Date.now()。
+ */
+function toRealTs(v: unknown): number {
+  if (v == null) return Date.now();
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === 'number') {
+    if (!isFinite(v) || v <= 0) return Date.now();
+    return v < 1e12 ? v * 1000 : v; // 秒 → 毫秒
+  }
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (v.trim() !== '' && isFinite(n) && n > 0) return n < 1e12 ? n * 1000 : n;
+    const parsed = Date.parse(v);
+    if (!isNaN(parsed)) return parsed;
+  }
+  return Date.now();
+}
+
+/**
+ * 解析 memory 文件真实时间：优先 frontmatter 的 date/createdAt/updatedAt，
+ * 否则回退文件系统 mtime。用于 MemoryFile 节点时序字段。
+ */
+function parseMemoryFileTime(content: string, filePath: string): number {
+  try {
+    const m = content.match(/^---\s*\n([\s\S]*?)\n---/);
+    if (m) {
+      for (const key of ['date', 'createdAt', 'updatedAt', 'created_at']) {
+        const kv = m[1].match(new RegExp(`^${key}\\s*:\\s*(.+)$`, 'm'));
+        if (kv?.[1]) {
+          const t = toRealTs(kv[1].trim().replace(/^["']|["']$/g, ''));
+          if (t > 0) return t;
+        }
+      }
+    }
+  } catch { /* 解析失败走回退 */ }
+  try {
+    const st = statSync(filePath);
+    return st.mtimeMs || Date.now();
+  } catch {
+    return Date.now();
+  }
 }
 
 /**
@@ -704,23 +751,26 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           // limit = 每批记录数上限；工具自动分多批直到全部导入（清理 Neo4j 后完整重建）
           const batchSize = Math.max(1, limit);
 
-          // 1) 全量收集待导入消息队列：不再 LIMIT 截断会话，会话内不再只取 5 条
+          // 1) 全量收集待导入消息队列：不再 LIMIT 截断会话，会话内不再只取 5 条。
+          //    时序使用 messages.created_at 真实时间（非导入时刻），供 :GmMessage / 三级节点建时序。
           const convs = db.prepare(
             "SELECT conversation_id, session_id FROM conversations " +
             "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
             "ORDER BY conversation_id DESC"
           ).all() as any[];
-          const pending: { id: string; role: string; content: string; sid: string; tokens: number }[] = [];
+          const pending: { id: string; role: string; content: string; sid: string; tokens: number; ts: number }[] = [];
+          // GmMessage 行：同一消息节点补 :GmMessage 标签 + turnIndex/seq/createdAt（真实时间）
+          const gmRows: { id: string; role: string; content: string; sid: string; turnIndex: number; ts: number; seq: number }[] = [];
           for (const conv of convs) {
-            const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
+            const msgs = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
+            let turnIndex = 0;
             for (const msg of msgs) {
-              pending.push({
-                id: `${conv.session_id}-${msg.seq}`,
-                role: msg.role,
-                content: (msg.content ?? "").slice(0, 5000),
-                sid: conv.session_id,
-                tokens: msg.content?.length ?? 0,
-              });
+              const ts = toRealTs(msg.created_at);
+              if (msg.role === 'user') turnIndex += 1; // 每遇 user 开新轮
+              const id = `${conv.session_id}-${msg.seq}`;
+              const content = (msg.content ?? "").slice(0, 5000);
+              pending.push({ id, role: msg.role, content, sid: conv.session_id, tokens: msg.content?.length ?? 0, ts });
+              gmRows.push({ id, role: msg.role, content, sid: conv.session_id, turnIndex, ts, seq: Number(msg.seq ?? 0) });
             }
           }
 
@@ -734,15 +784,28 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
               const chunk = pending.slice(i, i + batchSize);
-              const now = Date.now();
               await session.run(
                 "UNWIND $rows AS m " +
                 "MERGE (n:ConversationMessage {id: m.id}) " +
-                "ON CREATE SET n.recordedAt = m.now, n.validFrom = m.now, n.source = m.source, n.state = 'active', n.scores = m.scores " +
-                "SET n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.tokens = m.tokens",
-                { rows: chunk.map((m) => ({ ...m, now, source: 'lcm-import', scores: '{}' })) }
+                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = m.source, n.state = 'active', n.scores = m.scores " +
+                "SET n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.tokens = m.tokens, n.createdAt = m.ts",
+                { rows: chunk.map((m) => ({ ...m, source: 'lcm-import', scores: '{}' })) }
               );
               total += chunk.length;
+            }
+
+            // 3) 补写 :GmMessage（同一节点双标签，供 extract-service 读取配对重建三级节点）。
+            //    写入 turnIndex/createdAt/seq，时序用真实会话时间。
+            for (let i = 0; i < gmRows.length; i += batchSize) {
+              if (signal?.aborted) break;
+              const chunk = gmRows.slice(i, i + batchSize);
+              await session.run(
+                "UNWIND $rows AS m " +
+                "MERGE (n:GmMessage {id: m.id}) " +
+                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = 'lcm-import', n.state = 'active', n.scores = '{}' " +
+                "SET n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.turnIndex = m.turnIndex, n.seq = m.seq, n.createdAt = m.ts",
+                { rows: chunk }
+              );
             }
           } finally { await closeNeo4j(driver, session); }
           lines.push(`✅ Imported ${total}/${pending.length} messages from lossless-claw DB (batch=${batchSize}, batches=${Math.ceil(pending.length / batchSize)})`);
@@ -763,15 +826,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           const allFiles = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")) : [];
           const { driver, session } = await neo4jSession();
           try {
-            const now = Date.now();
-
             // 1) 一次性读取全部文件内容（仅读一次），构建节点写入行 + 关键词缓存。
             //    性能优化：避免节点写入与语义匹配各读一遍文件（2 万文件 → 少 1 万次读盘）。
-            const rows: { id: string; name: string; content: string; now: number; source: string; scores: string }[] = [];
+            //    时序使用每个文件真实时间（frontmatter date 优先，回退文件系统 mtime）。
+            const rows: { id: string; name: string; content: string; ts: number; source: string; scores: string }[] = [];
             const fileKeywords = new Map<string, string[]>();
             for (const file of allFiles) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
-              rows.push({ id: `file-${file}`, name: file, content, now, source: 'lcm-import', scores: '{}' });
+              const ts = parseMemoryFileTime(content, join(memDir, file));
+              rows.push({ id: `file-${file}`, name: file, content, ts, source: 'lcm-import', scores: '{}' });
               fileKeywords.set(file, extractMemoryKeywords(content));
             }
 
@@ -783,8 +846,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               await session.run(
                 "UNWIND $rows AS m " +
                 "MERGE (n:MemoryFile {id: m.id}) " +
-                "ON CREATE SET n.recordedAt = m.now, n.validFrom = m.now, n.source = m.source, n.state = 'active', n.scores = m.scores " +
-                "SET n.name = m.name, n.content = m.content",
+                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = m.source, n.state = 'active', n.scores = m.scores " +
+                "SET n.name = m.name, n.content = m.content, n.createdAt = m.ts",
                 { rows: rows.slice(i, i + batchSize) },
               );
               fCount = Math.min(rows.length, i + batchSize);
@@ -839,6 +902,28 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
+      // 4) 导入完成后自动触发三级节点重建（Task/Skill/Event）。
+      //    默认开启；openclaw.json → lcm-graph-extra.config.buildThreeLevel.onImport=false 可关闭。
+      //    异步 fire-and-forget，导入立即返回不阻塞（避免大库导入超时）；
+      //    经 extract-progress 进度按 turn 跳过已提取轮次，避免重复提取。
+      const buildCfg = api?.pluginConfig?.buildThreeLevel ?? {};
+      const enabled = buildCfg.enabled !== false;
+      const onImport = buildCfg.onImport !== false;
+      if (enabled && onImport && (params.source === "all" || params.source === "lcm_messages") && getExtractTurnFn()) {
+        const bLimit = Number(buildCfg.batchLimit ?? 50);
+        const batchLimit = Math.max(1, Math.min(500, Number.isFinite(bLimit) ? bLimit : 50));
+        lines.push(`⏳ 三级节点重建已异步启动（后台分批提取 Task/Skill/Event，batch=${batchLimit}）…`);
+        (async () => {
+          try {
+            const { rebuildAll } = await import('./plugin/extract-service.js');
+            const r = await rebuildAll({ extractTurn: getExtractTurnFn()!, logger: getGlobalLogger() }, batchLimit);
+            getGlobalLogger().info?.(`[lcmg_import] 三级节点重建完成: +${r.totalNodes} nodes, +${r.totalEdges} edges (${r.sessions.length} sessions)`);
+          } catch (e) {
+            getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败', { err: e instanceof Error ? e.message : String(e) });
+          }
+        })().catch(() => {});
+      }
+
       return {
         content: [{ type: "text" as const, text: lines.join("\n") || "No data imported." }],
         details: {
@@ -851,6 +936,69 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           },
         },
       };
+    },
+  }, { optional: true });
+
+  // ===================================================================
+  // 4.5 lcmg_extract_rebuild — 按需重建三级节点（Task/Skill/Event）
+  // ===================================================================
+  // 等价 gm-pro POST /api/extract/rebuild：
+  //   读取 :GmMessage 按 session 配对 user/assistant 轮次 → 复用 extractTurn 调 LLM
+  //   批量写入 :Task/:Skill/:Event 节点及边（生产节点，不带 :Benchmark）。
+  // 按需触发（非自动），经 lastProcessedTurn / extract-progress 进度避免重复提取。
+  api.registerTool({
+    name: "lcmg_extract_rebuild",
+    label: "三级节点重建",
+    description: "从 :GmMessage 消息按 session 配对 user/assistant 轮次，调 LLM 提取并批量写入 :Task/:Skill/:Event 三级节点及边（生产节点，不带 :Benchmark）。" +
+      "按需触发（非自动），通过 lastProcessedTurn 进度避免重复提取。不传 sessionKey 时批量重建全部会话；force=true 强制从头重建。",
+    parameters: Type.Object({
+      sessionKey: Type.Optional(Type.String({ description: "只重建指定会话（缺省重建全部含 :GmMessage 的会话）" })),
+      limit: Type.Optional(Type.Number({ description: "单次最多处理轮次数，默认 50", minimum: 1, maximum: 500 })),
+      lastProcessedTurn: Type.Optional(Type.Number({ description: "从哪一轮之后开始（默认读取本地进度，force=true 时从 0 开始）" })),
+      force: Type.Optional(Type.Boolean({ description: "强制从头重建该会话（忽略进度），默认 false" })),
+    }),
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      const extractTurn = getExtractTurnFn();
+      if (!extractTurn) {
+        return { content: [{ type: "text" as const, text: "❌ extractTurn 未注入（graphAdapter / LLM 未就绪，请确认插件初始化完成）" }], details: { ok: false, error: "extractTurn not injected" }, isError: true };
+      }
+      try {
+        const { rebuildSession, rebuildAll, getSessionProgress } = await import('./plugin/extract-service.js');
+        const limit = Math.max(1, Math.min(500, params.limit ?? 50));
+        const deps = { extractTurn, logger: getGlobalLogger(), signal };
+        const force = params.force === true;
+        if (params.sessionKey) {
+          const last = params.lastProcessedTurn !== undefined ? Number(params.lastProcessedTurn) : getSessionProgress(params.sessionKey, force);
+          const r = await rebuildSession(params.sessionKey, deps, limit, last, force);
+          return {
+            content: [{ type: "text" as const, text: [
+              "# 三级节点重建报告", "",
+              `会话: ${r.sessionKey}`,
+              `处理轮次: ${r.processed}/${r.turns}`,
+              `新增节点: ${r.nodes}`,
+              `新增边: ${r.edges}`,
+              r.error ? `错误: ${r.error}` : "",
+            ].filter(Boolean).join("\n") }],
+            details: { ok: true, ...r },
+          };
+        }
+        const r = await rebuildAll(deps, limit, force);
+        return {
+          content: [{ type: "text" as const, text: [
+            "# 三级节点重建报告", "",
+            `处理会话: ${r.sessions.length}`,
+            `新增节点: ${r.totalNodes}`,
+            `新增边: ${r.totalEdges}`,
+            ...r.sessions.map((s) => `  ${s.sessionKey}: ${s.processed}/${s.turns} turns, +${s.nodes} nodes`),
+          ].join("\n") }],
+          details: { ok: true, ...r },
+        };
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `❌ 重建失败: ${e.message}` }], details: { ok: false, error: `❌ 重建失败: ${e.message}` }, isError: true };
+      }
     },
   }, { optional: true });
 

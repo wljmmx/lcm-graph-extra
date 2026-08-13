@@ -35,6 +35,21 @@ export function setPluginApiRef(apiRef: any): void {
   _pluginApiRef = apiRef;
 }
 
+// ── 三级节点提取（extract-service）注入 ──
+// graphAdapter 实例生存于 index.ts 闭包内，tools 侧无法直接访问。
+// 通过此 setter 注入 "一轮 user/assistant → 提取 Task/Skill/Event" 的闭包，
+// 供 lcmg_extract_rebuild / 导入自动触发复用。
+
+let _extractTurnFn: ((user: string, assistant: string) => Promise<{ nodes: number; edges: number }>) | null = null;
+
+export function setExtractTurnFn(fn: ((user: string, assistant: string) => Promise<{ nodes: number; edges: number }>) | null): void {
+  _extractTurnFn = fn;
+}
+
+export function getExtractTurnFn(): ((user: string, assistant: string) => Promise<{ nodes: number; edges: number }>) | null {
+  return _extractTurnFn;
+}
+
 export function getPluginNeo4jConfig(): Record<string, unknown> | undefined {
   return _pluginNeo4jConfig;
 }
@@ -344,6 +359,7 @@ export async function ensureNeo4jSchema(): Promise<void> {
           ["Task", "lcm_task_id"],
           ["Skill", "lcm_skill_id"],
           ["Event", "lcm_event_id"],
+          ["GmMessage", "lcm_gm_msg_id"],
         ];
         for (const [label, name] of idConstraints) {
           try {
