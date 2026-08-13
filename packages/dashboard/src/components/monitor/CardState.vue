@@ -20,6 +20,8 @@ const props = withDefaults(defineProps<{
   emptyText?: string;
   /** 错误时显示的文案 */
   errorText?: string;
+  /** 错误详情（透出代理/后端返回的真实错误，便于定位根因） */
+  errorDetail?: string;
   /** 空数据时的额外提示 */
   emptyHint?: string;
   /** 骨架屏行数 */
@@ -55,6 +57,7 @@ const emit = defineEmits<{
       <NButton size="tiny" @click="emit('retry')">重试</NButton>
     </template>
     <span style="font-size: var(--fs-caption)">请检查 gm-pro 服务是否可达（端口 7850）。</span>
+    <div v-if="errorDetail" class="error-detail mono">{{ errorDetail }}</div>
   </NAlert>
 
   <!-- 空数据 -->
@@ -71,5 +74,11 @@ const emit = defineEmits<{
 <style scoped>
 .card-skeleton {
   padding: 8px 0;
+}
+.error-detail {
+  margin-top: 6px;
+  font-size: var(--fs-caption);
+  color: var(--color-error);
+  word-break: break-all;
 }
 </style>

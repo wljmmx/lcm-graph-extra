@@ -20,16 +20,27 @@ const { isDark } = useTheme();
 
 const fetching = ref(false);
 const isError = ref(false);
+const errorDetail = ref('');
 const schema = ref<GmProSchemaResult | null>(null);
 
 async function loadSchema(): Promise<void> {
   fetching.value = true;
   isError.value = false;
+  errorDetail.value = '';
   try {
     const res = await fetchGmProSchema();
     if (res.ok) schema.value = res.data ?? null;
-    else { isError.value = true; schema.value = null; }
-  } catch { isError.value = true; schema.value = null; }
+    else {
+      isError.value = true;
+      schema.value = null;
+      // 透出代理/后端返回的真实错误（如 HTTP 404 / 500 / 不可达），便于定位根因
+      errorDetail.value = [res.error, res.detail ? JSON.stringify(res.detail) : ''].filter(Boolean).join(' · ');
+    }
+  } catch (e) {
+    isError.value = true;
+    schema.value = null;
+    errorDetail.value = e instanceof Error ? e.message : String(e);
+  }
   finally { fetching.value = false; }
 }
 onMounted(loadSchema);
@@ -62,6 +73,7 @@ const barColorActive = computed(() => isDark.value ? '#4098fc' : '#2080f0');
       :has-data="!!schema"
       empty-text="暂无图谱结构数据"
       error-text="Schema 请求失败"
+      :error-detail="errorDetail"
       empty-hint="请确认 graph-memory-pro v2.3.3+ 服务已启动。"
       @retry="loadSchema"
     >
