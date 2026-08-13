@@ -717,22 +717,23 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
           const { driver, session } = await neo4jSession();
           try {
-            // 2) 按批次写入，直到队列耗尽
+            // 2) 按批次写入，直到队列耗尽。
+            // 性能优化：UNWIND 批量 MERGE（每批仅一次往返），避免逐条 session.run
+            // 造成数百上千次往返而拖慢全量导入（清理后完整重建场景数据量大）。
             for (let i = 0; i < pending.length; i += batchSize) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
               const chunk = pending.slice(i, i + batchSize);
-              for (const m of chunk) {
-                // 对齐 gm-pro batchUpsertNodes：导入时补齐时序默认字段（ON CREATE SET 仅在新建时填充）。
-                await session.run(
-                  "MERGE (n:ConversationMessage {id: $id}) " +
-                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores " +
-                  "SET n.role = $role, n.content = $content, n.sessionId = $sid, n.tokens = $tokens",
-                  { ...m, now: Date.now(), source: 'lcm-import', scores: '{}' }
-                );
-                total++;
-              }
+              const now = Date.now();
+              await session.run(
+                "UNWIND $rows AS m " +
+                "MERGE (n:ConversationMessage {id: m.id}) " +
+                "ON CREATE SET n.recordedAt = m.now, n.validFrom = m.now, n.source = m.source, n.state = 'active', n.scores = m.scores " +
+                "SET n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.tokens = m.tokens",
+                { rows: chunk.map((m) => ({ ...m, now, source: 'lcm-import', scores: '{}' })) }
+              );
+              total += chunk.length;
             }
           } finally { await closeNeo4j(driver, session); }
           lines.push(`✅ Imported ${total}/${pending.length} messages from lossless-claw DB (batch=${batchSize}, batches=${Math.ceil(pending.length / batchSize)})`);
@@ -753,23 +754,27 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           const allFiles = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")) : [];
           const { driver, session } = await neo4jSession();
           try {
+            const now = Date.now();
             for (let i = 0; i < allFiles.length; i += batchSize) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
               const chunk = allFiles.slice(i, i + batchSize);
-              for (const file of chunk) {
+              // 批量节点写入：UNWIND MERGE（每批一次往返）
+              const rows = chunk.map((file) => {
                 const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
-                await session.run(
-                  "MERGE (n:MemoryFile {id: $id}) " +
-                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores " +
-                  "SET n.name = $name, n.content = $content",
-                  { id: `file-${file}`, name: file, content, now: Date.now(), source: 'lcm-import', scores: '{}' },
-                );
-                // P1-孤立修复: 建立语义关联边 —— 从文件内容提取关键词，与图中
-                // 已有 Task/Skill/Event 节点按 name 匹配，创建 MENTIONS 边，
-                // 避免 MemoryFile 节点全部孤立于知识图谱之外。
-                const keywords = extractMemoryKeywords(content);
+                return { id: `file-${file}`, name: file, content, now, source: 'lcm-import', scores: '{}' };
+              });
+              await session.run(
+                "UNWIND $rows AS m " +
+                "MERGE (n:MemoryFile {id: m.id}) " +
+                "ON CREATE SET n.recordedAt = m.now, n.validFrom = m.now, n.source = m.source, n.state = 'active', n.scores = m.scores " +
+                "SET n.name = m.name, n.content = m.content",
+                { rows },
+              );
+              // 语义关联边逐文件处理（需按文件内容提取关键词，无法批量）
+              for (const r of rows) {
+                const keywords = extractMemoryKeywords(r.content);
                 if (keywords.length > 0) {
                   try {
                     await session.run(
@@ -780,10 +785,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                        MERGE (m)-[r:MENTIONS]->(n)
                          ON CREATE SET r.createdAt = timestamp()
                        RETURN count(r) AS linked`,
-                      { id: `file-${file}`, keywords, maxLinks: 10 },
+                      { id: r.id, keywords, maxLinks: 10 },
                     );
                   } catch (linkErr: any) {
-                    lines.push(`⚠ MemoryFile '${file}' semantic link skipped: ${linkErr?.message ?? String(linkErr)}`);
+                    lines.push(`⚠ MemoryFile '${r.name}' semantic link skipped: ${linkErr?.message ?? String(linkErr)}`);
                   }
                 }
                 fCount++;

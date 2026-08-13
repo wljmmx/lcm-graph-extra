@@ -62,7 +62,7 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
   lcmg_sync: 600_000,           // 同步修复，10min
   lcmg_backup: 300_000,         // 备份，5min
   lcmg_restore: 600_000,        // 恢复，10min
-  lcmg_import: 600_000,         // 历史导入，10min
+  lcmg_import: 3_600_000,       // 历史导入，60min（全量分批重建所有消息+记忆文件，配合 UNWIND 批量写入）
   lcmg_backfill: 900_000,       // 经验回溯，15min（100会话检测+提取，无 LLM）
 
   // heavy: 批量 LLM 蒸馏
