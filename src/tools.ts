@@ -20,7 +20,7 @@ import { registerDiagnoseTool } from './tools/diagnose.js';
 import {
   // state management
   setPluginNeo4jConfig, getPluginNeo4jConfig, setSharedQmdClient, setPluginApiRef,
-  getExtractTurnFn,
+  getExtractTurnFn, setExtractTurnFn,
   // shared utilities
   acquireQmdClient, validateBackupPath, escapeFts5Query, parseTimeRange,
   generateExperienceSummary, openDb, closeSharedDb, getQmdBaseUrl, LCM_DB,
