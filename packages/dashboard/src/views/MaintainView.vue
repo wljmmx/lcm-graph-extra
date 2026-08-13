@@ -508,17 +508,17 @@ function executeReembed(): void {
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">14 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">15 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- 14 张操作卡片网格（2 列响应式） -->
+      <!-- 15 张操作卡片网格（2 列响应式） -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 卡片 1: 图谱维护 -->
         <NGi>
           <OperationCard
             title="图谱维护"
-            description="触发 dedup / PageRank / community detection + 债务表对账。建议低峰期执行。"
+            description="运行节点去重、PageRank 排序与社区检测，并同步对账债务表。数据量较大时建议在低峰期执行。"
             icon="database"
             :confirm-level="1"
             :loading="!!loadingMap.maintain"
@@ -538,7 +538,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="系统诊断"
-            description="全栈自检：lcm.db / qmd MCP / Neo4j / 熔断器 / health metrics，输出多段 markdown 报告。"
+            description="对 lcm.db、qmd MCP、Neo4j、熔断器及健康指标做全栈自检，输出多段 Markdown 报告，便于排查问题。"
             icon="activity"
             :confirm-level="0"
             :loading="!!loadingMap.diagnose"
@@ -558,7 +558,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="触发蒸馏"
-            description="从 PENDING 经验批量蒸馏为 DISTILLED（调用 LLM 提取结构化经验）。失败的经验自动重试（最多 3 次）。"
+            description="调用 LLM 将 PENDING 经验批量蒸馏为结构化经验（DISTILLED）。蒸馏失败的经验会自动重试，最多 3 次。"
             icon="flask"
             :confirm-level="0"
             :loading="!!loadingMap.distill"
@@ -589,7 +589,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="重试失败经验"
-            description="重置蒸馏失败的 FAILED 经验回 PENDING 状态，清零重试次数，使其可被重新蒸馏。已耗尽自动重试次数的经验需在此重置后才会重新进入队列。"
+            description="将蒸馏失败的 FAILED 经验重置回 PENDING 并清零重试次数，使其可重新进入蒸馏队列。已耗尽自动重试次数的经验需在此重置后才能再次被处理。"
             icon="refresh"
             :confirm-level="0"
             :loading="!!loadingMap.distill_retry"
@@ -619,7 +619,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="经验回溯"
-            description="从历史对话记录中重新提取经验写入 PENDING 队列。修复连接问题后使用。默认跳过已处理过的会话。"
+            description="从历史对话中重新提取经验并写入 PENDING 队列，常用于对话记录修复后补建经验。默认跳过已处理过的会话。"
             icon="history"
             :confirm-level="0"
             :loading="!!loadingMap.backfill"
@@ -639,7 +639,7 @@ function executeReembed(): void {
                   style="width: 100%"
                 />
               </NFormItem>
-              <NFormItem label="强制重处理" size="small" :show-feedback="false">
+              <NFormItem label="忽略进度重跑" size="small" :show-feedback="false">
                 <NSwitch v-model:value="backfillForce" size="small" />
                 <span style="margin-left: 8px; font-size: 12px; color: #999">
                   {{ backfillForce ? '重新处理所有会话' : '跳过已处理会话' }}
@@ -656,7 +656,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="触发 compact"
-            description="手动触发指定会话的上下文压缩；省略 conversationId 则处理最紧急债务。"
+            description="手动触发指定会话的上下文压缩；不指定会话时，自动处理最紧急的债务会话。"
             icon="compress"
             :confirm-level="1"
             :loading="!!loadingMap.compact"
@@ -687,7 +687,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="重置熔断器"
-            description="重置指定子系统熔断器状态。Neo4j 还会重置 GraphAdapter 连接失败标志。"
+            description="重置指定子系统的熔断器状态；选择 Neo4j 时，同时清除 GraphAdapter 的连接失败标记。"
             icon="power"
             danger
             :confirm-level="1"
@@ -717,7 +717,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="TTL 清理"
-            description="触发债务表对账：删除孤儿债务 + 清理 7 天前墓碑。复用 lcmg_maintain。"
+            description="对账债务表：删除孤儿债务记录，并清理 7 天前的墓碑标记（复用图谱维护能力）。"
             icon="trash"
             :confirm-level="1"
             :loading="!!loadingMap.ttl_cleanup"
@@ -737,7 +737,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="备份"
-            description="导出 Neo4j + LCM 对话 + memory/*.md 为单 JSON 文件。路径必须在 ~/.openclaw 之下。"
+            description="将 Neo4j 图谱、LCM 对话与 memory/*.md 一并导出为单个 JSON 文件。输出路径必须在 ~/.openclaw 目录下。"
             icon="save"
             :confirm-level="0"
             :loading="!!loadingMap.backup"
@@ -802,7 +802,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="恢复"
-            description="从备份 JSON 恢复到 Neo4j / LCM / 文件。Neo4j 用 MERGE 不删现有节点。强制 dryRun 默认 true。"
+            description="从备份 JSON 恢复到 Neo4j / LCM / 文件。Neo4j 采用 MERGE 写入，不会删除现有节点；dryRun 默认开启，关闭后才会实际写入。"
             icon="upload"
             danger
             :confirm-level="2"
@@ -836,7 +836,7 @@ function executeReembed(): void {
               <NFormItem label="dryRun（预览不写入）" size="small" :show-feedback="false">
                 <NSwitch v-model:value="restoreDryRun" size="small" />
                 <span class="muted" style="margin-left: 8px">
-                  默认开启，关闭后将实际写入数据
+                  默认开启；关闭后才会实际写入数据
                 </span>
               </NFormItem>
               <NAlert
@@ -845,7 +845,7 @@ function executeReembed(): void {
                 :show-icon="true"
                 style="margin-top: 8px"
               >
-                dryRun 已关闭：执行后将实际向 Neo4j / LCM 写入数据，请再次确认备份文件路径正确。
+                已关闭 dryRun：执行后将实际向 Neo4j / LCM 写入数据。请再次确认备份文件路径正确。
               </NAlert>
             </template>
             <template #extra>
@@ -858,7 +858,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="同步修复"
-            description="跨存储一致性检查/修复：检测孤儿 Neo4j 节点 + TTL/pin 状态。repair 模式实际删除孤儿。"
+            description="跨存储一致性检查与修复：检测孤儿 Neo4j 节点以及 TTL / pin 状态。repair 模式下会实际删除孤儿节点。"
             icon="refresh"
             :danger="syncDanger"
             :confirm-level="syncConfirmLevel"
@@ -880,7 +880,7 @@ function executeReembed(): void {
               <NFormItem label="dryRun（预览不写入）" size="small" :show-feedback="false">
                 <NSwitch v-model:value="syncDryRun" size="small" />
                 <span class="muted" style="margin-left: 8px">
-                  默认开启，repair 模式下关闭才会实际删除
+                  默认开启；仅 repair 模式且关闭时才实际删除
                 </span>
               </NFormItem>
               <NAlert
@@ -889,7 +889,7 @@ function executeReembed(): void {
                 :show-icon="true"
                 style="margin-top: 8px"
               >
-                repair 模式且 dryRun 已关闭：执行后将实际删除孤儿节点，操作不可逆。
+                处于 repair 模式且已关闭 dryRun：执行后将实际删除孤儿节点，该操作不可逆。
               </NAlert>
             </template>
             <template #extra>
@@ -902,7 +902,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="历史导入"
-            description="把 LCM 消息 / 记忆文件 / 全部一次性导入 Neo4j（LLM 实体抽取，未配置时降级直存）。"
+            description="将 LCM 消息、记忆文件或两者一并导入 Neo4j（LLM 实体抽取，未配置时降级直存）。导入完成会自动在后台建立三级节点。"
             icon="download"
             :confirm-level="1"
             :loading="!!loadingMap.import"
@@ -940,7 +940,7 @@ function executeReembed(): void {
         <NGi>
           <OperationCard
             title="三级节点重建"
-            description="从 :GmMessage 按 session 配对 user/assistant 轮次，调 LLM 提取并批量写入 :Task/:Skill/:Event 三级节点及边（生产节点，不带 :Benchmark）。按需触发，经 lastProcessedTurn 进度避免重复提取。"
+            description="读取会话消息，按 user / assistant 轮次调用 LLM 提取，批量写入 :Task / :Skill / :Event 三级节点及其边（生产节点，不含 :Benchmark）。按需触发，依据处理进度自动跳过已提取的轮次。"
             icon="share"
             :confirm-level="1"
             :loading="!!loadingMap.extract_rebuild"
@@ -951,14 +951,17 @@ function executeReembed(): void {
             @execute="executeExtractRebuild"
           >
             <template #form>
-              <NFormItem label="会话" size="small" :show-feedback="false">
-                <NInput v-model:value="extractSessionKey" size="small" placeholder="留空重建全部会话" clearable />
+              <NFormItem label="指定会话" size="small" :show-feedback="false">
+                <NInput v-model:value="extractSessionKey" size="small" placeholder="留空则重建全部会话" clearable />
               </NFormItem>
-              <NFormItem label="单次轮次上限" size="small" :show-feedback="false">
+              <NFormItem label="单次处理轮次" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractLimit" :min="1" :max="500" size="small" style="width: 100%" />
               </NFormItem>
-              <NFormItem label="强制从头" size="small" :show-feedback="false">
+              <NFormItem label="忽略进度重跑" size="small" :show-feedback="false">
                 <NSwitch v-model:value="extractForce" size="small" />
+                <span class="muted" style="margin-left: 8px; font-size: 12px">
+                  {{ extractForce ? '忽略已处理进度，从头重建' : '按进度跳过已提取轮次' }}
+                </span>
               </NFormItem>
             </template>
             <template #extra>

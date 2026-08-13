@@ -1627,7 +1627,7 @@ const moaLatencyPhaseOption = computed(() => {
           </NCard>
           <NGrid :cols="chartCols" :x-gap="12" :y-gap="12" responsive="screen">
             <NGi>
-              <NCard title="检索延迟（Assemble 折线 + L2/L3/L4 独立柱）" size="small">
+              <NCard title="检索延迟（Assemble 折线 + 各检索层独立柱状图）" size="small">
                 <EChart v-if="historyAsc.length" :option="latencyOption" height="280px" aria-label="检索延迟图：Assemble 总耗时折线和 L2/L3/L4 各层耗时柱状图" />
                 <div v-else-if="historyLoading" class="chart-loading">
                   <NSpin size="small" />
@@ -1640,14 +1640,14 @@ const moaLatencyPhaseOption = computed(() => {
               </NCard>
             </NGi>
             <NGi>
-              <NCard title="tier 分布（Low/Medium/High 堆叠面积）" size="small">
+              <NCard title="压力等级分布（Low / Medium / High 堆叠面积）" size="small">
                 <EChart v-if="historyAsc.length" :option="tierOption" height="280px" aria-label="Tier 分布堆叠面积图：Low、Medium、High 三级压力分布随时间变化" />
                 <div v-else-if="historyLoading" class="chart-loading">
                   <NSpin size="small" />
                 </div>
                 <NEmpty
                   v-else
-                  :description="historyIsError ? '加载失败，见上方错误提示' : '暂无 tier 分布数据'"
+                  :description="historyIsError ? '加载失败，见上方错误提示' : '暂无压力等级分布数据'"
                   style="padding: 24px 0"
                 />
               </NCard>

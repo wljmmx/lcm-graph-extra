@@ -210,7 +210,7 @@ function handleReembedClear(): Promise<void> {
               触发增量维护
             </NButton>
           </template>
-          确定触发增量维护？仅处理当前 {{ dirtyCount }} 个脏节点（重算 PR / 社区归属 / 关联矩阵更新等）。
+          确定触发增量维护？仅处理当前 {{ dirtyCount }} 个脏节点（重算 PageRank、社区归属、关联矩阵更新等）。
         </NPopconfirm>
       </div>
 
@@ -274,7 +274,7 @@ function handleReembedClear(): Promise<void> {
               清库并重导
             </NButton>
           </template>
-          确定清库并重导？将先清空节点库再重新向量化（clear=true）。推荐流程：清库重导 → 导入数据 → 重新向量化（埋点）。此操作不可恢复。
+          确定清库并重导？将先清空节点库，再重新向量化（clear=true）。推荐流程：清库重导 → 导入数据 → 重新向量化（埋点）。此操作不可恢复。
         </NPopconfirm>
       </div>
     </CardState>

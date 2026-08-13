@@ -273,7 +273,7 @@ defineExpose({
         :has-data="searchHasResult && searchNodes.length > 0"
         empty-text="输入关键词或选择类型开始探索图谱"
         :error-text="searchError ?? undefined"
-        empty-hint="支持 TASK / SKILL / EVENT 三种类型；空关键词按类型浏览最多 50 个。"
+        empty-hint="支持任务（Task）、技能（Skill）、事件（Event）三类节点；留空关键词时按类型浏览，最多展示 50 个。"
       >
         <template v-if="searchHasResult">
           <div class="result-header-row">

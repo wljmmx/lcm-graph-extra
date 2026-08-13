@@ -248,7 +248,7 @@ function fmtTs(ts?: number): string {
       :has-data="!!recallResult"
       empty-text="输入 query 后点「执行 Recall」开始检索质量验证"
       :error-text="recallError ?? undefined"
-      empty-hint="建议先在「检索质量配置」中开启 multiStage 或 chunking，再用典型 query 对比效果。"
+      empty-hint="建议先在「检索质量配置」中开启多级检索（multiStage）或分块（chunking），再用典型 query 对比效果。"
       style="margin-top: 8px"
     >
       <!-- 元信息描述 -->
