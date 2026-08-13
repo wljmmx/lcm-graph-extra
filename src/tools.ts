@@ -546,7 +546,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             for (const ent of (data.neo4j as any)?.entities ?? []) {
-              await session.run("MERGE (n {id: $id}) SET n.name = $name, n.labels = $labels", { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [] });
+              // 对齐 gm-pro batchUpsertNodes：重建/恢复知识节点时补齐时序默认字段
+              // （recordedAt/validFrom/source/state/scores）。ON CREATE SET 只在新建时
+              // 填充默认值，不覆盖备份中已存在的时序数据。
+              await session.run(
+                "MERGE (n {id: $id}) " +
+                "SET n.name = $name, n.labels = $labels " +
+                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [], now: Date.now(), source: 'lcm-restore', scores: '{}' },
+              );
               nCount++;
             }
             if (signal?.aborted) {
@@ -692,9 +700,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             for (const conv of convs) {
               const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 5").all(conv.conversation_id) as any[];
               for (const msg of msgs) {
+                // 对齐 gm-pro batchUpsertNodes：导入时补齐时序默认字段（ON CREATE SET 仅在新建时填充）。
                 await session.run(
-                  "MERGE (n:ConversationMessage {id: $id}) SET n.role = $role, n.content = $content, n.sessionId = $sid, n.tokens = $tokens",
-                  { id: `${conv.session_id}-${msg.seq}`, role: msg.role, content: (msg.content ?? "").slice(0, 5000), sid: conv.session_id, tokens: msg.content?.length ?? 0 }
+                  "MERGE (n:ConversationMessage {id: $id}) " +
+                  "SET n.role = $role, n.content = $content, n.sessionId = $sid, n.tokens = $tokens " +
+                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                  { id: `${conv.session_id}-${msg.seq}`, role: msg.role, content: (msg.content ?? "").slice(0, 5000), sid: conv.session_id, tokens: msg.content?.length ?? 0, now: Date.now(), source: 'lcm-import', scores: '{}' }
                 );
                 total++;
               }
@@ -721,7 +732,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             }
             for (const file of files) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
-              await session.run("MERGE (n:MemoryFile {id: $id}) SET n.name = $name, n.content = $content", { id: `file-${file}`, name: file, content });
+              await session.run(
+                "MERGE (n:MemoryFile {id: $id}) " +
+                "SET n.name = $name, n.content = $content " +
+                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                { id: `file-${file}`, name: file, content, now: Date.now(), source: 'lcm-import', scores: '{}' },
+              );
               // P1-孤立修复: 建立语义关联边 —— 从文件内容提取关键词，与图中
               // 已有 Task/Skill/Event 节点按 name 匹配，创建 MENTIONS 边，
               // 避免 MemoryFile 节点全部孤立于知识图谱之外。
