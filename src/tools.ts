@@ -755,45 +755,73 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           const { driver, session } = await neo4jSession();
           try {
             const now = Date.now();
-            for (let i = 0; i < allFiles.length; i += batchSize) {
+
+            // 1) 一次性读取全部文件内容（仅读一次），构建节点写入行 + 关键词缓存。
+            //    性能优化：避免节点写入与语义匹配各读一遍文件（2 万文件 → 少 1 万次读盘）。
+            const rows: { id: string; name: string; content: string; now: number; source: string; scores: string }[] = [];
+            const fileKeywords = new Map<string, string[]>();
+            for (const file of allFiles) {
+              const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
+              rows.push({ id: `file-${file}`, name: file, content, now, source: 'lcm-import', scores: '{}' });
+              fileKeywords.set(file, extractMemoryKeywords(content));
+            }
+
+            // 2) 批量写入 MemoryFile 节点（UNWIND，每批仅一次往返）
+            for (let i = 0; i < rows.length; i += batchSize) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
-              const chunk = allFiles.slice(i, i + batchSize);
-              // 批量节点写入：UNWIND MERGE（每批一次往返）
-              const rows = chunk.map((file) => {
-                const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
-                return { id: `file-${file}`, name: file, content, now, source: 'lcm-import', scores: '{}' };
-              });
               await session.run(
                 "UNWIND $rows AS m " +
                 "MERGE (n:MemoryFile {id: m.id}) " +
                 "ON CREATE SET n.recordedAt = m.now, n.validFrom = m.now, n.source = m.source, n.state = 'active', n.scores = m.scores " +
                 "SET n.name = m.name, n.content = m.content",
-                { rows },
+                { rows: rows.slice(i, i + batchSize) },
               );
-              // 语义关联边逐文件处理（需按文件内容提取关键词，无法批量）
-              for (const r of rows) {
-                const keywords = extractMemoryKeywords(r.content);
-                if (keywords.length > 0) {
-                  try {
-                    await session.run(
-                      `MATCH (m:MemoryFile {id: $id})
-                       MATCH (n:Task|Skill|Event)
-                       WHERE n.name IS NOT NULL AND toLower(trim(n.name)) IN $keywords
-                       WITH m, n LIMIT $maxLinks
-                       MERGE (m)-[r:MENTIONS]->(n)
-                         ON CREATE SET r.createdAt = timestamp()
-                       RETURN count(r) AS linked`,
-                      { id: r.id, keywords, maxLinks: 10 },
-                    );
-                  } catch (linkErr: any) {
-                    lines.push(`⚠ MemoryFile '${r.name}' semantic link skipped: ${linkErr?.message ?? String(linkErr)}`);
-                  }
+              fCount = Math.min(rows.length, i + batchSize);
+              filesImported = fCount;
+            }
+
+            // 3) 语义关联边（P1-孤立修复）—— 性能优化：内存预加载候选节点 + UNWIND 批量建边，
+            //    替代原先每个文件一次 Cypher 往返。文件多时（100MB 可上万文件）该往返是超时主因：
+            //    原 O(文件数) 次往返 → 1 次候选查询 + O(边数/批) 次批量建边。
+            const candRes = await session.run(
+              `MATCH (n)
+               WHERE (n:Task OR n:Skill OR n:Event) AND n.name IS NOT NULL
+               RETURN n.id AS id, toLower(trim(n.name)) AS lname`,
+            );
+            const nameToId = new Map<string, string>();
+            for (const rec of candRes.records) {
+              const id = rec.get('id')?.toString();
+              const lname = rec.get('lname') as string | undefined;
+              if (id && lname) nameToId.set(lname, id);
+            }
+            // 候选节点过多时跳过语义关联，只完成节点导入（保住 10 分钟性能目标）
+            const CAND_LIMIT = 100_000;
+            if (nameToId.size > 0 && nameToId.size <= CAND_LIMIT) {
+              const edgeRows: { from: string; to: string }[] = [];
+              for (const file of allFiles) {
+                const keywords = fileKeywords.get(file) ?? [];
+                let linked = 0;
+                for (const kw of keywords) {
+                  const target = nameToId.get(kw);
+                  if (!target) continue;
+                  edgeRows.push({ from: `file-${file}`, to: target });
+                  if (++linked >= 10) break;
                 }
-                fCount++;
-                filesImported = fCount;
               }
+              for (let i = 0; i < edgeRows.length; i += batchSize) {
+                await session.run(
+                  `UNWIND $rows AS e
+                   MATCH (m:MemoryFile {id: e.from})
+                   MATCH (n) WHERE (n:Task OR n:Skill OR n:Event) AND n.id = e.to
+                   MERGE (m)-[r:MENTIONS]->(n)
+                     ON CREATE SET r.createdAt = timestamp()`,
+                  { rows: edgeRows.slice(i, i + batchSize) },
+                );
+              }
+            } else if (nameToId.size > CAND_LIMIT) {
+              lines.push(`⚠ MemoryFile semantic links skipped: ${nameToId.size} candidate nodes exceed limit ${CAND_LIMIT}`);
             }
           } finally { await closeNeo4j(driver, session); }
           lines.push(`✅ Imported ${fCount}/${allFiles.length} memory files into Neo4j (batch=${batchSize}, batches=${Math.ceil(allFiles.length / batchSize)})`);
