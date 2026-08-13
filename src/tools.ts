@@ -669,16 +669,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     name: "lcmg_import",
     label: "历史导入",
     description: "One-time import of historical data into Neo4j knowledge graph. source=lcm_messages imports chat history, source=memory_files imports *.md files, source=all does both. Uses LLM entity extraction when configured." +
-      " Uses LLM entity extraction when configured.",
+      " limit 为每批记录数上限，工具会自动分多批循环直到全部记录导入完成（清理后重建图库时用于完整恢复）。",
     parameters: Type.Object({
       source: Type.String({ description: '"lcm_messages", "memory_files", or "all"' }),
-      limit: Type.Optional(Type.Number({ description: "Max items to process (default 50)", minimum: 1, maximum: 500 })),
+      limit: Type.Optional(Type.Number({ description: "每批处理的记录数上限（默认 100），自动多批直到全部导入", minimum: 1, maximum: 500 })),
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
         return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
       }
-      const limit = params.limit ?? 50;
+      const limit = params.limit ?? 100;
       const lines: string[] = [];
       let total = 0;
       let filesImported = 0;
@@ -691,27 +691,50 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         let db: any = null;
         try {
           db = openDb();
-          const convs = db.prepare("SELECT conversation_id, session_id FROM conversations WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) ORDER BY conversation_id DESC LIMIT ?").all(limit) as any[];
+          // limit = 每批记录数上限；工具自动分多批直到全部导入（清理 Neo4j 后完整重建）
+          const batchSize = Math.max(1, limit);
+
+          // 1) 全量收集待导入消息队列：不再 LIMIT 截断会话，会话内不再只取 5 条
+          const convs = db.prepare(
+            "SELECT conversation_id, session_id FROM conversations " +
+            "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
+            "ORDER BY conversation_id DESC"
+          ).all() as any[];
+          const pending: { id: string; role: string; content: string; sid: string; tokens: number }[] = [];
+          for (const conv of convs) {
+            const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
+            for (const msg of msgs) {
+              pending.push({
+                id: `${conv.session_id}-${msg.seq}`,
+                role: msg.role,
+                content: (msg.content ?? "").slice(0, 5000),
+                sid: conv.session_id,
+                tokens: msg.content?.length ?? 0,
+              });
+            }
+          }
+
           const { driver, session } = await neo4jSession();
           try {
-            if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-            }
-            for (const conv of convs) {
-              const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 5").all(conv.conversation_id) as any[];
-              for (const msg of msgs) {
+            // 2) 按批次写入，直到队列耗尽
+            for (let i = 0; i < pending.length; i += batchSize) {
+              if (signal?.aborted) {
+                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+              }
+              const chunk = pending.slice(i, i + batchSize);
+              for (const m of chunk) {
                 // 对齐 gm-pro batchUpsertNodes：导入时补齐时序默认字段（ON CREATE SET 仅在新建时填充）。
                 await session.run(
                   "MERGE (n:ConversationMessage {id: $id}) " +
                   "SET n.role = $role, n.content = $content, n.sessionId = $sid, n.tokens = $tokens " +
                   "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
-                  { id: `${conv.session_id}-${msg.seq}`, role: msg.role, content: (msg.content ?? "").slice(0, 5000), sid: conv.session_id, tokens: msg.content?.length ?? 0, now: Date.now(), source: 'lcm-import', scores: '{}' }
+                  { ...m, now: Date.now(), source: 'lcm-import', scores: '{}' }
                 );
                 total++;
               }
             }
           } finally { await closeNeo4j(driver, session); }
-          lines.push(`✅ Imported ${total} messages from lossless-claw DB`);
+          lines.push(`✅ Imported ${total}/${pending.length} messages from lossless-claw DB (batch=${batchSize}, batches=${Math.ceil(pending.length / batchSize)})`);
         } catch (e: any) { lines.push(`❌ lossless-claw import: ${e.message}`); }
         finally { if (db) { try { db.close(); } catch {} } }
       }
@@ -724,45 +747,50 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         let fCount = 0;
         try {
           const memDir = join(homedir(), ".openclaw", "workspace", "main", "memory");
+          // limit = 每批文件数上限；自动分多批直到全部导入（清理 Neo4j 后完整重建）
+          const batchSize = Math.max(1, limit);
+          const allFiles = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")) : [];
           const { driver, session } = await neo4jSession();
           try {
-            const files = existsSync(memDir) ? readdirSync(memDir).filter((f) => f.endsWith(".md")).slice(0, limit) : [];
-            if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-            }
-            for (const file of files) {
-              const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
-              await session.run(
-                "MERGE (n:MemoryFile {id: $id}) " +
-                "SET n.name = $name, n.content = $content " +
-                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
-                { id: `file-${file}`, name: file, content, now: Date.now(), source: 'lcm-import', scores: '{}' },
-              );
-              // P1-孤立修复: 建立语义关联边 —— 从文件内容提取关键词，与图中
-              // 已有 Task/Skill/Event 节点按 name 匹配，创建 MENTIONS 边，
-              // 避免 MemoryFile 节点全部孤立于知识图谱之外。
-              const keywords = extractMemoryKeywords(content);
-              if (keywords.length > 0) {
-                try {
-                  await session.run(
-                    `MATCH (m:MemoryFile {id: $id})
-                     MATCH (n:Task|Skill|Event)
-                     WHERE n.name IS NOT NULL AND toLower(trim(n.name)) IN $keywords
-                     WITH m, n LIMIT $maxLinks
-                     MERGE (m)-[r:MENTIONS]->(n)
-                       ON CREATE SET r.createdAt = timestamp()
-                     RETURN count(r) AS linked`,
-                    { id: `file-${file}`, keywords, maxLinks: 10 },
-                  );
-                } catch (linkErr: any) {
-                  lines.push(`⚠ MemoryFile '${file}' semantic link skipped: ${linkErr?.message ?? String(linkErr)}`);
-                }
+            for (let i = 0; i < allFiles.length; i += batchSize) {
+              if (signal?.aborted) {
+                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
-              fCount++;
-              filesImported = fCount;
+              const chunk = allFiles.slice(i, i + batchSize);
+              for (const file of chunk) {
+                const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
+                await session.run(
+                  "MERGE (n:MemoryFile {id: $id}) " +
+                  "SET n.name = $name, n.content = $content " +
+                  "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores",
+                  { id: `file-${file}`, name: file, content, now: Date.now(), source: 'lcm-import', scores: '{}' },
+                );
+                // P1-孤立修复: 建立语义关联边 —— 从文件内容提取关键词，与图中
+                // 已有 Task/Skill/Event 节点按 name 匹配，创建 MENTIONS 边，
+                // 避免 MemoryFile 节点全部孤立于知识图谱之外。
+                const keywords = extractMemoryKeywords(content);
+                if (keywords.length > 0) {
+                  try {
+                    await session.run(
+                      `MATCH (m:MemoryFile {id: $id})
+                       MATCH (n:Task|Skill|Event)
+                       WHERE n.name IS NOT NULL AND toLower(trim(n.name)) IN $keywords
+                       WITH m, n LIMIT $maxLinks
+                       MERGE (m)-[r:MENTIONS]->(n)
+                         ON CREATE SET r.createdAt = timestamp()
+                       RETURN count(r) AS linked`,
+                      { id: `file-${file}`, keywords, maxLinks: 10 },
+                    );
+                  } catch (linkErr: any) {
+                    lines.push(`⚠ MemoryFile '${file}' semantic link skipped: ${linkErr?.message ?? String(linkErr)}`);
+                  }
+                }
+                fCount++;
+                filesImported = fCount;
+              }
             }
           } finally { await closeNeo4j(driver, session); }
-          lines.push(`✅ Imported ${fCount} memory files into Neo4j`);
+          lines.push(`✅ Imported ${fCount}/${allFiles.length} memory files into Neo4j (batch=${batchSize}, batches=${Math.ceil(allFiles.length / batchSize)})`);
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
