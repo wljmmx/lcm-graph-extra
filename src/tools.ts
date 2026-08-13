@@ -25,7 +25,7 @@ import {
   generateExperienceSummary, openDb, closeSharedDb, getQmdBaseUrl, LCM_DB,
   // Neo4j
   neo4jToNumber, getNeo4jDriver, neo4jSession, closeNeo4j, closeNeo4jDriver,
-  mergeEntriesNeo4jConfig,
+  mergeEntriesNeo4jConfig, ensureNeo4jSchema,
   // registry
   getRegisteredToolHandler, _resetRegisteredToolHandlers, registerToolHandler,
   createAuditWrapper,
@@ -539,6 +539,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
         try {
+          // 恢复 Neo4j 前先自动建索引与约束（幂等，含版别适配），确保 MERGE 走索引
+          await ensureNeo4jSchema();
           const { driver, session } = await neo4jSession();
           try {
             let nCount = 0, rCount = 0;
@@ -687,20 +689,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // 关键性能修复：为 id 字段建立唯一约束（自动创建索引）。
       // 22 万文件毫秒级不复现的根因：MERGE/MATCH (n:MemoryFile {id}) 无索引时全图扫描，
       // 复杂度 O(N²)。唯一约束让 Neo4j 为 id 建索引 → MERGE/MATCH 走索引 O(1) 查找。
-      // IF NOT EXISTS 幂等，重复运行、清理后重建均安全。
-      try {
-        const indexDriver = await getNeo4jDriver();
-        const indexSession = indexDriver.session();
-        try {
-          await indexSession.run("CREATE CONSTRAINT lcm_msg_id IF NOT EXISTS FOR (n:ConversationMessage) REQUIRE n.id IS UNIQUE");
-          await indexSession.run("CREATE CONSTRAINT lcm_mem_id IF NOT EXISTS FOR (n:MemoryFile) REQUIRE n.id IS UNIQUE");
-          // 语义边 MATCH (n) WHERE (n:Task OR n:Skill OR n:Event) AND n.id = e.to：
-          // 为三类标签分别建 id 约束，使标签并集匹配能走各自索引
-          await indexSession.run("CREATE CONSTRAINT lcm_task_id IF NOT EXISTS FOR (n:Task) REQUIRE n.id IS UNIQUE");
-          await indexSession.run("CREATE CONSTRAINT lcm_skill_id IF NOT EXISTS FOR (n:Skill) REQUIRE n.id IS UNIQUE");
-          await indexSession.run("CREATE CONSTRAINT lcm_event_id IF NOT EXISTS FOR (n:Event) REQUIRE n.id IS UNIQUE");
-        } finally { await indexSession.close(); }
-      } catch { /* 索引失败不阻塞导入，仅降低性能 */ }
+      // 由 ensureNeo4jSchema 统一在建约束（幂等，含版别适配的企业/社区版向量索引），
+      // 重复运行、清理后重建均安全。
+      await ensureNeo4jSchema();
 
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {

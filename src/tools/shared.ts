@@ -11,7 +11,7 @@ import { createRequire } from "node:module";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { resolveNeo4jConfig } from '../config/neo4j-helper';
+import { resolveNeo4jConfig, resolveEmbeddingConfig } from '../config/neo4j-helper';
 import { getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL } from '../utils/url.js';
 import { callLlm } from '../utils/llm-call.js';
@@ -269,6 +269,147 @@ export function mergeEntriesNeo4jConfig(api: any): Record<string, unknown> {
     }
   }
   return config;
+}
+
+// ── Neo4j 版别检测 + Schema 自动初始化 ──
+// 对齐 gm-pro v2.4.1 的版本适配逻辑：
+//   - 企业版：自动启用多数据库物理隔离 (withDatabase) + 精细 HNSW/量化向量索引参数
+//   - 社区版/未知：自动跳过多库切库、跳过不可用的量化/HNSW 精细选项，走逻辑隔离 + 基础索引
+// 所有 Neo4j 工具（lcmg_import / lcmg_restore / lcmg_sync 等）写入前调 ensureNeo4jSchema()，
+// 幂等自动建索引与约束，无需手动执行。
+
+export type Neo4jEdition = "Enterprise" | "Community" | null;
+
+let _cachedEdition: Neo4jEdition = null;
+let _schemaReady: Promise<void> | null = null;
+
+export function getCachedEdition(): Neo4jEdition { return _cachedEdition; }
+export function setCachedEdition(edition: Neo4jEdition): void { _cachedEdition = edition; }
+
+/** 判断缓存的 edition 是否支持多数据库物理隔离（仅 Enterprise） */
+export function cachedEditionSupportsMultiDb(): boolean {
+  return _cachedEdition === "Enterprise";
+}
+
+/**
+ * 检测连接的 Neo4j 版本代号（CALL dbms.components() YIELD edition）。
+ * 返回 "Enterprise" / "Community"，检测失败返回 null（不阻塞，调用方按保守处理）。
+ */
+export async function detectNeo4jEdition(): Promise<Neo4jEdition> {
+  try {
+    const driver = await getNeo4jDriver();
+    const session = driver.session();
+    try {
+      const result = await session.run(
+        "CALL dbms.components() YIELD name, edition WHERE name = 'Neo4j Kernel' RETURN edition",
+      );
+      const edition = result.records[0]?.get("edition");
+      const s = edition ? String(edition).toLowerCase() : "";
+      if (s.includes("enterprise")) return "Enterprise";
+      if (s.includes("community")) return "Community";
+      return null;
+    } finally { await session.close(); }
+  } catch {
+    // dbms.components() 可能因权限或版本不可用，静默失败
+    return null;
+  }
+}
+
+/**
+ * 幂等建立 Neo4j schema（约束 + 全文索引 + 向量索引）。
+ * 对齐 gm-pro v2.4.1：按版别选用向量索引精细参数。
+ *  - Enterprise：m=16 / ef_construction=128 / ef_search=64 / scalar 量化
+ *  - Community/未知：跳过量化和 HNSW 精细选项，仅基础 multi-label 向量索引
+ * 任一语句失败仅吞掉（IF NOT EXISTS 幂等；老版本不支持时回落过程化调用），不阻塞调用方。
+ */
+export async function ensureNeo4jSchema(): Promise<void> {
+  if (_schemaReady) return _schemaReady;
+  _schemaReady = (async () => {
+    try {
+      const driver = await getNeo4jDriver();
+      const session = driver.session();
+      try {
+        // 版别检测（缓存，供多库隔离 / 向量索引选参）
+        if (_cachedEdition === null) {
+          _cachedEdition = await detectNeo4jEdition();
+        }
+        const isEnterprise = _cachedEdition === "Enterprise";
+        const log = getGlobalLogger();
+        log?.info?.(`[lcm-graph-extra] Neo4j edition: ${_cachedEdition ?? "unknown"} (multi-db isolation: ${isEnterprise ? "enabled" : "not available — logical isolation"})`);
+
+        // 约束：各业务标签 id 唯一（自动建索引，消除 MERGE/MATCH 全图扫描）
+        const idConstraints: Array<[string, string]> = [
+          ["ConversationMessage", "lcm_msg_id"],
+          ["MemoryFile", "lcm_mem_id"],
+          ["Task", "lcm_task_id"],
+          ["Skill", "lcm_skill_id"],
+          ["Event", "lcm_event_id"],
+        ];
+        for (const [label, name] of idConstraints) {
+          try {
+            await session.run(`CREATE CONSTRAINT ${name} IF NOT EXISTS FOR (n:${label}) REQUIRE n.id IS UNIQUE`);
+          } catch { /* may exist */ }
+        }
+
+        // 全文索引：全文搜索（cjk 分析器，中文友好）
+        const fulltext: Array<[string, string, string]> = [
+          ["task_search", "Task", "[n.name, n.description, n.content]"],
+          ["skill_search", "Skill", "[n.name, n.description, n.content]"],
+          ["event_search", "Event", "[n.name, n.description, n.content]"],
+          ["conversation_search", "ConversationMessage", "[n.content]"],
+        ];
+        for (const [name, label, props] of fulltext) {
+          try {
+            await session.run(`CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { analyzer: "cjk" }`);
+          } catch { /* may exist */ }
+        }
+
+        // 向量索引（Neo4j 5.11+）：跨 Task|Skill|Event 单索引
+        // 企业版启用精细 HNSW + 量化（针对 NAS/内存有限场景）；社区版仅基础参数
+        const dim = resolveEmbeddingConfig(getPluginNeo4jConfig())?.dimensions ?? 1024;
+        try {
+          if (isEnterprise) {
+            await session.run(`
+              CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+              FOR (n:Task|Skill|Event) ON n.embedding
+              OPTIONS {
+                indexConfig: {
+                  \`vector.dimensions\`: ${dim},
+                  \`vector.similarity_function\`: 'cosine',
+                  \`vector.quantization.type\`: 'scalar',
+                  \`vector.hnsw.m\`: 16,
+                  \`vector.hnsw.ef_construction\`: 128,
+                  \`vector.hnsw.ef_search\`: 64
+                }
+              }
+            `);
+          } else {
+            await session.run(`
+              CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+              FOR (n:Task|Skill|Event) ON n.embedding
+              OPTIONS {
+                indexConfig: {
+                  \`vector.dimensions\`: ${dim},
+                  \`vector.similarity_function\`: 'cosine'
+                }
+              }
+            `);
+          }
+        } catch {
+          // 老版本不支持 CREATE VECTOR INDEX / 多 label 选项 → 回落过程化调用
+          try {
+            await session.run(
+              `CALL db.index.vector.createNodeIndex('gm_node_embedding', ['Task', 'Skill', 'Event'], 'embedding', ${dim}, 'cosine')`,
+            );
+          } catch { /* may exist or version < 5.11 */ }
+        }
+      } finally { await session.close(); }
+    } catch (e) {
+      // schema 初始化失败不阻塞工具主体（仅降低后续查询性能）
+      getGlobalLogger()?.warn?.("[lcm-graph-extra] ensureNeo4jSchema failed", { err: e instanceof Error ? e.message : String(e) });
+    }
+  })();
+  return _schemaReady;
 }
 
 // ── Tool handler registry ──
