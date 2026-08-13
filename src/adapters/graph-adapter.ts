@@ -442,13 +442,27 @@ export class GraphAdapter {
       this._recallerFromGmPro = false;
     }
 
-    // 3) 设置 embedding —— 优先沿用 gm-pro 已注入的 embed（避免重复维护一套 embedding 配置）。
-    //    仅当 lcm 显式配置了 embedding（model/apiKey/baseURL 任一存在）时才覆盖，
-    //    keep_alive 与维度以 lcm 为准；否则复用 A 的 embed，不重复 setEmbedFn。
+    // 3) 设置 embedding —— 复用 A 时直接沿用 gm-pro 已注入的 embed（含批量能力）。
+    //    不要 setEmbedFn 覆盖：lcm 单文本 createLocalEmbedFn 会覆盖 gm-pro 的 embed，
+    //    破坏其批量链路。仅当未复用 A（自建 B）时才把 embed 注入到 Recaller。
+    //    如需自定义 embed 模型，请配置在 graph-memory-pro 侧（lcm 复用其链路，不重复造轮子）。
     try {
       const ecfg = this.config.embedding;
       const hasExplicitEmbed = !!(ecfg && (ecfg.model || ecfg.apiKey || ecfg.baseURL));
-      if (hasExplicitEmbed) {
+      if (this._recallerFromGmPro) {
+        // 复用 A：实际召回沿用 gm-pro 已注入的批量 embed，不 setEmbedFn 覆盖。
+        // 但为 lcm 自身的心跳检查/维度探测/维护等代理读取保留一个本地 embed 引用
+        // （仅自用，不注入共享 Recaller，故不影响 gm-pro 的批量链路）。
+        if (hasExplicitEmbed) {
+          try {
+            this._embedFn = createLocalEmbedFn(ecfg);
+          } catch (e) {
+            this._embedFn = mod.createEmbedFn ? mod.createEmbedFn({ ...ecfg }) : undefined;
+          }
+        }
+        this.logger?.info?.('[graph-adapter] reusing graph-memory-pro embedFn (batch-capable); local embedding kept only for lcm proxy reads, not injected into shared Recaller');
+      } else if (hasExplicitEmbed) {
+        // 自建 B：用 lcm 的 embed（保 keep_alive）
         try {
           this._embedFn = createLocalEmbedFn(ecfg);
           this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
@@ -463,9 +477,6 @@ export class GraphAdapter {
         if (this._embedFn) {
           this._recaller.setEmbedFn(this._embedFn);
         }
-      } else if (this._recallerFromGmPro) {
-        // 复用 A：gm-pro 已注入自己的 embed，直接沿用，不重复覆盖
-        this.logger?.debug?.('[graph-adapter] reusing graph-memory-pro embedFn (no explicit local embedding config)');
       } else {
         this.logger?.warn?.('[graph-adapter] No embedding config provided, community recall disabled');
       }
