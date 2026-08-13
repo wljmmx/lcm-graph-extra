@@ -684,6 +684,24 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       let total = 0;
       let filesImported = 0;
 
+      // 关键性能修复：为 id 字段建立唯一约束（自动创建索引）。
+      // 22 万文件毫秒级不复现的根因：MERGE/MATCH (n:MemoryFile {id}) 无索引时全图扫描，
+      // 复杂度 O(N²)。唯一约束让 Neo4j 为 id 建索引 → MERGE/MATCH 走索引 O(1) 查找。
+      // IF NOT EXISTS 幂等，重复运行、清理后重建均安全。
+      try {
+        const indexDriver = await getNeo4jDriver();
+        const indexSession = indexDriver.session();
+        try {
+          await indexSession.run("CREATE CONSTRAINT lcm_msg_id IF NOT EXISTS FOR (n:ConversationMessage) REQUIRE n.id IS UNIQUE");
+          await indexSession.run("CREATE CONSTRAINT lcm_mem_id IF NOT EXISTS FOR (n:MemoryFile) REQUIRE n.id IS UNIQUE");
+          // 语义边 MATCH (n) WHERE (n:Task OR n:Skill OR n:Event) AND n.id = e.to：
+          // 为三类标签分别建 id 约束，使标签并集匹配能走各自索引
+          await indexSession.run("CREATE CONSTRAINT lcm_task_id IF NOT EXISTS FOR (n:Task) REQUIRE n.id IS UNIQUE");
+          await indexSession.run("CREATE CONSTRAINT lcm_skill_id IF NOT EXISTS FOR (n:Skill) REQUIRE n.id IS UNIQUE");
+          await indexSession.run("CREATE CONSTRAINT lcm_event_id IF NOT EXISTS FOR (n:Event) REQUIRE n.id IS UNIQUE");
+        } finally { await indexSession.close(); }
+      } catch { /* 索引失败不阻塞导入，仅降低性能 */ }
+
       // lossless-claw 消息导入
       if (params.source === "lcm_messages" || params.source === "all") {
         if (signal?.aborted) {
@@ -812,9 +830,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               }
               for (let i = 0; i < edgeRows.length; i += batchSize) {
                 await session.run(
+                  // 目标节点 id 来自内存 nameToId（已保证为 Task/Skill/Event），
+                  // 直接按 id 匹配以走 lcm_task/skill/event 唯一约束索引，避免标签并集全扫描
                   `UNWIND $rows AS e
                    MATCH (m:MemoryFile {id: e.from})
-                   MATCH (n) WHERE (n:Task OR n:Skill OR n:Event) AND n.id = e.to
+                   MATCH (n) WHERE n.id = e.to AND (n:Task OR n:Skill OR n:Event)
                    MERGE (m)-[r:MENTIONS]->(n)
                      ON CREATE SET r.createdAt = timestamp()`,
                   { rows: edgeRows.slice(i, i + batchSize) },
