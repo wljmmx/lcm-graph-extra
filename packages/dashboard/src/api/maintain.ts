@@ -76,6 +76,19 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
   return invokeMcpTool('lcmg_import', { source, limit });
 }
 
+/** 三级节点重建：sessionKey 省略重建全部；force 忽略进度从头重建 */
+export function invokeExtractRebuild(opts: {
+  sessionKey?: string;
+  limit?: number;
+  force?: boolean;
+} = {}): Promise<McpInvokeResponse> {
+  const params: Record<string, unknown> = {};
+  if (opts.sessionKey) params.sessionKey = opts.sessionKey;
+  if (opts.limit != null) params.limit = opts.limit;
+  if (opts.force) params.force = opts.force;
+  return invokeMcpTool('lcmg_extract_rebuild', params);
+}
+
 /**
  * Bootstrap 反馈工具：用已有图谱节点合成 warmup 反馈，突破冷启动。
  * 原理：以节点 name 作为 query 和 reply，启发式必然命中（name 在 reply 中），

@@ -37,6 +37,7 @@ import {
   invokeRestore,
   invokeSync,
   invokeImport,
+  invokeExtractRebuild,
   invokeBootstrap,
   invokeReembed,
   fetchOperationLogs,
@@ -119,6 +120,11 @@ const importSourceOptions = [
   { label: 'LCM 消息 (lcm_messages)', value: 'lcm_messages' },
   { label: '记忆文件 (memory_files)', value: 'memory_files' },
 ];
+
+// 卡片 9.5：三级节点重建（v2.8.1 新增）
+const extractSessionKey = ref<string>('');
+const extractLimit = ref<number>(50);
+const extractForce = ref<boolean>(false);
 
 // 卡片 10：Bootstrap 反馈（v2.3.5 新增）
 const bootstrapLimit = ref<number>(100);
@@ -459,6 +465,23 @@ function executeImport(): void {
     tool: 'lcmg_import',
     params: { source: importSource.value, limit: importLimit.value },
     invokeFn: () => invokeImport(importSource.value, importLimit.value),
+  });
+}
+
+function executeExtractRebuild(): void {
+  runMutation({
+    cardKey: 'extract_rebuild',
+    tool: 'lcmg_extract_rebuild',
+    params: {
+      sessionKey: extractSessionKey.value || undefined,
+      limit: extractLimit.value,
+      force: extractForce.value,
+    },
+    invokeFn: () => invokeExtractRebuild({
+      sessionKey: extractSessionKey.value || undefined,
+      limit: extractLimit.value,
+      force: extractForce.value,
+    }),
   });
 }
 
@@ -909,6 +932,37 @@ function executeReembed(): void {
             </template>
             <template #extra>
               <OperationRecentHistory :logs="historyOf('lcmg_import')" />
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 9.5: 三级节点重建（v2.8.1 新增） -->
+        <NGi>
+          <OperationCard
+            title="三级节点重建"
+            description="从 :GmMessage 按 session 配对 user/assistant 轮次，调 LLM 提取并批量写入 :Task/:Skill/:Event 三级节点及边（生产节点，不带 :Benchmark）。按需触发，经 lastProcessedTurn 进度避免重复提取。"
+            icon="share"
+            :confirm-level="1"
+            :loading="!!loadingMap.extract_rebuild"
+            tool-name="lcmg_extract_rebuild"
+            :last-status="lastResultMap.extract_rebuild?.status ?? null"
+            :last-details="lastResultMap.extract_rebuild?.details ?? null"
+            :last-text="lastResultMap.extract_rebuild?.text ?? null"
+            @execute="executeExtractRebuild"
+          >
+            <template #form>
+              <NFormItem label="会话" size="small" :show-feedback="false">
+                <NInput v-model:value="extractSessionKey" size="small" placeholder="留空重建全部会话" clearable />
+              </NFormItem>
+              <NFormItem label="单次轮次上限" size="small" :show-feedback="false">
+                <NInputNumber v-model:value="extractLimit" :min="1" :max="500" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="强制从头" size="small" :show-feedback="false">
+                <NSwitch v-model:value="extractForce" size="small" />
+              </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_extract_rebuild')" />
             </template>
           </OperationCard>
         </NGi>
