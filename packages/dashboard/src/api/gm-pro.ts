@@ -630,7 +630,11 @@ export interface GmProReembedResult {
   message?: string;
 }
 
-/** 触发全节点重新向量化（高成本，消耗 embedding 配额） */
-export function postGmProReembed(): Promise<GmProProxyResponse<GmProReembedResult>> {
-  return apiPost<GmProProxyResponse<GmProReembedResult>>('/api/gm-pro/proxy/reembed', {});
+/**
+ * 触发全节点重新向量化（高成本，消耗 embedding 配额）。
+ * @param opts.clear 为 true 时先清库再重导（gm-pro 集成到 reembed 工具，不新建工具）。
+ *   推荐流程：gm_reembed clear=true → 导入数据 → gm_reembed（埋点）。
+ */
+export function postGmProReembed(opts: { clear?: boolean } = {}): Promise<GmProProxyResponse<GmProReembedResult>> {
+  return apiPost<GmProProxyResponse<GmProReembedResult>>('/api/gm-pro/proxy/reembed', opts);
 }

@@ -50,6 +50,7 @@ const maintaining = ref(false);
 const fullMaintaining = ref(false);
 const refreshing = ref(false);
 const reembedding = ref(false);
+const reembedClearing = ref(false);
 
 const dirtyCount = computed(() => Number(props.dirty?.count ?? 0));
 const hasDirty = computed(() => dirtyCount.value > 0);
@@ -58,7 +59,7 @@ const previewIds = computed(() => nodeIds.value.slice(0, 3));
 
 /** 是否有任何动作在进行中（高风险按钮全局互斥） */
 const anyActing = computed(() =>
-  clearing.value || maintaining.value || fullMaintaining.value || refreshing.value || reembedding.value,
+  clearing.value || maintaining.value || fullMaintaining.value || refreshing.value || reembedding.value || reembedClearing.value,
 );
 
 // ── 操作通用执行封装 ──
@@ -136,6 +137,19 @@ function handleReembed(): Promise<void> {
       return typeof count === 'number'
         ? `重新向量化已启动（预计处理 ${count} 个节点，异步执行）`
         : '重新向量化已启动（异步执行）';
+    },
+    [['gm-pro-health']],
+  );
+}
+
+/** 清库重导：先清库再重导（clear=true），推荐流程：clear → 导入数据 → 埋点 */
+function handleReembedClear(): Promise<void> {
+  return runAction<GmProReembedResult>(
+    reembedClearing,
+    () => postGmProReembed({ clear: true }),
+    (d) => {
+      const msg = d?.message ?? '';
+      return msg ? `清库重导: ${msg}` : '清库重导已触发，完成后请导入数据再执行一次重新向量化（埋点）';
     },
     [['gm-pro-health']],
   );
@@ -247,6 +261,20 @@ function handleReembed(): Promise<void> {
             </NButton>
           </template>
           确定触发重新向量化？将为所有节点重新生成 embedding（消耗大量 embedding 配额，通常无需执行）。
+        </NPopconfirm>
+          <NPopconfirm @positive-click="handleReembedClear">
+          <template #trigger>
+            <NButton
+              size="tiny"
+              type="error"
+              secondary
+              :disabled="anyActing"
+              :loading="reembedClearing"
+            >
+              清库并重导
+            </NButton>
+          </template>
+          确定清库并重导？将先清空节点库再重新向量化（clear=true）。推荐流程：清库重导 → 导入数据 → 重新向量化（埋点）。此操作不可恢复。
         </NPopconfirm>
       </div>
     </CardState>
