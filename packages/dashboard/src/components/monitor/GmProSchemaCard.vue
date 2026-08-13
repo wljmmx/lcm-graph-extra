@@ -14,7 +14,7 @@ import { computed, onMounted, ref } from 'vue';
 import { useTheme } from '../../composables/useTheme';
 import { NCard, NTag, NDescriptions, NDescriptionsItem, NEmpty, NSpin } from 'naive-ui';
 import CardState from './CardState.vue';
-import { fetchGmProSchema, type GmProSchemaResult } from '../../api/gm-pro';
+import { fetchGmProSchema, fetchGmProStats, fetchGmProHealth, type GmProSchemaResult } from '../../api/gm-pro';
 
 const { isDark } = useTheme();
 
@@ -22,20 +22,41 @@ const fetching = ref(false);
 const isError = ref(false);
 const errorDetail = ref('');
 const schema = ref<GmProSchemaResult | null>(null);
+/** 是否处于兜底模式（/api/schema 因 gm-pro bug 失败，改用 stats/health 展示） */
+const fallback = ref(false);
+/** 兜底用的节点/边总数（/api/stats 提供，schema 接口不可用时用于头部展示） */
+const counts = ref<{ nodeCount: number; edgeCount: number }>({ nodeCount: 0, edgeCount: 0 });
 
 async function loadSchema(): Promise<void> {
   fetching.value = true;
   isError.value = false;
   errorDetail.value = '';
+  fallback.value = false;
   try {
     const res = await fetchGmProSchema();
-    if (res.ok) schema.value = res.data ?? null;
-    else {
+    if (res.ok && res.data) {
+      schema.value = res.data;
+      return;
+    }
+    // /api/schema 失败（graph-memory-pro 已知 bug：同 session 并发查询报
+    // "Queries cannot be run directly on a session with ongoing work"）→ 兜底到 stats/health
+    const [statsRes, healthRes] = await Promise.all([fetchGmProStats(), fetchGmProHealth()]);
+    const stats = statsRes.ok ? statsRes.data : null;
+    const health = healthRes.ok ? healthRes.data : null;
+    if (!stats && !health) {
       isError.value = true;
       schema.value = null;
-      // 透出代理/后端返回的真实错误（如 HTTP 404 / 500 / 不可达），便于定位根因
-      errorDetail.value = [res.error, res.detail ? JSON.stringify(res.detail) : ''].filter(Boolean).join(' · ');
+      errorDetail.value = res.error ?? 'schema 接口不可用';
+      return;
     }
+    fallback.value = true;
+    counts.value = {
+      nodeCount: stats?.nodeCount ?? 0,
+      edgeCount: stats?.edgeCount ?? health?.edges?.total ?? 0,
+    };
+    const edgeTypes = Object.entries(health?.edges?.byType ?? {}).map(([type, count]) => ({ type, count }));
+    schema.value = { nodeTypes: [], edgeTypes, indexingModels: null, vectorDimension: null };
+    errorDetail.value = `schema 接口不可用，已回退到 stats/health（${res.error ?? ''}）`;
   } catch (e) {
     isError.value = true;
     schema.value = null;
@@ -48,8 +69,16 @@ onMounted(loadSchema);
 /** 节点类型条形最大值，用于计算每类占比宽度 */
 const nodeMax = computed(() => Math.max(1, ...(schema.value?.nodeTypes?.map((t) => t.count) ?? [0])));
 const edgeMax = computed(() => Math.max(1, ...(schema.value?.edgeTypes?.map((t) => t.count) ?? [0])));
-const nodeTotal = computed(() => schema.value?.nodeTypes?.reduce((s, t) => s + t.count, 0) ?? 0);
-const edgeTotal = computed(() => schema.value?.edgeTypes?.reduce((s, t) => s + t.count, 0) ?? 0);
+const nodeTotal = computed(() => {
+  const nt = schema.value?.nodeTypes;
+  if (nt?.length) return nt.reduce((s, t) => s + t.count, 0);
+  return counts.value.nodeCount ?? 0;
+});
+const edgeTotal = computed(() => {
+  const et = schema.value?.edgeTypes;
+  if (et?.length) return et.reduce((s, t) => s + t.count, 0);
+  return counts.value.edgeCount ?? 0;
+});
 
 const barColor = computed(() => isDark.value ? 'rgba(64,152,252,0.35)' : 'rgba(32,128,240,0.25)');
 const barColorActive = computed(() => isDark.value ? '#4098fc' : '#2080f0');
@@ -88,6 +117,11 @@ const barColorActive = computed(() => isDark.value ? '#4098fc' : '#2080f0');
           <span v-else class="muted">—</span>
         </NDescriptionsItem>
       </NDescriptions>
+
+      <!-- 兜底模式提示：/api/schema 接口因 gm-pro bug 不可用 -->
+      <NAlert v-if="fallback" type="warning" :show-icon="true" style="margin-bottom:8px">
+        <span style="font-size: var(--fs-caption)">schema 接口不可用，已回退到 stats/health 展示（节点类型暂缺）。</span>
+      </NAlert>
 
       <div class="two-cols">
         <!-- 左：节点类型分布 -->
