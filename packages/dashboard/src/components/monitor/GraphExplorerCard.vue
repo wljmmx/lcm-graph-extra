@@ -371,13 +371,13 @@ defineExpose({
           </div>
 
           <!-- 反馈统计 -->
-          <NDivider v-if="currentFeedback && currentFeedback.feedbackCount">用户反馈</NDivider>
-          <NDescriptions v-if="currentFeedback && currentFeedback.feedbackCount" :column="2" size="small" label-placement="left" bordered>
-            <NDescriptionsItem label="反馈次数">
-              <span class="mono">{{ currentFeedback.feedbackCount }}</span>
+          <NDivider v-if="currentFeedback && (currentFeedback.usedCount != null || currentFeedback.unusedCount != null)">用户反馈</NDivider>
+          <NDescriptions v-if="currentFeedback && (currentFeedback.usedCount != null || currentFeedback.unusedCount != null)" :column="2" size="small" label-placement="left" bordered>
+            <NDescriptionsItem label="使用次数">
+              <span class="mono">{{ currentFeedback.usedCount ?? 0 }}</span>
             </NDescriptionsItem>
-            <NDescriptionsItem label="平均评分">
-              <span class="mono">{{ currentFeedback.avgScore?.toFixed(2) ?? '—' }}</span>
+            <NDescriptionsItem label="未使用次数">
+              <span class="mono">{{ currentFeedback.unusedCount ?? 0 }}</span>
             </NDescriptionsItem>
           </NDescriptions>
 

@@ -430,10 +430,16 @@ export function fetchGmProNodeEdges(id: string): Promise<GmProProxyResponse<GmPr
 
 // ─── 节点反馈统计 ──────────────────────────────────────────────────────────
 
+/**
+ * graph-memory-pro /api/nodes/:id/feedback-stats 响应体。
+ * 对应 src/store/feedback.ts getNodeFeedbackStats → handler 返回 { nodeId, usedCount, unusedCount }。
+ */
 export interface GmProNodeFeedbackStats {
   nodeId?: string;
-  feedbackCount?: number;
-  avgScore?: number;
+  /** 被 JUDGED='used' 的反馈数量 */
+  usedCount?: number;
+  /** 被 JUDGED='unused' 的反馈数量 */
+  unusedCount?: number;
   [key: string]: unknown;
 }
 
