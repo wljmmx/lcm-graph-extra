@@ -73,10 +73,12 @@ export async function acquireDriver(config: Neo4jConfig, _depth = 0): Promise<an
     // 导致 `this.driver.session()` 返回已关闭的 session，触发"session closed"错误。
     const ageMs = Date.now() - existing.createdAt;
     if (ageMs >= PROACTIVE_REFRESH_AGE_MS) {
+      // 先同步移除池条目，再异步关闭 —— 避免并发请求在 close 进行中仍复用到旧 driver，
+      // 否则会触发 "Pool is closed, it is no more able to serve requests."
+      pool.delete(key);
       try {
         await existing.driver.close();
       } catch { /* ignore close errors */ }
-      pool.delete(key);
       // 回退到新建连接（传递递归深度 +1）
       return await acquireDriver(config, _depth + 1);
     }
@@ -85,11 +87,11 @@ export async function acquireDriver(config: Neo4jConfig, _depth = 0): Promise<an
     try {
       await existing.driver.verifyConnectivity();
     } catch {
-      // 旧 driver 已失效 → 关闭并从池中移除
+      // 旧 driver 已失效 → 先同步移除，再异步关闭（避免并发复用正在关闭的 driver）
+      pool.delete(key);
       try {
         await existing.driver.close();
       } catch { /* ignore close errors */ }
-      pool.delete(key);
       // 回退到新建连接逻辑（传递递归深度 +1）
       return await acquireDriver(config, _depth + 1);
     }
