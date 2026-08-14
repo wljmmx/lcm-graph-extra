@@ -572,12 +572,16 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         return { ok: false, error: err };
       }
     }
-    // 三级节点重建：记录本次使用的进度文件路径，供 GET /api/extract-rebuild/progress 轮询读取
+    // 三级节点重建：显式注入绝对进度路径，供 GET /api/extract-rebuild/progress 轮询读取。
+    // 关键：必须把 progressPath 注入 params 传给插件，否则插件用自身进程的 homedir 默认路径写，
+    // 与 dashboard 读的路径（基于自身 homedir）在进程 HOME 不同时会 mismatch，导致进度读不到。
     if (tool === 'lcmg_extract_rebuild') {
-      activeExtractProgressPath =
+      const pp =
         typeof params.progressPath === 'string' && params.progressPath.trim()
           ? params.progressPath.trim()
           : DEFAULT_EXTRACT_PROGRESS_PATH;
+      params.progressPath = pp;
+      activeExtractProgressPath = pp;
     }
     const startTs = Date.now();
     let result: any;
