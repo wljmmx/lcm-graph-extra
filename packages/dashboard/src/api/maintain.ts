@@ -78,7 +78,9 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
 
 /**
  * 三级节点重建：sessionKey 省略重建全部；force 忽略进度从头重建。
- * concurrency = LLM 并发窗口（1-128，默认 4）；pageSize = 读取分页大小（默认 2000）；
+ * concurrency = 会话内 LLM 并发窗口（1-128，默认 4）；sessionConcurrency = 批量重建时同时处理的会话数（1-32，默认 2）；
+ * mode = 提取模式（llm 默认 / heuristic 快速规则提取）；thinking = LLM 思考模式（true 推理 / false 快速 / undefined 保持默认）；
+ * limitSessions = 限制处理会话数（0 不限制）；pageSize = 读取分页大小（默认 2000）；
  * writeBatchSize = 合并写入批上限（默认 500）；progressPath = 断点续传 + 进度落盘路径（传入即启用，同路径再调续跑）。
  */
 export function invokeExtractRebuild(opts: {
@@ -86,6 +88,10 @@ export function invokeExtractRebuild(opts: {
   limit?: number;
   force?: boolean;
   concurrency?: number;
+  sessionConcurrency?: number;
+  mode?: 'llm' | 'heuristic';
+  thinking?: boolean;
+  limitSessions?: number;
   pageSize?: number;
   writeBatchSize?: number;
   progressPath?: string;
@@ -95,6 +101,10 @@ export function invokeExtractRebuild(opts: {
   if (opts.limit != null) params.limit = opts.limit;
   if (opts.force) params.force = opts.force;
   if (opts.concurrency != null) params.concurrency = opts.concurrency;
+  if (opts.sessionConcurrency != null) params.sessionConcurrency = opts.sessionConcurrency;
+  if (opts.mode != null) params.mode = opts.mode;
+  if (opts.thinking != null) params.thinking = opts.thinking;
+  if (opts.limitSessions != null && opts.limitSessions > 0) params.limitSessions = opts.limitSessions;
   if (opts.pageSize != null) params.pageSize = opts.pageSize;
   if (opts.writeBatchSize != null) params.writeBatchSize = opts.writeBatchSize;
   if (opts.progressPath) params.progressPath = opts.progressPath;

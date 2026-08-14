@@ -47,7 +47,7 @@ export interface SessionTurn {
 /** extract-service 外部依赖（由调用方注入） */
 export interface ExtractDeps {
   /** 一轮 user/assistant → 提取 Task/Skill/Event。返回新增节点/边数。opts.writeBatchSize 透传合并写入批上限。 */
-  extractTurn: (user: string, assistant: string, opts?: { writeBatchSize?: number }) => Promise<{ nodes: number; edges: number }>;
+  extractTurn: (user: string, assistant: string, opts?: { writeBatchSize?: number; mode?: 'llm' | 'heuristic'; thinking?: boolean }) => Promise<{ nodes: number; edges: number }>;
   logger?: any;
   signal?: AbortSignal;
 }
@@ -83,6 +83,14 @@ export interface RebuildOptions {
   progressPath?: string;
   /** 内部：运行级进度快照（由 rebuildAll 注入；单会话独立调用时自动创建） */
   progress?: RunProgress;
+  /** 会话并发数（同时处理多个 session），默认 2，1-32 */
+  sessionConcurrency?: number;
+  /** 提取模式：llm（默认，走 LLM 提取） / heuristic（快速规则提取，纯正则毫秒级） */
+  mode?: 'llm' | 'heuristic';
+  /** LLM 思考模式：true 开启推理，false 关闭思考（快速提取），不传保持服务默认 */
+  thinking?: boolean;
+  /** 限制处理会话数量（0 不限制，用于测试） */
+  limitSessions?: number;
 }
 
 // ── 进度记录（避免重复提取 / 断点续传 / Dashboard 进度条）──
@@ -375,9 +383,11 @@ interface TurnPoolResult {
 async function runTurnPool(
   turns: SessionTurn[],
   concurrency: number,
-  deps: ExtractDeps,
+  deps: ExtractDeps & { extractTurn: ExtractDeps['extractTurn'] },
   log: any,
   writeBatchSize?: number,
+  mode?: 'llm' | 'heuristic',
+  thinking?: boolean,
 ): Promise<TurnPoolResult> {
   let idx = 0;
   let nodes = 0;
@@ -392,7 +402,11 @@ async function runTurnPool(
       const cur = idx++;
       const turn = turns[cur];
       try {
-        const r = await deps.extractTurn(turn.user, turn.assistant, writeBatchSize != null ? { writeBatchSize } : undefined);
+        const r = await deps.extractTurn(turn.user, turn.assistant, {
+          writeBatchSize: writeBatchSize != null ? writeBatchSize : undefined,
+          mode,
+          thinking,
+        });
         nodes += r.nodes ?? 0;
         edges += r.edges ?? 0;
         processed++;
@@ -421,6 +435,8 @@ export async function rebuildSession(
   const writeBatchSize = opts.writeBatchSize != null ? clampInt(opts.writeBatchSize, 1, 50000) : undefined;
   const progressPath = opts.progressPath;
   const force = opts.force === true;
+  const mode = opts.mode ?? 'llm';
+  const thinking = opts.thinking;
   const startTurn = opts.lastProcessedTurn !== undefined ? Number(opts.lastProcessedTurn) : getSessionProgress(sessionKey, force, progressPath);
 
   const driver = await getNeo4jDriver();
@@ -479,7 +495,7 @@ export async function rebuildSession(
       cursor = Math.max(cursor, ...window);
       break;
     }
-    const pool = await runTurnPool(turns, concurrency, deps, log, writeBatchSize);
+    const pool = await runTurnPool(turns, concurrency, deps, log, writeBatchSize, mode, thinking);
     nodes += pool.nodes;
     edges += pool.edges;
     processed += pool.processed;
@@ -517,6 +533,10 @@ export async function rebuildAll(
   const limit = clampInt(opts.limit ?? 50, 1, 100000);
   const progressPath = opts.progressPath;
   const force = opts.force === true;
+  const sessionConcurrency = clampInt(opts.sessionConcurrency ?? 2, 1, 32);
+  const mode = opts.mode ?? 'llm';
+  const thinking = opts.thinking;
+  const limitSessions = clampInt(opts.limitSessions ?? 0, 0, 100000);
 
   // 先落盘初始进度（在数据库查询之前），确保 Dashboard 轮询能立即读到进度文件。
   // 若后续查询/提取失败，也会在 catch 中落盘 done=true，避免"一直收集进度"死循环。
@@ -550,6 +570,10 @@ export async function rebuildAll(
     persistProgress(progressPath, (s) => applyRunProgress(s, progress));
     throw e;
   }
+  // limitSessions > 0 时仅处理前 N 个会话（用于测试/小批量验证）
+  if (limitSessions > 0 && sessionKeys.length > limitSessions) {
+    sessionKeys = sessionKeys.slice(0, limitSessions);
+  }
   progress.totalSessions = sessionKeys.length;
   progress.totalBatches = sessionKeys.length;
   persistProgress(progressPath, (s) => applyRunProgress(s, progress));
@@ -567,22 +591,42 @@ export async function rebuildAll(
   const sessions: RebuildResult[] = [];
   let totalNodes = 0;
   let totalEdges = 0;
-  for (let i = 0; i < sessionKeys.length; i++) {
+
+  // 两层并发：sessionConcurrency 控制同时处理的会话数，会话内由 concurrency 控制提取并发窗口。
+  // 复用同一 Neo4j 连接池与会话级进度写入，避免多实例连接池压力与进度竞争。
+  const batches: string[][] = [];
+  for (let i = 0; i < sessionKeys.length; i += sessionConcurrency) {
+    batches.push(sessionKeys.slice(i, i + sessionConcurrency));
+  }
+
+  // currentBatch 以会话为粒度（totalBatches = 会话数），并发处理时仍按会话逐步推进，进度条平滑
+  let batchCursor = 0;
+  for (let b = 0; b < batches.length; b++) {
     if (deps.signal?.aborted) break;
-    const sk = sessionKeys[i];
-    progress.currentBatch = i + 1;
-    progress.currentSession = i + 1;
-    progress.currentSessionKey = sk;
+    const batch = batches[b];
     progress.updatedAt = new Date().toISOString();
     persistProgress(progressPath, (s) => applyRunProgress(s, progress));
-    const r = await rebuildSession(sk, deps, { ...opts, progress });
-    sessions.push(r);
-    totalNodes += r.nodes;
-    totalEdges += r.edges;
-    progress.processedSessions++;
-    progress.updatedAt = new Date().toISOString();
-    persistProgress(progressPath, (s) => applyRunProgress(s, progress));
-    log?.info?.(`[extract-service] rebuilt ${sk}: ${r.processed}/${r.turns} turns, +${r.nodes} nodes, +${r.edges} edges`);
+
+    const batchResults = await Promise.all(
+      batch.map(async (sk) => {
+        progress.currentSession++;
+        progress.currentSessionKey = sk;
+        progress.updatedAt = new Date().toISOString();
+        persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+        return rebuildSession(sk, deps, { ...opts, progress, sessionConcurrency, mode, thinking });
+      }),
+    );
+
+    for (const r of batchResults) {
+      sessions.push(r);
+      totalNodes += r.nodes;
+      totalEdges += r.edges;
+      progress.processedSessions++;
+      progress.currentBatch = ++batchCursor;
+      progress.updatedAt = new Date().toISOString();
+      persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+      log?.info?.(`[extract-service] rebuilt ${r.sessionKey}: ${r.processed}/${r.turns} turns, +${r.nodes} nodes, +${r.edges} edges`);
+    }
   }
   progress.done = true;
   progress.updatedAt = new Date().toISOString();

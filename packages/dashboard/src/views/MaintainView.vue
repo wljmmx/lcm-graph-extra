@@ -128,6 +128,10 @@ const extractSessionKey = ref<string>('');
 const extractLimit = ref<number>(50);
 const extractForce = ref<boolean>(false);
 const extractConcurrency = ref<number>(4);
+const extractSessionConcurrency = ref<number>(2);
+const extractMode = ref<'llm' | 'heuristic'>('llm');
+const extractThinking = ref<boolean | undefined>(undefined);
+const extractLimitSessions = ref<number>(0);
 const extractPageSize = ref<number>(2000);
 const extractWriteBatchSize = ref<number>(500);
 const extractProgressPath = ref<string>('');
@@ -532,6 +536,8 @@ function executeImport(): void {
 }
 
 function executeExtractRebuild(): void {
+  // thinking 三态：undefined=保持服务默认，因此仅当用户显式切换时才传
+  const thinking = extractThinking.value;
   runMutation({
     cardKey: 'extract_rebuild',
     tool: 'lcmg_extract_rebuild',
@@ -540,6 +546,10 @@ function executeExtractRebuild(): void {
       limit: extractLimit.value,
       force: extractForce.value,
       concurrency: extractConcurrency.value,
+      sessionConcurrency: extractSessionConcurrency.value,
+      mode: extractMode.value,
+      thinking: thinking === undefined ? undefined : thinking,
+      limitSessions: extractLimitSessions.value > 0 ? extractLimitSessions.value : undefined,
       pageSize: extractPageSize.value,
       writeBatchSize: extractWriteBatchSize.value,
       progressPath: extractProgressPath.value || undefined,
@@ -549,6 +559,10 @@ function executeExtractRebuild(): void {
       limit: extractLimit.value,
       force: extractForce.value,
       concurrency: extractConcurrency.value,
+      sessionConcurrency: extractSessionConcurrency.value,
+      mode: extractMode.value,
+      thinking: thinking === undefined ? undefined : thinking,
+      limitSessions: extractLimitSessions.value > 0 ? extractLimitSessions.value : undefined,
       pageSize: extractPageSize.value,
       writeBatchSize: extractWriteBatchSize.value,
       progressPath: extractProgressPath.value || undefined,
@@ -1025,11 +1039,38 @@ function executeReembed(): void {
               <NFormItem label="指定会话" size="small" :show-feedback="false">
                 <NInput v-model:value="extractSessionKey" size="small" placeholder="留空则重建全部会话" clearable />
               </NFormItem>
+              <NFormItem label="提取模式" size="small" :show-feedback="false">
+                <NSelect
+                  v-model:value="extractMode"
+                  size="small"
+                  :options="[
+                    { label: 'LLM 提取（默认，精度高）', value: 'llm' },
+                    { label: '规则快速提取（heuristic，毫秒级零成本）', value: 'heuristic' },
+                  ]"
+                />
+              </NFormItem>
               <NFormItem label="单次处理轮次" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractLimit" :min="1" :max="500" size="small" style="width: 100%" />
               </NFormItem>
-              <NFormItem label="LLM 并发窗口" size="small" :show-feedback="false">
+              <NFormItem label="会话内 LLM 并发窗口" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractConcurrency" :min="1" :max="128" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="会话并发数（批量）" size="small" :show-feedback="false">
+                <NInputNumber v-model:value="extractSessionConcurrency" :min="1" :max="32" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="限制会话数（0 不限制）" size="small" :show-feedback="false">
+                <NInputNumber v-model:value="extractLimitSessions" :min="0" :max="100000" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="LLM 思考模式" size="small" :show-feedback="false">
+                <NSwitch
+                  :value="extractThinking === true"
+                  :disabled="extractMode === 'heuristic'"
+                  size="small"
+                  @update:value="(v: boolean) => { extractThinking = v; }"
+                />
+                <span class="muted" style="margin-left: 8px; font-size: 12px">
+                  {{ extractThinking === undefined ? '保持服务默认' : extractThinking ? '开启推理（慢）' : '关闭思考（快）' }}
+                </span>
               </NFormItem>
               <NFormItem label="读取分页大小" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractPageSize" :min="1" :max="20000" size="small" style="width: 100%" />

@@ -952,13 +952,20 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     description: "从 :GmMessage 消息按 session 配对 user/assistant 轮次，调 LLM 提取并批量写入 :Task/:Skill/:Event 三级节点及边（生产节点，不带 :Benchmark）。" +
       "按需触发（非自动），通过 lastProcessedTurn 进度避免重复提取。不传 sessionKey 时批量重建全部会话；force=true 强制从头重建。\n" +
       "控制参数：concurrency 为 LLM 并发窗口（1-128，默认 4）；pageSize 为读取分页大小（默认 2000）；writeBatchSize 为合并写入批上限（默认 500）；" +
-      "progressPath 传入路径即启用断点续传 + 进度落盘，同路径再次调用从断点续跑、不重复处理。",
+      "progressPath 传入路径即启用断点续传 + 进度落盘，同路径再次调用从断点续跑、不重复处理。\n" +
+      "批量重建（不传 sessionKey）支持两层并发：sessionConcurrency 控制同时处理的会话数（默认 2，1-32），会话内由 concurrency 控制提取并发窗口。" +
+      "mode=llm（默认）走 LLM 提取；mode=heuristic 走纯正则快速提取（TASK/SKILL/EVENT 节点 + USED_SKILL/SOLVED_BY 边，毫秒级、零 LLM 成本）。" +
+      "thinking=true 开启 LLM 推理，false 关闭思考（速度更快），不传保持服务默认。",
     parameters: Type.Object({
       sessionKey: Type.Optional(Type.String({ description: "只重建指定会话（缺省重建全部含 :GmMessage 的会话）" })),
       limit: Type.Optional(Type.Number({ description: "单次最多处理轮次数，默认 50", minimum: 1, maximum: 500 })),
       lastProcessedTurn: Type.Optional(Type.Number({ description: "从哪一轮之后开始（默认读取本地进度，force=true 时从 0 开始）" })),
       force: Type.Optional(Type.Boolean({ description: "强制从头重建该会话（忽略进度），默认 false" })),
-      concurrency: Type.Optional(Type.Number({ description: "LLM 并发窗口（同时提取的轮次数），1-128，默认 4", minimum: 1, maximum: 128 })),
+      concurrency: Type.Optional(Type.Number({ description: "会话内 LLM 并发窗口（同时提取的轮次数），1-128，默认 4", minimum: 1, maximum: 128 })),
+      sessionConcurrency: Type.Optional(Type.Number({ description: "批量重建时同时处理的会话数（两层并发外层），默认 2，1-32", minimum: 1, maximum: 32 })),
+      mode: Type.Optional(Type.Union([Type.Literal('llm'), Type.Literal('heuristic')], { description: "提取模式：llm（默认，LLM 提取）/ heuristic（快速规则提取，毫秒级零成本）" })),
+      thinking: Type.Optional(Type.Boolean({ description: "LLM 思考模式：true 开启推理，false 关闭思考（快速），不传保持服务默认" })),
+      limitSessions: Type.Optional(Type.Number({ description: "批量重建时限制处理会话数（0 不限制）", minimum: 0, maximum: 100000 })),
       pageSize: Type.Optional(Type.Number({ description: "读取分页大小（按轮次窗口分批读取，避免大会话一次性载入内存），默认 2000", minimum: 1, maximum: 20000 })),
       writeBatchSize: Type.Optional(Type.Number({ description: "合并写入批上限（batchUpsert 每批最多节点/边数），默认 500", minimum: 1, maximum: 50000 })),
       progressPath: Type.Optional(Type.String({ description: "断点续传 + 进度落盘路径；传入即启用，同路径再次调用从断点续跑，不重复处理" })),
@@ -978,6 +985,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const opts: import('./plugin/extract-service.js').RebuildOptions = { limit, force: params.force === true };
         if (params.lastProcessedTurn !== undefined) opts.lastProcessedTurn = Number(params.lastProcessedTurn);
         if (params.concurrency !== undefined) opts.concurrency = params.concurrency;
+        if (params.sessionConcurrency !== undefined) opts.sessionConcurrency = params.sessionConcurrency;
+        if (params.mode !== undefined) opts.mode = params.mode;
+        if (params.thinking !== undefined) opts.thinking = params.thinking;
+        if (params.limitSessions !== undefined) opts.limitSessions = params.limitSessions;
         if (params.pageSize !== undefined) opts.pageSize = params.pageSize;
         if (params.writeBatchSize !== undefined) opts.writeBatchSize = params.writeBatchSize;
         if (params.progressPath) opts.progressPath = params.progressPath;

@@ -43,6 +43,10 @@ export function setPluginApiRef(apiRef: any): void {
 export interface ExtractTurnOpts {
   /** 合并写入批上限（透传至 graphAdapter.batchUpsert），默认 500 */
   writeBatchSize?: number;
+  /** 提取模式：llm（默认）/ heuristic（快速规则提取） */
+  mode?: 'llm' | 'heuristic';
+  /** LLM 思考模式：true 开启推理，false 关闭思考，不传保持服务默认 */
+  thinking?: boolean;
 }
 export type ExtractTurnFn = (user: string, assistant: string, opts?: ExtractTurnOpts) => Promise<{ nodes: number; edges: number }>;
 

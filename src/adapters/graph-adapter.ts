@@ -1440,16 +1440,22 @@ export class GraphAdapter {
    * Extract triplets from a conversation turn and upsert to Neo4j graph.
    */
   async extractAndUpsertFromTurn(
-    llmConfig: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string }) => Promise<{ text: string; provider?: string; model?: string }> },
+    llmConfig: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; thinking?: boolean; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string; think?: boolean }) => Promise<{ text: string; provider?: string; model?: string }> },
     userContent: string,
     assistantContent: string,
     writeBatchSize?: number,
+    mode?: 'llm' | 'heuristic',
+    thinking?: boolean,
   ): Promise<{ nodes: number; edges: number }> {
     if (!this.mod) return { nodes: 0, edges: 0 };
     try {
+      // heuristic 模式：纯规则正则快速提取，零 LLM 调用，毫秒级
+      if (mode === 'heuristic') {
+        return await this.heuristicExtract(userContent, assistantContent, writeBatchSize);
+      }
       const { extractTriplets } = this.mod as any;
       if (!extractTriplets) return { nodes: 0, edges: 0 };
-      const llmFn = this.buildLlmFn(llmConfig);
+      const llmFn = this.buildLlmFn({ ...(llmConfig as any), thinking });
       if (!llmFn) return { nodes: 0, edges: 0 };
       const result = await extractTriplets(llmFn, userContent, assistantContent);
       if (!result || (!result.nodes?.length && !result.edges?.length)) return { nodes: 0, edges: 0 };
@@ -1463,7 +1469,56 @@ export class GraphAdapter {
     }
   }
 
-  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string }) => Promise<{ text: string; provider?: string; model?: string }> }): ((system: string, user: string) => Promise<string>) | null {
+  /**
+   * heuristicExtract — 非 LLM 快速规则提取（mode='heuristic'）。
+   * 纯正则从轮次文本中提取 TASK / SKILL / EVENT 节点，并生成 USED_SKILL / SOLVED_BY 边。
+   * 零 LLM 调用、毫秒级；即使未配置 LLM 也能运行。
+   * 节点 id 沿用 makeNodeId（hash type+name）→ batchUpsert 的 MERGE 幂等，重跑不膨胀。
+   */
+  async heuristicExtract(
+    userContent: string,
+    assistantContent: string,
+    writeBatchSize?: number,
+  ): Promise<{ nodes: number; edges: number }> {
+    const text = `${userContent}\n${assistantContent}`;
+    const entities: Array<{ name: string; type: string; description: string; content: string }> = [];
+    const seen = new Set<string>();
+    const pushEntity = (name: string, type: string) => {
+      const n = (name ?? '').trim();
+      if (!n) return;
+      const key = `${type}:${n.toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      entities.push({ name: n, type, description: '', content: n });
+    };
+    // TASK / SKILL / EVENT 规则提取（支持中文标签与英文关键词）
+    const taskRegex = /(?:任务|TASK|Task)[:：]\s*([^。,;；!！?？\n，]+)/g;
+    const skillRegex = /(?:技能|SKILL|Skill)[:：]\s*([^。,;；!！?？\n，]+)/g;
+    const eventRegex = /(?:事件|EVENT|Event)[:：]\s*([^。,;；!！?？\n，]+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = taskRegex.exec(text)) !== null) pushEntity(m[1], 'TASK');
+    while ((m = skillRegex.exec(text)) !== null) pushEntity(m[1], 'SKILL');
+    while ((m = eventRegex.exec(text)) !== null) pushEntity(m[1], 'EVENT');
+    if (entities.length === 0) return { nodes: 0, edges: 0 };
+
+    // 生成 USED_SKILL（SKILL → 首个 TASK）与 SOLVED_BY（EVENT ← TASK）边
+    const firstTask = entities.find((e) => e.type === 'TASK');
+    const relations: Array<{ from: string; to: string; type: string; instruction?: string }> = [];
+    for (const e of entities) {
+      if (e.type === 'SKILL' && firstTask) {
+        relations.push({ from: firstTask.name, to: e.name, type: 'USED_SKILL' });
+      }
+    }
+    for (const e of entities) {
+      if (e.type === 'EVENT' && firstTask) {
+        relations.push({ from: firstTask.name, to: e.name, type: 'SOLVED_BY' });
+      }
+    }
+    await this.batchUpsert(entities, relations, writeBatchSize);
+    return { nodes: entities.length, edges: relations.length };
+  }
+
+  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; thinking?: boolean; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string; think?: boolean }) => Promise<{ text: string; provider?: string; model?: string }> }): ((system: string, user: string) => Promise<string>) | null {
     // 优先用 SDK 提供的 runtimeContext.llm.complete（已认证、已配置、跟随主会话模型）
     // 包装成 extractTriplets 期望的 (system, user) => Promise<string> 签名
     if (config?.complete && typeof config.complete === 'function') {
@@ -1476,6 +1531,8 @@ export class GraphAdapter {
           maxTokens: 1024,
           temperature: 0.3,
           purpose: 'lcm-graph-extra:triplet-extraction',
+          // 思考模式开关透传（服务端不识别该字段时自动忽略）
+          think: config.thinking,
         });
         return result?.text ?? '';
       };
@@ -1495,6 +1552,7 @@ export class GraphAdapter {
         temperature: 0.3,
         maxTokens: 1024,
         keepAlive,
+        think: config.thinking,
         signal: AbortSignal.timeout(llmTimeout('graphLlmTimeoutMs')),
       });
       return result.text ?? '';

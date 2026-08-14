@@ -11,6 +11,14 @@ export interface LlmCallParams {
   keepAlive?: string;
   signal?: AbortSignal;
   extraHeaders?: Record<string, string>;
+  /**
+   * LLM 思考模式开关：
+   *  - Ollama 原生/OpenAI 兼容端点透传 think 字段（不识别该字段的服务会自动忽略）
+   *  - true  开启 reasoning（深度思考）
+   *  - false 关闭思考（快速输出）
+   *  - 缺省不传，保持服务端默认
+   */
+  think?: boolean;
 }
 
 export interface LlmCallResult {
@@ -37,6 +45,10 @@ function buildOpenAiBody(params: LlmCallParams): Record<string, unknown> {
   };
   if (params.keepAlive && isOllamaEndpoint(params.baseURL)) {
     body.keep_alive = params.keepAlive;
+  }
+  // 思考模式开关：透传 think 字段（不识别该字段的服务自动忽略）
+  if (params.think !== undefined) {
+    body.think = params.think;
   }
   return body;
 }
