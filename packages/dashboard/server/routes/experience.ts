@@ -63,7 +63,9 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
 // ---------------------------------------------------------------------------
 
 const DEFAULT_EXTRACT_PROGRESS_PATH = path.join(os.homedir(), '.openclaw', 'extract-progress.json');
-let activeExtractProgressPath: string | null = null;
+// 默认即指向默认进度文件：即使轮询早于 /api/mcp/invoke 到达（或未走该路由），
+// GET /api/extract-rebuild/progress 也能读到 extract-service 默认落盘的进度。
+let activeExtractProgressPath: string | null = DEFAULT_EXTRACT_PROGRESS_PATH;
 
 /** 读取并归一化重建进度文件，返回运行级进度快照（供双进度条展示） */
 function readExtractProgress(): {

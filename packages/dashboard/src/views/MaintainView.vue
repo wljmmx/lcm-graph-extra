@@ -155,7 +155,8 @@ const extractTotalPercent = computed(() => {
 async function pollExtractProgress(): Promise<void> {
   try {
     const res = await fetchExtractRebuildProgress();
-    extractProgress.value = res.progress;
+    // 避免 null 覆盖上一次已拿到的进度（重建刚开始时文件可能尚未落盘）
+    if (res.progress) extractProgress.value = res.progress;
     if (res.progress?.done) stopExtractPolling();
   } catch {
     // 轮询失败静默（保留上次进度），避免干扰主流程
@@ -1076,6 +1077,9 @@ function executeReembed(): void {
                   </span>
                 </div>
               </div>
+              <div v-else class="extract-progress-waiting">
+                正在收集重建进度…
+              </div>
             </template>
             <template #extra>
               <OperationRecentHistory :logs="historyOf('lcmg_extract_rebuild')" />
@@ -1202,5 +1206,9 @@ function executeReembed(): void {
   color: var(--color-text-secondary);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+.extract-progress-waiting {
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
 }
 </style>
