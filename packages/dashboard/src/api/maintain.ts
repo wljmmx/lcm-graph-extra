@@ -8,7 +8,7 @@
  * 中已注册的 POST /api/mcp/invoke 转发到 OpenClaw MCP host。
  */
 import { invokeMcpTool, type McpInvokeResponse } from './experience';
-import { apiGet, apiPost } from './client';
+import { apiGet, apiPost, ApiError } from './client';
 
 /** 图谱维护（dedup / PageRank / community + 债务表对账）。可选 params 如 { source: 'ttl_cleanup' } 用于 TTL 清理变体。 */
 export function invokeMaintain(params: Record<string, unknown> = {}): Promise<McpInvokeResponse> {
@@ -129,6 +129,7 @@ export async function invokeExtractRebuild(opts: {
 
     const d0 = (resp.data ?? {}) as Record<string, unknown>;
     const httpStatus = resp._status ?? 200;
+    const fallbackMode = opts.mode ?? 'llm';
 
     // ── 异步分支：rebuild-all 返回 202 + jobId ──
     if (httpStatus === 202 && !isSingle) {
@@ -141,37 +142,67 @@ export async function invokeExtractRebuild(opts: {
       const pollTimeout = opts.pollTimeoutMs ?? 30 * 60_000;
       const startTime = Date.now();
       let lastData: Record<string, unknown> = d0;
+      let consecutiveFailures = 0;
+      const MAX_CONSECUTIVE_FAILURES = 20;  // ≈ 1 分钟连续失败，认为不可达，退出
 
       while (true) {
         if (Date.now() - startTime > pollTimeout) {
           // 超时：返回当前进度（非失败，用户可继续轮询或沿 progressPath 续跑）
-          return wrapRebuildResult(lastData, 200, true);
+          return wrapRebuildResult(lastData, 200, true, fallbackMode);
         }
         await sleep(pollInterval);
         try {
-          const jobResp = await apiGet<{ ok: boolean; data?: any; _status?: number }>(
+          const jobResp = await apiGet<{ ok: boolean; data?: any; error?: string; _status?: number }>(
             `/api/gm-pro/proxy/extract/rebuild-all/job/${jobId}`,
           );
+          consecutiveFailures = 0;
           if (!jobResp.ok) {
-            // job 查询失败不中断轮询，继续等
-            continue;
+            // 代理层业务语义失败（极少见，job 500 已被代理单独透传为 _status=500 走上面分支）
+            const errBody = jobResp.error ?? 'rebuild job 查询失败';
+            return wrapRebuildResult(
+              { ...lastData, message: errBody },
+              500,
+              false,
+              fallbackMode,
+            );
           }
           lastData = (jobResp.data ?? {}) as Record<string, unknown>;
           const jobStatus = lastData.status as string | undefined;
+          const jobHttpStatus = jobResp._status ?? 200;
           // status: "running" | "done" | "failed"
-          if (jobStatus === 'done' || jobStatus === 'failed') {
-            const finalStatus = jobResp._status ?? (jobStatus === 'done' ? 200 : 500);
-            return wrapRebuildResult(lastData, finalStatus, false);
+          // 500 → job.status === "failed" 且代理已透传 _status=500
+          if (jobStatus === 'done' || jobStatus === 'failed' || jobHttpStatus >= 500) {
+            const finalStatus = jobHttpStatus >= 500
+              ? jobHttpStatus
+              : (jobStatus === 'failed' ? 500 : 200);
+            return wrapRebuildResult(lastData, finalStatus, false, fallbackMode);
           }
           // running → 继续轮询
-        } catch {
-          // 网络抖动不中断轮询
+        } catch (err) {
+          // 网络抖动：连续失败达到上限后退出，避免无限死等
+          consecutiveFailures++;
+          const e = err instanceof Error ? err : new Error(String(err));
+          const is404 = e instanceof ApiError && e.status === 404;
+          if (is404 || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            return wrapRebuildResult(
+              {
+                ...lastData,
+                message: is404
+                  ? `rebuild job ${jobId} 不存在（插件可能已重启，进度文件仍在）`
+                  : `连续 ${MAX_CONSECUTIVE_FAILURES} 次查询失败，轮询终止: ${e.message}`,
+              },
+              500,
+              false,
+              fallbackMode,
+            );
+          }
+          // 否则视为网络瞬断，继续下一轮
         }
       }
     }
 
     // ── 同步分支：单会话 rebuild（200/207）或 rebuild-all 兜底 200 ──
-    return wrapRebuildResult(d0, httpStatus, false);
+    return wrapRebuildResult(d0, httpStatus, false, fallbackMode);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `三级节点重建请求失败: ${msg}` };
@@ -183,14 +214,16 @@ function wrapRebuildResult(
   d: Record<string, unknown>,
   httpStatus: number,
   isTimeout: boolean,
+  fallbackMode?: 'llm' | 'heuristic',
 ): McpInvokeResponse {
   const isPartial = httpStatus === 207 || Number(d.failedSessions ?? 0) > 0;
   const isFailed = httpStatus >= 500;
   const failedSessions = Number(d.failedSessions ?? 0);
+  const modeDisplay = (d.mode as 'llm' | 'heuristic' | undefined) ?? fallbackMode ?? 'llm';
   const text = [
     '# 三级节点重建报告',
     '',
-    `模式: ${d.mode ?? 'llm'}`,
+    `模式: ${modeDisplay}`,
     `处理会话: ${d.processedSessions ?? 0}/${d.totalSessions ?? 0}`,
     failedSessions > 0 ? `**失败会话: ${failedSessions}**` : '',
     `处理轮次: ${d.processedPairs ?? 0}/${d.totalPairs ?? 0}`,
@@ -218,7 +251,7 @@ function wrapRebuildResult(
         failedSessions,
         totalPairs: d.totalPairs ?? 0,
         processedPairs: d.processedPairs ?? 0,
-        mode: d.mode ?? 'llm',
+        mode: modeDisplay,
         llmOutputTokens: d.llmOutputTokens ?? 0,
         llmHasOutput: d.llmHasOutput === true,
         results,

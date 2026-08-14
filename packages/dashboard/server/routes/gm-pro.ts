@@ -150,7 +150,7 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
     method: 'GET' | 'POST' | 'DELETE',
     proxyPath: string,
     query: string,
-  ): Promise<{ ok: boolean; data?: unknown; error?: string; detail?: unknown }> {
+  ): Promise<{ ok: boolean; data?: unknown; error?: string; detail?: unknown; _status?: number }> {
     const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}${query}`;
 
     const timeoutMs = resolveGmProTimeout(proxyPath);
@@ -172,23 +172,28 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       // v2.4.1 rebuild-all 异步化 + Multi-Status 语义：
       //   202 (Accepted) → 任务已提交，返回 { jobId, status:"running", message }，前端轮询 job 状态；
       //   200 → 全部成功（同步接口如单会话 rebuild，或 job 轮询返回最终结果）；
-      //   207 (Multi-Status) → 部分会话失败（failedSessions>0），body 带 message/results。
-      // 202 和 207 虽在 2xx 段，但 fetch 标准下 resp.ok 为 false。此处显式视为"成功透传"。
+      //   207 (Multi-Status) → 部分会话失败（failedSessions>0），body 带 message/results；
+      //   500 (rebuild-all job 失败) → job.status="failed"，后端显式返回，前端需退出轮询而非死等。
+      // 202 / 207 虽在 2xx 段但 fetch resp.ok = false；500 fetch resp.ok = false。
+      // 这三种语义均"业务有明确返回体"，需要把 body + HTTP 码一起透传给前端判断。
       const isAccepted = resp.status === 202;
       const isMultiStatus = resp.status === 207;
+      const isJobFailure = resp.status === 500 && proxyPath.startsWith('/api/extract/rebuild-all/job');
+      const shouldPassThroughBody = resp.ok || isAccepted || isMultiStatus || isJobFailure;
+
+      const contentType = resp.headers.get('content-type') ?? '';
+      // JSON：解析为结构化对象
+      if (contentType.includes('application/json') && shouldPassThroughBody) {
+        const data = await resp.json();
+        // 透传实际状态码，前端/api层据此区分 202/207/500/200
+        const status = isAccepted ? 202 : isMultiStatus ? 207 : resp.status;
+        return { ok: resp.ok || isAccepted || isMultiStatus || isJobFailure, data, _status: status };
+      }
+
       if (!resp.ok && !isAccepted && !isMultiStatus) {
         let errBody: unknown;
         try { errBody = await resp.json(); } catch { errBody = { error: `graph-memory-pro returned ${resp.status}` }; }
         return { ok: false, error: `graph-memory-pro HTTP ${resp.status}`, detail: errBody };
-      }
-
-      const contentType = resp.headers.get('content-type') ?? '';
-      // JSON：解析为结构化对象
-      if (contentType.includes('application/json')) {
-        const data = await resp.json();
-        // 透传实际状态码，前端/api层据此区分 202(异步提交) / 207(部分失败) / 200(成功)
-        const status = isAccepted ? 202 : isMultiStatus ? 207 : 200;
-        return { ok: true, data, _status: status };
       }
       // Prometheus 文本（/api/metrics）：透传原始文本，由前端解析
       if (contentType.includes('text/plain')) {
