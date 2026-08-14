@@ -904,6 +904,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
       // 4) 导入完成后自动触发三级节点重建（Task/Skill/Event）。
       //    默认开启；openclaw.json → lcm-graph-extra.config.buildThreeLevel.onImport=false 可关闭。
+      //    提取模式默认 heuristic（规则快速提取，零 LLM、毫秒级）；onImportMode="llm" 可切回 LLM 精炼。
       //    异步 fire-and-forget，导入立即返回不阻塞（避免大库导入超时）；
       //    经 extract-progress 进度按 turn 跳过已提取轮次，避免重复提取。
       const buildCfg = api?.pluginConfig?.buildThreeLevel ?? {};
@@ -912,12 +913,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       if (enabled && onImport && (params.source === "all" || params.source === "lcm_messages") && getExtractTurnFn()) {
         const bLimit = Number(buildCfg.batchLimit ?? 50);
         const batchLimit = Math.max(1, Math.min(500, Number.isFinite(bLimit) ? bLimit : 50));
-        lines.push(`⏳ 三级节点重建已异步启动（后台分批提取 Task/Skill/Event，batch=${batchLimit}）…`);
+        // 批量导入后默认按规则快速提取（heuristic），避免导入即触发 LLM 批量开销；
+        // 重点会话再用 mode=llm + thinking:false 精炼补全。
+        const importMode: 'llm' | 'heuristic' = buildCfg.onImportMode === 'llm' ? 'llm' : 'heuristic';
+        lines.push(`⏳ 三级节点重建已异步启动（后台分批提取 Task/Skill/Event，模式=${importMode}，batch=${batchLimit}）…`);
         (async () => {
           try {
             const { rebuildAll } = await import('./plugin/extract-service.js');
-            const r = await rebuildAll({ extractTurn: getExtractTurnFn()!, logger: getGlobalLogger() }, { limit: batchLimit });
-            getGlobalLogger().info?.(`[lcmg_import] 三级节点重建完成: +${r.totalNodes} nodes, +${r.totalEdges} edges (${r.sessions.length} sessions)`);
+            const r = await rebuildAll({ extractTurn: getExtractTurnFn()!, logger: getGlobalLogger() }, { limit: batchLimit, mode: importMode });
+            getGlobalLogger().info?.(`[lcmg_import] 三级节点重建完成: +${r.totalNodes} nodes, +${r.totalEdges} edges (${r.sessions.length} sessions, mode=${importMode})`);
           } catch (e) {
             getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败', { err: e instanceof Error ? e.message : String(e) });
           }

@@ -1456,12 +1456,13 @@ export class GraphAdapter {
     mode?: 'llm' | 'heuristic',
     thinking?: boolean,
   ): Promise<{ nodes: number; edges: number; llmOutputTokens: number; llmHasOutput: boolean }> {
-    if (!this.mod) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
     try {
-      // heuristic 模式：纯规则正则快速提取，零 LLM 调用，毫秒级
+      // heuristic 模式：纯规则正则快速提取，零 LLM 调用，毫秒级。
+      // 不依赖 this.mod（未加载 LLM 模块也能跑），故在本检查之前短路。
       if (mode === 'heuristic') {
         return await this.heuristicExtract(userContent, assistantContent, writeBatchSize);
       }
+      if (!this.mod) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
       const { extractTriplets } = this.mod as any;
       if (!extractTriplets) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
       // counter 累计本次调用期间 LLM 实际输出的 token 数（buildLlmFn 每次调用累加）
