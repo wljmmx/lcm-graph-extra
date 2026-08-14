@@ -1260,8 +1260,9 @@ export class GraphAdapter {
         const now = Date.now();
         // 关系端点 id 必须与同批节点 id 一致（节点 id = makeNodeId(name, mapEntityType(type))）。
         // 按 name 建立映射优先取节点 id，避免 SKILL/EVENT 节点被硬编码 'TASK' 计算导致边连不上。
+        // 注意：nodeData 定义在上方 validEntities 分支内（作用域不可达），此处直接由 validEntities 派生。
         const nameToId = new Map<string, string>();
-        for (const nd of nodeData) nameToId.set(nd.name.trim().toLowerCase(), nd.id);
+        for (const e of validEntities) nameToId.set(e.name.trim().toLowerCase(), makeNodeId(e.name, mapEntityType(e.type)));
         const edgesByType = new Map<string, any[]>();
         for (const rel of validRelations) {
           const mt = mapEdgeType(rel.type);
