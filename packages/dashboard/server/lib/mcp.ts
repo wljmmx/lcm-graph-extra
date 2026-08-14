@@ -67,7 +67,6 @@ const TOOL_TIMEOUT_MS: Record<string, number> = {
 
   // heavy: 批量 LLM 蒸馏
   lcmg_distill: 3_600_000,      // 蒸馏，60min（50条 * 120s/条 / 并发3 ≈ 2000s，留余量）
-  lcmg_extract_rebuild: 3_600_000, // 三级节点重建，60min（逐轮 LLM 提取 Task/Skill/Event，批量会话）
 };
 
 /** 默认超时（未在 TOOL_TIMEOUT_MS 中显式列出的工具） */

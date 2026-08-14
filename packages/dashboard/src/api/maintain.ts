@@ -77,20 +77,20 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
 }
 
 /**
- * 三级节点重建：sessionKey 省略重建全部；force 忽略进度从头重建。
+ * 三级节点重建：完全复用 graph-memory-pro 的 HTTP API（POST /api/extract/rebuild[-all]）。
+ * sessionKey 给定 → 单会话重建；省略 → 批量重建全部会话。
  * concurrency = 会话内 LLM 并发窗口（1-128，默认 4）；sessionConcurrency = 批量重建时同时处理的会话数（1-32，默认 2）；
- * mode = 提取模式（llm 默认 / heuristic 快速规则提取）；thinking = LLM 思考模式（true 推理 / false 快速 / undefined 保持默认）；
+ * mode = 提取模式（llm 默认 / heuristic 快速规则提取）；
  * limitSessions = 限制处理会话数（0 不限制）；pageSize = 读取分页大小（默认 2000）；
  * writeBatchSize = 合并写入批上限（默认 500）；progressPath = 断点续传 + 进度落盘路径（传入即启用，同路径再调续跑）。
+ * 返回体含 mode / processedPairs / totalPairs / llmOutputTokens / llmHasOutput 等字段。
  */
-export function invokeExtractRebuild(opts: {
+export async function invokeExtractRebuild(opts: {
   sessionKey?: string;
   limit?: number;
-  force?: boolean;
   concurrency?: number;
   sessionConcurrency?: number;
   mode?: 'llm' | 'heuristic';
-  thinking?: boolean;
   limitSessions?: number;
   pageSize?: number;
   writeBatchSize?: number;
@@ -99,16 +99,25 @@ export function invokeExtractRebuild(opts: {
   const params: Record<string, unknown> = {};
   if (opts.sessionKey) params.sessionKey = opts.sessionKey;
   if (opts.limit != null) params.limit = opts.limit;
-  if (opts.force) params.force = opts.force;
   if (opts.concurrency != null) params.concurrency = opts.concurrency;
   if (opts.sessionConcurrency != null) params.sessionConcurrency = opts.sessionConcurrency;
   if (opts.mode != null) params.mode = opts.mode;
-  if (opts.thinking != null) params.thinking = opts.thinking;
   if (opts.limitSessions != null && opts.limitSessions > 0) params.limitSessions = opts.limitSessions;
   if (opts.pageSize != null) params.pageSize = opts.pageSize;
   if (opts.writeBatchSize != null) params.writeBatchSize = opts.writeBatchSize;
   if (opts.progressPath) params.progressPath = opts.progressPath;
-  return invokeMcpTool('lcmg_extract_rebuild', params);
+  // 单会话 → rebuild；批量 → rebuild-all（走 gm-pro HTTP 代理，白名单已开放）
+  const path = opts.sessionKey
+    ? '/api/gm-pro/proxy/extract/rebuild'
+    : '/api/gm-pro/proxy/extract/rebuild-all';
+  try {
+    const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(path, params);
+    if (resp.ok) return { ok: true, result: resp.data };
+    return { ok: false, error: resp.error ?? '三级节点重建失败' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `三级节点重建请求失败: ${msg}` };
+  }
 }
 
 /** 三级节点重建的运行级进度快照（后端 GET /api/extract-rebuild/progress） */

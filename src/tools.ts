@@ -20,7 +20,6 @@ import { registerDiagnoseTool } from './tools/diagnose.js';
 import {
   // state management
   setPluginNeo4jConfig, getPluginNeo4jConfig, setSharedQmdClient, setPluginApiRef,
-  getExtractTurnFn, setExtractTurnFn,
   // shared utilities
   acquireQmdClient, validateBackupPath, escapeFts5Query, parseTimeRange,
   generateExperienceSummary, openDb, closeSharedDb, getQmdBaseUrl, LCM_DB,
@@ -34,7 +33,7 @@ import {
   type DashboardToolContext,
 } from './tools/shared.js';
 
-export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange, setExtractTurnFn, getExtractTurnFn };
+export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange };
 export type { DashboardToolContext };
 
 export function registerOperationalTools(api: any): void {
@@ -794,7 +793,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               total += chunk.length;
             }
 
-            // 3) 补写 :GmMessage（同一节点双标签，供 extract-service 读取配对重建三级节点）。
+            // 3) 补写 :GmMessage（同一节点双标签，供 graph-memory-pro 重建读取配对三级节点）。
             //    写入 turnIndex/createdAt/seq，时序用真实会话时间。
             for (let i = 0; i < gmRows.length; i += batchSize) {
               if (signal?.aborted) break;
@@ -903,25 +902,34 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       }
 
       // 4) 导入完成后自动触发三级节点重建（Task/Skill/Event）。
+      //    完全复用 graph-memory-pro 的批量重建 API（POST /api/extract/rebuild-all）。
       //    默认开启；openclaw.json → lcm-graph-extra.config.buildThreeLevel.onImport=false 可关闭。
       //    提取模式默认 heuristic（规则快速提取，零 LLM、毫秒级）；onImportMode="llm" 可切回 LLM 精炼。
       //    异步 fire-and-forget，导入立即返回不阻塞（避免大库导入超时）；
-      //    经 extract-progress 进度按 turn 跳过已提取轮次，避免重复提取。
+      //    进度与断点续传由 gm-pro 在 progressPath 落盘，本地不再自建重建逻辑。
       const buildCfg = api?.pluginConfig?.buildThreeLevel ?? {};
       const enabled = buildCfg.enabled !== false;
       const onImport = buildCfg.onImport !== false;
-      if (enabled && onImport && (params.source === "all" || params.source === "lcm_messages") && getExtractTurnFn()) {
+      if (enabled && onImport && (params.source === "all" || params.source === "lcm_messages")) {
         const bLimit = Number(buildCfg.batchLimit ?? 50);
         const batchLimit = Math.max(1, Math.min(500, Number.isFinite(bLimit) ? bLimit : 50));
         // 批量导入后默认按规则快速提取（heuristic），避免导入即触发 LLM 批量开销；
         // 重点会话再用 mode=llm + thinking:false 精炼补全。
         const importMode: 'llm' | 'heuristic' = buildCfg.onImportMode === 'llm' ? 'llm' : 'heuristic';
-        lines.push(`⏳ 三级节点重建已异步启动（后台分批提取 Task/Skill/Event，模式=${importMode}，batch=${batchLimit}）…`);
+        lines.push(`⏳ 三级节点重建已异步启动（走 graph-memory-pro 批量重建 API，模式=${importMode}，batch=${batchLimit}）…`);
         (async () => {
           try {
-            const { rebuildAll } = await import('./plugin/extract-service.js');
-            const r = await rebuildAll({ extractTurn: getExtractTurnFn()!, logger: getGlobalLogger() }, { limit: batchLimit, mode: importMode });
-            getGlobalLogger().info?.(`[lcmg_import] 三级节点重建完成: +${r.totalNodes} nodes, +${r.totalEdges} edges (${r.sessions.length} sessions, mode=${importMode})`);
+            const { triggerGmProRebuildAll } = await import('./tools/shared.js');
+            const r = await triggerGmProRebuildAll({
+              mode: importMode,
+              limitSessions: batchLimit,
+              progressPath: buildCfg.progressPath,
+            });
+            if (!r.ok) {
+              getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败（触发 gm-pro 未成功）', { error: r.error });
+            } else {
+              getGlobalLogger().info?.(`[lcmg_import] 已触发 graph-memory-pro 三级节点重建（mode=${importMode}）`);
+            }
           } catch (e) {
             getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败', { err: e instanceof Error ? e.message : String(e) });
           }
@@ -940,103 +948,6 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           },
         },
       };
-    },
-  }, { optional: true });
-
-  // ===================================================================
-  // 4.5 lcmg_extract_rebuild — 按需重建三级节点（Task/Skill/Event）
-  // ===================================================================
-  // 等价 gm-pro POST /api/extract/rebuild：
-  //   读取 :GmMessage 按 session 配对 user/assistant 轮次 → 复用 extractTurn 调 LLM
-  //   批量写入 :Task/:Skill/:Event 节点及边（生产节点，不带 :Benchmark）。
-  // 按需触发（非自动），经 lastProcessedTurn / extract-progress 进度避免重复提取。
-  api.registerTool({
-    name: "lcmg_extract_rebuild",
-    label: "三级节点重建",
-    description: "从 :GmMessage 消息按 session 配对 user/assistant 轮次，调 LLM 提取并批量写入 :Task/:Skill/:Event 三级节点及边（生产节点，不带 :Benchmark）。" +
-      "按需触发（非自动），通过 lastProcessedTurn 进度避免重复提取。不传 sessionKey 时批量重建全部会话；force=true 强制从头重建。\n" +
-      "控制参数：concurrency 为 LLM 并发窗口（1-128，默认 4）；pageSize 为读取分页大小（默认 2000）；writeBatchSize 为合并写入批上限（默认 500）；" +
-      "progressPath 传入路径即启用断点续传 + 进度落盘，同路径再次调用从断点续跑、不重复处理。\n" +
-      "批量重建（不传 sessionKey）支持两层并发：sessionConcurrency 控制同时处理的会话数（默认 2，1-32），会话内由 concurrency 控制提取并发窗口。" +
-      "mode=llm（默认）走 LLM 提取；mode=heuristic 走纯正则快速提取（TASK/SKILL/EVENT 节点 + USED_SKILL/SOLVED_BY 边，毫秒级、零 LLM 成本）。" +
-      "thinking=true 开启 LLM 推理，false 关闭思考（速度更快），不传保持服务默认。",
-    parameters: Type.Object({
-      sessionKey: Type.Optional(Type.String({ description: "只重建指定会话（缺省重建全部含 :GmMessage 的会话）" })),
-      limit: Type.Optional(Type.Number({ description: "单次最多处理轮次数，默认 50", minimum: 1, maximum: 500 })),
-      lastProcessedTurn: Type.Optional(Type.Number({ description: "从哪一轮之后开始（默认读取本地进度，force=true 时从 0 开始）" })),
-      force: Type.Optional(Type.Boolean({ description: "强制从头重建该会话（忽略进度），默认 false" })),
-      concurrency: Type.Optional(Type.Number({ description: "会话内 LLM 并发窗口（同时提取的轮次数），1-128，默认 4", minimum: 1, maximum: 128 })),
-      sessionConcurrency: Type.Optional(Type.Number({ description: "批量重建时同时处理的会话数（两层并发外层），默认 2，1-32", minimum: 1, maximum: 32 })),
-      mode: Type.Optional(Type.Union([Type.Literal('llm'), Type.Literal('heuristic')], { description: "提取模式：llm（默认，LLM 提取）/ heuristic（快速规则提取，毫秒级零成本）" })),
-      thinking: Type.Optional(Type.Boolean({ description: "LLM 思考模式：true 开启推理，false 关闭思考（快速），不传保持服务默认" })),
-      limitSessions: Type.Optional(Type.Number({ description: "批量重建时限制处理会话数（0 不限制）", minimum: 0, maximum: 100000 })),
-      pageSize: Type.Optional(Type.Number({ description: "读取分页大小（按轮次窗口分批读取，避免大会话一次性载入内存），默认 2000", minimum: 1, maximum: 20000 })),
-      writeBatchSize: Type.Optional(Type.Number({ description: "合并写入批上限（batchUpsert 每批最多节点/边数），默认 500", minimum: 1, maximum: 50000 })),
-      progressPath: Type.Optional(Type.String({ description: "断点续传 + 进度落盘路径；传入即启用，同路径再次调用从断点续跑，不重复处理" })),
-    }),
-    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
-      if (signal?.aborted) {
-        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-      }
-      const extractTurn = getExtractTurnFn();
-      if (!extractTurn) {
-        return { content: [{ type: "text" as const, text: "❌ extractTurn 未注入（graphAdapter / LLM 未就绪，请确认插件初始化完成）" }], details: { ok: false, error: "extractTurn not injected" }, isError: true };
-      }
-      try {
-        const { rebuildSession, rebuildAll } = await import('./plugin/extract-service.js');
-        const limit = Math.max(1, Math.min(500, params.limit ?? 50));
-        const deps = { extractTurn, logger: getGlobalLogger(), signal };
-        const opts: import('./plugin/extract-service.js').RebuildOptions = { limit, force: params.force === true };
-        if (params.lastProcessedTurn !== undefined) opts.lastProcessedTurn = Number(params.lastProcessedTurn);
-        if (params.concurrency !== undefined) opts.concurrency = params.concurrency;
-        if (params.sessionConcurrency !== undefined) opts.sessionConcurrency = params.sessionConcurrency;
-        if (params.mode !== undefined) opts.mode = params.mode;
-        if (params.thinking !== undefined) opts.thinking = params.thinking;
-        if (params.limitSessions !== undefined) opts.limitSessions = params.limitSessions;
-        if (params.pageSize !== undefined) opts.pageSize = params.pageSize;
-        if (params.writeBatchSize !== undefined) opts.writeBatchSize = params.writeBatchSize;
-        if (params.progressPath) opts.progressPath = params.progressPath;
-        if (params.sessionKey) {
-          const r = await rebuildSession(params.sessionKey, deps, opts);
-          const p = r.progress;
-          const pct = p && p.totalTurns > 0 ? Math.round((p.processedTurns / p.totalTurns) * 100) : 100;
-          return {
-            content: [{ type: "text" as const, text: [
-              "# 三级节点重建报告", "",
-              `会话: ${r.sessionKey}`,
-              `模式: ${r.mode ?? 'llm'}`,
-              `处理轮次: ${r.processedPairs}/${r.totalPairs}`,
-              `新增节点: ${r.nodes}`,
-              `新增边: ${r.edges}`,
-              `LLM 输出 Token: ${r.llmOutputTokens}`,
-              `LLM 有输出: ${r.llmHasOutput}`,
-              `总进度: ${p ? `${p.processedTurns}/${p.totalTurns} 轮 · ${pct}%` : `${pct}%`}`,
-              r.error ? `错误: ${r.error}` : "",
-            ].filter(Boolean).join("\n") }],
-            details: { ok: true, ...r },
-          };
-        }
-        const r = await rebuildAll(deps, opts);
-        return {
-          content: [{ type: "text" as const, text: [
-            "# 三级节点重建报告", "",
-            `模式: ${r.mode}`,
-            `处理会话: ${r.sessions.length}`,
-            `处理批次: ${r.progress.totalBatches}`,
-            `处理轮次: ${r.processedPairs}/${r.totalPairs}`,
-            `LLM 输出 Token: ${r.llmOutputTokens}`,
-            `LLM 有输出: ${r.llmHasOutput}`,
-            `总进度: ${r.progress.processedTurns}/${r.progress.totalTurns} 轮` +
-              (r.progress.totalTurns > 0 ? ` · ${Math.round((r.progress.processedTurns / r.progress.totalTurns) * 100)}%` : " · 100%"),
-            `新增节点: ${r.totalNodes}`,
-            `新增边: ${r.totalEdges}`,
-            ...r.sessions.map((s) => `  ${s.sessionKey}: ${s.processedPairs}/${s.totalPairs} pairs, +${s.nodes} nodes, LLM tok=${s.llmOutputTokens}`),
-          ].join("\n") }],
-          details: { ok: true, ...r },
-        };
-      } catch (e: any) {
-        return { content: [{ type: "text" as const, text: `❌ 重建失败: ${e.message}` }], details: { ok: false, error: `❌ 重建失败: ${e.message}` }, isError: true };
-      }
     },
   }, { optional: true });
 

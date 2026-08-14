@@ -18,7 +18,7 @@
 
 // @ts-ignore - plugin-sdk types only available at runtime
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
-import { registerOperationalToolsWithDashboard, closeNeo4jDriver, mergeEntriesNeo4jConfig, setExtractTurnFn, type DashboardToolContext } from './tools.js';
+import { registerOperationalToolsWithDashboard, closeNeo4jDriver, mergeEntriesNeo4jConfig, type DashboardToolContext } from './tools.js';
 import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboard-snapshot.js';
 import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
@@ -1699,14 +1699,6 @@ const pluginEntry: any = definePluginEntry({
     // 注入 register() 闭包内的单例引用，供 lcmg_distill / lcmg_compact / lcmg_reset_breaker
     // 三个 MCP 工具手动触发维护操作。所有回调延迟访问闭包变量，确保 dispose 后安全。
     // -------------------------------------------------------------------
-    // 注入三级节点提取闭包（供 lcmg_extract_rebuild / 导入自动触发复用）。
-    // graphAdapter 在闭包内延迟访问；LLM 配置经 resolveDistillationLlm 统一解析。
-    setExtractTurnFn(async (user: string, assistant: string, opts?: { writeBatchSize?: number; mode?: 'llm' | 'heuristic'; thinking?: boolean }) => {
-      if (!graphAdapter || typeof graphAdapter.extractAndUpsertFromTurn !== 'function') return { nodes: 0, edges: 0 };
-      const mergedApi = { ...api, pluginConfig: mergeEntriesNeo4jConfig(api) };
-      const llmCfg = distillationModule.resolveDistillationLlm(mergedApi);
-      return graphAdapter.extractAndUpsertFromTurn(llmCfg, user, assistant, opts?.writeBatchSize, opts?.mode, opts?.thinking);
-    });
     const dashboardContext: DashboardToolContext = {
       expStore: undefined, // expStore 在闭包内延迟访问，由 runDistillation 回调内部读取
       // BUGFIX(P1-4): 注入 qmdClient 单例，供 5 个 MCP 工具复用（避免每次 new QmdClient）

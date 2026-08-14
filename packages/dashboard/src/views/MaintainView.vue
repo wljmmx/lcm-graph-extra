@@ -124,13 +124,13 @@ const importSourceOptions = [
 ];
 
 // 卡片 9.5：三级节点重建（v2.8.1 新增）
+// gm-pro 仅在传入 progressPath 时落盘进度，故留空时使用该默认路径，保证「重建写入」与「进度轮询读取」一致。
+const DEFAULT_EXTRACT_PROGRESS_PATH = '/tmp/gm-rebuild-progress.json';
 const extractSessionKey = ref<string>('');
 const extractLimit = ref<number>(50);
-const extractForce = ref<boolean>(false);
 const extractConcurrency = ref<number>(4);
 const extractSessionConcurrency = ref<number>(2);
 const extractMode = ref<'llm' | 'heuristic'>('llm');
-const extractThinking = ref<boolean | undefined>(undefined);
 const extractLimitSessions = ref<number>(0);
 const extractPageSize = ref<number>(2000);
 const extractWriteBatchSize = ref<number>(500);
@@ -158,8 +158,9 @@ const extractTotalPercent = computed(() => {
 
 async function pollExtractProgress(): Promise<void> {
   try {
-    // 把用户填的 progressPath 传给后端，确保后端按插件实际写入的同一路径读取进度
-    const res = await fetchExtractRebuildProgress(extractProgressPath.value);
+    // 与 executeExtractRebuild 的默认路径保持一致，否则用户留空时「重建写入路径」与「进度读取路径」不一致。
+    const progressPath = extractProgressPath.value?.trim() || DEFAULT_EXTRACT_PROGRESS_PATH;
+    const res = await fetchExtractRebuildProgress(progressPath);
     // 避免 null 覆盖上一次已拿到的进度（重建刚开始时文件可能尚未落盘）
     if (res.progress) extractProgress.value = res.progress;
     if (res.progress?.done) stopExtractPolling();
@@ -536,36 +537,35 @@ function executeImport(): void {
 }
 
 function executeExtractRebuild(): void {
-  // thinking 三态：undefined=保持服务默认，因此仅当用户显式切换时才传
-  const thinking = extractThinking.value;
+  // 复用 gm-pro HTTP API：gm-pro 无 thinking 参数（思考开关由 gm-pro 自身配置控制），故不传。
+  // progressPath 留空时给默认值，保证「重建写入路径」与「进度轮询读取路径」一致（gm-pro 仅在传路径时落盘进度）。
+  const progressPath = extractProgressPath.value?.trim() || DEFAULT_EXTRACT_PROGRESS_PATH;
+  extractSessionKey.value = extractSessionKey.value?.trim() ?? '';
+  const sessionKey = extractSessionKey.value || undefined;
   runMutation({
     cardKey: 'extract_rebuild',
-    tool: 'lcmg_extract_rebuild',
+    tool: 'gm_pro_extract_rebuild',
     params: {
-      sessionKey: extractSessionKey.value || undefined,
+      sessionKey,
       limit: extractLimit.value,
-      force: extractForce.value,
       concurrency: extractConcurrency.value,
       sessionConcurrency: extractSessionConcurrency.value,
       mode: extractMode.value,
-      thinking: thinking === undefined ? undefined : thinking,
       limitSessions: extractLimitSessions.value > 0 ? extractLimitSessions.value : undefined,
       pageSize: extractPageSize.value,
       writeBatchSize: extractWriteBatchSize.value,
-      progressPath: extractProgressPath.value || undefined,
+      progressPath,
     },
     invokeFn: () => invokeExtractRebuild({
-      sessionKey: extractSessionKey.value || undefined,
+      sessionKey,
       limit: extractLimit.value,
-      force: extractForce.value,
       concurrency: extractConcurrency.value,
       sessionConcurrency: extractSessionConcurrency.value,
       mode: extractMode.value,
-      thinking: thinking === undefined ? undefined : thinking,
       limitSessions: extractLimitSessions.value > 0 ? extractLimitSessions.value : undefined,
       pageSize: extractPageSize.value,
       writeBatchSize: extractWriteBatchSize.value,
-      progressPath: extractProgressPath.value || undefined,
+      progressPath,
     }),
   });
 }
@@ -1029,7 +1029,7 @@ function executeReembed(): void {
             icon="share"
             :confirm-level="1"
             :loading="!!loadingMap.extract_rebuild"
-            tool-name="lcmg_extract_rebuild"
+            tool-name="gm_pro_extract_rebuild"
             :last-status="lastResultMap.extract_rebuild?.status ?? null"
             :last-details="lastResultMap.extract_rebuild?.details ?? null"
             :last-text="lastResultMap.extract_rebuild?.text ?? null"
@@ -1061,17 +1061,6 @@ function executeReembed(): void {
               <NFormItem label="限制会话数（0 不限制）" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractLimitSessions" :min="0" :max="100000" size="small" style="width: 100%" />
               </NFormItem>
-              <NFormItem label="LLM 思考模式" size="small" :show-feedback="false">
-                <NSwitch
-                  :value="extractThinking === true"
-                  :disabled="extractMode === 'heuristic'"
-                  size="small"
-                  @update:value="(v: boolean) => { extractThinking = v; }"
-                />
-                <span class="muted" style="margin-left: 8px; font-size: 12px">
-                  {{ extractThinking === undefined ? '保持服务默认' : extractThinking ? '开启推理（慢）' : '关闭思考（快）' }}
-                </span>
-              </NFormItem>
               <NFormItem label="读取分页大小" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractPageSize" :min="1" :max="20000" size="small" style="width: 100%" />
               </NFormItem>
@@ -1079,13 +1068,7 @@ function executeReembed(): void {
                 <NInputNumber v-model:value="extractWriteBatchSize" :min="1" :max="50000" size="small" style="width: 100%" />
               </NFormItem>
               <NFormItem label="进度落盘路径" size="small" :show-feedback="false">
-                <NInput v-model:value="extractProgressPath" size="small" placeholder="留空则使用默认进度；传入路径即启用断点续传，同路径再调续跑" clearable />
-              </NFormItem>
-              <NFormItem label="忽略进度重跑" size="small" :show-feedback="false">
-                <NSwitch v-model:value="extractForce" size="small" />
-                <span class="muted" style="margin-left: 8px; font-size: 12px">
-                  {{ extractForce ? '忽略已处理进度，从头重建' : '按进度跳过已提取轮次' }}
-                </span>
+                <NInput v-model:value="extractProgressPath" size="small" placeholder="留空则写入 /tmp/gm-rebuild-progress.json；传入路径即启用断点续传，同路径再调续跑" clearable />
               </NFormItem>
             </template>
             <!-- 重建运行中：批次进度 + 总进度 双进度条（含数量与百分比） -->
@@ -1127,7 +1110,7 @@ function executeReembed(): void {
               </div>
             </template>
             <template #extra>
-              <OperationRecentHistory :logs="historyOf('lcmg_extract_rebuild')" />
+              <OperationRecentHistory :logs="historyOf('gm_pro_extract_rebuild')" />
             </template>
           </OperationCard>
         </NGi>

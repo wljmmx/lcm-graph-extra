@@ -35,29 +35,51 @@ export function setPluginApiRef(apiRef: any): void {
   _pluginApiRef = apiRef;
 }
 
-// ── 三级节点提取（extract-service）注入 ──
-// graphAdapter 实例生存于 index.ts 闭包内，tools 侧无法直接访问。
-// 通过此 setter 注入 "一轮 user/assistant → 提取 Task/Skill/Event" 的闭包，
-// 供 lcmg_extract_rebuild / 导入自动触发复用。
+// ── 三级节点重建：完全复用 gm-pro HTTP API ──
+// 本地不再自建重建逻辑，改为触发 graph-memory-pro 的 POST /api/extract/rebuild-all。
+// 供 lcmg_import 导入后自动调度（默认 heuristic 快速提取）复用。
 
-export interface ExtractTurnOpts {
-  /** 合并写入批上限（透传至 graphAdapter.batchUpsert），默认 500 */
-  writeBatchSize?: number;
-  /** 提取模式：llm（默认）/ heuristic（快速规则提取） */
-  mode?: 'llm' | 'heuristic';
-  /** LLM 思考模式：true 开启推理，false 关闭思考，不传保持服务默认 */
-  thinking?: boolean;
-}
-export type ExtractTurnFn = (user: string, assistant: string, opts?: ExtractTurnOpts) => Promise<{ nodes: number; edges: number }>;
-
-let _extractTurnFn: ExtractTurnFn | null = null;
-
-export function setExtractTurnFn(fn: ExtractTurnFn | null): void {
-  _extractTurnFn = fn;
-}
-
-export function getExtractTurnFn(): ExtractTurnFn | null {
-  return _extractTurnFn;
+/**
+ * 触发 gm-pro 批量重建全部会话（POST /api/extract/rebuild-all）。
+ * 返回是否成功；失败不抛错（调用方 fire-and-forget）。
+ */
+export async function triggerGmProRebuildAll(
+  opts: {
+    mode?: 'llm' | 'heuristic';
+    sessionConcurrency?: number;
+    progressPath?: string;
+    limitSessions?: number;
+  } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const baseUrl = (process.env.GM_PRO_HTTP_URL || 'http://127.0.0.1:7850').replace(/\/+$/, '');
+  // 鉴权令牌：与 dashboard gm-pro 代理同一来源（openclaw.json graph-memory-pro 配置段 apiServer.authToken）
+  let authToken = '';
+  try {
+    const p = homedir() + '/.openclaw/openclaw.json';
+    if (existsSync(p)) {
+      const d = JSON.parse(readFileSync(p, 'utf8'));
+      authToken = d?.plugins?.entries?.['graph-memory-pro']?.config?.apiServer?.authToken ?? '';
+    }
+  } catch { /* 读不到令牌则不带鉴权头 */ }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authToken) headers['x-auth-token'] = authToken;
+  const body: Record<string, unknown> = {
+    mode: opts.mode ?? 'heuristic',
+    sessionConcurrency: opts.sessionConcurrency ?? 2,
+  };
+  if (opts.progressPath) body.progressPath = opts.progressPath;
+  if (opts.limitSessions != null && opts.limitSessions > 0) body.limitSessions = opts.limitSessions;
+  try {
+    const resp = await fetch(`${baseUrl}/api/extract/rebuild-all`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) return { ok: false, error: `gm-pro HTTP ${resp.status}` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export function getPluginNeo4jConfig(): Record<string, unknown> | undefined {

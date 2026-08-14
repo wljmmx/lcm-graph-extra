@@ -38,6 +38,14 @@ import { readGmProRawConfig } from './config';
 /** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
 const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL ?? 'http://127.0.0.1:7850';
 const GM_PRO_HTTP_TIMEOUT = Number(process.env.GM_PRO_HTTP_TIMEOUT ?? 10_000);
+// 长时任务路径 → 更长的代理超时（ms）。三级节点重建为逐轮 LLM 提取，可能耗时很长。
+const GM_PRO_LONG_TASK_TIMEOUT = Number(process.env.GM_PRO_HTTP_LONG_TIMEOUT ?? 30 * 60_000);
+const GM_PRO_LONG_TASK_PATHS = new Set<string>(['/api/extract/rebuild', '/api/extract/rebuild-all']);
+
+/** 按代理路径解析超时（长时任务用长超时，其余用默认） */
+function resolveGmProTimeout(proxyPath: string): number {
+  return GM_PRO_LONG_TASK_PATHS.has(proxyPath) ? GM_PRO_LONG_TASK_TIMEOUT : GM_PRO_HTTP_TIMEOUT;
+}
 
 /**
  * graph-memory-pro 鉴权令牌（X-Auth-Token）。
@@ -142,8 +150,9 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
   ): Promise<{ ok: boolean; data?: unknown; error?: string; detail?: unknown }> {
     const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}${query}`;
 
+    const timeoutMs = resolveGmProTimeout(proxyPath);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GM_PRO_HTTP_TIMEOUT);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     const headers: Record<string, string> = {
       'Accept': 'application/json',
@@ -179,7 +188,7 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       const isTimeout = err instanceof Error && err.name === 'AbortError';
       const error = isTimeout
-        ? `graph-memory-pro 请求超时（${GM_PRO_HTTP_TIMEOUT}ms）`
+        ? `graph-memory-pro 请求超时（${timeoutMs}ms）`
         : `graph-memory-pro 不可达: ${msg}`;
       req.log.warn({ err: error, targetUrl }, `graph-memory-pro ${method} 代理失败`);
       return { ok: false, error };

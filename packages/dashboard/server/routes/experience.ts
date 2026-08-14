@@ -51,20 +51,20 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
   'lcmg_restore',
   'lcmg_sync',
   'lcmg_import',
-  'lcmg_extract_rebuild',
   'lcmg_forget',
   'lcmg_pin',
   'lcmg_distill_retry',
 ]);
 
 // ---------------------------------------------------------------------------
-// 三级节点重建实时进度：记录最近一次 rebuild 请求使用的 progressPath
-// （与插件 extract-service 的默认路径对齐），供 GET /api/extract-rebuild/progress 轮询读取
+// 三级节点重建实时进度：完全复用 gm-pro，进度文件由 gm-pro 写入 progressPath。
+// GET /api/extract-rebuild/progress 读取该文件供 Dashboard 双进度条轮询。
+// 前端始终传入 progressPath（留空默认 /tmp/gm-rebuild-progress.json），
+// 此处仅作兜底默认值（未传 path 时读取该兜底路径）。
 // ---------------------------------------------------------------------------
 
 const DEFAULT_EXTRACT_PROGRESS_PATH = path.join(os.homedir(), '.openclaw', 'extract-progress.json');
-// 默认即指向默认进度文件：即使轮询早于 /api/mcp/invoke 到达（或未走该路由），
-// GET /api/extract-rebuild/progress 也能读到 extract-service 默认落盘的进度。
+// 兜底：前端未带 path 参数时读取该默认路径（正常流程前端总是带 path）。
 let activeExtractProgressPath: string | null = DEFAULT_EXTRACT_PROGRESS_PATH;
 
 /** 读取并归一化重建进度文件，返回运行级进度快照（供双进度条展示） */
@@ -83,30 +83,39 @@ export interface ExtractProgressSnapshot {
   llmOutputTokens?: number;
 }
 
-/** 读取并归一化重建进度文件。path 优先于最近一次 invoke 记录的路径，便于解耦"插件写哪"与"dashboard 读哪"。 */
+/** 读取并归一化重建进度文件。path 优先于最近一次 invoke 记录的路径，便于解耦"gm-pro 写哪"与"dashboard 读哪"。 */
 function readExtractProgress(pathOverride?: string): ExtractProgressSnapshot | null {
   const target = (pathOverride && pathOverride.trim()) || activeExtractProgressPath;
   if (!target) return null;
   try {
     if (!fs.existsSync(target)) {
-      // 进度文件不存在：可能是插件尚未落盘，或插件写入的路径与读取的路径不一致。
+      // 进度文件不存在：可能是 gm-pro 尚未落盘，或写入路径与读取路径不一致。
       return null;
     }
     const raw = JSON.parse(fs.readFileSync(target, 'utf8')) as Record<string, unknown>;
     const num = (v: unknown): number => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    // 完全复用 gm-pro：进度文件为 gm-pro 的 RebuildAllProgress 格式
+    //   { done, totalSessions, processedSessions, totalPairs, processedPairs, sessions, updatedAt }
+    // 单会话格式：{ sessionKey, lastProcessedTurn, processedPairs, totalPairs, status }。
+    // Radar 以 "totalPairs" 存在与否判定 gm-pro 格式（本地旧格式无该字段）。
+    const isGmPro = 'totalPairs' in raw;
+    const totalSessions = num(raw.totalSessions);
+    const processedSessions = num(raw.processedSessions);
     return {
       done: raw.done === true,
       startedAt: raw.startedAt ?? null,
       updatedAt: raw.updatedAt ?? null,
-      totalSessions: num(raw.totalSessions),
-      totalBatches: num(raw.totalBatches),
-      currentSession: num(raw.currentSession),
-      currentBatch: num(raw.currentBatch),
-      processedSessions: num(raw.processedSessions),
-      totalTurns: num(raw.totalTurns),
-      processedTurns: num(raw.processedTurns),
-      currentSessionKey: raw.currentSessionKey ?? null,
-      // LLM 输出 token 实时累计（heuristic 恒为 0）
+      totalSessions,
+      // gm-pro 无 batch 概念：以「会话数」近似「批次」，会话即批次。
+      totalBatches: isGmPro ? totalSessions : num(raw.totalBatches),
+      currentSession: isGmPro ? processedSessions : num(raw.currentSession),
+      currentBatch: isGmPro ? processedSessions : num(raw.currentBatch),
+      processedSessions,
+      // gm-pro 的 pair（轮次）映射为 turns。
+      totalTurns: isGmPro ? num(raw.totalPairs) : num(raw.totalTurns),
+      processedTurns: isGmPro ? num(raw.processedPairs) : num(raw.processedTurns),
+      currentSessionKey: isGmPro ? (raw.sessionKey ?? null) : (raw.currentSessionKey ?? null),
+      // LLM 输出 token 实时累计（heuristic 恒为 undefined → 前端不展示）
       llmOutputTokens: raw.llmOutputTokens !== undefined ? num(raw.llmOutputTokens) : undefined,
     };
   } catch {
@@ -581,17 +590,6 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         reply.code(400);
         return { ok: false, error: err };
       }
-    }
-    // 三级节点重建：显式注入绝对进度路径，供 GET /api/extract-rebuild/progress 轮询读取。
-    // 关键：必须把 progressPath 注入 params 传给插件，否则插件用自身进程的 homedir 默认路径写，
-    // 与 dashboard 读的路径（基于自身 homedir）在进程 HOME 不同时会 mismatch，导致进度读不到。
-    if (tool === 'lcmg_extract_rebuild') {
-      const pp =
-        typeof params.progressPath === 'string' && params.progressPath.trim()
-          ? params.progressPath.trim()
-          : DEFAULT_EXTRACT_PROGRESS_PATH;
-      params.progressPath = pp;
-      activeExtractProgressPath = pp;
     }
     const startTs = Date.now();
     let result: any;
