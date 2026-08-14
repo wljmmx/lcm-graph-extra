@@ -101,6 +101,39 @@ export function invokeExtractRebuild(opts: {
   return invokeMcpTool('lcmg_extract_rebuild', params);
 }
 
+/** 三级节点重建的运行级进度快照（后端 GET /api/extract-rebuild/progress） */
+export interface ExtractRebuildProgress {
+  done: boolean;
+  startedAt?: string | null;
+  updatedAt?: string | null;
+  /** 本次一共处理多少会话 */
+  totalSessions: number;
+  /** 本次分多少批次（每会话一个处理批次） */
+  totalBatches: number;
+  /** 当前处理第几个会话（1-based，0=尚未开始） */
+  currentSession: number;
+  /** 当前处理第几个批次（1-based，0=尚未开始） */
+  currentBatch: number;
+  /** 已完成的会话数 */
+  processedSessions: number;
+  /** 本次需处理的总轮次数 */
+  totalTurns: number;
+  /** 已提取轮次数 */
+  processedTurns: number;
+  /** 当前正在处理的会话 */
+  currentSessionKey?: string | null;
+}
+
+export interface ExtractRebuildProgressResponse {
+  running: boolean;
+  progress: ExtractRebuildProgress | null;
+}
+
+/** 拉取三级节点重建实时进度（Dashboard 双进度条轮询） */
+export function fetchExtractRebuildProgress(): Promise<ExtractRebuildProgressResponse> {
+  return apiGet<ExtractRebuildProgressResponse>('/api/extract-rebuild/progress');
+}
+
 /**
  * Bootstrap 反馈工具：用已有图谱节点合成 warmup 反馈，突破冷启动。
  * 原理：以节点 name 作为 query 和 reply，启发式必然命中（name 在 reply 中），

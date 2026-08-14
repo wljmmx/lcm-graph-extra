@@ -983,6 +983,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         if (params.progressPath) opts.progressPath = params.progressPath;
         if (params.sessionKey) {
           const r = await rebuildSession(params.sessionKey, deps, opts);
+          const p = r.progress;
+          const pct = p && p.totalTurns > 0 ? Math.round((p.processedTurns / p.totalTurns) * 100) : 100;
           return {
             content: [{ type: "text" as const, text: [
               "# 三级节点重建报告", "",
@@ -990,6 +992,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               `处理轮次: ${r.processed}/${r.turns}`,
               `新增节点: ${r.nodes}`,
               `新增边: ${r.edges}`,
+              `总进度: ${p ? `${p.processedTurns}/${p.totalTurns} 轮 · ${pct}%` : `${pct}%`}`,
               r.error ? `错误: ${r.error}` : "",
             ].filter(Boolean).join("\n") }],
             details: { ok: true, ...r },
@@ -1000,6 +1003,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           content: [{ type: "text" as const, text: [
             "# 三级节点重建报告", "",
             `处理会话: ${r.sessions.length}`,
+            `处理批次: ${r.progress.totalBatches}`,
+            `总进度: ${r.progress.processedTurns}/${r.progress.totalTurns} 轮` +
+              (r.progress.totalTurns > 0 ? ` · ${Math.round((r.progress.processedTurns / r.progress.totalTurns) * 100)}%` : " · 100%"),
             `新增节点: ${r.totalNodes}`,
             `新增边: ${r.totalEdges}`,
             ...r.sessions.map((s) => `  ${s.sessionKey}: ${s.processed}/${s.turns} turns, +${s.nodes} nodes`),

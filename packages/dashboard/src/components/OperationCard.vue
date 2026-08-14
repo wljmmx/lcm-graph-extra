@@ -165,6 +165,10 @@ const elapsedLabel = computed(() => {
     <div v-if="loading" class="card-progress" role="status" aria-live="polite">
       <div class="progress-bar-indeterminate"><div class="progress-bar-fill" /></div>
       <span class="progress-elapsed">执行中… 已耗时 {{ elapsedLabel }}</span>
+      <!-- 具体进度（如三级节点重建的双进度条），由卡片通过 #progress slot 提供 -->
+      <div v-if="$slots.progress" class="card-progress-specific">
+        <slot name="progress" />
+      </div>
     </div>
 
     <!-- 参数表单 slot -->
@@ -333,6 +337,9 @@ const elapsedLabel = computed(() => {
   margin-top: 4px;
   font-size: var(--fs-caption);
   color: var(--color-text-tertiary);
+}
+.card-progress-specific {
+  margin-top: 8px;
 }
 .card-footer {
   display: flex;

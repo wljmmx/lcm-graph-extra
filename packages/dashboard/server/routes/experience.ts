@@ -12,6 +12,7 @@
 import type { FastifyInstance } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 import { runReadQuery, runWriteQuery, toNumber, splitTag } from '../lib/neo4j';
 import { invokeMcpTool } from '../lib/mcp';
 
@@ -55,6 +56,51 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
   'lcmg_pin',
   'lcmg_distill_retry',
 ]);
+
+// ---------------------------------------------------------------------------
+// 三级节点重建实时进度：记录最近一次 rebuild 请求使用的 progressPath
+// （与插件 extract-service 的默认路径对齐），供 GET /api/extract-rebuild/progress 轮询读取
+// ---------------------------------------------------------------------------
+
+const DEFAULT_EXTRACT_PROGRESS_PATH = path.join(os.homedir(), '.openclaw', 'extract-progress.json');
+let activeExtractProgressPath: string | null = null;
+
+/** 读取并归一化重建进度文件，返回运行级进度快照（供双进度条展示） */
+function readExtractProgress(): {
+  done: boolean;
+  startedAt: unknown;
+  updatedAt: unknown;
+  totalSessions: number;
+  totalBatches: number;
+  currentSession: number;
+  currentBatch: number;
+  processedSessions: number;
+  totalTurns: number;
+  processedTurns: number;
+  currentSessionKey: unknown;
+} | null {
+  if (!activeExtractProgressPath) return null;
+  try {
+    if (!fs.existsSync(activeExtractProgressPath)) return null;
+    const raw = JSON.parse(fs.readFileSync(activeExtractProgressPath, 'utf8')) as Record<string, unknown>;
+    const num = (v: unknown): number => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    return {
+      done: raw.done === true,
+      startedAt: raw.startedAt ?? null,
+      updatedAt: raw.updatedAt ?? null,
+      totalSessions: num(raw.totalSessions),
+      totalBatches: num(raw.totalBatches),
+      currentSession: num(raw.currentSession),
+      currentBatch: num(raw.currentBatch),
+      processedSessions: num(raw.processedSessions),
+      totalTurns: num(raw.totalTurns),
+      processedTurns: num(raw.processedTurns),
+      currentSessionKey: raw.currentSessionKey ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 类型定义（与 src/api/experience.ts 对齐）
@@ -524,6 +570,13 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
         return { ok: false, error: err };
       }
     }
+    // 三级节点重建：记录本次使用的进度文件路径，供 GET /api/extract-rebuild/progress 轮询读取
+    if (tool === 'lcmg_extract_rebuild') {
+      activeExtractProgressPath =
+        typeof params.progressPath === 'string' && params.progressPath.trim()
+          ? params.progressPath.trim()
+          : DEFAULT_EXTRACT_PROGRESS_PATH;
+    }
     const startTs = Date.now();
     let result: any;
     let error: string | undefined;
@@ -554,6 +607,12 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
       /* 日志写入失败不阻塞响应 */
     }
     return result;
+  });
+
+  // ===== 三级节点重建实时进度（Dashboard 双进度条轮询） =====
+  app.get('/api/extract-rebuild/progress', async () => {
+    const progress = readExtractProgress();
+    return { running: progress ? !progress.done : false, progress };
   });
 
   // ===== 操作日志查询（v1.0.1-6 增强：支持 user / from / to 过滤） =====

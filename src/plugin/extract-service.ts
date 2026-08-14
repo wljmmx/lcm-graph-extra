@@ -60,6 +60,8 @@ export interface RebuildResult {
   edges: number;
   skipped: number;
   error?: string;
+  /** 本次重建的运行级进度快照 */
+  progress?: RunProgress;
 }
 
 /** 重建控制参数（对齐 gm-pro POST /api/extract/rebuild） */
@@ -78,15 +80,52 @@ export interface RebuildOptions {
   writeBatchSize?: number;
   /** 断点续传 + 进度落盘路径；传入即启用，同路径再次调用从断点续跑 */
   progressPath?: string;
+  /** 内部：运行级进度快照（由 rebuildAll 注入；单会话独立调用时自动创建） */
+  progress?: RunProgress;
 }
 
-// ── 进度记录（避免重复提取 / 断点续传）──
+// ── 进度记录（避免重复提取 / 断点续传 / Dashboard 进度条）──
 const PROGRESS_PATH = join(homedir(), '.openclaw', 'extract-progress.json');
 
+/** 运行级进度快照（供 Dashboard 双进度条展示：批次进度 / 总进度） */
+export interface RunProgress {
+  done: boolean;
+  startedAt?: string;
+  updatedAt?: string;
+  /** 本次一共处理多少会话 */
+  totalSessions: number;
+  /** 本次分多少批次（每个会话为一个处理批次） */
+  totalBatches: number;
+  /** 当前处理第几个批次（1-based，0 = 尚未开始） */
+  currentBatch: number;
+  /** 当前处理第几个会话（1-based，0 = 尚未开始） */
+  currentSession: number;
+  /** 已完成的会话数 */
+  processedSessions: number;
+  /** 本次需处理的总轮次数（按 limit 与已处理进度预估的剩余可提取轮次） */
+  totalTurns: number;
+  /** 已提取轮次数 */
+  processedTurns: number;
+  /** 当前正在处理的会话 */
+  currentSessionKey?: string;
+}
+
 interface ProgressState {
+  version?: number;
   /** sessionKey -> 已处理到的最大 turnIndex */
   sessions: Record<string, number>;
   lastRunAt?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  done?: boolean;
+  totalSessions?: number;
+  totalBatches?: number;
+  currentBatch?: number;
+  currentSession?: number;
+  processedSessions?: number;
+  totalTurns?: number;
+  processedTurns?: number;
+  currentSessionKey?: string;
 }
 
 /** 解析进度文件路径：优先使用 progressPath 参数（传入即启用断点续传），否则回退默认路径 */
@@ -111,6 +150,47 @@ function writeProgress(state: ProgressState, progressPath?: string): void {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, JSON.stringify(state, null, 2));
   } catch { /* 进度持久化失败不阻塞重建 */ }
+}
+
+/** 读改写进度文件：读入 -> mutate -> 落盘（统一入口，避免多处写互相覆盖） */
+function persistProgress(progressPath: string | undefined, mutate: (s: ProgressState) => void): void {
+  const state = readProgress(progressPath);
+  mutate(state);
+  state.updatedAt = new Date().toISOString();
+  writeProgress(state, progressPath);
+}
+
+/** 将运行级进度快照写入进度状态（供断点续传 + Dashboard 双进度条） */
+function applyRunProgress(state: ProgressState, p: RunProgress): void {
+  state.version = 2;
+  state.done = p.done;
+  state.startedAt = p.startedAt;
+  state.totalSessions = p.totalSessions;
+  state.totalBatches = p.totalBatches;
+  state.currentBatch = p.currentBatch;
+  state.currentSession = p.currentSession;
+  state.processedSessions = p.processedSessions;
+  state.totalTurns = p.totalTurns;
+  state.processedTurns = p.processedTurns;
+  state.currentSessionKey = p.currentSessionKey;
+}
+
+/** 从进度文件读取运行级快照（归一化；缺省为未开始） */
+export function readRunProgress(progressPath?: string): RunProgress {
+  const s = readProgress(progressPath);
+  return {
+    done: s.done === true,
+    startedAt: s.startedAt,
+    updatedAt: s.updatedAt,
+    totalSessions: Number(s.totalSessions) || 0,
+    totalBatches: Number(s.totalBatches) || 0,
+    currentBatch: Number(s.currentBatch) || 0,
+    currentSession: Number(s.currentSession) || 0,
+    processedSessions: Number(s.processedSessions) || 0,
+    totalTurns: Number(s.totalTurns) || 0,
+    processedTurns: Number(s.processedTurns) || 0,
+    currentSessionKey: s.currentSessionKey,
+  };
 }
 
 /** 读取某 session 的已处理进度；force 时返回 0（从头重建）。progressPath 传入即从该路径读取断点进度。 */
@@ -220,6 +300,58 @@ export async function getSessionTurns(
   return pairTurns(sessionKey, window, messages, limit, deps?.signal);
 }
 
+/** 预估本批会话在各自 startTurn 之后剩余的可提取轮次数（role=user 的 DISTINCT turnIndex，扣除已处理进度，且受 perSessionLimit 封顶） */
+async function estimateRemainingTurns(
+  driver: any,
+  sessionKeys: string[],
+  startTurns: Map<string, number>,
+  perSessionLimit: number,
+): Promise<number> {
+  if (sessionKeys.length === 0) return 0;
+  const session = driver.session();
+  try {
+    const res = await session.run(
+      `MATCH (n:GmMessage) WHERE n.sessionId IN $keys AND n.role = 'user'
+       RETURN n.sessionId AS sessionKey, COLLECT(DISTINCT n.turnIndex) AS turns`,
+      { keys: sessionKeys },
+    );
+    let total = 0;
+    for (const r of res.records) {
+      const sk = String(r.get('sessionKey') ?? '');
+      const start = startTurns.get(sk) ?? 0;
+      const turns: number[] = (r.get('turns') ?? [])
+        .map((t: any) => Number(t))
+        .filter((t: number) => Number.isFinite(t) && t > start);
+      total += Math.min(perSessionLimit, turns.length);
+    }
+    return total;
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
+/** 单会话独立调用时创建运行级进度快照（totalSessions=1，totalTurns 按剩余可提取轮次预估） */
+async function createStandaloneProgress(
+  driver: any,
+  sessionKey: string,
+  startTurn: number,
+  perSessionLimit: number,
+): Promise<RunProgress> {
+  const totalTurns = await estimateRemainingTurns(driver, [sessionKey], new Map([[sessionKey, startTurn]]), perSessionLimit);
+  return {
+    done: false,
+    startedAt: new Date().toISOString(),
+    totalSessions: 1,
+    totalBatches: 1,
+    currentBatch: 1,
+    currentSession: 1,
+    processedSessions: 0,
+    totalTurns,
+    processedTurns: 0,
+    currentSessionKey: sessionKey,
+  };
+}
+
 // ── 并发池：受 concurrency 控制，同时最多 N 轮调 LLM 提取 ──
 
 interface TurnPoolResult {
@@ -282,6 +414,13 @@ export async function rebuildSession(
   const startTurn = opts.lastProcessedTurn !== undefined ? Number(opts.lastProcessedTurn) : getSessionProgress(sessionKey, force, progressPath);
 
   const driver = await getNeo4jDriver();
+  // 运行级进度：由 rebuildAll 注入（多会话），否则单会话独立创建
+  const standalone = opts.progress === undefined;
+  const progress = opts.progress ?? (await createStandaloneProgress(driver, sessionKey, startTurn, limit));
+  if (standalone) {
+    // 单会话独立调用：首次落盘运行级进度（含 totalTurns 预估），供 Dashboard 展示 0% 起点
+    persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+  }
   let nodes = 0;
   let edges = 0;
   let processed = 0;
@@ -313,21 +452,29 @@ export async function rebuildSession(
     cursor = Math.max(cursor, pool.maxTurn, Math.max(...window));
     // 每页落盘进度：中断后以同一 progressPath 重新调用即可从断点续跑，不重复处理
     if (pool.processed > 0) {
-      const state = readProgress(progressPath);
-      state.sessions[sessionKey] = Math.max(state.sessions[sessionKey] ?? 0, maxTurn);
-      state.lastRunAt = new Date().toISOString();
-      writeProgress(state, progressPath);
+      progress.processedTurns += pool.processed;
+      persistProgress(progressPath, (s) => {
+        s.sessions[sessionKey] = Math.max(s.sessions[sessionKey] ?? 0, maxTurn);
+        s.lastRunAt = new Date().toISOString();
+        applyRunProgress(s, progress);
+      });
     }
   }
 
-  return { sessionKey, turns: processed + skipped, processed, nodes, edges, skipped };
+  // 单会话独立调用：运行结束标记 done
+  if (standalone) {
+    progress.done = true;
+    persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+  }
+
+  return { sessionKey, turns: processed + skipped, processed, nodes, edges, skipped, progress };
 }
 
-/** 枚举全部含 :GmMessage 的 session，逐个重建（分批；跨会话顺序执行，会话内由 concurrency 控制并发） */
+/** 枚举全部含 :GmMessage 的 session，逐个重建（每个会话一个处理批次；跨会话顺序执行，会话内由 concurrency 控制并发） */
 export async function rebuildAll(
   deps: ExtractDeps,
   opts: RebuildOptions = {},
-): Promise<{ sessions: RebuildResult[]; totalNodes: number; totalEdges: number }> {
+): Promise<{ sessions: RebuildResult[]; totalNodes: number; totalEdges: number; progress: RunProgress }> {
   const driver = await getNeo4jDriver();
   const session = driver.session();
   let sessionKeys: string[] = [];
@@ -338,16 +485,54 @@ export async function rebuildAll(
     await session.close().catch(() => {});
   }
   const log = deps.logger ?? getGlobalLogger();
+  const limit = clampInt(opts.limit ?? 50, 1, 100000);
+  const progressPath = opts.progressPath;
+  const force = opts.force === true;
+
+  // 汇总每个会话的起始游标（进度 / lastProcessedTurn），并预估本次需处理的总轮次数
+  const startTurns = new Map<string, number>();
+  for (const sk of sessionKeys) {
+    const st = opts.lastProcessedTurn !== undefined ? Number(opts.lastProcessedTurn) : getSessionProgress(sk, force, progressPath);
+    startTurns.set(sk, st);
+  }
+  const totalTurns = await estimateRemainingTurns(driver, sessionKeys, startTurns, limit);
+
+  const progress: RunProgress = {
+    done: false,
+    startedAt: new Date().toISOString(),
+    totalSessions: sessionKeys.length,
+    totalBatches: sessionKeys.length,
+    currentBatch: 0,
+    currentSession: 0,
+    processedSessions: 0,
+    totalTurns,
+    processedTurns: 0,
+  };
+  // 运行开始即落盘（含 totalSessions / totalBatches / totalTurns），供 Dashboard 展示 0% 起点
+  persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+
   const sessions: RebuildResult[] = [];
   let totalNodes = 0;
   let totalEdges = 0;
-  for (const sk of sessionKeys) {
+  for (let i = 0; i < sessionKeys.length; i++) {
     if (deps.signal?.aborted) break;
-    const r = await rebuildSession(sk, deps, { ...opts });
+    const sk = sessionKeys[i];
+    progress.currentBatch = i + 1;
+    progress.currentSession = i + 1;
+    progress.currentSessionKey = sk;
+    progress.updatedAt = new Date().toISOString();
+    persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+    const r = await rebuildSession(sk, deps, { ...opts, progress });
     sessions.push(r);
     totalNodes += r.nodes;
     totalEdges += r.edges;
+    progress.processedSessions++;
+    progress.updatedAt = new Date().toISOString();
+    persistProgress(progressPath, (s) => applyRunProgress(s, progress));
     log?.info?.(`[extract-service] rebuilt ${sk}: ${r.processed}/${r.turns} turns, +${r.nodes} nodes, +${r.edges} edges`);
   }
-  return { sessions, totalNodes, totalEdges };
+  progress.done = true;
+  progress.updatedAt = new Date().toISOString();
+  persistProgress(progressPath, (s) => applyRunProgress(s, progress));
+  return { sessions, totalNodes, totalEdges, progress };
 }

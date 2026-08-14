@@ -19,9 +19,9 @@
  *   - reset_breaker / sync repair / compact / maintain / ttl_cleanup / import 二次确认
  *   - 危险操作（restore / reset_breaker / sync repair）按钮 type=error
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useMutation, useQuery } from '@tanstack/vue-query';
-import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, NTag, NText, useMessage } from 'naive-ui';
+import { NGrid, NGi, NSpace, NInput, NInputNumber, NSelect, NSwitch, NFormItem, NAlert, NTag, NText, NProgress, useMessage } from 'naive-ui';
 import OperationCard from '../components/OperationCard.vue';
 import OperationLog, { type OperationLogEntry } from '../components/OperationLog.vue';
 import OperationRecentHistory from '../components/OperationRecentHistory.vue';
@@ -38,6 +38,8 @@ import {
   invokeSync,
   invokeImport,
   invokeExtractRebuild,
+  fetchExtractRebuildProgress,
+  type ExtractRebuildProgress,
   invokeBootstrap,
   invokeReembed,
   fetchOperationLogs,
@@ -129,6 +131,61 @@ const extractConcurrency = ref<number>(4);
 const extractPageSize = ref<number>(2000);
 const extractWriteBatchSize = ref<number>(500);
 const extractProgressPath = ref<string>('');
+
+// 卡片 9.5：重建实时进度（轮询 GET /api/extract-rebuild/progress，双进度条）
+const extractProgress = ref<ExtractRebuildProgress | null>(null);
+let extractProgressTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 批次进度（会话粒度）：当前批次 / 总批次 */
+const extractBatchPercent = computed(() => {
+  const p = extractProgress.value;
+  if (!p || p.totalBatches <= 0) return 0;
+  return Math.min(100, Math.round((p.currentBatch / p.totalBatches) * 100));
+});
+
+/** 总进度（轮次粒度）：已提取轮次 / 总轮次，无轮次数据时回退会话进度 */
+const extractTotalPercent = computed(() => {
+  const p = extractProgress.value;
+  if (!p) return 0;
+  if (p.totalTurns > 0) return Math.min(100, Math.round((p.processedTurns / p.totalTurns) * 100));
+  if (p.totalSessions > 0) return Math.min(100, Math.round((p.processedSessions / p.totalSessions) * 100));
+  return 0;
+});
+
+async function pollExtractProgress(): Promise<void> {
+  try {
+    const res = await fetchExtractRebuildProgress();
+    extractProgress.value = res.progress;
+    if (res.progress?.done) stopExtractPolling();
+  } catch {
+    // 轮询失败静默（保留上次进度），避免干扰主流程
+  }
+}
+
+function startExtractPolling(): void {
+  stopExtractPolling();
+  extractProgress.value = null;
+  void pollExtractProgress();
+  extractProgressTimer = setInterval(() => { void pollExtractProgress(); }, 2000);
+}
+
+function stopExtractPolling(): void {
+  if (extractProgressTimer) {
+    clearInterval(extractProgressTimer);
+    extractProgressTimer = null;
+  }
+}
+
+// 重建卡片进入 loading 即开始轮询，结束即停止
+watch(
+  () => loadingMap.extract_rebuild,
+  (loading) => {
+    if (loading) startExtractPolling();
+    else stopExtractPolling();
+  },
+);
+
+onUnmounted(stopExtractPolling);
 
 // 卡片 10：Bootstrap 反馈（v2.3.5 新增）
 const bootstrapLimit = ref<number>(100);
@@ -988,6 +1045,38 @@ function executeReembed(): void {
                 </span>
               </NFormItem>
             </template>
+            <!-- 重建运行中：批次进度 + 总进度 双进度条（含数量与百分比） -->
+            <template #progress>
+              <div v-if="extractProgress" class="extract-progress">
+                <div class="extract-progress-row">
+                  <span class="extract-progress-label">批次进度</span>
+                  <NProgress
+                    :percentage="extractBatchPercent"
+                    :height="8"
+                    :show-indicator="false"
+                    processing
+                    style="flex: 1"
+                  />
+                  <span class="extract-progress-count">
+                    第 {{ extractProgress.currentBatch }} / {{ extractProgress.totalBatches }} 批 · {{ extractBatchPercent }}%
+                  </span>
+                </div>
+                <div class="extract-progress-row">
+                  <span class="extract-progress-label">总进度</span>
+                  <NProgress
+                    :percentage="extractTotalPercent"
+                    :height="8"
+                    :show-indicator="false"
+                    processing
+                    style="flex: 1"
+                  />
+                  <span class="extract-progress-count">
+                    轮次 {{ extractProgress.processedTurns }} / {{ extractProgress.totalTurns }}
+                    · 会话 {{ extractProgress.currentSession }}/{{ extractProgress.totalSessions }} · {{ extractTotalPercent }}%
+                  </span>
+                </div>
+              </div>
+            </template>
             <template #extra>
               <OperationRecentHistory :logs="historyOf('lcmg_extract_rebuild')" />
             </template>
@@ -1086,5 +1175,32 @@ function executeReembed(): void {
 .muted {
   /* color 由 tokens.css 全局 .muted 提供，此处仅追加 caption 字号 */
   font-size: var(--fs-caption);
+}
+/* 三级节点重建双进度条 */
+.extract-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+}
+.extract-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.extract-progress-label {
+  flex: 0 0 auto;
+  min-width: 52px;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+}
+.extract-progress-count {
+  flex: 0 0 auto;
+  font-size: var(--fs-caption);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 </style>
