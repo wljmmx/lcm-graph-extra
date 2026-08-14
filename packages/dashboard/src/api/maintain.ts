@@ -129,9 +129,10 @@ export interface ExtractRebuildProgressResponse {
   progress: ExtractRebuildProgress | null;
 }
 
-/** 拉取三级节点重建实时进度（Dashboard 双进度条轮询） */
-export function fetchExtractRebuildProgress(): Promise<ExtractRebuildProgressResponse> {
-  return apiGet<ExtractRebuildProgressResponse>('/api/extract-rebuild/progress');
+/** 拉取三级节点重建实时进度（Dashboard 双进度条轮询）。可选 progressPath 指定读取的进度文件（与用户表单一致）。 */
+export function fetchExtractRebuildProgress(progressPath?: string): Promise<ExtractRebuildProgressResponse> {
+  const qs = progressPath && progressPath.trim() ? `?path=${encodeURIComponent(progressPath.trim())}` : '';
+  return apiGet<ExtractRebuildProgressResponse>(`/api/extract-rebuild/progress${qs}`);
 }
 
 /**

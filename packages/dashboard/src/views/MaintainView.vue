@@ -154,7 +154,8 @@ const extractTotalPercent = computed(() => {
 
 async function pollExtractProgress(): Promise<void> {
   try {
-    const res = await fetchExtractRebuildProgress();
+    // 把用户填的 progressPath 传给后端，确保后端按插件实际写入的同一路径读取进度
+    const res = await fetchExtractRebuildProgress(extractProgressPath.value);
     // 避免 null 覆盖上一次已拿到的进度（重建刚开始时文件可能尚未落盘）
     if (res.progress) extractProgress.value = res.progress;
     if (res.progress?.done) stopExtractPolling();

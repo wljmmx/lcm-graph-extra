@@ -68,7 +68,7 @@ const DEFAULT_EXTRACT_PROGRESS_PATH = path.join(os.homedir(), '.openclaw', 'extr
 let activeExtractProgressPath: string | null = DEFAULT_EXTRACT_PROGRESS_PATH;
 
 /** 读取并归一化重建进度文件，返回运行级进度快照（供双进度条展示） */
-function readExtractProgress(): {
+export interface ExtractProgressSnapshot {
   done: boolean;
   startedAt: unknown;
   updatedAt: unknown;
@@ -80,15 +80,18 @@ function readExtractProgress(): {
   totalTurns: number;
   processedTurns: number;
   currentSessionKey: unknown;
-} | null {
-  if (!activeExtractProgressPath) return null;
+}
+
+/** 读取并归一化重建进度文件。path 优先于最近一次 invoke 记录的路径，便于解耦"插件写哪"与"dashboard 读哪"。 */
+function readExtractProgress(pathOverride?: string): ExtractProgressSnapshot | null {
+  const target = (pathOverride && pathOverride.trim()) || activeExtractProgressPath;
+  if (!target) return null;
   try {
-    if (!fs.existsSync(activeExtractProgressPath)) {
-      // 进度文件不存在：可能是插件尚未落盘，或插件写入的路径与 dashboard 读取的路径不一致。
-      // 输出一条日志便于定位（每轮询周期只记一次，避免刷屏由调用方控制）。
+    if (!fs.existsSync(target)) {
+      // 进度文件不存在：可能是插件尚未落盘，或插件写入的路径与读取的路径不一致。
       return null;
     }
-    const raw = JSON.parse(fs.readFileSync(activeExtractProgressPath, 'utf8')) as Record<string, unknown>;
+    const raw = JSON.parse(fs.readFileSync(target, 'utf8')) as Record<string, unknown>;
     const num = (v: unknown): number => (Number.isFinite(Number(v)) ? Number(v) : 0);
     return {
       done: raw.done === true,
@@ -620,8 +623,9 @@ export async function registerExperienceRoutes(app: FastifyInstance): Promise<vo
   });
 
   // ===== 三级节点重建实时进度（Dashboard 双进度条轮询） =====
-  app.get('/api/extract-rebuild/progress', async () => {
-    const progress = readExtractProgress();
+  app.get('/api/extract-rebuild/progress', async (req) => {
+    const q = req.query as { path?: string };
+    const progress = readExtractProgress(q?.path);
     return { running: progress ? !progress.done : false, progress };
   });
 
