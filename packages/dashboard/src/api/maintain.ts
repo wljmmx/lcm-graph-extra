@@ -78,12 +78,18 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
 
 /**
  * 三级节点重建：完全复用 graph-memory-pro 的 HTTP API（POST /api/extract/rebuild[-all]）。
- * sessionKey 给定 → 单会话重建；省略 → 批量重建全部会话。
+ * sessionKey 给定 → 单会话重建（同步）；省略 → 批量重建全部会话（v2.4.1 异步化：202+jobId+轮询）。
  * concurrency = 会话内 LLM 并发窗口（1-128，默认 4）；sessionConcurrency = 批量重建时同时处理的会话数（1-32，默认 2）；
  * mode = 提取模式（llm 默认 / heuristic 快速规则提取）；
  * limitSessions = 限制处理会话数（0 不限制）；pageSize = 读取分页大小（默认 2000）；
  * writeBatchSize = 合并写入批上限（默认 500）；progressPath = 断点续传 + 进度落盘路径（传入即启用，同路径再调续跑）。
- * 返回体含 mode / processedPairs / totalPairs / llmOutputTokens / llmHasOutput 等字段。
+ *
+ * v2.4.1 异步化流程（rebuild-all）：
+ *   1. POST /api/extract/rebuild-all → 202 { jobId, status:"running" }
+ *   2. GET /api/extract/rebuild-all/job/:jobId → 200 (running/done) | 207 (partial) | 500 (failed)
+ *   3. 前端自动轮询直到 done/failed，再包装为 MCP 标准结构返回
+ *
+ * 单会话 rebuild 仍为同步接口（200/207/500），不走异步 job。
  */
 export async function invokeExtractRebuild(opts: {
   sessionKey?: string;
@@ -95,6 +101,10 @@ export async function invokeExtractRebuild(opts: {
   pageSize?: number;
   writeBatchSize?: number;
   progressPath?: string;
+  /** 异步 job 轮询间隔（ms，默认 3000） */
+  pollIntervalMs?: number;
+  /** 异步 job 最大轮询时长（ms，默认 30min，超时返回当前进度） */
+  pollTimeoutMs?: number;
 } = {}): Promise<McpInvokeResponse> {
   const params: Record<string, unknown> = {};
   if (opts.sessionKey) params.sessionKey = opts.sessionKey;
@@ -106,67 +116,125 @@ export async function invokeExtractRebuild(opts: {
   if (opts.pageSize != null) params.pageSize = opts.pageSize;
   if (opts.writeBatchSize != null) params.writeBatchSize = opts.writeBatchSize;
   if (opts.progressPath) params.progressPath = opts.progressPath;
-  // 单会话 → rebuild；批量 → rebuild-all（走 gm-pro HTTP 代理，白名单已开放）
-  const path = opts.sessionKey
+  // 单会话 → rebuild（同步）；批量 → rebuild-all（v2.4.1 异步）
+  const isSingle = !!opts.sessionKey;
+  const postPath = isSingle
     ? '/api/gm-pro/proxy/extract/rebuild'
     : '/api/gm-pro/proxy/extract/rebuild-all';
   try {
-    const resp = await apiPost<{ ok: boolean; data?: any; error?: string; _status?: number }>(path, params);
-    if (resp.ok) {
-      // gm-pro rebuild 返回体为扁平结构（totalSessions / processedPairs / totalPairs / mode / results
-      //                / llmOutputTokens / llmHasOutput / failedSessions / message）。
-      // v2.4.1 rebuild-all 语义：
-      //   HTTP 200 → 全部成功，failedSessions=0；
-      //   HTTP 207 (Multi-Status) → 部分会话失败 failedSessions>0，body 带 message 与 results；
-      // 前端 extractText/extractDetails 只识别 MCP 标准结构（content[].text / details），
-      // 此处包装成标准形态，确保卡片能渲染文本与结构化指标（含失败数和续传提示）。
-      const d = (resp.data ?? {}) as Record<string, unknown>;
-      const isPartial = (resp._status === 207) || Number(d.failedSessions ?? 0) > 0;
-      const failedSessions = Number(d.failedSessions ?? 0);
-      const text = [
-        '# 三级节点重建报告',
-        '',
-        `模式: ${d.mode ?? 'llm'}`,
-        `处理会话: ${d.processedSessions ?? 0}/${d.totalSessions ?? 0}`,
-        failedSessions > 0 ? `**失败会话: ${failedSessions}**` : '',
-        `处理轮次: ${d.processedPairs ?? 0}/${d.totalPairs ?? 0}`,
-        `LLM 输出 Token: ${d.llmOutputTokens ?? 0}`,
-        `LLM 有输出: ${d.llmHasOutput === true ? '是' : '否'}`,
-        typeof d.message === 'string' && d.message ? `状态: ${d.message}` : '',
-        isPartial ? `提示: 可沿原进度路径重新触发，断点文件已累计 failedSessions，失败会话未标记 -1、会自动重试。` : '',
-      ].filter(Boolean).join('\n');
-      const bb = (d.results ?? {}) as Record<string, { processedPairs?: number; totalPairs?: number }>;
-      const results = Object.entries(bb).map(([k, v]) => ({
-        sessionKey: k,
-        processedPairs: v?.processedPairs ?? 0,
-        totalPairs: v?.totalPairs ?? 0,
-      }));
-      return {
-        ok: true,
-        result: {
-          content: [{ type: 'text', text }],
-          details: {
-            ok: !isPartial,
-            totalSessions: d.totalSessions ?? 0,
-            processedSessions: d.processedSessions ?? 0,
-            failedSessions,
-            totalPairs: d.totalPairs ?? 0,
-            processedPairs: d.processedPairs ?? 0,
-            mode: d.mode ?? 'llm',
-            llmOutputTokens: d.llmOutputTokens ?? 0,
-            llmHasOutput: d.llmHasOutput === true,
-            results,
-            message: typeof d.message === 'string' ? d.message : undefined,
-            httpStatus: resp._status ?? 200,
-          },
-        },
-      };
+    const resp = await apiPost<{ ok: boolean; data?: any; error?: string; _status?: number }>(postPath, params);
+    if (!resp.ok) {
+      return { ok: false, error: resp.error ?? '三级节点重建失败' };
     }
-    return { ok: false, error: resp.error ?? '三级节点重建失败' };
+
+    const d0 = (resp.data ?? {}) as Record<string, unknown>;
+    const httpStatus = resp._status ?? 200;
+
+    // ── 异步分支：rebuild-all 返回 202 + jobId ──
+    if (httpStatus === 202 && !isSingle) {
+      const jobId = d0.jobId as string | undefined;
+      if (!jobId) {
+        return { ok: false, error: 'rebuild-all 返回 202 但缺少 jobId' };
+      }
+      // 轮询 job 状态直到完成
+      const pollInterval = opts.pollIntervalMs ?? 3000;
+      const pollTimeout = opts.pollTimeoutMs ?? 30 * 60_000;
+      const startTime = Date.now();
+      let lastData: Record<string, unknown> = d0;
+
+      while (true) {
+        if (Date.now() - startTime > pollTimeout) {
+          // 超时：返回当前进度（非失败，用户可继续轮询或沿 progressPath 续跑）
+          return wrapRebuildResult(lastData, 200, true);
+        }
+        await sleep(pollInterval);
+        try {
+          const jobResp = await apiGet<{ ok: boolean; data?: any; _status?: number }>(
+            `/api/gm-pro/proxy/extract/rebuild-all/job/${jobId}`,
+          );
+          if (!jobResp.ok) {
+            // job 查询失败不中断轮询，继续等
+            continue;
+          }
+          lastData = (jobResp.data ?? {}) as Record<string, unknown>;
+          const jobStatus = lastData.status as string | undefined;
+          // status: "running" | "done" | "failed"
+          if (jobStatus === 'done' || jobStatus === 'failed') {
+            const finalStatus = jobResp._status ?? (jobStatus === 'done' ? 200 : 500);
+            return wrapRebuildResult(lastData, finalStatus, false);
+          }
+          // running → 继续轮询
+        } catch {
+          // 网络抖动不中断轮询
+        }
+      }
+    }
+
+    // ── 同步分支：单会话 rebuild（200/207）或 rebuild-all 兜底 200 ──
+    return wrapRebuildResult(d0, httpStatus, false);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `三级节点重建请求失败: ${msg}` };
   }
+}
+
+/** 将 gm-pro 返回体包装为 MCP 标准结构（content[].text + details） */
+function wrapRebuildResult(
+  d: Record<string, unknown>,
+  httpStatus: number,
+  isTimeout: boolean,
+): McpInvokeResponse {
+  const isPartial = httpStatus === 207 || Number(d.failedSessions ?? 0) > 0;
+  const isFailed = httpStatus >= 500;
+  const failedSessions = Number(d.failedSessions ?? 0);
+  const text = [
+    '# 三级节点重建报告',
+    '',
+    `模式: ${d.mode ?? 'llm'}`,
+    `处理会话: ${d.processedSessions ?? 0}/${d.totalSessions ?? 0}`,
+    failedSessions > 0 ? `**失败会话: ${failedSessions}**` : '',
+    `处理轮次: ${d.processedPairs ?? 0}/${d.totalPairs ?? 0}`,
+    `LLM 输出 Token: ${d.llmOutputTokens ?? 0}`,
+    `LLM 有输出: ${d.llmHasOutput === true ? '是' : '否'}`,
+    typeof d.message === 'string' && d.message ? `状态: ${d.message}` : '',
+    isTimeout ? '⚠ 轮询超时，任务仍在后台运行。可沿原进度路径继续轮询或用同一 progressPath 续跑。' : '',
+    isPartial && !isTimeout ? '提示: 可沿原进度路径重新触发，断点文件已累计 failedSessions，失败会话未标记 -1、会自动重试。' : '',
+    isFailed ? `❌ 重建失败: ${typeof d.message === 'string' ? d.message : '未知错误'}` : '',
+  ].filter(Boolean).join('\n');
+  const bb = (d.results ?? {}) as Record<string, { processedPairs?: number; totalPairs?: number }>;
+  const results = Object.entries(bb).map(([k, v]) => ({
+    sessionKey: k,
+    processedPairs: v?.processedPairs ?? 0,
+    totalPairs: v?.totalPairs ?? 0,
+  }));
+  return {
+    ok: !isFailed,
+    result: {
+      content: [{ type: 'text', text }],
+      details: {
+        ok: !isPartial && !isFailed,
+        totalSessions: d.totalSessions ?? 0,
+        processedSessions: d.processedSessions ?? 0,
+        failedSessions,
+        totalPairs: d.totalPairs ?? 0,
+        processedPairs: d.processedPairs ?? 0,
+        mode: d.mode ?? 'llm',
+        llmOutputTokens: d.llmOutputTokens ?? 0,
+        llmHasOutput: d.llmHasOutput === true,
+        results,
+        message: typeof d.message === 'string' ? d.message : undefined,
+        httpStatus,
+        jobId: d.jobId,
+        jobStatus: d.status,
+        isTimeout,
+      },
+    },
+  };
+}
+
+/** 简单 sleep */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /** 三级节点重建的运行级进度快照（后端 GET /api/extract-rebuild/progress） */

@@ -38,9 +38,10 @@ import { readGmProRawConfig } from './config';
 /** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
 const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL ?? 'http://127.0.0.1:7850';
 const GM_PRO_HTTP_TIMEOUT = Number(process.env.GM_PRO_HTTP_TIMEOUT ?? 10_000);
-// 长时任务路径 → 更长的代理超时（ms）。三级节点重建为逐轮 LLM 提取，可能耗时很长。
+// 长时任务路径 → 更长的代理超时（ms）。单会话 rebuild 仍同步等待（逐轮 LLM 提取，可能耗时很长）。
+// rebuild-all v2.4.1 已异步化（立即返回 202），不再需要长超时。
 const GM_PRO_LONG_TASK_TIMEOUT = Number(process.env.GM_PRO_HTTP_LONG_TIMEOUT ?? 30 * 60_000);
-const GM_PRO_LONG_TASK_PATHS = new Set<string>(['/api/extract/rebuild', '/api/extract/rebuild-all']);
+const GM_PRO_LONG_TASK_PATHS = new Set<string>(['/api/extract/rebuild']);
 
 /** 按代理路径解析超时（长时任务用长超时，其余用默认） */
 function resolveGmProTimeout(proxyPath: string): number {
@@ -79,6 +80,8 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/usage',
   '/api/config',
   '/api/ops/services',
+  // v2.4.1: rebuild-all 异步化后，通过 GET /api/extract/rebuild-all/job/:jobId 轮询任务状态
+  '/api/extract/rebuild-all/job',
 ]);
 
 /**
@@ -166,12 +169,14 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       const body = method !== 'GET' && req.body ? JSON.stringify(req.body) : undefined;
       const resp = await fetch(targetUrl, { method, headers, body, signal: controller.signal });
 
-      // v2.4.1 rebuild-all 语义：
-      //   200 → 全部成功；207 (Multi-Status) → 部分会话失败（failedSessions>0）。
-      // 207 虽在 2xx 段，但 fetch 标准下 resp.ok 为 false。此处显式将 207 视为"成功透传"，
-      // 让 failedSessions/message/results 正常返回到前端。其他非 2xx 仍走错误分支。
+      // v2.4.1 rebuild-all 异步化 + Multi-Status 语义：
+      //   202 (Accepted) → 任务已提交，返回 { jobId, status:"running", message }，前端轮询 job 状态；
+      //   200 → 全部成功（同步接口如单会话 rebuild，或 job 轮询返回最终结果）；
+      //   207 (Multi-Status) → 部分会话失败（failedSessions>0），body 带 message/results。
+      // 202 和 207 虽在 2xx 段，但 fetch 标准下 resp.ok 为 false。此处显式视为"成功透传"。
+      const isAccepted = resp.status === 202;
       const isMultiStatus = resp.status === 207;
-      if (!resp.ok && !isMultiStatus) {
+      if (!resp.ok && !isAccepted && !isMultiStatus) {
         let errBody: unknown;
         try { errBody = await resp.json(); } catch { errBody = { error: `graph-memory-pro returned ${resp.status}` }; }
         return { ok: false, error: `graph-memory-pro HTTP ${resp.status}`, detail: errBody };
@@ -181,9 +186,9 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       // JSON：解析为结构化对象
       if (contentType.includes('application/json')) {
         const data = await resp.json();
-        // 207 Multi-Status：data 含 failedSessions>0 与 message 字段。仍标记 ok:true，
-        // 由前端/api层通过 failedSessions 感知部分失败并提示续传。
-        return { ok: true, data, _status: isMultiStatus ? 207 : 200 };
+        // 透传实际状态码，前端/api层据此区分 202(异步提交) / 207(部分失败) / 200(成功)
+        const status = isAccepted ? 202 : isMultiStatus ? 207 : 200;
+        return { ok: true, data, _status: status };
       }
       // Prometheus 文本（/api/metrics）：透传原始文本，由前端解析
       if (contentType.includes('text/plain')) {

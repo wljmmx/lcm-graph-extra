@@ -1129,7 +1129,7 @@ function executeReembed(): void {
                 </div>
               </div>
               <div v-else class="extract-progress-waiting">
-                正在收集重建进度…
+                {{ extractSessionKey?.trim() ? '正在执行单会话重建…' : '已提交异步重建任务，正在收集进度…' }}
               </div>
             </template>
             <template #extra>
