@@ -22,6 +22,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import * as neo4jDriver from 'neo4j-driver';
 import { getNeo4jDriver } from "../tools/shared.js";
 import { getGlobalLogger } from "../utils/logger.js";
 
@@ -217,7 +218,11 @@ async function fetchTurnWindow(driver: any, sessionKey: string, lastTurn: number
        RETURN DISTINCT n.turnIndex AS turnIndex
        ORDER BY turnIndex ASC
        LIMIT $size`,
-      { sessionKey, lastTurn: Number(lastTurn) || 0, size: Math.max(1, Math.floor(size) || 1) },
+      {
+        sessionKey,
+        lastTurn: neo4jDriver.int(Math.trunc(Number(lastTurn) || 0)),
+        size: neo4jDriver.int(Math.max(1, Math.floor(size) || 1)),
+      },
     );
     return res.records.map((r: any) => Number(r.get('turnIndex') ?? 0)).filter((t: number) => t > lastTurn);
   } finally {
