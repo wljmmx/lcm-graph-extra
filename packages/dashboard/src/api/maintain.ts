@@ -112,7 +112,45 @@ export async function invokeExtractRebuild(opts: {
     : '/api/gm-pro/proxy/extract/rebuild-all';
   try {
     const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(path, params);
-    if (resp.ok) return { ok: true, result: resp.data };
+    if (resp.ok) {
+      // gm-pro rebuild 返回体为扁平结构（totalSessions / processedPairs / totalPairs / mode / results / llmOutputTokens / llmHasOutput / message）。
+      // 前端 extractText/extractDetails 只识别 MCP 标准结构（content[].text / details），
+      // 此处包装成标准形态，确保卡片能渲染文本与结构化指标。
+      const d = (resp.data ?? {}) as Record<string, unknown>;
+      const text = [
+        '# 三级节点重建报告',
+        '',
+        `模式: ${d.mode ?? 'llm'}`,
+        `处理会话: ${d.processedSessions ?? 0}/${d.totalSessions ?? 0}`,
+        `处理轮次: ${d.processedPairs ?? 0}/${d.totalPairs ?? 0}`,
+        `LLM 输出 Token: ${d.llmOutputTokens ?? 0}`,
+        `LLM 有输出: ${d.llmHasOutput === true ? '是' : '否'}`,
+        typeof d.message === 'string' && d.message ? `状态: ${d.message}` : '',
+      ].filter(Boolean).join('\n');
+      const bb = (d.results ?? {}) as Record<string, { processedPairs?: number; totalPairs?: number }>;
+      const results = Object.entries(bb).map(([k, v]) => ({
+        sessionKey: k,
+        processedPairs: v?.processedPairs ?? 0,
+        totalPairs: v?.totalPairs ?? 0,
+      }));
+      return {
+        ok: true,
+        result: {
+          content: [{ type: 'text', text }],
+          details: {
+            ok: true,
+            totalSessions: d.totalSessions ?? 0,
+            processedSessions: d.processedSessions ?? 0,
+            totalPairs: d.totalPairs ?? 0,
+            processedPairs: d.processedPairs ?? 0,
+            mode: d.mode ?? 'llm',
+            llmOutputTokens: d.llmOutputTokens ?? 0,
+            llmHasOutput: d.llmHasOutput === true,
+            results,
+          },
+        },
+      };
+    }
     return { ok: false, error: resp.error ?? '三级节点重建失败' };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -795,6 +795,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
             // 3) 补写 :GmMessage（同一节点双标签，供 graph-memory-pro 重建读取配对三级节点）。
             //    写入 turnIndex/createdAt/seq，时序用真实会话时间。
+            //    注意：graph-memory-pro 的 rebuild 按 m.sessionKey 枚举会话（listAllSessionKeys），
+            //    故此处必须补写 sessionKey（= session_id），否则 gm-pro 读不到任何会话、秒结束 0 处理。
             for (let i = 0; i < gmRows.length; i += batchSize) {
               if (signal?.aborted) break;
               const chunk = gmRows.slice(i, i + batchSize);
@@ -802,7 +804,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 "UNWIND $rows AS m " +
                 "MERGE (n:GmMessage {id: m.id}) " +
                 "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = 'lcm-import', n.state = 'active', n.scores = '{}' " +
-                "SET n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.turnIndex = m.turnIndex, n.seq = m.seq, n.createdAt = m.ts",
+                "SET n.sessionKey = m.sid, n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.turnIndex = m.turnIndex, n.seq = m.seq, n.createdAt = m.ts",
                 { rows: chunk }
               );
             }
