@@ -752,9 +752,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
           // 1) 全量收集待导入消息队列：不再 LIMIT 截断会话，会话内不再只取 5 条。
           //    时序使用 messages.created_at 真实时间（非导入时刻），供 :GmMessage / 三级节点建时序。
-          // 查询需同时取出 session_id 和 session_key：gm-pro 的 :GmMessage.sessionKey
-          // 对应 conversations.session_key（gm-pro 正常 ingest 从 ctx.sessionKey 写入），
-          // 不能与 session_id 混用——两者是不同的值。
+          // 查询需同时取出 conversation_id / session_id / session_key：
+          //   gm-pro :GmMessage.sessionKey 对应 SDK 层 ctx.sessionKey = conversations.session_key。
+          //   当 session_key 为 NULL 时，SDK 层回退为 "conv:" + conversation_id（见 debt-manager
+          //   中 const sessionKey = sessionInfo.sessionKey ?? "conv:" + debt.conversationId），
+          //   绝对不能混用 session_id——两者值完全不同，会导致 listAllSessionKeys 枚举到的 key
+          //   与正常 ingest 写入的 key 不匹配，从而三级重建秒结束 0 处理。
           const convs = db.prepare(
             "SELECT conversation_id, session_id, session_key FROM conversations " +
             "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
@@ -762,10 +765,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           ).all() as any[];
           const pending: { id: string; role: string; content: string; sid: string; tokens: number; ts: number }[] = [];
           // GmMessage 行：同一消息节点补 :GmMessage 标签 + turnIndex/seq/createdAt（真实时间）
-          // skey = session_key（gm-pro rebuild 枚举会话用）；session_key 为空时回退 session_id
+          // skey = SDK ctx.sessionKey 的真实回填规则：session_key ?? "conv:" + conversation_id
           const gmRows: { id: string; role: string; content: string; sid: string; skey: string; turnIndex: number; ts: number; seq: number }[] = [];
           for (const conv of convs) {
             const msgs = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
+            const realSessionKey = (conv.session_key && String(conv.session_key).trim())
+              ? conv.session_key
+              : `conv:${conv.conversation_id}`;
             let turnIndex = 0;
             for (const msg of msgs) {
               const ts = toRealTs(msg.created_at);
@@ -773,7 +779,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               const id = `${conv.session_id}-${msg.seq}`;
               const content = (msg.content ?? "").slice(0, 5000);
               pending.push({ id, role: msg.role, content, sid: conv.session_id, tokens: msg.content?.length ?? 0, ts });
-              gmRows.push({ id, role: msg.role, content, sid: conv.session_id, skey: conv.session_key || conv.session_id, turnIndex, ts, seq: Number(msg.seq ?? 0) });
+              gmRows.push({ id, role: msg.role, content, sid: conv.session_id, skey: realSessionKey, turnIndex, ts, seq: Number(msg.seq ?? 0) });
             }
           }
 
@@ -799,10 +805,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
             // 3) 补写 :GmMessage（同一节点双标签，供 graph-memory-pro 重建读取配对三级节点）。
             //    写入 turnIndex/createdAt/seq，时序用真实会话时间。
-            //    graph-memory-pro 的 rebuild 按 m.sessionKey 枚举会话（listAllSessionKeys），
-            //    sessionKey 对应 conversations.session_key（gm-pro 正常 ingest 从 ctx.sessionKey 写入），
-            //    不是 session_id。session_key 为空时回退 session_id（skey 已在 JS 层处理）。
-            //    sessionId 字段单独存 session_id，与 sessionKey 区分。
+            //    graph-memory-pro 的 rebuild 按 m.sessionKey 枚举会话（listAllSessionKeys）。
+            //    sessionKey 写入规则与 SDK ctx.sessionKey 完全一致：
+            //      有 conversations.session_key → 用其值；
+            //      无（大量历史会话为 NULL） → 回退 "conv:" + conversation_id。
+            //    绝对不能写 session_id——两者值完全不同，会导致正常 ingest 写入的 key
+            //    与重建枚举到的 key 不一致，重建秒结束 0 处理。
+            //    sessionId 字段单独存 session_id，与 sessionKey 明确区分。
             for (let i = 0; i < gmRows.length; i += batchSize) {
               if (signal?.aborted) break;
               const chunk = gmRows.slice(i, i + batchSize);
