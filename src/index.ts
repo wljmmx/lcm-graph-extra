@@ -1701,11 +1701,11 @@ const pluginEntry: any = definePluginEntry({
     // -------------------------------------------------------------------
     // 注入三级节点提取闭包（供 lcmg_extract_rebuild / 导入自动触发复用）。
     // graphAdapter 在闭包内延迟访问；LLM 配置经 resolveDistillationLlm 统一解析。
-    setExtractTurnFn(async (user: string, assistant: string) => {
+    setExtractTurnFn(async (user: string, assistant: string, opts?: { writeBatchSize?: number }) => {
       if (!graphAdapter || typeof graphAdapter.extractAndUpsertFromTurn !== 'function') return { nodes: 0, edges: 0 };
       const mergedApi = { ...api, pluginConfig: mergeEntriesNeo4jConfig(api) };
       const llmCfg = distillationModule.resolveDistillationLlm(mergedApi);
-      return graphAdapter.extractAndUpsertFromTurn(llmCfg, user, assistant);
+      return graphAdapter.extractAndUpsertFromTurn(llmCfg, user, assistant, opts?.writeBatchSize);
     });
     const dashboardContext: DashboardToolContext = {
       expStore: undefined, // expStore 在闭包内延迟访问，由 runDistillation 回调内部读取

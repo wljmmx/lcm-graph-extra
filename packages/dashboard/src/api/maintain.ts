@@ -76,16 +76,28 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
   return invokeMcpTool('lcmg_import', { source, limit });
 }
 
-/** 三级节点重建：sessionKey 省略重建全部；force 忽略进度从头重建 */
+/**
+ * 三级节点重建：sessionKey 省略重建全部；force 忽略进度从头重建。
+ * concurrency = LLM 并发窗口（1-128，默认 4）；pageSize = 读取分页大小（默认 2000）；
+ * writeBatchSize = 合并写入批上限（默认 500）；progressPath = 断点续传 + 进度落盘路径（传入即启用，同路径再调续跑）。
+ */
 export function invokeExtractRebuild(opts: {
   sessionKey?: string;
   limit?: number;
   force?: boolean;
+  concurrency?: number;
+  pageSize?: number;
+  writeBatchSize?: number;
+  progressPath?: string;
 } = {}): Promise<McpInvokeResponse> {
   const params: Record<string, unknown> = {};
   if (opts.sessionKey) params.sessionKey = opts.sessionKey;
   if (opts.limit != null) params.limit = opts.limit;
   if (opts.force) params.force = opts.force;
+  if (opts.concurrency != null) params.concurrency = opts.concurrency;
+  if (opts.pageSize != null) params.pageSize = opts.pageSize;
+  if (opts.writeBatchSize != null) params.writeBatchSize = opts.writeBatchSize;
+  if (opts.progressPath) params.progressPath = opts.progressPath;
   return invokeMcpTool('lcmg_extract_rebuild', params);
 }
 

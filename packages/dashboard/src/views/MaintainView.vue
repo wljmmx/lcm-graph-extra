@@ -125,6 +125,10 @@ const importSourceOptions = [
 const extractSessionKey = ref<string>('');
 const extractLimit = ref<number>(50);
 const extractForce = ref<boolean>(false);
+const extractConcurrency = ref<number>(4);
+const extractPageSize = ref<number>(2000);
+const extractWriteBatchSize = ref<number>(500);
+const extractProgressPath = ref<string>('');
 
 // 卡片 10：Bootstrap 反馈（v2.3.5 新增）
 const bootstrapLimit = ref<number>(100);
@@ -476,11 +480,19 @@ function executeExtractRebuild(): void {
       sessionKey: extractSessionKey.value || undefined,
       limit: extractLimit.value,
       force: extractForce.value,
+      concurrency: extractConcurrency.value,
+      pageSize: extractPageSize.value,
+      writeBatchSize: extractWriteBatchSize.value,
+      progressPath: extractProgressPath.value || undefined,
     },
     invokeFn: () => invokeExtractRebuild({
       sessionKey: extractSessionKey.value || undefined,
       limit: extractLimit.value,
       force: extractForce.value,
+      concurrency: extractConcurrency.value,
+      pageSize: extractPageSize.value,
+      writeBatchSize: extractWriteBatchSize.value,
+      progressPath: extractProgressPath.value || undefined,
     }),
   });
 }
@@ -956,6 +968,18 @@ function executeReembed(): void {
               </NFormItem>
               <NFormItem label="单次处理轮次" size="small" :show-feedback="false">
                 <NInputNumber v-model:value="extractLimit" :min="1" :max="500" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="LLM 并发窗口" size="small" :show-feedback="false">
+                <NInputNumber v-model:value="extractConcurrency" :min="1" :max="128" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="读取分页大小" size="small" :show-feedback="false">
+                <NInputNumber v-model:value="extractPageSize" :min="1" :max="20000" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="合并写入批上限" size="small" :show-feedback="false">
+                <NInputNumber v-model:value="extractWriteBatchSize" :min="1" :max="50000" size="small" style="width: 100%" />
+              </NFormItem>
+              <NFormItem label="进度落盘路径" size="small" :show-feedback="false">
+                <NInput v-model:value="extractProgressPath" size="small" placeholder="留空则使用默认进度；传入路径即启用断点续传，同路径再调续跑" clearable />
               </NFormItem>
               <NFormItem label="忽略进度重跑" size="small" :show-feedback="false">
                 <NSwitch v-model:value="extractForce" size="small" />

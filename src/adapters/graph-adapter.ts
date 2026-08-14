@@ -1116,6 +1116,7 @@ export class GraphAdapter {
   async batchUpsert(
     entities: Array<{ name: string; type: string; description: string; content: string; updatedAt?: number }>,
     relations: Array<{ from: string; to: string; type: string; instruction?: string; updatedAt?: number }>,
+    writeBatchSize?: number,
   ): Promise<{ upserted: number; conflicts: number }> {
     if (!this.driver) return { upserted: 0, conflicts: 0 };
 
@@ -1185,61 +1186,67 @@ export class GraphAdapter {
           await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
         }
 
-        // P1-2 M-1: 节点存在性检查改为单条 UNWIND（原 per-node N 次 MATCH 查询）
-        const existingResult = await session.run(
-          `UNWIND $nodes AS node MATCH (n { id: node.id }) RETURN collect(node.id) AS existingIds`,
-          { nodes: nodeData.map(({ embedding, ...rest }) => rest) },
-        );
-        cc += (existingResult.records[0]?.get('existingIds') ?? []).length;
+        // writeBatchSize: 合并写入批上限 —— 节点按批拆分提交，避免单条 UNWIND 数据量过大
+        const batchSize = Math.max(1, Math.floor(writeBatchSize ?? 500));
+        for (let i = 0; i < nodeData.length; i += batchSize) {
+          const chunk = nodeData.slice(i, i + batchSize);
 
-        // N-1: 增量 MERGE —— 按 label 分组 UNWIND MERGE，实现 updatedAt 对比
-        // 仅在节点不存在 OR 节点存在但 incoming updatedAt > existing updatedAt 时才更新属性。
-        // 这样重放旧数据不会覆盖新数据，支持增量同步。
-        //
-        // 实现方式：按 label 分组，每组一条 UNWIND MERGE（关系类型不可参数化的同构问题）
-        const nodesByLabel = new Map<string, typeof nodeData>();
-        for (const n of nodeData) {
-          const arr = nodesByLabel.get(n.label) || [];
-          arr.push(n);
-          nodesByLabel.set(n.label, arr);
-        }
+          // P1-2 M-1: 节点存在性检查改为单条 UNWIND（原 per-node N 次 MATCH 查询）
+          const existingResult = await session.run(
+            `UNWIND $nodes AS node MATCH (n { id: node.id }) RETURN collect(node.id) AS existingIds`,
+            { nodes: chunk.map(({ embedding, ...rest }) => rest) },
+          );
+          cc += (existingResult.records[0]?.get('existingIds') ?? []).length;
 
-        for (const [label, nodes] of nodesByLabel) {
-          // 原生 VECTOR 写入：embedding 非空时用 vector(node.embedding, $dim, FLOAT) 写入。
-          // vector() 维度参数必须是字面量（不支持参数绑定），故内联 embedDim。
-          const embedDimLocal = embedDim;
-          const embedSetOnCreate = embedDimLocal > 0
-            ? `, n.embedding = CASE WHEN node.embedding IS NOT NULL THEN vector(node.embedding, ${embedDimLocal}, FLOAT) END`
-            : '';
-          const embedSetOnMatch = embedDimLocal > 0
-            ? `, n.embedding = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) AND node.embedding IS NOT NULL THEN vector(node.embedding, ${embedDimLocal}, FLOAT) ELSE n.embedding END`
-            : '';
-          const cypher = `
-            UNWIND $nodes AS node
-            MERGE (n:\`${label}\` { id: node.id })
-            ON CREATE SET
-              n.name = node.name,
-              n.description = node.description,
-              n.content = node.content,
-              n.status = node.status,
-              n.pagerank = node.pagerank,
-              n.updatedAt = node.updatedAt,
-              n.createdAt = node.updatedAt${embedSetOnCreate}
-            ON MATCH SET
-              n.name = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.name ELSE n.name END,
-              n.description = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.description ELSE n.description END,
-              n.content = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.content ELSE n.content END,
-              n.status = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.status ELSE n.status END,
-              n.pagerank = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.pagerank ELSE n.pagerank END,
-              n.updatedAt = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.updatedAt ELSE n.updatedAt END${embedSetOnMatch}
-            RETURN count(*) AS cnt
-          `;
-          const result = await session.run(cypher, { nodes });
-          // BUGFIX: neo4j-driver 6.x Integer 的 valueOf() 返回 BigInt，
-          // `number += Integer` 会抛 "Cannot mix BigInt and other types"。
-          // 必须显式调用 toNumber() 转为原生 number。
-          const cntVal = result.records[0]?.get('cnt');
-          uc += (typeof cntVal?.toNumber === 'function' ? cntVal.toNumber() : Number(cntVal)) || 0;
+          // N-1: 增量 MERGE —— 按 label 分组 UNWIND MERGE，实现 updatedAt 对比
+          // 仅在节点不存在 OR 节点存在但 incoming updatedAt > existing updatedAt 时才更新属性。
+          // 这样重放旧数据不会覆盖新数据，支持增量同步。
+          //
+          // 实现方式：按 label 分组，每组一条 UNWIND MERGE（关系类型不可参数化的同构问题）
+          const nodesByLabel = new Map<string, typeof nodeData>();
+          for (const n of chunk) {
+            const arr = nodesByLabel.get(n.label) || [];
+            arr.push(n);
+            nodesByLabel.set(n.label, arr);
+          }
+
+          for (const [label, nodes] of nodesByLabel) {
+            // 原生 VECTOR 写入：embedding 非空时用 vector(node.embedding, $dim, FLOAT) 写入。
+            // vector() 维度参数必须是字面量（不支持参数绑定），故内联 embedDim。
+            const embedDimLocal = embedDim;
+            const embedSetOnCreate = embedDimLocal > 0
+              ? `, n.embedding = CASE WHEN node.embedding IS NOT NULL THEN vector(node.embedding, ${embedDimLocal}, FLOAT) END`
+              : '';
+            const embedSetOnMatch = embedDimLocal > 0
+              ? `, n.embedding = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) AND node.embedding IS NOT NULL THEN vector(node.embedding, ${embedDimLocal}, FLOAT) ELSE n.embedding END`
+              : '';
+            const cypher = `
+              UNWIND $nodes AS node
+              MERGE (n:\`${label}\` { id: node.id })
+              ON CREATE SET
+                n.name = node.name,
+                n.description = node.description,
+                n.content = node.content,
+                n.status = node.status,
+                n.pagerank = node.pagerank,
+                n.updatedAt = node.updatedAt,
+                n.createdAt = node.updatedAt${embedSetOnCreate}
+              ON MATCH SET
+                n.name = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.name ELSE n.name END,
+                n.description = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.description ELSE n.description END,
+                n.content = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.content ELSE n.content END,
+                n.status = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.status ELSE n.status END,
+                n.pagerank = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.pagerank ELSE n.pagerank END,
+                n.updatedAt = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.updatedAt ELSE n.updatedAt END${embedSetOnMatch}
+              RETURN count(*) AS cnt
+            `;
+            const result = await session.run(cypher, { nodes });
+            // BUGFIX: neo4j-driver 6.x Integer 的 valueOf() 返回 BigInt，
+            // `number += Integer` 会抛 "Cannot mix BigInt and other types"。
+            // 必须显式调用 toNumber() 转为原生 number。
+            const cntVal = result.records[0]?.get('cnt');
+            uc += (typeof cntVal?.toNumber === 'function' ? cntVal.toNumber() : Number(cntVal)) || 0;
+          }
         }
       }
 
@@ -1263,11 +1270,16 @@ export class GraphAdapter {
           list.push(entry);
           edgesByType.set(mt, list);
         }
+        // writeBatchSize: 合并写入批上限 —— 边按批拆分提交，避免单条 UNWIND 数据量过大
+        const edgeBatchSize = Math.max(1, Math.floor(writeBatchSize ?? 500));
         for (const [mt, group] of edgesByType) {
-          await session.run(
-            `UNWIND $edges AS edge MATCH (a { id: edge.fromId }), (b { id: edge.toId }) MERGE (a)-[r:${mt}]->(b) ON CREATE SET r.instruction = edge.instruction, r.weight = edge.weight, r.updatedAt = edge.updatedAt, r.createdAt = edge.updatedAt ON MATCH SET r.instruction = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.instruction ELSE r.instruction END, r.weight = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.weight ELSE r.weight END, r.updatedAt = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.updatedAt ELSE r.updatedAt END`,
-            { edges: group },
-          );
+          for (let i = 0; i < group.length; i += edgeBatchSize) {
+            const chunk = group.slice(i, i + edgeBatchSize);
+            await session.run(
+              `UNWIND $edges AS edge MATCH (a { id: edge.fromId }), (b { id: edge.toId }) MERGE (a)-[r:${mt}]->(b) ON CREATE SET r.instruction = edge.instruction, r.weight = edge.weight, r.updatedAt = edge.updatedAt, r.createdAt = edge.updatedAt ON MATCH SET r.instruction = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.instruction ELSE r.instruction END, r.weight = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.weight ELSE r.weight END, r.updatedAt = CASE WHEN edge.updatedAt > coalesce(r.updatedAt, 0) THEN edge.updatedAt ELSE r.updatedAt END`,
+              { edges: chunk },
+            );
+          }
         }
       }
 
@@ -1431,6 +1443,7 @@ export class GraphAdapter {
     llmConfig: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string }) => Promise<{ text: string; provider?: string; model?: string }> },
     userContent: string,
     assistantContent: string,
+    writeBatchSize?: number,
   ): Promise<{ nodes: number; edges: number }> {
     if (!this.mod) return { nodes: 0, edges: 0 };
     try {
@@ -1442,7 +1455,7 @@ export class GraphAdapter {
       if (!result || (!result.nodes?.length && !result.edges?.length)) return { nodes: 0, edges: 0 };
       const entities = (result.nodes ?? []).map((n: any) => ({ name: n.name ?? '', type: n.type ?? 'TASK', description: n.description ?? '', content: n.content ?? '' })).filter((e: any) => e.name?.trim());
       const relations = (result.edges ?? []).map((e: any) => ({ from: e.from ?? e.source ?? '', to: e.to ?? e.target ?? '', type: e.type ?? 'RELATED_TO', instruction: e.instruction ?? e.description ?? '' })).filter((r: any) => r.from?.trim() && r.to?.trim());
-      if (entities.length > 0 || relations.length > 0) await this.batchUpsert(entities, relations);
+      if (entities.length > 0 || relations.length > 0) await this.batchUpsert(entities, relations, writeBatchSize);
       return { nodes: entities.length, edges: relations.length };
     } catch (err) {
       this.logger?.error?.('[lcm-graph-extra] extractAndUpsertFromTurn error', { err });

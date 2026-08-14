@@ -40,13 +40,19 @@ export function setPluginApiRef(apiRef: any): void {
 // 通过此 setter 注入 "一轮 user/assistant → 提取 Task/Skill/Event" 的闭包，
 // 供 lcmg_extract_rebuild / 导入自动触发复用。
 
-let _extractTurnFn: ((user: string, assistant: string) => Promise<{ nodes: number; edges: number }>) | null = null;
+export interface ExtractTurnOpts {
+  /** 合并写入批上限（透传至 graphAdapter.batchUpsert），默认 500 */
+  writeBatchSize?: number;
+}
+export type ExtractTurnFn = (user: string, assistant: string, opts?: ExtractTurnOpts) => Promise<{ nodes: number; edges: number }>;
 
-export function setExtractTurnFn(fn: ((user: string, assistant: string) => Promise<{ nodes: number; edges: number }>) | null): void {
+let _extractTurnFn: ExtractTurnFn | null = null;
+
+export function setExtractTurnFn(fn: ExtractTurnFn | null): void {
   _extractTurnFn = fn;
 }
 
-export function getExtractTurnFn(): ((user: string, assistant: string) => Promise<{ nodes: number; edges: number }>) | null {
+export function getExtractTurnFn(): ExtractTurnFn | null {
   return _extractTurnFn;
 }
 

@@ -916,7 +916,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         (async () => {
           try {
             const { rebuildAll } = await import('./plugin/extract-service.js');
-            const r = await rebuildAll({ extractTurn: getExtractTurnFn()!, logger: getGlobalLogger() }, batchLimit);
+            const r = await rebuildAll({ extractTurn: getExtractTurnFn()!, logger: getGlobalLogger() }, { limit: batchLimit });
             getGlobalLogger().info?.(`[lcmg_import] 三级节点重建完成: +${r.totalNodes} nodes, +${r.totalEdges} edges (${r.sessions.length} sessions)`);
           } catch (e) {
             getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败', { err: e instanceof Error ? e.message : String(e) });
@@ -950,12 +950,18 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
     name: "lcmg_extract_rebuild",
     label: "三级节点重建",
     description: "从 :GmMessage 消息按 session 配对 user/assistant 轮次，调 LLM 提取并批量写入 :Task/:Skill/:Event 三级节点及边（生产节点，不带 :Benchmark）。" +
-      "按需触发（非自动），通过 lastProcessedTurn 进度避免重复提取。不传 sessionKey 时批量重建全部会话；force=true 强制从头重建。",
+      "按需触发（非自动），通过 lastProcessedTurn 进度避免重复提取。不传 sessionKey 时批量重建全部会话；force=true 强制从头重建。\n" +
+      "控制参数：concurrency 为 LLM 并发窗口（1-128，默认 4）；pageSize 为读取分页大小（默认 2000）；writeBatchSize 为合并写入批上限（默认 500）；" +
+      "progressPath 传入路径即启用断点续传 + 进度落盘，同路径再次调用从断点续跑、不重复处理。",
     parameters: Type.Object({
       sessionKey: Type.Optional(Type.String({ description: "只重建指定会话（缺省重建全部含 :GmMessage 的会话）" })),
       limit: Type.Optional(Type.Number({ description: "单次最多处理轮次数，默认 50", minimum: 1, maximum: 500 })),
       lastProcessedTurn: Type.Optional(Type.Number({ description: "从哪一轮之后开始（默认读取本地进度，force=true 时从 0 开始）" })),
       force: Type.Optional(Type.Boolean({ description: "强制从头重建该会话（忽略进度），默认 false" })),
+      concurrency: Type.Optional(Type.Number({ description: "LLM 并发窗口（同时提取的轮次数），1-128，默认 4", minimum: 1, maximum: 128 })),
+      pageSize: Type.Optional(Type.Number({ description: "读取分页大小（按轮次窗口分批读取，避免大会话一次性载入内存），默认 2000", minimum: 1, maximum: 20000 })),
+      writeBatchSize: Type.Optional(Type.Number({ description: "合并写入批上限（batchUpsert 每批最多节点/边数），默认 500", minimum: 1, maximum: 50000 })),
+      progressPath: Type.Optional(Type.String({ description: "断点续传 + 进度落盘路径；传入即启用，同路径再次调用从断点续跑，不重复处理" })),
     }),
     async execute(toolCallId: string, params: any, signal?: AbortSignal) {
       if (signal?.aborted) {
@@ -966,13 +972,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return { content: [{ type: "text" as const, text: "❌ extractTurn 未注入（graphAdapter / LLM 未就绪，请确认插件初始化完成）" }], details: { ok: false, error: "extractTurn not injected" }, isError: true };
       }
       try {
-        const { rebuildSession, rebuildAll, getSessionProgress } = await import('./plugin/extract-service.js');
+        const { rebuildSession, rebuildAll } = await import('./plugin/extract-service.js');
         const limit = Math.max(1, Math.min(500, params.limit ?? 50));
         const deps = { extractTurn, logger: getGlobalLogger(), signal };
-        const force = params.force === true;
+        const opts: import('./plugin/extract-service.js').RebuildOptions = { limit, force: params.force === true };
+        if (params.lastProcessedTurn !== undefined) opts.lastProcessedTurn = Number(params.lastProcessedTurn);
+        if (params.concurrency !== undefined) opts.concurrency = params.concurrency;
+        if (params.pageSize !== undefined) opts.pageSize = params.pageSize;
+        if (params.writeBatchSize !== undefined) opts.writeBatchSize = params.writeBatchSize;
+        if (params.progressPath) opts.progressPath = params.progressPath;
         if (params.sessionKey) {
-          const last = params.lastProcessedTurn !== undefined ? Number(params.lastProcessedTurn) : getSessionProgress(params.sessionKey, force);
-          const r = await rebuildSession(params.sessionKey, deps, limit, last, force);
+          const r = await rebuildSession(params.sessionKey, deps, opts);
           return {
             content: [{ type: "text" as const, text: [
               "# 三级节点重建报告", "",
@@ -985,7 +995,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             details: { ok: true, ...r },
           };
         }
-        const r = await rebuildAll(deps, limit, force);
+        const r = await rebuildAll(deps, opts);
         return {
           content: [{ type: "text" as const, text: [
             "# 三级节点重建报告", "",
