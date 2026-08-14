@@ -124,7 +124,7 @@ const paginatedDetailNodes = computed<GmProNode[]>(() => {
 });
 
 function nodeTypeTagType(t?: string): 'success' | 'warning' | 'info' | 'default' {
-  switch (t) {
+  switch ((t ?? '').toUpperCase()) {
     case 'TASK': return 'warning';
     case 'SKILL': return 'info';
     case 'EVENT': return 'success';

@@ -315,8 +315,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           if (signal?.aborted) {
             return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
-          let query = `MATCH (e:EVENT)
-            OPTIONAL MATCH (e)-[r:SOLVED_BY]->(fix:SKILL)
+          let query = `MATCH (e:Event)
+            OPTIONAL MATCH (e)-[r:SOLVED_BY]->(fix:Skill)
             WITH e, collect({fix: fix, relation: r}) AS solutions
             WHERE size(solutions) > 0 AND ANY(s IN solutions WHERE s.fix IS NOT NULL)`;
           query += whereClause;

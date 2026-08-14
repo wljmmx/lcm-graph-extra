@@ -234,9 +234,12 @@ function inferType(label: string): RetrievalType {
 
 function mapEntityType(raw: string): string {
   const t = (raw || 'CONCEPT').toUpperCase();
-  if (['SKILL','CAPABILITY','METHOD','TOOL','BEST_PRACTICE','CONCEPT','KNOWLEDGE'].includes(t)) return 'SKILL';
-  if (['EVENT','BUG','ERROR','ISSUE','PROBLEM'].includes(t)) return 'EVENT';
-  return 'TASK';
+  // 统一输出为项目检索链路一致的首字母大写规范 label：Task / Skill / Event。
+  // 勿用全大写（TASK/SKILL/EVENT），否则与 searchExperience 的 (:Task|Skill|Event)
+  // 及向量索引 ['Task','Skill','Event'] 不一致，重建节点无法被检索命中。
+  if (['SKILL','CAPABILITY','METHOD','TOOL','BEST_PRACTICE','CONCEPT','KNOWLEDGE'].includes(t)) return 'Skill';
+  if (['EVENT','BUG','ERROR','ISSUE','PROBLEM'].includes(t)) return 'Event';
+  return 'Task';
 }
 
 function mapEdgeType(raw: string): string {
@@ -916,7 +919,7 @@ export class GraphAdapter {
     }
     return (reranked).map((n: any) => {
       const name = n.name ?? n.properties?.name ?? '';
-      const label = n.type ?? n.labels?.[0] ?? 'TASK';
+      const label = n.type ?? n.labels?.[0] ?? 'Task';
       const desc = n.description ?? n.properties?.description ?? '';
       const content = n.content ?? n.properties?.content ?? '';
       const ppr = n.pagerank ?? n.properties?.pagerank ?? 0.5;
@@ -1021,7 +1024,7 @@ export class GraphAdapter {
   private async _doSearchExperience(mod: any, query: string, rl: number, ctx: any): Promise<RetrievalResult[]> {
     const nodes = await mod.searchNodes(this.driver, query, rl * 3);
     const events = (nodes ?? []).filter((n: any) => {
-      if ((n.type ?? n.labels?.[0]) !== 'EVENT') return false;
+      if ((n.type ?? n.labels?.[0]) !== 'Event') return false;
       const st = n?.state ?? n?.properties?.state;
       return st !== 'superseded';
     });
@@ -1255,13 +1258,19 @@ export class GraphAdapter {
       // N-1: 边也支持增量 updatedAt 对比
       if (validRelations.length > 0) {
         const now = Date.now();
+        // 关系端点 id 必须与同批节点 id 一致（节点 id = makeNodeId(name, mapEntityType(type))）。
+        // 按 name 建立映射优先取节点 id，避免 SKILL/EVENT 节点被硬编码 'TASK' 计算导致边连不上。
+        const nameToId = new Map<string, string>();
+        for (const nd of nodeData) nameToId.set(nd.name.trim().toLowerCase(), nd.id);
         const edgesByType = new Map<string, any[]>();
         for (const rel of validRelations) {
           const mt = mapEdgeType(rel.type);
           const ts = typeof rel.updatedAt === 'number' && rel.updatedAt > 0 ? rel.updatedAt : now;
+          const fromName = String(rel.from ?? '').trim();
+          const toName = String(rel.to ?? '').trim();
           const entry = {
-            fromId: makeNodeId(rel.from, 'TASK'),
-            toId: makeNodeId(rel.to, 'TASK'),
+            fromId: nameToId.get(fromName.toLowerCase()) ?? makeNodeId(fromName, 'Task'),
+            toId: nameToId.get(toName.toLowerCase()) ?? makeNodeId(toName, 'Task'),
             instruction: (rel.instruction ?? '').slice(0, 500),
             weight: 1.0,
             updatedAt: ts,
