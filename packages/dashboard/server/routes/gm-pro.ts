@@ -99,6 +99,9 @@ const ALLOWED_GM_PRO_POST_PATHS = new Set([
   '/api/recall',
   // v2.4.0: graph/walk POST 版本（seedIds 较多时）
   '/api/graph/walk',
+  // v2.4.1: 三级节点重建（单会话 / 批量，llm + heuristic 模式，断点续传）
+  '/api/extract/rebuild',
+  '/api/extract/rebuild-all',
 ]);
 
 /**
