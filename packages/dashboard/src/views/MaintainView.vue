@@ -124,8 +124,11 @@ const importSourceOptions = [
 ];
 
 // 卡片 9.5：三级节点重建（v2.8.1 新增）
-// gm-pro 仅在传入 progressPath 时落盘进度，故留空时使用该默认路径，保证「重建写入」与「进度轮询读取」一致。
-const DEFAULT_EXTRACT_PROGRESS_PATH = '/tmp/gm-rebuild-progress.json';
+// gm-pro 仅在传入 progressPath 时落盘进度，故留空时使用默认路径，保证「重建写入」与「进度轮询读取」一致。
+// 单会话（rebuild）和全部重建（rebuild-all）使用不同默认路径，避免两种格式混写（gm-pro 已加 kind 校验，
+// 但物理隔离更稳妥）。
+const DEFAULT_REBUILD_SESSION_PATH = '/tmp/rebuild-session.json';
+const DEFAULT_REBUILD_ALL_PATH = '/tmp/rebuild-all.json';
 const extractSessionKey = ref<string>('');
 const extractLimit = ref<number>(50);
 const extractConcurrency = ref<number>(4);
@@ -135,6 +138,16 @@ const extractLimitSessions = ref<number>(0);
 const extractPageSize = ref<number>(2000);
 const extractWriteBatchSize = ref<number>(500);
 const extractProgressPath = ref<string>('');
+
+/** 根据是否有 sessionKey 选择默认 progressPath：单会话→rebuild-session.json，全部→rebuild-all.json。
+ *  用户手动填写了 progressPath 时优先用用户值。 */
+const effectiveProgressPath = computed(() => {
+  const userPath = extractProgressPath.value?.trim();
+  if (userPath) return userPath;
+  return extractSessionKey.value?.trim()
+    ? DEFAULT_REBUILD_SESSION_PATH
+    : DEFAULT_REBUILD_ALL_PATH;
+});
 
 // 卡片 9.5：重建实时进度（轮询 GET /api/extract-rebuild/progress，双进度条）
 const extractProgress = ref<ExtractRebuildProgress | null>(null);
@@ -158,9 +171,8 @@ const extractTotalPercent = computed(() => {
 
 async function pollExtractProgress(): Promise<void> {
   try {
-    // 与 executeExtractRebuild 的默认路径保持一致，否则用户留空时「重建写入路径」与「进度读取路径」不一致。
-    const progressPath = extractProgressPath.value?.trim() || DEFAULT_EXTRACT_PROGRESS_PATH;
-    const res = await fetchExtractRebuildProgress(progressPath);
+    // 与 executeExtractRebuild 的路径保持一致，否则「重建写入路径」与「进度读取路径」不匹配。
+    const res = await fetchExtractRebuildProgress(effectiveProgressPath.value);
     // 避免 null 覆盖上一次已拿到的进度（重建刚开始时文件可能尚未落盘）
     if (res.progress) extractProgress.value = res.progress;
     if (res.progress?.done) stopExtractPolling();
@@ -538,10 +550,11 @@ function executeImport(): void {
 
 function executeExtractRebuild(): void {
   // 复用 gm-pro HTTP API：gm-pro 无 thinking 参数（思考开关由 gm-pro 自身配置控制），故不传。
-  // progressPath 留空时给默认值，保证「重建写入路径」与「进度轮询读取路径」一致（gm-pro 仅在传路径时落盘进度）。
-  const progressPath = extractProgressPath.value?.trim() || DEFAULT_EXTRACT_PROGRESS_PATH;
+  // progressPath 由 effectiveProgressPath 自动选择：单会话→rebuild-session.json，全部→rebuild-all.json。
+  // 用户手动填写时优先用户值。gm-pro 已加 kind 校验防止格式混读，但物理隔离更稳妥。
   extractSessionKey.value = extractSessionKey.value?.trim() ?? '';
   const sessionKey = extractSessionKey.value || undefined;
+  const progressPath = effectiveProgressPath.value;
   runMutation({
     cardKey: 'extract_rebuild',
     tool: 'gm_pro_extract_rebuild',
@@ -1068,7 +1081,7 @@ function executeReembed(): void {
                 <NInputNumber v-model:value="extractWriteBatchSize" :min="1" :max="50000" size="small" style="width: 100%" />
               </NFormItem>
               <NFormItem label="进度落盘路径" size="small" :show-feedback="false">
-                <NInput v-model:value="extractProgressPath" size="small" placeholder="留空则写入 /tmp/gm-rebuild-progress.json；传入路径即启用断点续传，同路径再调续跑" clearable />
+                <NInput v-model:value="extractProgressPath" size="small" placeholder="留空自动区分：单会话→/tmp/rebuild-session.json，全部→/tmp/rebuild-all.json；填入路径即启用断点续传" clearable />
               </NFormItem>
             </template>
             <!-- 重建运行中：批次进度 + 总进度 双进度条（含数量与百分比） -->

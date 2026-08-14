@@ -59,13 +59,13 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
 // ---------------------------------------------------------------------------
 // 三级节点重建实时进度：完全复用 gm-pro，进度文件由 gm-pro 写入 progressPath。
 // GET /api/extract-rebuild/progress 读取该文件供 Dashboard 双进度条轮询。
-// 前端始终传入 progressPath（留空默认 /tmp/gm-rebuild-progress.json），
-// 此处仅作兜底默认值（未传 path 时读取该兜底路径）。
+// 前端始终传入 progressPath（留空时前端自动区分：单会话→/tmp/rebuild-session.json，
+// 全部→/tmp/rebuild-all.json），此处仅作兜底（前端未带 path 时的最后回退）。
+// gm-pro v2.4.1+ 进度文件带 kind 字段（"session"/"all"），即使误用同路径也不会混读。
 // ---------------------------------------------------------------------------
 
-const DEFAULT_EXTRACT_PROGRESS_PATH = path.join(os.homedir(), '.openclaw', 'extract-progress.json');
 // 兜底：前端未带 path 参数时读取该默认路径（正常流程前端总是带 path）。
-let activeExtractProgressPath: string | null = DEFAULT_EXTRACT_PROGRESS_PATH;
+let activeExtractProgressPath: string | null = '/tmp/rebuild-all.json';
 
 /** 读取并归一化重建进度文件，返回运行级进度快照（供双进度条展示） */
 export interface ExtractProgressSnapshot {
@@ -94,23 +94,28 @@ function readExtractProgress(pathOverride?: string): ExtractProgressSnapshot | n
     }
     const raw = JSON.parse(fs.readFileSync(target, 'utf8')) as Record<string, unknown>;
     const num = (v: unknown): number => (Number.isFinite(Number(v)) ? Number(v) : 0);
-    // 完全复用 gm-pro：进度文件为 gm-pro 的 RebuildAllProgress 格式
-    //   { done, totalSessions, processedSessions, totalPairs, processedPairs, sessions, updatedAt }
-    // 单会话格式：{ sessionKey, lastProcessedTurn, processedPairs, totalPairs, status }。
-    // Radar 以 "totalPairs" 存在与否判定 gm-pro 格式（本地旧格式无该字段）。
-    const isGmPro = 'totalPairs' in raw;
+    // gm-pro v2.4.1+ 进度文件格式（带 kind 字段区分）：
+    //   kind:"all"     → { kind, done, totalSessions, processedSessions, totalPairs, processedPairs, sessions, updatedAt }
+    //   kind:"session" → { kind, sessionKey, lastProcessedTurn, processedPairs, totalPairs, status, updatedAt }
+    // 旧格式无 kind 字段，以 "totalPairs" 存在与否做向后兼容。
+    const kind = raw.kind as string | undefined;
+    const isAll = kind === 'all' || (!kind && 'totalSessions' in raw);
+    const isSession = kind === 'session' || (!kind && 'totalPairs' in raw && !('totalSessions' in raw));
+    const isGmPro = isAll || isSession;
     const totalSessions = num(raw.totalSessions);
     const processedSessions = num(raw.processedSessions);
     return {
-      done: raw.done === true,
+      // all 格式用 done:true，session 格式用 status:"done"
+      done: raw.done === true || raw.status === 'done',
       startedAt: raw.startedAt ?? null,
       updatedAt: raw.updatedAt ?? null,
-      totalSessions,
+      // 单会话模式 totalSessions=0（只有 1 个会话），前端展示用 processedPairs/totalPairs 即可
+      totalSessions: isSession ? 1 : totalSessions,
       // gm-pro 无 batch 概念：以「会话数」近似「批次」，会话即批次。
-      totalBatches: isGmPro ? totalSessions : num(raw.totalBatches),
-      currentSession: isGmPro ? processedSessions : num(raw.currentSession),
-      currentBatch: isGmPro ? processedSessions : num(raw.currentBatch),
-      processedSessions,
+      totalBatches: isGmPro ? (isSession ? 1 : totalSessions) : num(raw.totalBatches),
+      currentSession: isGmPro ? (isSession ? 1 : processedSessions) : num(raw.currentSession),
+      currentBatch: isGmPro ? (isSession ? 1 : processedSessions) : num(raw.currentBatch),
+      processedSessions: isSession ? 1 : processedSessions,
       // gm-pro 的 pair（轮次）映射为 turns。
       totalTurns: isGmPro ? num(raw.totalPairs) : num(raw.totalTurns),
       processedTurns: isGmPro ? num(raw.processedPairs) : num(raw.processedTurns),
