@@ -83,7 +83,11 @@ function readExtractProgress(): {
 } | null {
   if (!activeExtractProgressPath) return null;
   try {
-    if (!fs.existsSync(activeExtractProgressPath)) return null;
+    if (!fs.existsSync(activeExtractProgressPath)) {
+      // 进度文件不存在：可能是插件尚未落盘，或插件写入的路径与 dashboard 读取的路径不一致。
+      // 输出一条日志便于定位（每轮询周期只记一次，避免刷屏由调用方控制）。
+      return null;
+    }
     const raw = JSON.parse(fs.readFileSync(activeExtractProgressPath, 'utf8')) as Record<string, unknown>;
     const num = (v: unknown): number => (Number.isFinite(Number(v)) ? Number(v) : 0);
     return {
