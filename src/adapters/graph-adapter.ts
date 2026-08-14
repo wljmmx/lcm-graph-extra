@@ -1446,26 +1446,30 @@ export class GraphAdapter {
     writeBatchSize?: number,
     mode?: 'llm' | 'heuristic',
     thinking?: boolean,
-  ): Promise<{ nodes: number; edges: number }> {
-    if (!this.mod) return { nodes: 0, edges: 0 };
+  ): Promise<{ nodes: number; edges: number; llmOutputTokens: number; llmHasOutput: boolean }> {
+    if (!this.mod) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
     try {
       // heuristic 模式：纯规则正则快速提取，零 LLM 调用，毫秒级
       if (mode === 'heuristic') {
         return await this.heuristicExtract(userContent, assistantContent, writeBatchSize);
       }
       const { extractTriplets } = this.mod as any;
-      if (!extractTriplets) return { nodes: 0, edges: 0 };
-      const llmFn = this.buildLlmFn({ ...(llmConfig as any), thinking });
-      if (!llmFn) return { nodes: 0, edges: 0 };
+      if (!extractTriplets) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
+      // counter 累计本次调用期间 LLM 实际输出的 token 数（buildLlmFn 每次调用累加）
+      const counter = { tokens: 0 };
+      const llmFn = this.buildLlmFn({ ...(llmConfig as any), thinking }, counter);
+      if (!llmFn) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
       const result = await extractTriplets(llmFn, userContent, assistantContent);
-      if (!result || (!result.nodes?.length && !result.edges?.length)) return { nodes: 0, edges: 0 };
+      const llmOutputTokens = counter.tokens;
+      const llmHasOutput = llmOutputTokens > 0;
+      if (!result || (!result.nodes?.length && !result.edges?.length)) return { nodes: 0, edges: 0, llmOutputTokens, llmHasOutput };
       const entities = (result.nodes ?? []).map((n: any) => ({ name: n.name ?? '', type: n.type ?? 'TASK', description: n.description ?? '', content: n.content ?? '' })).filter((e: any) => e.name?.trim());
       const relations = (result.edges ?? []).map((e: any) => ({ from: e.from ?? e.source ?? '', to: e.to ?? e.target ?? '', type: e.type ?? 'RELATED_TO', instruction: e.instruction ?? e.description ?? '' })).filter((r: any) => r.from?.trim() && r.to?.trim());
       if (entities.length > 0 || relations.length > 0) await this.batchUpsert(entities, relations, writeBatchSize);
-      return { nodes: entities.length, edges: relations.length };
+      return { nodes: entities.length, edges: relations.length, llmOutputTokens, llmHasOutput };
     } catch (err) {
       this.logger?.error?.('[lcm-graph-extra] extractAndUpsertFromTurn error', { err });
-      return { nodes: 0, edges: 0 };
+      return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
     }
   }
 
@@ -1479,7 +1483,7 @@ export class GraphAdapter {
     userContent: string,
     assistantContent: string,
     writeBatchSize?: number,
-  ): Promise<{ nodes: number; edges: number }> {
+  ): Promise<{ nodes: number; edges: number; llmOutputTokens: number; llmHasOutput: boolean }> {
     const text = `${userContent}\n${assistantContent}`;
     const entities: Array<{ name: string; type: string; description: string; content: string }> = [];
     const seen = new Set<string>();
@@ -1499,7 +1503,7 @@ export class GraphAdapter {
     while ((m = taskRegex.exec(text)) !== null) pushEntity(m[1], 'TASK');
     while ((m = skillRegex.exec(text)) !== null) pushEntity(m[1], 'SKILL');
     while ((m = eventRegex.exec(text)) !== null) pushEntity(m[1], 'EVENT');
-    if (entities.length === 0) return { nodes: 0, edges: 0 };
+    if (entities.length === 0) return { nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false };
 
     // 生成 USED_SKILL（SKILL → 首个 TASK）与 SOLVED_BY（EVENT ← TASK）边
     const firstTask = entities.find((e) => e.type === 'TASK');
@@ -1515,10 +1519,10 @@ export class GraphAdapter {
       }
     }
     await this.batchUpsert(entities, relations, writeBatchSize);
-    return { nodes: entities.length, edges: relations.length };
+    return { nodes: entities.length, edges: relations.length, llmOutputTokens: 0, llmHasOutput: false };
   }
 
-  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; thinking?: boolean; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string; think?: boolean }) => Promise<{ text: string; provider?: string; model?: string }> }): ((system: string, user: string) => Promise<string>) | null {
+  private buildLlmFn(config?: { apiKey?: string; baseURL?: string; model?: string; keepAlive?: string; thinking?: boolean; complete?: (p: { messages: any[]; model?: string; maxTokens?: number; temperature?: number; systemPrompt?: string; signal?: AbortSignal; purpose?: string; think?: boolean }) => Promise<{ text: string; provider?: string; model?: string }> }, counter?: { tokens: number }): ((system: string, user: string) => Promise<string>) | null {
     // 优先用 SDK 提供的 runtimeContext.llm.complete（已认证、已配置、跟随主会话模型）
     // 包装成 extractTriplets 期望的 (system, user) => Promise<string> 签名
     if (config?.complete && typeof config.complete === 'function') {
@@ -1534,7 +1538,10 @@ export class GraphAdapter {
           // 思考模式开关透传（服务端不识别该字段时自动忽略）
           think: config.thinking,
         });
-        return result?.text ?? '';
+        // complete 回调不返回 usage，按输出文本长度粗估 token（保证有真实输出时 llmOutputTokens>0）
+        const text = result?.text ?? '';
+        if (counter && text.trim()) counter.tokens += Math.max(1, Math.round(text.length / 4));
+        return text;
       };
     }
     if (!config?.model && !config?.apiKey) return null;
@@ -1555,6 +1562,13 @@ export class GraphAdapter {
         think: config.thinking,
         signal: AbortSignal.timeout(llmTimeout('graphLlmTimeoutMs')),
       });
+      // OpenAI 兼容：usage.completion_tokens；Anthropic：usage.output_tokens
+      if (counter) {
+        const u = result.raw?.usage;
+        const tok = u?.completion_tokens ?? u?.output_tokens ?? 0;
+        if (tok > 0) counter.tokens += tok;
+        else if (result.text?.trim()) counter.tokens += Math.max(1, Math.round(result.text.length / 4));
+      }
       return result.text ?? '';
     };
   }

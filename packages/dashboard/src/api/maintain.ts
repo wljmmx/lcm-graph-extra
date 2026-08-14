@@ -132,6 +132,8 @@ export interface ExtractRebuildProgress {
   processedTurns: number;
   /** 当前正在处理的会话 */
   currentSessionKey?: string | null;
+  /** 本次调用期间 LLM 实际输出的 token 累计（heuristic 恒为 0） */
+  llmOutputTokens?: number;
 }
 
 export interface ExtractRebuildProgressResponse {

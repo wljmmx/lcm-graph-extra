@@ -1116,6 +1116,9 @@ function executeReembed(): void {
                   <span class="extract-progress-count">
                     轮次 {{ extractProgress.processedTurns }} / {{ extractProgress.totalTurns }}
                     · 会话 {{ extractProgress.currentSession }}/{{ extractProgress.totalSessions }} · {{ extractTotalPercent }}%
+                    <span v-if="extractProgress.llmOutputTokens !== undefined" class="extract-token">
+                      · LLM 输出 {{ extractProgress.llmOutputTokens }} tok
+                    </span>
                   </span>
                 </div>
               </div>

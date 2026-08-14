@@ -80,6 +80,7 @@ export interface ExtractProgressSnapshot {
   totalTurns: number;
   processedTurns: number;
   currentSessionKey: unknown;
+  llmOutputTokens?: number;
 }
 
 /** 读取并归一化重建进度文件。path 优先于最近一次 invoke 记录的路径，便于解耦"插件写哪"与"dashboard 读哪"。 */
@@ -105,6 +106,8 @@ function readExtractProgress(pathOverride?: string): ExtractProgressSnapshot | n
       totalTurns: num(raw.totalTurns),
       processedTurns: num(raw.processedTurns),
       currentSessionKey: raw.currentSessionKey ?? null,
+      // LLM 输出 token 实时累计（heuristic 恒为 0）
+      llmOutputTokens: raw.llmOutputTokens !== undefined ? num(raw.llmOutputTokens) : undefined,
     };
   } catch {
     return null;

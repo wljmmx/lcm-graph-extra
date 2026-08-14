@@ -47,9 +47,21 @@ export interface SessionTurn {
 /** extract-service 外部依赖（由调用方注入） */
 export interface ExtractDeps {
   /** 一轮 user/assistant → 提取 Task/Skill/Event。返回新增节点/边数。opts.writeBatchSize 透传合并写入批上限。 */
-  extractTurn: (user: string, assistant: string, opts?: { writeBatchSize?: number; mode?: 'llm' | 'heuristic'; thinking?: boolean }) => Promise<{ nodes: number; edges: number }>;
+  extractTurn: (user: string, assistant: string, opts?: { writeBatchSize?: number; mode?: 'llm' | 'heuristic'; thinking?: boolean }) => Promise<{ nodes: number; edges: number; llmOutputTokens?: number }>;
   logger?: any;
   signal?: AbortSignal;
+}
+
+/** 一轮提取池的运行结果（含 LLM 输出 token 统计） */
+export interface TurnPoolResult {
+  nodes: number;
+  edges: number;
+  processed: number;
+  skipped: number;
+  /** 成功处理到的最大 turnIndex */
+  maxTurn: number;
+  /** 本次窗口期间 LLM 实际输出的 token 累计 */
+  llmOutputTokens: number;
 }
 
 /** 重建返回结果 */
@@ -63,6 +75,16 @@ export interface RebuildResult {
   error?: string;
   /** 本次重建的运行级进度快照 */
   progress?: RunProgress;
+  /** 提取模式（llm / heuristic） */
+  mode?: 'llm' | 'heuristic';
+  /** 已处理的轮次对（= processed） */
+  processedPairs: number;
+  /** 总轮次对（= turns） */
+  totalPairs: number;
+  /** 本次调用期间 LLM 实际输出的 token 累计（heuristic 恒为 0） */
+  llmOutputTokens: number;
+  /** 是否有真实 LLM 输出（llmOutputTokens > 0） */
+  llmHasOutput: boolean;
 }
 
 /** 重建控制参数（对齐 gm-pro POST /api/extract/rebuild） */
@@ -113,10 +135,12 @@ export interface RunProgress {
   processedSessions: number;
   /** 本次需处理的总轮次数（按 limit 与已处理进度预估的剩余可提取轮次） */
   totalTurns: number;
-  /** 已提取轮次数 */
+  /** 已提取轮次对 */
   processedTurns: number;
   /** 当前正在处理的会话 */
   currentSessionKey?: string;
+  /** 本次调用期间 LLM 实际输出的 token 累计（实时累计，供 Dashboard 展示；heuristic 恒为 0） */
+  llmOutputTokens?: number;
 }
 
 interface ProgressState {
@@ -135,6 +159,7 @@ interface ProgressState {
   totalTurns?: number;
   processedTurns?: number;
   currentSessionKey?: string;
+  llmOutputTokens?: number;
 }
 
 /** 解析进度文件路径：优先使用 progressPath 参数（传入即启用断点续传），否则回退默认路径 */
@@ -187,6 +212,7 @@ function applyRunProgress(state: ProgressState, p: RunProgress): void {
   state.totalTurns = p.totalTurns;
   state.processedTurns = p.processedTurns;
   state.currentSessionKey = p.currentSessionKey;
+  if (p.llmOutputTokens !== undefined) state.llmOutputTokens = p.llmOutputTokens;
 }
 
 /** 从进度文件读取运行级快照（归一化；缺省为未开始） */
@@ -204,6 +230,7 @@ export function readRunProgress(progressPath?: string): RunProgress {
     totalTurns: Number(s.totalTurns) || 0,
     processedTurns: Number(s.processedTurns) || 0,
     currentSessionKey: s.currentSessionKey,
+    llmOutputTokens: s.llmOutputTokens !== undefined ? Number(s.llmOutputTokens) || 0 : undefined,
   };
 }
 
@@ -372,14 +399,6 @@ async function createStandaloneProgress(
 
 // ── 并发池：受 concurrency 控制，同时最多 N 轮调 LLM 提取 ──
 
-interface TurnPoolResult {
-  nodes: number;
-  edges: number;
-  processed: number;
-  skipped: number;
-  maxTurn: number;
-}
-
 async function runTurnPool(
   turns: SessionTurn[],
   concurrency: number,
@@ -388,6 +407,7 @@ async function runTurnPool(
   writeBatchSize?: number,
   mode?: 'llm' | 'heuristic',
   thinking?: boolean,
+  onTurn?: (info: { sessionKey: string; turnIndex: number; llmOutputTokens: number }) => void,
 ): Promise<TurnPoolResult> {
   let idx = 0;
   let nodes = 0;
@@ -395,6 +415,7 @@ async function runTurnPool(
   let processed = 0;
   let skipped = 0;
   let maxTurn = 0;
+  let llmOutputTokens = 0;
   const workerCount = Math.max(1, Math.min(concurrency, turns.length));
   const workers = Array.from({ length: workerCount }, async () => {
     while (idx < turns.length) {
@@ -410,7 +431,11 @@ async function runTurnPool(
         nodes += r.nodes ?? 0;
         edges += r.edges ?? 0;
         processed++;
+        const tok = r.llmOutputTokens ?? 0;
+        llmOutputTokens += tok;
         if (turn.turnIndex > maxTurn) maxTurn = turn.turnIndex;
+        // 每个 turn 处理完成后即时回调，供调用方实时落盘进度（Dashboard 二级进度条及时刷新）
+        onTurn?.({ sessionKey: turn.sessionKey, turnIndex: turn.turnIndex, llmOutputTokens: tok });
         log?.debug?.(`[extract-service] ${turn.sessionKey} turn ${turn.turnIndex}: +${r.nodes ?? 0} nodes, +${r.edges ?? 0} edges`);
       } catch (e) {
         skipped++;
@@ -419,7 +444,7 @@ async function runTurnPool(
     }
   });
   await Promise.all(workers);
-  return { nodes, edges, processed, skipped, maxTurn };
+  return { nodes, edges, processed, skipped, maxTurn, llmOutputTokens };
 }
 
 /** 重建单个 session：按 pageSize 分页 + concurrency 并发提取，每页推进进度（断点续传） */
@@ -479,6 +504,7 @@ export async function rebuildSession(
   let edges = 0;
   let processed = 0;
   let skipped = 0;
+  let llmOutputTokens = 0;
   let maxTurn = startTurn;
   let cursor = startTurn;
   let remaining = limit;
@@ -495,24 +521,36 @@ export async function rebuildSession(
       cursor = Math.max(cursor, ...window);
       break;
     }
-    const pool = await runTurnPool(turns, concurrency, deps, log, writeBatchSize, mode, thinking);
+    const pool = await runTurnPool(
+      turns,
+      concurrency,
+      deps,
+      log,
+      writeBatchSize,
+      mode,
+      thinking,
+      // onTurn：每个 turn 处理完成后即时回写进度，保证 Dashboard 二级进度条实时刷新，
+      // 而非等整个窗口/会话处理完才更新。同步写文件在 Node 单线程下原子执行，安全。
+      (info) => {
+        progress.processedTurns++;
+        progress.llmOutputTokens = (progress.llmOutputTokens ?? 0) + info.llmOutputTokens;
+        progress.updatedAt = new Date().toISOString();
+        persistProgress(progressPath, (s) => {
+          s.sessions[sessionKey] = Math.max(s.sessions[sessionKey] ?? 0, info.turnIndex);
+          s.lastRunAt = new Date().toISOString();
+          applyRunProgress(s, progress);
+        });
+      },
+    );
     nodes += pool.nodes;
     edges += pool.edges;
     processed += pool.processed;
     skipped += pool.skipped;
+    llmOutputTokens += pool.llmOutputTokens;
     maxTurn = Math.max(maxTurn, pool.maxTurn);
     remaining -= turns.length;
     // 游标推进到本页最大 turnIndex（未处理的轮次下次调用从断点续跑）
     cursor = Math.max(cursor, pool.maxTurn, Math.max(...window));
-    // 每页落盘进度：中断后以同一 progressPath 重新调用即可从断点续跑，不重复处理
-    if (pool.processed > 0) {
-      progress.processedTurns += pool.processed;
-      persistProgress(progressPath, (s) => {
-        s.sessions[sessionKey] = Math.max(s.sessions[sessionKey] ?? 0, maxTurn);
-        s.lastRunAt = new Date().toISOString();
-        applyRunProgress(s, progress);
-      });
-    }
   }
 
   // 单会话独立调用：运行结束标记 done
@@ -521,14 +559,37 @@ export async function rebuildSession(
     persistProgress(progressPath, (s) => applyRunProgress(s, progress));
   }
 
-  return { sessionKey, turns: processed + skipped, processed, nodes, edges, skipped, progress };
+  return {
+    sessionKey,
+    mode,
+    turns: processed + skipped,
+    processed,
+    nodes,
+    edges,
+    skipped,
+    processedPairs: processed,
+    totalPairs: processed + skipped,
+    llmOutputTokens,
+    llmHasOutput: llmOutputTokens > 0,
+    progress,
+  };
 }
 
 /** 枚举全部含 :GmMessage 的 session，逐个重建（每个会话一个处理批次；跨会话顺序执行，会话内由 concurrency 控制并发） */
 export async function rebuildAll(
   deps: ExtractDeps,
   opts: RebuildOptions = {},
-): Promise<{ sessions: RebuildResult[]; totalNodes: number; totalEdges: number; progress: RunProgress }> {
+): Promise<{
+  sessions: RebuildResult[];
+  totalNodes: number;
+  totalEdges: number;
+  totalPairs: number;
+  processedPairs: number;
+  llmOutputTokens: number;
+  llmHasOutput: boolean;
+  progress: RunProgress;
+  mode: 'llm' | 'heuristic';
+}> {
   const log = deps.logger ?? getGlobalLogger();
   const limit = clampInt(opts.limit ?? 50, 1, 100000);
   const progressPath = opts.progressPath;
@@ -550,6 +611,7 @@ export async function rebuildAll(
     processedSessions: 0,
     totalTurns: 0,
     processedTurns: 0,
+    llmOutputTokens: 0,
   };
   persistProgress(progressPath, (s) => applyRunProgress(s, progress));
 
@@ -631,5 +693,18 @@ export async function rebuildAll(
   progress.done = true;
   progress.updatedAt = new Date().toISOString();
   persistProgress(progressPath, (s) => applyRunProgress(s, progress));
-  return { sessions, totalNodes, totalEdges, progress };
+  const totalPairs = sessions.reduce((a, r) => a + (r.totalPairs ?? r.turns), 0);
+  const processedPairs = sessions.reduce((a, r) => a + (r.processedPairs ?? r.processed), 0);
+  const llmOutputTokens = sessions.reduce((a, r) => a + (r.llmOutputTokens ?? 0), 0);
+  return {
+    sessions,
+    totalNodes,
+    totalEdges,
+    totalPairs,
+    processedPairs,
+    llmOutputTokens,
+    llmHasOutput: llmOutputTokens > 0,
+    progress,
+    mode,
+  };
 }

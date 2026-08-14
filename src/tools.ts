@@ -1000,9 +1000,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             content: [{ type: "text" as const, text: [
               "# 三级节点重建报告", "",
               `会话: ${r.sessionKey}`,
-              `处理轮次: ${r.processed}/${r.turns}`,
+              `模式: ${r.mode ?? 'llm'}`,
+              `处理轮次: ${r.processedPairs}/${r.totalPairs}`,
               `新增节点: ${r.nodes}`,
               `新增边: ${r.edges}`,
+              `LLM 输出 Token: ${r.llmOutputTokens}`,
+              `LLM 有输出: ${r.llmHasOutput}`,
               `总进度: ${p ? `${p.processedTurns}/${p.totalTurns} 轮 · ${pct}%` : `${pct}%`}`,
               r.error ? `错误: ${r.error}` : "",
             ].filter(Boolean).join("\n") }],
@@ -1013,13 +1016,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         return {
           content: [{ type: "text" as const, text: [
             "# 三级节点重建报告", "",
+            `模式: ${r.mode}`,
             `处理会话: ${r.sessions.length}`,
             `处理批次: ${r.progress.totalBatches}`,
+            `处理轮次: ${r.processedPairs}/${r.totalPairs}`,
+            `LLM 输出 Token: ${r.llmOutputTokens}`,
+            `LLM 有输出: ${r.llmHasOutput}`,
             `总进度: ${r.progress.processedTurns}/${r.progress.totalTurns} 轮` +
               (r.progress.totalTurns > 0 ? ` · ${Math.round((r.progress.processedTurns / r.progress.totalTurns) * 100)}%` : " · 100%"),
             `新增节点: ${r.totalNodes}`,
             `新增边: ${r.totalEdges}`,
-            ...r.sessions.map((s) => `  ${s.sessionKey}: ${s.processed}/${s.turns} turns, +${s.nodes} nodes`),
+            ...r.sessions.map((s) => `  ${s.sessionKey}: ${s.processedPairs}/${s.totalPairs} pairs, +${s.nodes} nodes, LLM tok=${s.llmOutputTokens}`),
           ].join("\n") }],
           details: { ok: true, ...r },
         };
