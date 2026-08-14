@@ -1117,6 +1117,16 @@ function executeReembed(): void {
                     </span>
                   </span>
                 </div>
+                <!-- v2.4.1: 失败会话数 + 续传提示 -->
+                <div v-if="(extractProgress.failedSessions ?? 0) > 0 || extractProgress.message" class="extract-progress-failed">
+                  <span v-if="(extractProgress.failedSessions ?? 0) > 0" class="extract-failed-badge">
+                    ⚠ 失败会话 {{ extractProgress.failedSessions }}
+                  </span>
+                  <span v-if="extractProgress.message">{{ extractProgress.message }}</span>
+                  <span class="extract-failed-tip">
+                    可沿原进度路径重新触发，断点文件已累计失败数，失败会话未标记 -1、会自动重试。
+                  </span>
+                </div>
               </div>
               <div v-else class="extract-progress-waiting">
                 正在收集重建进度…
@@ -1251,5 +1261,27 @@ function executeReembed(): void {
 .extract-progress-waiting {
   font-size: var(--fs-caption);
   color: var(--color-text-tertiary);
+}
+.extract-progress-failed {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: var(--color-warning-soft, #fff7e6);
+  border: 1px solid var(--color-warning-border, #ffd591);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-caption);
+  color: var(--color-warning-text, #d46b08);
+}
+.extract-failed-badge {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.extract-failed-tip {
+  color: var(--color-text-secondary);
+  flex: 1 1 auto;
+  min-width: 0;
 }
 </style>

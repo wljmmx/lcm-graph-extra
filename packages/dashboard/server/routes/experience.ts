@@ -77,10 +77,13 @@ export interface ExtractProgressSnapshot {
   currentSession: number;
   currentBatch: number;
   processedSessions: number;
+  failedSessions: number;
   totalTurns: number;
   processedTurns: number;
   currentSessionKey: unknown;
   llmOutputTokens?: number;
+  status?: unknown;
+  message?: unknown;
 }
 
 /** 读取并归一化重建进度文件。path 优先于最近一次 invoke 记录的路径，便于解耦"gm-pro 写哪"与"dashboard 读哪"。 */
@@ -104,6 +107,7 @@ function readExtractProgress(pathOverride?: string): ExtractProgressSnapshot | n
     const isGmPro = isAll || isSession;
     const totalSessions = num(raw.totalSessions);
     const processedSessions = num(raw.processedSessions);
+    const failedSessions = num(raw.failedSessions);
     return {
       // all 格式用 done:true，session 格式用 status:"done"
       done: raw.done === true || raw.status === 'done',
@@ -113,15 +117,19 @@ function readExtractProgress(pathOverride?: string): ExtractProgressSnapshot | n
       totalSessions: isSession ? 1 : totalSessions,
       // gm-pro 无 batch 概念：以「会话数」近似「批次」，会话即批次。
       totalBatches: isGmPro ? (isSession ? 1 : totalSessions) : num(raw.totalBatches),
-      currentSession: isGmPro ? (isSession ? 1 : processedSessions) : num(raw.currentSession),
-      currentBatch: isGmPro ? (isSession ? 1 : processedSessions) : num(raw.currentBatch),
+      currentSession: isGmPro ? (isSession ? 1 : processedSessions + failedSessions) : num(raw.currentSession),
+      currentBatch: isGmPro ? (isSession ? 1 : processedSessions + failedSessions) : num(raw.currentBatch),
       processedSessions: isSession ? 1 : processedSessions,
+      failedSessions: isSession ? 0 : failedSessions,
       // gm-pro 的 pair（轮次）映射为 turns。
       totalTurns: isGmPro ? num(raw.totalPairs) : num(raw.totalTurns),
       processedTurns: isGmPro ? num(raw.processedPairs) : num(raw.processedTurns),
       currentSessionKey: isGmPro ? (raw.sessionKey ?? null) : (raw.currentSessionKey ?? null),
       // LLM 输出 token 实时累计（heuristic 恒为 undefined → 前端不展示）
       llmOutputTokens: raw.llmOutputTokens !== undefined ? num(raw.llmOutputTokens) : undefined,
+      // 透传 status 与 message（207 部分失败时 message 有提示）
+      status: raw.status,
+      message: typeof raw.message === 'string' ? raw.message : undefined,
     };
   } catch {
     return null;

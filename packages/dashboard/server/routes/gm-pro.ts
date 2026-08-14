@@ -166,7 +166,12 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       const body = method !== 'GET' && req.body ? JSON.stringify(req.body) : undefined;
       const resp = await fetch(targetUrl, { method, headers, body, signal: controller.signal });
 
-      if (!resp.ok) {
+      // v2.4.1 rebuild-all 语义：
+      //   200 → 全部成功；207 (Multi-Status) → 部分会话失败（failedSessions>0）。
+      // 207 虽在 2xx 段，但 fetch 标准下 resp.ok 为 false。此处显式将 207 视为"成功透传"，
+      // 让 failedSessions/message/results 正常返回到前端。其他非 2xx 仍走错误分支。
+      const isMultiStatus = resp.status === 207;
+      if (!resp.ok && !isMultiStatus) {
         let errBody: unknown;
         try { errBody = await resp.json(); } catch { errBody = { error: `graph-memory-pro returned ${resp.status}` }; }
         return { ok: false, error: `graph-memory-pro HTTP ${resp.status}`, detail: errBody };
@@ -176,7 +181,9 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
       // JSON：解析为结构化对象
       if (contentType.includes('application/json')) {
         const data = await resp.json();
-        return { ok: true, data };
+        // 207 Multi-Status：data 含 failedSessions>0 与 message 字段。仍标记 ok:true，
+        // 由前端/api层通过 failedSessions 感知部分失败并提示续传。
+        return { ok: true, data, _status: isMultiStatus ? 207 : 200 };
       }
       // Prometheus 文本（/api/metrics）：透传原始文本，由前端解析
       if (contentType.includes('text/plain')) {

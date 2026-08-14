@@ -111,21 +111,29 @@ export async function invokeExtractRebuild(opts: {
     ? '/api/gm-pro/proxy/extract/rebuild'
     : '/api/gm-pro/proxy/extract/rebuild-all';
   try {
-    const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(path, params);
+    const resp = await apiPost<{ ok: boolean; data?: any; error?: string; _status?: number }>(path, params);
     if (resp.ok) {
-      // gm-pro rebuild 返回体为扁平结构（totalSessions / processedPairs / totalPairs / mode / results / llmOutputTokens / llmHasOutput / message）。
+      // gm-pro rebuild 返回体为扁平结构（totalSessions / processedPairs / totalPairs / mode / results
+      //                / llmOutputTokens / llmHasOutput / failedSessions / message）。
+      // v2.4.1 rebuild-all 语义：
+      //   HTTP 200 → 全部成功，failedSessions=0；
+      //   HTTP 207 (Multi-Status) → 部分会话失败 failedSessions>0，body 带 message 与 results；
       // 前端 extractText/extractDetails 只识别 MCP 标准结构（content[].text / details），
-      // 此处包装成标准形态，确保卡片能渲染文本与结构化指标。
+      // 此处包装成标准形态，确保卡片能渲染文本与结构化指标（含失败数和续传提示）。
       const d = (resp.data ?? {}) as Record<string, unknown>;
+      const isPartial = (resp._status === 207) || Number(d.failedSessions ?? 0) > 0;
+      const failedSessions = Number(d.failedSessions ?? 0);
       const text = [
         '# 三级节点重建报告',
         '',
         `模式: ${d.mode ?? 'llm'}`,
         `处理会话: ${d.processedSessions ?? 0}/${d.totalSessions ?? 0}`,
+        failedSessions > 0 ? `**失败会话: ${failedSessions}**` : '',
         `处理轮次: ${d.processedPairs ?? 0}/${d.totalPairs ?? 0}`,
         `LLM 输出 Token: ${d.llmOutputTokens ?? 0}`,
         `LLM 有输出: ${d.llmHasOutput === true ? '是' : '否'}`,
         typeof d.message === 'string' && d.message ? `状态: ${d.message}` : '',
+        isPartial ? `提示: 可沿原进度路径重新触发，断点文件已累计 failedSessions，失败会话未标记 -1、会自动重试。` : '',
       ].filter(Boolean).join('\n');
       const bb = (d.results ?? {}) as Record<string, { processedPairs?: number; totalPairs?: number }>;
       const results = Object.entries(bb).map(([k, v]) => ({
@@ -138,15 +146,18 @@ export async function invokeExtractRebuild(opts: {
         result: {
           content: [{ type: 'text', text }],
           details: {
-            ok: true,
+            ok: !isPartial,
             totalSessions: d.totalSessions ?? 0,
             processedSessions: d.processedSessions ?? 0,
+            failedSessions,
             totalPairs: d.totalPairs ?? 0,
             processedPairs: d.processedPairs ?? 0,
             mode: d.mode ?? 'llm',
             llmOutputTokens: d.llmOutputTokens ?? 0,
             llmHasOutput: d.llmHasOutput === true,
             results,
+            message: typeof d.message === 'string' ? d.message : undefined,
+            httpStatus: resp._status ?? 200,
           },
         },
       };
@@ -173,6 +184,8 @@ export interface ExtractRebuildProgress {
   currentBatch: number;
   /** 已完成的会话数 */
   processedSessions: number;
+  /** 失败的会话数（v2.4.1：断点文件累计，207 时>0） */
+  failedSessions: number;
   /** 本次需处理的总轮次数 */
   totalTurns: number;
   /** 已提取轮次数 */
@@ -181,6 +194,10 @@ export interface ExtractRebuildProgress {
   currentSessionKey?: string | null;
   /** 本次调用期间 LLM 实际输出的 token 累计（heuristic 恒为 0） */
   llmOutputTokens?: number;
+  /** 状态文本（"done"/"running"...） */
+  status?: unknown;
+  /** gm-pro 返回的状态提示（207 部分失败时会带 N failed session(s)） */
+  message?: string;
 }
 
 export interface ExtractRebuildProgressResponse {
