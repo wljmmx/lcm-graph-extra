@@ -64,12 +64,20 @@ let _lastRuntimeLlmSnapshot: RuntimeLlmSnapshot | null = null;
 
 /**
  * 记录最近一次用户会话的主模型快照。仅当主模型为本地部署时写入，避免污染远程场景。
- * 调用方：index.ts 的 assemble / afterTurn / compact 入口。
+ *
+ * 参数：
+ * - runtimeLlm: SDK 注入的 params.runtimeContext.llm（可能只含 complete，无 model/baseURL）
+ * - agentModel: params.model，即 agent 当前正在使用的模型（如 "qwen3.8:27b" /
+ *   "ollama/qwen3.8:27b"）。这是判定本地/远程的权威来源，弥补 runtimeLlm
+ *   可能缺失的 model 字段。
+ *
+ * 调用方：index.ts 的 assemble / afterTurn 入口，每个用户轮次都会触发，
+ * 从而在同 session 内通过 /model 切换模型后能及时重新探测判定。
  */
-export function recordRuntimeLlm(runtimeLlm: any): void {
-  if (!runtimeLlm?.model) return;
-  const model = String(runtimeLlm.model);
-  const baseURL = runtimeLlm.baseURL ? String(runtimeLlm.baseURL) : undefined;
+export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown): void {
+  const model = String(agentModel ?? runtimeLlm?.model ?? '');
+  if (!model) return;
+  const baseURL = runtimeLlm?.baseURL ? String(runtimeLlm.baseURL) : undefined;
   // 本地判定：isLocalLlm(baseURL) 或 isOllamaModel(model)
   const isLocal = (baseURL && isLocalLlm(baseURL, model)) || isOllamaModel(model);
   if (!isLocal) {
@@ -80,7 +88,7 @@ export function recordRuntimeLlm(runtimeLlm: any): void {
   _lastRuntimeLlmSnapshot = {
     model,
     baseURL: baseURL ?? null,
-    apiKey: runtimeLlm.apiKey ? String(runtimeLlm.apiKey) : '',
+    apiKey: runtimeLlm?.apiKey ? String(runtimeLlm.apiKey) : '',
   };
 }
 
@@ -361,6 +369,14 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     const llm = resolveDistillationLlm(apiRef);
     result.llmModel = llm.model;
     result.llmBaseURL = llm.baseURL;
+    // G-MODEL-SYNC: 打印实际用于蒸馏的模型。若主模型为本地 ollama/局域网模型，
+    // 此处应等于 agent 当前模型（如 qwen3.8:27b），而非蒸馏配置的远程/其他模型。
+    log?.info?.('distillation: resolved LLM', {
+      model: llm.model,
+      baseURL: llm.baseURL,
+      source: _lastRuntimeLlmSnapshot ? 'agent-main-model-snapshot' : 'distillationLlm-config-or-env',
+      agentModel: _lastRuntimeLlmSnapshot?.model ?? null,
+    });
   } catch (llmErr) {
     log?.warn?.('distillation: resolveDistillationLlm failed', { err: String(llmErr) });
     result.llmModel = '(config resolve failed)';
