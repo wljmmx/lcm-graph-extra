@@ -564,6 +564,7 @@ export class LosslessClawAdapter {
     runtimeContext?: any;
     runtimeSettings?: any;
     legacyParams?: any;
+    runtimeModelOverride?: string;
   }): Promise<{
     ok: boolean;
     compacted: boolean;
@@ -594,9 +595,9 @@ export class LosslessClawAdapter {
     //    模型与配置模型反复加载/卸载、GPU 争抢。自建 complete 绕过 OpenClaw SDK
     //    对 llm.allowModelOverride 的策略检查（我们自行 fetch）。
     //  - 远程/无快照 → 不改动 params，lossless-claw 回退到其自身 LLM 配置。
-    const _lcSk = typeof params.sessionKey === 'string' && params.sessionKey.trim()
+    const _lcSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
       ? params.sessionKey.trim()
-      : (typeof params.session_id === 'string' && params.session_id.trim() ? params.session_id.trim() : '');
+      : '';
     const _lcSnap = _lcSk
       ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
       : getActiveLocalLlmSnapshot();
@@ -604,11 +605,12 @@ export class LosslessClawAdapter {
       try {
         const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);
         const _lcLlm = { complete: _lcLocalComplete };
+        const _lcRt = { ...((params as any).runtimeContext ?? {}), llm: _lcLlm };
+        const _lcLg = { ...((params as any).legacyParams ?? {}), llm: _lcLlm };
         params = {
           ...params,
-          llm: _lcLlm,
-          runtimeContext: { ...((params as any).runtimeContext ?? {}), llm: _lcLlm },
-          legacyParams: { ...((params as any).legacyParams ?? {}), llm: _lcLlm },
+          runtimeContext: _lcRt,
+          legacyParams: _lcLg,
           runtimeModelOverride: _lcSnap.model,
         };
         this.logger?.info?.('[lossless-claw-adapter] compact uses agent local model', {

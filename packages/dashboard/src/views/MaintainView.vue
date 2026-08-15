@@ -196,14 +196,7 @@ function stopExtractPolling(): void {
 }
 
 // 重建卡片进入 loading 即开始轮询，结束即停止
-watch(
-  () => loadingMap.extract_rebuild,
-  (loading) => {
-    if (loading) startExtractPolling();
-    else stopExtractPolling();
-  },
-);
-
+// 注意：必须放在 loadingMap 声明之后（依赖 loadingMap）
 onUnmounted(stopExtractPolling);
 
 // 卡片 10：Bootstrap 反馈（v2.3.5 新增）
@@ -238,6 +231,14 @@ function validateOpenclawPath(p: string): string | null {
 
 const logs = ref<OperationLogEntry[]>([]);
 const loadingMap = reactive<Record<string, boolean>>({});
+// 重建卡片进入 loading 即开始轮询，结束即停止（依赖 loadingMap，须在其声明后）
+watch(
+  () => loadingMap.extract_rebuild,
+  (loading) => {
+    if (loading) startExtractPolling();
+    else stopExtractPolling();
+  },
+);
 /** 每张卡片最近一次完成的执行结果（用于卡片内摘要展示） */
 const lastResultMap = reactive<Record<string, {
   status: 'success' | 'error';

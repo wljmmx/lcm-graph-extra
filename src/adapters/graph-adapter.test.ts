@@ -105,7 +105,7 @@ describe('GraphAdapter', () => {
       'user text',
       'assistant text',
     );
-    expect(result).toEqual({ nodes: 0, edges: 0 });
+    expect(result).toEqual({ nodes: 0, edges: 0, llmOutputTokens: 0, llmHasOutput: false });
   });
 
   describe('health() 重试计数', () => {
