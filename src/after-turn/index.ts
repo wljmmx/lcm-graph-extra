@@ -302,6 +302,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                     { label: 'S-9 consolidateBuffer' },
                   );
                   if (!consolidated || !consolidated.consolidatedIds?.length) {
+                    // 本地主模型时，LosslessClawAdapter.compact 内部会统一注入本地 llm.complete
                     await ctx.losslessClawAdapter.compact({
                       sessionId: _sessionId,
                       sessionKey: sk,

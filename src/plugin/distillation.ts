@@ -97,6 +97,42 @@ export function getLastRuntimeLlmSnapshot(): RuntimeLlmSnapshot | null {
   return _lastRuntimeLlmSnapshot;
 }
 
+/**
+ * 构建一个基于本地主模型的 llm.complete 函数，供 lossless-claw 等外部引擎直接调用。
+ *
+ * 用途：当 agent 主模型为本地 ollama/局域网模型时，把该模型注入 lossless-claw 的
+ * 压缩/摘要流程，避免其使用自身配置的模型（造成本地模型反复加载/卸载、GPU 争抢）。
+ * 该函数自建 fetch 调用（绕开 OpenClaw SDK 对 llm.allowModelOverride 的策略检查），
+ * 且忽略调用方传入的 model，始终使用传入的本地模型。
+ *
+ * @param snapshot 本地主模型快照（model / baseURL / apiKey）
+ */
+export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
+  const model = snapshot.model;
+  const baseURL = snapshot.baseURL || 'http://127.0.0.1:18789/v1';
+  const apiKey = snapshot.apiKey || '';
+  return async (p: any) => {
+    const { callLlm: _callLlm } = await import('../utils/llm-call.js');
+    const { ensureOllamaV1Path } = await import('../utils/url.js');
+    const _msgs: any[] = Array.isArray(p?.messages) ? p.messages : [];
+    const _text = p?.systemPrompt
+      ? `${p.systemPrompt}\n\n${_msgs.map((m: any) => `${m.role ?? 'user'}: ${m.content ?? ''}`).join('\n')}`
+      : _msgs.map((m: any) => `${m.role ?? 'user'}: ${m.content ?? ''}`).join('\n');
+    const _r = await _callLlm({
+      baseURL: ensureOllamaV1Path(baseURL),
+      apiKey,
+      model, // 忽略调用方传入的 model，始终用本地主模型
+      prompt: _text,
+      temperature: p?.temperature ?? 0.3,
+      maxTokens: p?.maxTokens ?? 1024,
+      keepAlive: '1h',
+      think: p?.think,
+      signal: p?.signal,
+    });
+    return { text: _r?.text ?? '', provider: 'ollama', model };
+  };
+}
+
 export function resolveDistillationLlm(apiRef: any) {
   // 1) 优先从 runtimeContext.llm 读取（SDK 注入的运行时会话模型，对话内有效）
   let runtimeLlm = apiRef?.runtimeContext?.llm;

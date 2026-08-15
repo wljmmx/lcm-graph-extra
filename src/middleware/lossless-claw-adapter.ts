@@ -27,6 +27,7 @@ import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
+import { getLastRuntimeLlmSnapshot, buildLocalLlmComplete } from '../plugin/distillation.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -580,6 +581,38 @@ export class LosslessClawAdapter {
     // P0-AUDIT: 统一用 coerceSessionId 强制 sessionId String 化
     // 避免 lossless-claw 内部 sessionId.trim() 抛 TypeError
     params = coerceSessionId(params);
+
+    // ── G-MODEL-SYNC: 本地主模型时，让 lossless-claw 压缩直接使用本地模型 ──
+    // 统一在此注入，覆盖所有 compact 调用方（/compact 主路径、assemble 预压缩、
+    // S-9 主题切换、hooks 压力响应等），避免每处重复实现。
+    // 判定依据：最近一次会话主模型快照（recordRuntimeLlm 在每个轮次更新）。
+    //  - 本地模型 → 注入自建 llm.complete（基于 callLlm 直连本地模型），
+    //    lossless-claw 摘要/DAG LLM 直接走本地模型，不再读取自身配置，
+    //    避免本地模型与配置模型反复加载/卸载、GPU 争抢。自建 complete 绕过
+    //    OpenClaw SDK 对 llm.allowModelOverride 的策略检查（我们自行 fetch）。
+    //  - 远程/无快照 → 不改动 params，lossless-claw 回退到其自身 LLM 配置。
+    const _lcSnap = getLastRuntimeLlmSnapshot() ?? null;
+    if (_lcSnap?.model) {
+      try {
+        const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);
+        const _lcLlm = { complete: _lcLocalComplete };
+        params = {
+          ...params,
+          llm: _lcLlm,
+          runtimeContext: { ...((params as any).runtimeContext ?? {}), llm: _lcLlm },
+          legacyParams: { ...((params as any).legacyParams ?? {}), llm: _lcLlm },
+          runtimeModelOverride: _lcSnap.model,
+        };
+        this.logger?.info?.('[lossless-claw-adapter] compact uses agent local model', {
+          model: _lcSnap.model,
+          baseURL: _lcSnap.baseURL ?? null,
+        });
+      } catch (lcInjectErr) {
+        this.logger?.warn?.('[lossless-claw-adapter] compact local-llm injection failed, using default', {
+          err: lcInjectErr instanceof Error ? lcInjectErr.message : String(lcInjectErr),
+        });
+      }
+    }
 
     try {
       // Call lossless-claw's compact engine

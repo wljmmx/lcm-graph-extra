@@ -1115,6 +1115,9 @@ const pluginEntry: any = definePluginEntry({
                     // 其 plugins.entries.lossless-claw.llm.allowModelOverride 配置已生效。
                     // 注意：engine.ts 通过 legacyParams = asRecord(runtimeContext) ?? legacyParams
                     // 读取 llm，所以必须同时从顶层、runtimeContext、legacyParams 三个位置剥离。
+                    //
+                    // 本地主模型场景：LosslessClawAdapter.compact 内部会统一注入自建
+                    // llm.complete（直连本地模型），此处无需重复处理（见 adapter）。
                     llm: undefined,
                     runtimeContext: {
                       ...((params as any).runtimeContext ?? {}),
