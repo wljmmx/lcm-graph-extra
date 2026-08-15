@@ -37,7 +37,7 @@ export function isOllamaModel(model: string): boolean {
 }
 
 /**
- * 最近一次用户会话的主模型快照。
+ * 会话级主模型快照。
  *
  * 设计背景：
  * - resolveDistillationLlm 优先读 apiRef.runtimeContext.llm，但后者只在单轮
@@ -47,54 +47,85 @@ export function isOllamaModel(model: string): boolean {
  *   配置（硬编码 ollama/qwen3.6:27b 或用户设置的 Qwen3.6-35B-A3B-MTP），进而
  *   与当前正在运行的本地主模型争抢 GPU、造成反复加载/卸载。
  *
+ * 存储策略：
+ * - 按 sessionKey 分键存储（_sessionLlmSnapshots）：不同 agent/会话各自使用自己的
+ *   本地主模型快照，避免跨会话串用。
+ * - 同时维护"当前活跃本地模型"（_activeLocalLlmSnapshot）：用于 cron / 心跳等
+ *   无 sessionKey 的后台任务。多个本地会话并行时取最近一次活跃的本地模型。
+ *
  * 使用规则：
  * - 用户轮次中检测到 runtimeContext.llm 是本地模型时，调用 recordRuntimeLlm
- *   写入快照。
- * - resolveDistillationLlm 在 apiRef.runtimeContext.llm 缺失时读取该快照，
- *   若快照本身仍是本地模型则优先复用。
- * - 远程模型不写入快照也不通过快照复用，保证远程主模型场景下仍然使用
- *   distillationLlm.* 配置的模型。
+ *   写入对应 sessionKey 快照，并更新活跃本地模型。
+ * - 远程模型：删除该 sessionKey 的快照；不更新活跃本地模型（后台任务回退到配置）。
+ * - resolveDistillationLlm 在 apiRef.runtimeContext.llm 缺失时读取活跃本地模型。
  */
 type RuntimeLlmSnapshot = {
   model: string;
   baseURL?: string | null;
   apiKey?: string;
 };
-let _lastRuntimeLlmSnapshot: RuntimeLlmSnapshot | null = null;
+/** 按 sessionKey 分键的本地主模型快照 */
+const _sessionLlmSnapshots = new Map<string, RuntimeLlmSnapshot>();
+/** 最近一次活跃的本地主模型快照（供 cron 等无 sessionKey 场景） */
+let _activeLocalLlmSnapshot: RuntimeLlmSnapshot | null = null;
 
 /**
- * 记录最近一次用户会话的主模型快照。仅当主模型为本地部署时写入，避免污染远程场景。
+ * 记录某会话的主模型快照。仅当主模型为本地部署时写入，避免污染远程场景。
  *
  * 参数：
  * - runtimeLlm: SDK 注入的 params.runtimeContext.llm（可能只含 complete，无 model/baseURL）
  * - agentModel: params.model，即 agent 当前正在使用的模型（如 "qwen3.8:27b" /
  *   "ollama/qwen3.8:27b"）。这是判定本地/远程的权威来源，弥补 runtimeLlm
  *   可能缺失的 model 字段。
+ * - sessionKey: 当前会话标识（如 params.sessionKey / params.session_id）。
+ *   传入时按它分键存储；为空（如某些后台入口）则只更新活跃本地模型。
  *
  * 调用方：index.ts 的 assemble / afterTurn 入口，每个用户轮次都会触发，
  * 从而在同 session 内通过 /model 切换模型后能及时重新探测判定。
  */
-export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown): void {
+export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown, sessionKey?: unknown): void {
   const model = String(agentModel ?? runtimeLlm?.model ?? '');
   if (!model) return;
   const baseURL = runtimeLlm?.baseURL ? String(runtimeLlm.baseURL) : undefined;
   // 本地判定：isLocalLlm(baseURL) 或 isOllamaModel(model)
   const isLocal = (baseURL && isLocalLlm(baseURL, model)) || isOllamaModel(model);
+  const sk = typeof sessionKey === 'string' && sessionKey.trim() ? sessionKey.trim() : '';
   if (!isLocal) {
-    // 主模型切到远程时主动清空快照，避免远程会话之后的后台任务还复用旧本地模型
-    _lastRuntimeLlmSnapshot = null;
+    // 主模型切到远程：删除该会话的快照；不更新活跃本地模型，
+    // 保证该会话/后台任务随后回退到蒸馏配置，而非旧本地模型。
+    if (sk) _sessionLlmSnapshots.delete(sk);
     return;
   }
-  _lastRuntimeLlmSnapshot = {
+  const snap: RuntimeLlmSnapshot = {
     model,
     baseURL: baseURL ?? null,
     apiKey: runtimeLlm?.apiKey ? String(runtimeLlm.apiKey) : '',
   };
+  if (sk) _sessionLlmSnapshots.set(sk, snap);
+  _activeLocalLlmSnapshot = snap;
 }
 
-/** 获取最近一次本地主模型快照（只读，供诊断/测试使用） */
+/**
+ * 获取指定会话的本地主模型快照（只读）。会话无快照时返回 null。
+ * 供 lossless-claw compact 等按 sessionKey 取模型的场景使用。
+ */
+export function getSessionLlmSnapshot(sessionKey?: unknown): RuntimeLlmSnapshot | null {
+  const sk = typeof sessionKey === 'string' && sessionKey.trim() ? sessionKey.trim() : '';
+  if (!sk) return null;
+  return _sessionLlmSnapshots.get(sk) ?? null;
+}
+
+/**
+ * 获取最近一次活跃的本地主模型快照（只读，供 cron 等无 sessionKey 场景使用）。
+ * 远程切换后可能为 null（此时后台任务回退到蒸馏配置）。
+ */
+export function getActiveLocalLlmSnapshot(): RuntimeLlmSnapshot | null {
+  return _activeLocalLlmSnapshot;
+}
+
+/** @deprecated 使用 getActiveLocalLlmSnapshot() 替代 */
 export function getLastRuntimeLlmSnapshot(): RuntimeLlmSnapshot | null {
-  return _lastRuntimeLlmSnapshot;
+  return _activeLocalLlmSnapshot;
 }
 
 /**
@@ -136,9 +167,9 @@ export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot): (p: any) =>
 export function resolveDistillationLlm(apiRef: any) {
   // 1) 优先从 runtimeContext.llm 读取（SDK 注入的运行时会话模型，对话内有效）
   let runtimeLlm = apiRef?.runtimeContext?.llm;
-  // 2) 若 api 单例没有（非对话上下文），尝试最近一次会话主模型快照
-  if (!runtimeLlm?.model && _lastRuntimeLlmSnapshot) {
-    runtimeLlm = _lastRuntimeLlmSnapshot as any;
+  // 2) 若 api 单例没有（非对话上下文），尝试最近一次活跃本地模型快照
+  if (!runtimeLlm?.model && _activeLocalLlmSnapshot) {
+    runtimeLlm = _activeLocalLlmSnapshot as any;
   }
   // 插件配置：openclaw.json 中 plugins.entries.lcm-graph-extra.config
   // 注意：属性名是 pluginConfig，不是 config（api.config 是 workspace 配置）
@@ -410,8 +441,8 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     log?.info?.('distillation: resolved LLM', {
       model: llm.model,
       baseURL: llm.baseURL,
-      source: _lastRuntimeLlmSnapshot ? 'agent-main-model-snapshot' : 'distillationLlm-config-or-env',
-      agentModel: _lastRuntimeLlmSnapshot?.model ?? null,
+      source: _activeLocalLlmSnapshot ? 'agent-main-model-snapshot' : 'distillationLlm-config-or-env',
+      agentModel: _activeLocalLlmSnapshot?.model ?? null,
     });
   } catch (llmErr) {
     log?.warn?.('distillation: resolveDistillationLlm failed', { err: String(llmErr) });

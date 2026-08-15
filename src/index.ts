@@ -717,7 +717,9 @@ const pluginEntry: any = definePluginEntry({
           const rllm = (params as any)?.runtimeContext?.llm;
           // 传入 params.model 作为权威 agent 模型：同 session 内用 /model 切换后，
           // 每个轮次都会重新探测判定本地/远程，避免后台任务沿用旧模型。
-          distillationModule.recordRuntimeLlm?.(rllm, params.model);
+          // 传入 sessionKey：不同 agent/会话各自使用自己的本地模型快照。
+          const _sk = (params as any)?.sessionKey ?? (params as any)?.session_id ?? '';
+          distillationModule.recordRuntimeLlm?.(rllm, params.model, _sk);
         } catch { /* ignore */ }
 
         // 捕获活跃模型 ID，供 compact 回查模型实际上下文窗口
@@ -798,7 +800,8 @@ const pluginEntry: any = definePluginEntry({
         // 两者都调用 recordRuntimeLlm 以保证任何路径触发的后续后台任务都能拿到）
         try {
           const rllm = (params as any)?.runtimeContext?.llm;
-          distillationModule.recordRuntimeLlm?.(rllm, params.model);
+          const _sk = (params as any)?.sessionKey ?? (params as any)?.session_id ?? '';
+          distillationModule.recordRuntimeLlm?.(rllm, params.model, _sk);
         } catch { /* ignore */ }
 
         // R-1: 委托给 src/after-turn/index.ts

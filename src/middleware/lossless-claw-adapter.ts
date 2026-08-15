@@ -27,7 +27,7 @@ import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
-import { getLastRuntimeLlmSnapshot, buildLocalLlmComplete } from '../plugin/distillation.js';
+import { getSessionLlmSnapshot, getActiveLocalLlmSnapshot, buildLocalLlmComplete } from '../plugin/distillation.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -585,13 +585,21 @@ export class LosslessClawAdapter {
     // ── G-MODEL-SYNC: 本地主模型时，让 lossless-claw 压缩直接使用本地模型 ──
     // 统一在此注入，覆盖所有 compact 调用方（/compact 主路径、assemble 预压缩、
     // S-9 主题切换、hooks 压力响应等），避免每处重复实现。
-    // 判定依据：最近一次会话主模型快照（recordRuntimeLlm 在每个轮次更新）。
+    // 判定依据（按 sessionKey 分键 + 活跃模型回退）：
+    //  - 优先取本会话（params.sessionKey / session_id）的本地主模型快照，
+    //    不同 agent/会话各自用各自的模型，避免跨会话串用。
+    //  - 无 sessionKey（cron / 心跳等后台任务）时，回退到最近一次活跃本地模型。
     //  - 本地模型 → 注入自建 llm.complete（基于 callLlm 直连本地模型），
-    //    lossless-claw 摘要/DAG LLM 直接走本地模型，不再读取自身配置，
-    //    避免本地模型与配置模型反复加载/卸载、GPU 争抢。自建 complete 绕过
-    //    OpenClaw SDK 对 llm.allowModelOverride 的策略检查（我们自行 fetch）。
+    //    lossless-claw 摘要/DAG LLM 直接走本地模型，不再读取自身配置，避免本地
+    //    模型与配置模型反复加载/卸载、GPU 争抢。自建 complete 绕过 OpenClaw SDK
+    //    对 llm.allowModelOverride 的策略检查（我们自行 fetch）。
     //  - 远程/无快照 → 不改动 params，lossless-claw 回退到其自身 LLM 配置。
-    const _lcSnap = getLastRuntimeLlmSnapshot() ?? null;
+    const _lcSk = typeof params.sessionKey === 'string' && params.sessionKey.trim()
+      ? params.sessionKey.trim()
+      : (typeof params.session_id === 'string' && params.session_id.trim() ? params.session_id.trim() : '');
+    const _lcSnap = _lcSk
+      ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
+      : getActiveLocalLlmSnapshot();
     if (_lcSnap?.model) {
       try {
         const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);
@@ -604,6 +612,7 @@ export class LosslessClawAdapter {
           runtimeModelOverride: _lcSnap.model,
         };
         this.logger?.info?.('[lossless-claw-adapter] compact uses agent local model', {
+          sessionKey: _lcSk || null,
           model: _lcSnap.model,
           baseURL: _lcSnap.baseURL ?? null,
         });
