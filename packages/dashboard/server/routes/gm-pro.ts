@@ -38,10 +38,17 @@ import { readGmProRawConfig } from './config';
 /** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
 const GM_PRO_HTTP_URL = process.env.GM_PRO_HTTP_URL ?? 'http://127.0.0.1:7850';
 const GM_PRO_HTTP_TIMEOUT = Number(process.env.GM_PRO_HTTP_TIMEOUT ?? 10_000);
-// 长时任务路径 → 更长的代理超时（ms）。单会话 rebuild 仍同步等待（逐轮 LLM 提取，可能耗时很长）。
-// rebuild-all v2.4.1 已异步化（立即返回 202），不再需要长超时。
+// 长时任务路径 → 更长的代理超时（ms）。
+// 全量维护（PageRank/社区检测/孤立节点）、增量维护、过时刷新、重新向量化 均需遍历全图，
+// 10s 默认超时不够。rebuild-all v2.4.1 已异步化（立即返回 202），但单会话 rebuild 仍同步等待。
 const GM_PRO_LONG_TASK_TIMEOUT = Number(process.env.GM_PRO_HTTP_LONG_TIMEOUT ?? 30 * 60_000);
-const GM_PRO_LONG_TASK_PATHS = new Set<string>(['/api/extract/rebuild']);
+const GM_PRO_LONG_TASK_PATHS = new Set<string>([
+  '/api/extract/rebuild',
+  '/api/maintain',
+  '/api/maintain/incremental',
+  '/api/staleness/refresh',
+  '/api/reembed',
+]);
 
 /** 按代理路径解析超时（长时任务用长超时，其余用默认） */
 function resolveGmProTimeout(proxyPath: string): number {
