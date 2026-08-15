@@ -36,9 +36,66 @@ export function isOllamaModel(model: string): boolean {
   return false;
 }
 
+/**
+ * 最近一次用户会话的主模型快照。
+ *
+ * 设计背景：
+ * - resolveDistillationLlm 优先读 apiRef.runtimeContext.llm，但后者只在单轮
+ *   assemble/afterTurn 的 params.runtimeContext 中注入，不在 plugin api 单例上保留。
+ * - 因此后台 cron 蒸馏（每 2 小时）、compaction provider、maintain 等非对话上下
+ *   文调用时，runtimeContext.llm 恒为 undefined，必然回退到 distillationLlm.*
+ *   配置（硬编码 ollama/qwen3.6:27b 或用户设置的 Qwen3.6-35B-A3B-MTP），进而
+ *   与当前正在运行的本地主模型争抢 GPU、造成反复加载/卸载。
+ *
+ * 使用规则：
+ * - 用户轮次中检测到 runtimeContext.llm 是本地模型时，调用 recordRuntimeLlm
+ *   写入快照。
+ * - resolveDistillationLlm 在 apiRef.runtimeContext.llm 缺失时读取该快照，
+ *   若快照本身仍是本地模型则优先复用。
+ * - 远程模型不写入快照也不通过快照复用，保证远程主模型场景下仍然使用
+ *   distillationLlm.* 配置的模型。
+ */
+type RuntimeLlmSnapshot = {
+  model: string;
+  baseURL?: string | null;
+  apiKey?: string;
+};
+let _lastRuntimeLlmSnapshot: RuntimeLlmSnapshot | null = null;
+
+/**
+ * 记录最近一次用户会话的主模型快照。仅当主模型为本地部署时写入，避免污染远程场景。
+ * 调用方：index.ts 的 assemble / afterTurn / compact 入口。
+ */
+export function recordRuntimeLlm(runtimeLlm: any): void {
+  if (!runtimeLlm?.model) return;
+  const model = String(runtimeLlm.model);
+  const baseURL = runtimeLlm.baseURL ? String(runtimeLlm.baseURL) : undefined;
+  // 本地判定：isLocalLlm(baseURL) 或 isOllamaModel(model)
+  const isLocal = (baseURL && isLocalLlm(baseURL, model)) || isOllamaModel(model);
+  if (!isLocal) {
+    // 主模型切到远程时主动清空快照，避免远程会话之后的后台任务还复用旧本地模型
+    _lastRuntimeLlmSnapshot = null;
+    return;
+  }
+  _lastRuntimeLlmSnapshot = {
+    model,
+    baseURL: baseURL ?? null,
+    apiKey: runtimeLlm.apiKey ? String(runtimeLlm.apiKey) : '',
+  };
+}
+
+/** 获取最近一次本地主模型快照（只读，供诊断/测试使用） */
+export function getLastRuntimeLlmSnapshot(): RuntimeLlmSnapshot | null {
+  return _lastRuntimeLlmSnapshot;
+}
+
 export function resolveDistillationLlm(apiRef: any) {
-  // 优先从 runtimeContext.llm 读取（SDK 注入的运行时会话模型）
-  const runtimeLlm = apiRef?.runtimeContext?.llm;
+  // 1) 优先从 runtimeContext.llm 读取（SDK 注入的运行时会话模型，对话内有效）
+  let runtimeLlm = apiRef?.runtimeContext?.llm;
+  // 2) 若 api 单例没有（非对话上下文），尝试最近一次会话主模型快照
+  if (!runtimeLlm?.model && _lastRuntimeLlmSnapshot) {
+    runtimeLlm = _lastRuntimeLlmSnapshot as any;
+  }
   // 插件配置：openclaw.json 中 plugins.entries.lcm-graph-extra.config
   // 注意：属性名是 pluginConfig，不是 config（api.config 是 workspace 配置）
   const pluginConfig = apiRef?.pluginConfig ?? apiRef?.config ?? {};

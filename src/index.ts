@@ -709,6 +709,15 @@ const pluginEntry: any = definePluginEntry({
        * Assemble — optimized: instances reused, L2/L3/L4 fully parallelized.
        */
       async assemble(params: any) {
+        // G-MODEL-SYNC: 捕获会话主模型快照，供后台 cron 蒸馏 / compact provider
+        // 等非对话上下文复用，避免本地主模型与 distillationLlm 配置争抢 GPU。
+        // 仅当 params.runtimeContext.llm 存在时记录；recordRuntimeLlm 内部会判定
+        // 是否为本地模型，非本地（远程）时自动清空快照。
+        try {
+          const rllm = (params as any)?.runtimeContext?.llm;
+          if (rllm) distillationModule.recordRuntimeLlm?.(rllm);
+        } catch { /* ignore */ }
+
         // 捕获活跃模型 ID，供 compact 回查模型实际上下文窗口
         const modelId = typeof params.model === "string" ? params.model : "";
         if (modelId && _modelRegistry) {
@@ -783,6 +792,13 @@ const pluginEntry: any = definePluginEntry({
       },
 
       async afterTurn(params: any) {
+        // G-MODEL-SYNC: 同步写入主模型快照（afterTurn 与 assemble 可能先后调用，
+        // 两者都调用 recordRuntimeLlm 以保证任何路径触发的后续后台任务都能拿到）
+        try {
+          const rllm = (params as any)?.runtimeContext?.llm;
+          if (rllm) distillationModule.recordRuntimeLlm?.(rllm);
+        } catch { /* ignore */ }
+
         // R-1: 委托给 src/after-turn/index.ts
         const ctx: AfterTurnContext = {
           api,
