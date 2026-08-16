@@ -8,6 +8,8 @@
  * - runDistillation: batch process pending experiences
  */
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { ensureOllamaV1Path, ensureAnthropicMessagesPath } from '../utils/url.js';
 import { callLlm, isLocalLlm } from '../utils/llm-call.js';
 import { businessMetrics } from '../health-metrics.js';
@@ -69,6 +71,71 @@ const _sessionLlmSnapshots = new Map<string, RuntimeLlmSnapshot>();
 /** 最近一次活跃的本地主模型快照（供 cron 等无 sessionKey 场景） */
 let _activeLocalLlmSnapshot: RuntimeLlmSnapshot | null = null;
 
+// ---------------------------------------------------------------------------
+// agent provider 地址解析（~/.openclaw/openclaw.json 的 models.providers）
+// ---------------------------------------------------------------------------
+// SDK 注入的 runtimeContext.llm.baseURL 通常是 OpenClaw 内置网关地址
+// （如 http://127.0.0.1:18789/v1），而非 agent 实际使用的 provider 端点。
+// 直接复用该地址做蒸馏/压缩直连，会打到错误的 endpoint。
+// 这里读取 openclaw.json 的 models.providers.<providerKey>.baseURL 作为权威地址，
+// 在 recordRuntimeLlm 写快照时就覆盖掉网关地址，让后续所有 use 方拿到真实端点。
+type ProviderInfo = { baseURL: string; modelIds: Set<string> };
+const _providerInfos = new Map<string, ProviderInfo>();
+let _providersLoaded = false;
+
+function loadAgentProviders(): void {
+  if (_providersLoaded) return;
+  try {
+    const cfgPath = homedir() + "/.openclaw/openclaw.json";
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+    const providers = cfg?.models?.providers ?? {};
+    for (const [key, def] of Object.entries(providers)) {
+      const p = def as any;
+      const baseURL = p?.baseURL ? String(p.baseURL) : '';
+      const modelIds = new Set<string>();
+      if (Array.isArray(p?.models)) {
+        for (const m of p.models) if (m?.id) modelIds.add(String(m.id));
+      }
+      _providerInfos.set(key, { baseURL, modelIds });
+    }
+    _providersLoaded = true; // 仅解析成功后置位，读取失败可下次重试
+  } catch {
+    /* 读取不到 openclaw.json 时保持空，回退到原逻辑 */
+  }
+}
+
+/**
+ * 解析 agent 使用的 provider 对应的真实 baseURL。
+ * 匹配规则：优先 provider/model 前缀；否则按 modelId 短 ID 匹配；仍不中就取唯一
+ * 配了 baseURL 的 provider。
+ * @returns 找到的 provider baseURL，无则 null
+ */
+function resolveProviderBaseURL(model: string): string | null {
+  if (!model) return null;
+  loadAgentProviders();
+  if (_providerInfos.size === 0) return null;
+
+  // 1) provider/model 前缀精确匹配
+  if (model.includes('/')) {
+    const p = model.split('/')[0];
+    const info = _providerInfos.get(p);
+    if (info?.baseURL) return info.baseURL;
+  }
+
+  // 2) 短 ID 匹配：agent model 命中的 provider
+  const shortId = model.includes('/') ? model.split('/').pop() : model;
+  if (shortId) {
+    for (const [, info] of _providerInfos) {
+      if (info.baseURL && info.modelIds.has(shortId)) return info.baseURL;
+    }
+  }
+
+  // 3) 兜底：仅一个 provider 配了 baseURL 时使用它
+  const registered: string[] = [];
+  for (const [, info] of _providerInfos) if (info.baseURL) registered.push(info.baseURL);
+  return registered.length === 1 ? registered[0] : null;
+}
+
 /**
  * 记录某会话的主模型快照。仅当主模型为本地部署时写入，避免污染远程场景。
  *
@@ -86,7 +153,7 @@ let _activeLocalLlmSnapshot: RuntimeLlmSnapshot | null = null;
 export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown, sessionKey?: unknown): void {
   const model = String(agentModel ?? runtimeLlm?.model ?? '');
   if (!model) return;
-  const baseURL = runtimeLlm?.baseURL ? String(runtimeLlm.baseURL) : undefined;
+  let baseURL = runtimeLlm?.baseURL ? String(runtimeLlm.baseURL) : undefined;
   // 本地判定：isLocalLlm(baseURL) 或 isOllamaModel(model)
   const isLocal = (baseURL && isLocalLlm(baseURL, model)) || isOllamaModel(model);
   const sk = typeof sessionKey === 'string' && sessionKey.trim() ? sessionKey.trim() : '';
@@ -95,6 +162,13 @@ export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown, sessionK
     // 保证该会话/后台任务随后回退到蒸馏配置，而非旧本地模型。
     if (sk) _sessionLlmSnapshots.delete(sk);
     return;
+  }
+  // BUGFIX: SDK 注入的 baseURL 常是 OpenClaw 网关地址（127.0.0.1:18789），
+  // 用户实际配置的 Ollama 端点在 models.providers.<provider>.baseURL。
+  // 本地模型时优先用 provider 权威地址覆盖，避免蒸馏/压缩直连打到网关。
+  const providerBaseURL = resolveProviderBaseURL(model);
+  if (providerBaseURL) {
+    baseURL = providerBaseURL;
   }
   const snap: RuntimeLlmSnapshot = {
     model,
@@ -137,13 +211,10 @@ export function getLastRuntimeLlmSnapshot(): RuntimeLlmSnapshot | null {
  * 且忽略调用方传入的 model，始终使用传入的本地模型。
  *
  * @param snapshot 本地主模型快照（model / baseURL / apiKey）
- * @param fallbackBaseURL 可选兜底 baseURL（snapshot.baseURL 为网关地址时使用）
  */
-export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot, fallbackBaseURL?: string): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
+export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
   const model = snapshot.model;
-  // BUGFIX: 当 snapshot.baseURL 是网关地址（127.0.0.1:18789）时，优先使用
-  // fallbackBaseURL（调用方传入的 config 实际 Ollama 地址），而非网关地址。
-  const baseURL = _resolveActualBaseURL(snapshot.baseURL, fallbackBaseURL);
+  const baseURL = snapshot.baseURL || 'http://127.0.0.1:18789/v1';
   const apiKey = snapshot.apiKey || '';
   return async (p: any) => {
     const { callLlm: _callLlm } = await import('../utils/llm-call.js');
