@@ -2552,6 +2552,9 @@ const pluginEntry: any = definePluginEntry({
         // 索引与 schema 会永久缺失 → L4 全文检索等 API 降级甚至"丢失"且不自愈。
         // 这里在 graph 连接建立/恢复后按状态机重跑（幂等，IF NOT EXISTS + cjk），
         // 仅在连接丢失后复位验证标记，连接恢复的下一轮自动重新补齐。
+        // force=true：连接建立后做一次"先 DROP 再按规范 CREATE"的强制重建，能修掉
+        // 损坏/类型错误的 FULLTEXT 索引（非 force 的 SHOW+校验类型对"SHOW 报 FULLTEXT
+        // 但实际不可用"的损坏索引是空操作）。每连接段仅执行一次，成本可接受。
         if (graphAdapter && expStore && typeof expStore.ensureIndexes === 'function') {
           const _graphConnected = typeof graphAdapter.isConnected === 'boolean'
             ? graphAdapter.isConnected
@@ -2559,7 +2562,7 @@ const pluginEntry: any = definePluginEntry({
           if (_graphConnected) {
             if (!_expIndexesVerified) {
               try {
-                await expStore.ensureIndexes();
+                await expStore.ensureIndexes(true);
                 _expIndexesVerified = true;
                 logger?.debug?.('heartbeat: EXPERIENCE fulltext indexes verified');
               } catch (idxErr) {

@@ -263,11 +263,14 @@ const CLEANUP_EXPIRED = `
 export class ExperienceStorage {
   private adapter: GraphQueryExecutor;
   /**
-   * 全文索引查询时自愈标记：首次遇到"无全文索引"错误时重建索引并重试一次。
-   * 仅当重建仍失败（权限/版本不支持）才置位，避免每次搜索都重复尝试；
-   * 心跳周期仍会持续重试补齐索引。
+   * 全文索引查询自愈节流：遇到"无全文索引/索引损坏"错误时，强制 DROP+重建并重试。
+   * 用一个时间戳代替旧的布尔标记，避免第一次重建失败后永久不再重试
+   * （旧逻辑 _ftSelfHealAttempted=true 置位后永不复位 → 损坏的 FULLTEXT 索引
+   * 一直修不好）。改为节流：同一进程内每次失败后至少间隔 THROTTLE 才再次重建，
+   * 既能恢复瞬时问题，又不会在每次查询都狂打重建。
    */
-  private _ftSelfHealAttempted = false;
+  private _lastFtHealAt = 0;
+  private static FT_HEAL_THROTTLE_MS = 120_000;
 
   constructor(adapter: GraphQueryExecutor) {
     this.adapter = adapter;
@@ -303,7 +306,7 @@ export class ExperienceStorage {
    * 再重建（幂等迁移历史 TEXT 索引），随后创建/确认 FULLTEXT 索引（cjk 分析器，
    * 中文友好）。任一语句失败仅吞掉，不阻塞调用方。
    */
-  async ensureIndexes(): Promise<void> {
+  async ensureIndexes(force = false): Promise<void> {
     const fulltextIndexes: Array<[string, string]> = [
       ['experience_summary_idx', 'summary'],
       ['experience_context_idx', 'context'],
@@ -311,13 +314,22 @@ export class ExperienceStorage {
     ];
     for (const [name, prop] of fulltextIndexes) {
       try {
-        // 若已存在同名非 FULLTEXT 索引（历史 TEXT 索引），先删除再重建
-        const rows = await this.adapter.query('SHOW INDEXES YIELD name, type');
-        const existing = (rows ?? []).find((r: any) => (r as any).name === name);
-        if (existing && String((existing as any).type).toUpperCase() !== 'FULLTEXT') {
+        // 已存在同名非 FULLTEXT 索引（历史 TEXT 索引）或 force 重建时 → 先删除再重建。
+        // 注意：只依赖 SHOW INDEXES 判定类型不可靠——若 FULLTEXT 索引损坏/缓存过期，
+        // SHOW 仍报 FULLTEXT、CREATE ... IF NOT EXISTS 会是空操作，queryNodes 依旧失败。
+        // 因此 force 时无条件 DROP IF EXISTS + CREATE，确保真按规范重建。
+        let needRecreate = force;
+        if (!force) {
+          const rows = await this.adapter.query('SHOW INDEXES YIELD name, type');
+          const existing = (rows ?? []).find((r: any) => (r as any).name === name);
+          if (existing && String((existing as any).type).toUpperCase() !== 'FULLTEXT') {
+            needRecreate = true;
+          }
+        }
+        if (needRecreate) {
           try {
             await this.adapter.query(`DROP INDEX ${name} IF EXISTS`);
-          } catch { /* 删除失败不阻塞（可能已不存在） */ }
+          } catch { /* 删除失败不阻塞（可能已不存在/被占用） */ }
         }
         await this.adapter.query(
           `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${prop}] OPTIONS { analyzer: "cjk" }`,
@@ -485,16 +497,20 @@ export class ExperienceStorage {
     try {
       return await runOnce();
     } catch (err) {
-      // 查询时自愈：全文索引缺失（历史误建 TEXT 索引 / 初始化时 Neo4j 未就绪被吞）时，
-      // 先重建索引（ensureIndexes 幂等：SHOW+校验类型+DROP 旧索引+CREATE FULLTEXT）再重试一次，
-      // 成功即恢复全文检索路径；仍失败则交回 searchByQuery 降级到 CONTAINS。
-      if (!this._ftSelfHealAttempted) {
+      // 查询时自愈：全文索引缺失/损坏（历史误建 TEXT 索引、初始化时 Neo4j 未就绪被吞、
+      // FULLTEXT 索引损坏导致 queryNodes 报 "no such fulltext schema index"）。
+      // 旧逻辑第一次失败后永久不再重试，损坏的 FULLTEXT 索引（SHOW 报 FULLTEXT 但
+      // 实际不可用，IF NOT EXISTS 是空操作）一直修不好。现改为：按节流间隔强制
+      // DROP+重建（force=true 保证按规范重建），再重试一次；成功立即恢复全文检索，
+      // 失败则交回 searchByQuery 降级到 CONTAINS，下次查询在节流后可再次自愈。
+      const now = Date.now();
+      if (now - this._lastFtHealAt >= ExperienceStorage.FT_HEAL_THROTTLE_MS) {
+        this._lastFtHealAt = now;
         try {
-          await this.ensureIndexes();
+          await this.ensureIndexes(true);
           return await runOnce();
         } catch {
-          // 索引确实无法创建（权限/版本），置位避免每次搜索重复尝试；心跳会持续补齐
-          this._ftSelfHealAttempted = true;
+          // 索引确实无法创建（权限/版本），留待节流后再试；心跳也会持续补齐
           throw err;
         }
       }
