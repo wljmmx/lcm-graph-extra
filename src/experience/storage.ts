@@ -341,6 +341,29 @@ export class ExperienceStorage {
   }
 
   /**
+   * 探测全文索引是否真正可用。
+   * 用一次最小的 queryNodes 调用验证每个索引：
+   * - 索引缺失/损坏（queryNodes 报 "no such fulltext schema index"）→ 该请求抛错 → 判定不可用
+   * - 索引健康 → 返回 0 行（无匹配），不抛错 → 判定可用
+   * 这样心跳可以"只在真正坏了才重建"，避免每次连接都无条件 DROP+重建健康索引。
+   * @returns 所有全文索引均可用
+   */
+  async checkFulltextIndexes(): Promise<boolean> {
+    const names = ['experience_summary_idx', 'experience_context_idx', 'experience_title_idx'];
+    for (const name of names) {
+      try {
+        await this.adapter.query(
+          `CALL db.index.fulltext.queryNodes($idx, 'probe') YIELD node RETURN node LIMIT 1`,
+          { idx: name },
+        );
+      } catch {
+        return false; // 任一索引缺失/损坏 → 需要重建
+      }
+    }
+    return true;
+  }
+
+  /**
    * 写入原始经验（标记 PENDING）
    */
   async saveRaw(raw: RawExperience): Promise<void> {

@@ -2552,9 +2552,9 @@ const pluginEntry: any = definePluginEntry({
         // 索引与 schema 会永久缺失 → L4 全文检索等 API 降级甚至"丢失"且不自愈。
         // 这里在 graph 连接建立/恢复后按状态机重跑（幂等，IF NOT EXISTS + cjk），
         // 仅在连接丢失后复位验证标记，连接恢复的下一轮自动重新补齐。
-        // force=true：连接建立后做一次"先 DROP 再按规范 CREATE"的强制重建，能修掉
-        // 损坏/类型错误的 FULLTEXT 索引（非 force 的 SHOW+校验类型对"SHOW 报 FULLTEXT
-        // 但实际不可用"的损坏索引是空操作）。每连接段仅执行一次，成本可接受。
+        // 只在检测到索引真正不可用时才强制 DROP+重建：先做一次轻量 queryNodes 探测，
+        // 健康则仅标记已验证、不重建；探测报错（缺失/损坏）才 ensureIndexes(true)。
+        // 避免每次连接都无条件 DROP+重建健康索引（重建期间索引短暂不可用，浪费）。
         if (graphAdapter && expStore && typeof expStore.ensureIndexes === 'function') {
           const _graphConnected = typeof graphAdapter.isConnected === 'boolean'
             ? graphAdapter.isConnected
@@ -2562,7 +2562,13 @@ const pluginEntry: any = definePluginEntry({
           if (_graphConnected) {
             if (!_expIndexesVerified) {
               try {
-                await expStore.ensureIndexes(true);
+                const _ftOk = typeof expStore.checkFulltextIndexes === 'function'
+                  ? await expStore.checkFulltextIndexes()
+                  : true;
+                if (!_ftOk) {
+                  logger?.warn?.('heartbeat: EXPERIENCE fulltext index unusable, forcing rebuild');
+                  await expStore.ensureIndexes(true);
+                }
                 _expIndexesVerified = true;
                 logger?.debug?.('heartbeat: EXPERIENCE fulltext indexes verified');
               } catch (idxErr) {
