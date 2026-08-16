@@ -262,6 +262,12 @@ const CLEANUP_EXPIRED = `
 
 export class ExperienceStorage {
   private adapter: GraphQueryExecutor;
+  /**
+   * 全文索引查询时自愈标记：首次遇到"无全文索引"错误时重建索引并重试一次。
+   * 仅当重建仍失败（权限/版本不支持）才置位，避免每次搜索都重复尝试；
+   * 心跳周期仍会持续重试补齐索引。
+   */
+  private _ftSelfHealAttempted = false;
 
   constructor(adapter: GraphQueryExecutor) {
     this.adapter = adapter;
@@ -471,7 +477,32 @@ export class ExperienceStorage {
       halfLifeDays,
     };
 
-    const rows = await this.adapter.query<ExperienceSearchRow>(cypher, params);
+    const runOnce = async (): Promise<ExperienceSearchResult[]> => {
+      const rows = await this.adapter.query<ExperienceSearchRow>(cypher, params);
+      return this._mapFulltextRows(rows);
+    };
+
+    try {
+      return await runOnce();
+    } catch (err) {
+      // 查询时自愈：全文索引缺失（历史误建 TEXT 索引 / 初始化时 Neo4j 未就绪被吞）时，
+      // 先重建索引（ensureIndexes 幂等：SHOW+校验类型+DROP 旧索引+CREATE FULLTEXT）再重试一次，
+      // 成功即恢复全文检索路径；仍失败则交回 searchByQuery 降级到 CONTAINS。
+      if (!this._ftSelfHealAttempted) {
+        try {
+          await this.ensureIndexes();
+          return await runOnce();
+        } catch {
+          // 索引确实无法创建（权限/版本），置位避免每次搜索重复尝试；心跳会持续补齐
+          this._ftSelfHealAttempted = true;
+          throw err;
+        }
+      }
+      throw err;
+    }
+  }
+
+  private _mapFulltextRows(rows: Record<string, unknown>[] | null | undefined): ExperienceSearchResult[] {
     return (rows || []).map((r: any) => ({
       experience: rowToDistilled(r),
       score: r.relevanceScore !== undefined

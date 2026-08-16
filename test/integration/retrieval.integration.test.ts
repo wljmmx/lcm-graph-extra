@@ -778,3 +778,63 @@ describe('ExperienceStorage Integration', () => {
     expect(found!.score).toBe(0.9);
   });
 });
+
+// =========================================================================
+// 全文索引查询时自愈：索引缺失（历史误建 TEXT / 初始化时 Neo4j 未就绪）时，
+// 首次搜索应触发 ensureIndexes 重建 FULLTEXT 索引并重试成功，而非永久降级。
+// =========================================================================
+
+describe('ExperienceStorage 全文索引查询时自愈', () => {
+  it('首次全文查询遇 "no such fulltext schema index" 时重建索引并重试成功', async () => {
+    let fulltextCalls = 0;
+    const schemaOps: string[] = [];
+    const adapter: GraphQueryExecutor = {
+      async query(cypher: string): Promise<Record<string, unknown>[]> {
+        const c = cypher.trim();
+        if (c.startsWith('CALL db.index.fulltext.queryNodes')) {
+          fulltextCalls++;
+          if (fulltextCalls === 1) {
+            throw new Error(
+              'Neo4jError: Failed to invoke procedure `db.index.fulltext.queryNodes`: '
+              + 'Caused by: java.lang.IllegalArgumentException: '
+              + 'There is no such fulltext schema index: experience_summary_idx',
+            );
+          }
+          return [{
+            id: 'test-selftest',
+            title: 'React perf',
+            summary: 'Use memo',
+            detail: '',
+            context: 'frontend',
+            relevanceScore: 0.9,
+            createdAt: Date.now(),
+            matchCount: 0,
+            rawIds: '',
+            type: 'bug_fix',
+            tags_scenario: '',
+            tags_techStack: '',
+            tags_severity: '',
+            tags_free: '',
+            queryMatch: 0.8,
+          }];
+        }
+        // 模拟历史遗留的同名 TEXT 索引（ensureIndexes 应识别并先删除再建 FULLTEXT）
+        if (c.startsWith('SHOW INDEXES')) { schemaOps.push('SHOW'); return [{ name: 'experience_summary_idx', type: 'TEXT' } as Record<string, unknown>]; }
+        if (c.startsWith('DROP INDEX')) { schemaOps.push('DROP'); return []; }
+        if (c.startsWith('CREATE FULLTEXT INDEX')) { schemaOps.push('CREATE'); return []; }
+        return [];
+      },
+    };
+
+    const storage = new ExperienceStorage(adapter);
+    const results = await storage.searchByQuery({ query: 'React', minScore: 0.6, limit: 5 });
+
+    // 自愈生效：首次失败 → ensureIndexes（SHOW + DROP 旧 TEXT + CREATE FULLTEXT）→ 重试成功
+    expect(fulltextCalls).toBe(2);
+    expect(schemaOps).toContain('SHOW');
+    expect(schemaOps).toContain('DROP');
+    expect(schemaOps).toContain('CREATE');
+    expect(results.length).toBe(1);
+    expect(results[0].experience.id).toBe('test-selftest');
+  });
+});
