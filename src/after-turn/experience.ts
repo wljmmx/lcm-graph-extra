@@ -13,6 +13,13 @@ import { join } from 'node:path';
 import { detectExperienceTrigger, extractRawExperience } from '../experience/index.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { cleanBaseURL } from '../utils/url.js';
+// G-MODEL-SYNC: 复用会话级本地主模型快照，避免 afterTurn 三元组提取走 SDK complete
+// 时被解析成蒸馏配置模型（Qwen3.6-35B-A3B-MTP），与用户主模型不一致 → 反复加载/卸载。
+import {
+  buildLocalLlmComplete,
+  getSessionLlmSnapshot,
+  getActiveLocalLlmSnapshot,
+} from '../plugin/distillation.js';
 import type { AfterTurnContext } from './types.js';
 
 /**
@@ -108,12 +115,34 @@ export function extractExperiences(
 
 /**
  * 解析 LLM 配置，优先级：
- *   1. SDK runtimeContext.llm.complete
- *   2. resolveDistillationLlm(api)
- *   3. api.pluginConfig.llm / ~/.openclaw/openclaw.json graph-memory-pro 配置
- *   4. 环境变量 OPENAI_API_KEY 等兜底
+ *   1. 会话级本地主模型快照（getSessionLlmSnapshot / getActiveLocalLlmSnapshot）→ 自建 complete 强制主模型
+ *   2. SDK runtimeContext.llm.complete（无本地快照时）
+ *   3. resolveDistillationLlm(api)
+ *   4. api.pluginConfig.llm / ~/.openclaw/openclaw.json graph-memory-pro 配置
+ *   5. 环境变量 OPENAI_API_KEY 等兜底
  */
-function resolveLlmConfig(ctx: AfterTurnContext, params: any): any {
+export function resolveLlmConfig(ctx: AfterTurnContext, params: any): any {
+  // G-MODEL-SYNC: 本地主模型优先（与 lossless-claw compact 一致）。
+  // 若当前会话（或最近活跃）的 agent 主模型是本地模型，自建 complete 强制使用主模型，
+  // 绕开 SDK runtimeContext.llm.complete —— 后者在 cron/后台会话常解析为蒸馏配置模型
+  // （Qwen3.6-35B-A3B-MTP），与用户主模型不一致 → Ollama 反复加载/卸载、GPU 争抢。
+  const _sk = (typeof params?.sessionKey === 'string' && params.sessionKey.trim())
+    ? params.sessionKey.trim()
+    : (typeof params?.session_id === 'string' && params.session_id.trim() ? params.session_id.trim() : '');
+  const _snap = _sk
+    ? (getSessionLlmSnapshot(_sk) ?? getActiveLocalLlmSnapshot())
+    : getActiveLocalLlmSnapshot();
+  if (_snap?.model) {
+    const _localComplete = buildLocalLlmComplete(_snap);
+    return {
+      complete: _localComplete,
+      model: _snap.model,
+      apiKey: _snap.apiKey || '',
+      baseURL: _snap.baseURL || undefined,
+      keepAlive: ctx.api?.pluginConfig?.distillationLlm?.keepAlive || '1h',
+    };
+  }
+
   const sdkLlmComplete = (params as any)?.runtimeContext?.llm?.complete;
   const distillLlm = ctx.resolveDistillationLlm(ctx.api);
 
