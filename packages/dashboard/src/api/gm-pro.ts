@@ -334,6 +334,19 @@ export function fetchGmProDoctor(): Promise<GmProProxyResponse<GmProDoctorResult
   return apiGet<GmProProxyResponse<GmProDoctorResult>>('/api/gm-pro/proxy/doctor');
 }
 
+/**
+ * 生成 Doctor 卡片的空态提示文案（区分 401 / 不可达 / 其他失败原因，
+ * 避免一律误报"authToken 未配置"——空态可能是 gm-pro 不可达或超时而非鉴权问题）。
+ */
+export function formatGmProDoctorHint(error?: string): string {
+  if (!error) return '';
+  if (/401|unauthorized/i.test(error)) {
+    return 'graph-memory-pro 返回 401：请确认 openclaw.json 中 graph-memory-pro 的 apiServer.authToken 与 gm-pro 服务端一致（/api/doctor 为敏感路径需鉴权）。';
+  }
+  if (/不可达|超时|ECONNREFUSED|ETIMEDOUT/i.test(error)) return `graph-memory-pro 不可达：${error}`;
+  return `系统诊断请求失败：${error}`;
+}
+
 // ─── Usage 统计 ────────────────────────────────────────────────────────────
 
 export interface GmProUsage {

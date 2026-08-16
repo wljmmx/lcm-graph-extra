@@ -64,6 +64,7 @@ import {
   fetchGmProAutoTunerState,
   fetchGmProServices,
   fetchGmProDoctor,
+  formatGmProDoctorHint,
   fetchGmProAssociationMatrixState,
   postGmProAssociationMatrixSave,
   postGmProAssociationMatrixLoad,
@@ -251,6 +252,12 @@ const { data: gmProDoctorRes } = useQuery({
   staleTime: 60_000,
 });
 const gmProDoctor = computed(() => gmProDoctorRes.value?.ok ? (gmProDoctorRes.value.data ?? null) : null);
+// G-5.8: Doctor 空态提示按真实原因区分（401 / 不可达 / 其他），避免一律误报鉴权
+const gmProDoctorHint = computed(() => {
+  const res = gmProDoctorRes.value;
+  const err = res && !res.ok ? String(res.error ?? '') : '';
+  return err ? formatGmProDoctorHint(err) : '暂无诊断报告';
+});
 
 // G-5.8: Doctor 报告解析（/api/doctor 返回 checks[] 数组，非顶层 neo4j/llm 对象）
 const gmProDoctorChecks = computed<any[]>(() => {
@@ -2150,7 +2157,7 @@ const moaLatencyPhaseOption = computed(() => {
               </template>
               <NEmpty v-else description="暂无诊断报告" style="padding:12px 0">
                 <template #extra>
-                  <span class="muted" style="font-size:var(--fs-caption)">请确认 openclaw.json 中 graph-memory-pro 的 apiServer.authToken 已配置（/api/doctor 为敏感路径需鉴权）。</span>
+                  <span class="muted" style="font-size:var(--fs-caption)">{{ gmProDoctorHint }}</span>
                 </template>
               </NEmpty>
             </NCard>

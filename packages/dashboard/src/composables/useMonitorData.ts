@@ -153,6 +153,11 @@ export function useMonitorData() {
     staleTime: 60_000,
   });
   const gmProDoctor = computed(() => gmProDoctorRes.value?.ok ? (gmProDoctorRes.value.data ?? null) : null);
+  /** doctor 请求失败时的错误信息（供 DoctorCard 显示真实原因，避免一律误报鉴权） */
+  const gmProDoctorError = computed(() => {
+    const res = gmProDoctorRes.value;
+    return res && !res.ok ? String(res.error ?? '') : '';
+  });
 
   // ── 13. gm-pro-association-matrix (120s) ──
   const { data: gmProAmRes, isLoading: gmProAmLoading, isError: gmProAmIsError } = useQuery({
@@ -219,7 +224,7 @@ export function useMonitorData() {
     gmProUsage, gmProUsageLoading, gmProUsageIsError,
     gmProTuner, gmProTunerLoading, gmProTunerIsError,
     gmProServices, gmProServicesLoading, gmProServicesIsError,
-    gmProDoctor, gmProDoctorLoading, gmProDoctorIsError,
+    gmProDoctor, gmProDoctorLoading, gmProDoctorIsError, gmProDoctorError,
     gmProAm, gmProAmLoading, gmProAmIsError,
     gmProMetrics, gmProMetricsLoading, gmProMetricsIsError,
     // status

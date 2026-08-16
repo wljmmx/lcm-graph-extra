@@ -6,7 +6,7 @@ import { ref } from 'vue';
 import { useQueryClient } from '@tanstack/vue-query';
 import { NGrid, NGi, useMessage } from 'naive-ui';
 import { useMonitorData } from '../../composables/useMonitorData';
-import { postGmProAssociationMatrixSave, postGmProAssociationMatrixLoad } from '../../api/gm-pro';
+import { postGmProAssociationMatrixSave, postGmProAssociationMatrixLoad, formatGmProDoctorHint } from '../../api/gm-pro';
 import AutoTunerCard from '../../components/monitor/AutoTunerCard.vue';
 import DoctorCard from '../../components/monitor/DoctorCard.vue';
 import AssociationMatrixStateCard from '../../components/monitor/AssociationMatrixStateCard.vue';
@@ -19,6 +19,7 @@ const {
   gmProDoctor,
   gmProDoctorLoading,
   gmProDoctorIsError,
+  gmProDoctorError,
   gmProAm,
   gmProAmLoading,
   gmProAmIsError,
@@ -83,6 +84,7 @@ async function handleAmLoad(): Promise<void> {
           :doctor="gmProDoctor"
           :loading="gmProDoctorLoading"
           :is-error="gmProDoctorIsError"
+          :hint="formatGmProDoctorHint(gmProDoctorError)"
         />
       </NGi>
       <NGi>
