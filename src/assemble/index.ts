@@ -447,7 +447,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             sessionId: _lcSid,
             sessionKey: preCompactSessionKey,
             sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
-            force: true,
+            // 预压缩是"预防性"动作，不应强制压缩：force:false 让 lossless-claw 自行判断
+            // DAG 是否真的达到压缩阈值（达到才压），避免低压区间（tokenRatio 刚过 0.55）
+            // 每次 assemble 都强制压缩一遍，打满本地 LLM pending 队列。
+            force: false,
             currentTokenCount: effectiveTokenCount,
             compactionTarget: 'threshold',
           }).then(() => {}, () => {}));
