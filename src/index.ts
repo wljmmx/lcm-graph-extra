@@ -2022,7 +2022,9 @@ const pluginEntry: any = definePluginEntry({
           },
           getRetrievalState: () => {
             const summary = _retrievalGateway?.getPerfSummary?.() ?? 'gateway not initialized';
-            logger?.info?.('[perf-stats] getRetrievalState called', {
+            // dashboard 每 10s 轮询 snapshot 端点都会走到这里，属轮询遥测，
+            // 降为 debug 级避免刷屏。
+            logger?.debug?.('[perf-stats] getRetrievalState called', {
               hasGateway: !!_retrievalGateway,
               hasGetPerfSummary: typeof _retrievalGateway?.getPerfSummary === 'function',
               summary,

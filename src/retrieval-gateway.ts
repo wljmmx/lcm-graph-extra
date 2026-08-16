@@ -264,7 +264,7 @@ export class RetrievalGateway {
 
   /** Get performance summary */
   getPerfSummary(): string {
-    this.logger.info('[perf-stats] getPerfSummary called', {
+    this.logger.debug('[perf-stats] getPerfSummary called', {
       qmd: this.stats.qmd,
       graph: this.stats.graph,
       experience: this.stats.experience,
