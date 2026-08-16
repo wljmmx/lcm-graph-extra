@@ -453,7 +453,11 @@ export async function ensureNeo4jSchema(): Promise<void> {
         }
       } finally { await session.close(); }
     } catch (e) {
-      // schema 初始化失败不阻塞工具主体（仅降低后续查询性能）
+      // schema 初始化失败不阻塞工具主体（仅降低后续查询性能），
+      // 但必须清除 _schemaReady 缓存 —— 否则失败被永久吞掉，
+      // 即使后续 Neo4j 恢复也不会再重试建索引/约束（能力丢失且不自愈）。
+      // 清除后下次调用（工具写入前 / 心跳周期）会重新尝试。
+      _schemaReady = null;
       getGlobalLogger()?.warn?.("[lcm-graph-extra] ensureNeo4jSchema failed", { err: e instanceof Error ? e.message : String(e) });
     }
   })();

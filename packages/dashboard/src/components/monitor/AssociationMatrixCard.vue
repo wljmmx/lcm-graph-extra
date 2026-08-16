@@ -105,17 +105,41 @@ const historySamples = computed<GmProLearningSample[]>(() =>
 
 const historyOption = computed<Record<string, unknown>>(() => {
   const samples = historySamples.value;
+  if (!samples.length) return {};
   const x = samples.map(s => new Date(s.timestamp).toLocaleTimeString());
+  // 学习曲线画的是「每采样窗口增量」（学习速率），而非累计值——
+  // 累计的 feedback/applied/rejected 单调递增、三条线同步上升，看不出
+  // 学习是否在收敛；增量归零即表示学习进入平台期，才是真正有意义的曲线。
+  const deltaFeedback = [0];
+  const deltaApplied = [0];
+  const deltaRejected = [0];
+  for (let i = 1; i < samples.length; i++) {
+    const prev = samples[i - 1];
+    const cur = samples[i];
+    deltaFeedback.push(Math.max(0, cur.feedbackCount - prev.feedbackCount));
+    deltaApplied.push(Math.max(0, cur.updatesApplied - prev.updatesApplied));
+    deltaRejected.push(Math.max(0, cur.updatesRejected - prev.updatesRejected));
+  }
+  // 接受率（窗口增量口径）：applied / (applied + rejected)，无新增时为空点
+  const acceptRate = samples.map((_, i) => {
+    const a = deltaApplied[i];
+    const r = deltaRejected[i];
+    return a + r > 0 ? Math.round((a / (a + r)) * 100) : null;
+  });
   return {
     tooltip: { trigger: 'axis' },
     legend: {},
-    grid: { left: 40, right: 16, top: 28, bottom: 28 },
+    grid: { left: 40, right: 44, top: 28, bottom: 28 },
     xAxis: { type: 'category', data: x, boundaryGap: false },
-    yAxis: { type: 'value', minInterval: 1 },
+    yAxis: [
+      { type: 'value', name: '增量', minInterval: 1 },
+      { type: 'value', name: '接受率%', min: 0, max: 100, splitLine: { show: false } },
+    ],
     series: [
-      { name: '已应用', type: 'line', smooth: true, showSymbol: false, data: samples.map(s => s.updatesApplied) },
-      { name: '被拒', type: 'line', smooth: true, showSymbol: false, data: samples.map(s => s.updatesRejected) },
-      { name: '反馈数', type: 'line', smooth: true, showSymbol: false, data: samples.map(s => s.feedbackCount) },
+      { name: '反馈增量', type: 'line', smooth: true, showSymbol: false, areaStyle: { opacity: 0.08 }, data: deltaFeedback },
+      { name: '应用增量', type: 'line', smooth: true, showSymbol: false, data: deltaApplied },
+      { name: '拒绝增量', type: 'line', smooth: true, showSymbol: false, data: deltaRejected },
+      { name: '接受率%', type: 'line', smooth: true, showSymbol: false, yAxisIndex: 1, lineStyle: { type: 'dashed' }, data: acceptRate },
     ],
   };
 });
@@ -294,7 +318,7 @@ const visualScalars = computed(() => {
         <!-- AM-5: 学习曲线（跨重启历史） -->
         <div style="margin-top:12px">
           <div class="ratio-label">
-            <span class="muted" style="font-size:var(--fs-caption)">学习曲线（跨重启）</span>
+            <span class="muted" style="font-size:var(--fs-caption)">学习速率曲线（跨重启·增量）</span>
             <span class="mono" style="font-size:var(--fs-caption)">
               {{ historySamples.length }} 点
               <span v-if="historyLoading && !historySamples.length && !historyIsError" class="muted"> · 加载中…</span>
@@ -305,7 +329,7 @@ const visualScalars = computed(() => {
             <NButton size="tiny" secondary @click="refetchHistory">重试</NButton>
           </div>
           <NEmpty v-else-if="!historySamples.length" description="暂无采样" style="padding:8px 0" :style="{ fontSize: 'var(--fs-caption)' }" />
-          <EChart v-else :option="historyOption" height="180px" aria-label="关联矩阵M学习曲线：已应用/被拒/反馈数随时间变化" />
+          <EChart v-else :option="historyOption" height="180px" aria-label="关联矩阵M学习速率曲线：每窗口反馈/应用/拒绝增量与接受率随时间变化" />
         </div>
 
         <!-- AM-6: 热力网格（降采样） -->

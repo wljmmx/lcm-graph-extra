@@ -179,6 +179,11 @@ const pluginEntry: any = definePluginEntry({
     let _lastEmbedHealth: boolean = true;
     /** v2.7.0 P1: graph quickHealth 连续失败计数，≥3 次触发 health() 完整恢复 */
     let _graphQuickHealthFailCount = 0;
+    /** API 健壮性自愈：EXPERIENCE 全文索引是否已在本轮连接状态下验证过。
+     *  true 后不再重复建索引；连接丢失/重建时复位为 false，恢复后再验证。 */
+    let _expIndexesVerified = false;
+    /** gm-pro 独立 HTTP API 上一次探测结果（用于记录 断开→恢复 转换日志） */
+    let _lastGmProHttpOk = true;
     let _modelRegistry: Record<string, number> | undefined;
     // 从 assemble 中捕获活跃模型 ID，供 compact 回查模型上下文窗口
     let _activeModelId: string | undefined;
@@ -2500,7 +2505,79 @@ const pluginEntry: any = definePluginEntry({
             });
           }
         }
-        
+
+        // --- 2f-2. API 能力自愈：EXPERIENCE 全文索引 + 插件 Neo4j schema ---
+        // 背景：expStore.ensureIndexes() 仅在 ensureInitialized 时执行一次，
+        // ensureNeo4jSchema() 仅在工具写入前执行。若初始化/首次执行时 Neo4j 未就绪，
+        // 索引与 schema 会永久缺失 → L4 全文检索等 API 降级甚至"丢失"且不自愈。
+        // 这里在 graph 连接建立/恢复后按状态机重跑（幂等，IF NOT EXISTS + cjk），
+        // 仅在连接丢失后复位验证标记，连接恢复的下一轮自动重新补齐。
+        if (graphAdapter && expStore && typeof expStore.ensureIndexes === 'function') {
+          const _graphConnected = typeof graphAdapter.isConnected === 'boolean'
+            ? graphAdapter.isConnected
+            : !!(graphAdapter as any)?.driver;
+          if (_graphConnected) {
+            if (!_expIndexesVerified) {
+              try {
+                await expStore.ensureIndexes();
+                _expIndexesVerified = true;
+                logger?.debug?.('heartbeat: EXPERIENCE fulltext indexes verified');
+              } catch (idxErr) {
+                logger?.warn?.('heartbeat: EXPERIENCE indexes re-check failed (will retry next cycle)', {
+                  err: idxErr instanceof Error ? idxErr.message : String(idxErr),
+                });
+              }
+            }
+            // 插件级 Neo4j schema（约束 + 全文 + 向量索引）——幂等；失败已改为清除缓存自愈
+            try {
+              const { ensureNeo4jSchema } = await import('./tools/shared.js');
+              await ensureNeo4jSchema();
+            } catch { /* 幂等，失败留待下一轮/写入前重试 */ }
+          } else {
+            // 连接丢失：复位标记，待恢复后重新验证补齐
+            _expIndexesVerified = false;
+          }
+        } else {
+          _expIndexesVerified = false;
+        }
+
+        // --- 2g. gm-pro 能力自愈：模块重探 + HTTP API 可用性检查 ---
+        // 模块侧：probeGmPro() 首次失败后永久缓存"不可用"；这里在未加载时周期性重探，
+        // 使 gm-pro 安装/恢复后被重新拾取（withGmProFallback 重新走 gm-pro 路径）。
+        // HTTP 侧：插件依赖 gm-pro 独立 HTTP 服务（rebuild-all 等），心跳探测其状态端点，
+        // 记录 断开→恢复 转换，及时发现 API 接口丢失。
+        try {
+          const { probeGmPro, _resetGmProProbe, getGmProMod } = await import('./adapters/gm-pro-fallback.js');
+          if (!getGmProMod()) {
+            _resetGmProProbe();
+            const gmAvail = await probeGmPro();
+            if (gmAvail) {
+              logger?.info?.('heartbeat: gm-pro capability re-probed and available');
+            }
+          }
+        } catch (gErr) {
+          logger?.debug?.('heartbeat: gm-pro module re-probe failed (non-fatal)', { err: gErr instanceof Error ? gErr.message : String(gErr) });
+        }
+        try {
+          const _gmBase = (process.env.GM_PRO_HTTP_URL || 'http://127.0.0.1:7850').replace(/\/+$/, '');
+          let _httpOk = false;
+          try {
+            const r = await fetch(`${_gmBase}/api/status`, { signal: AbortSignal.timeout(3000) });
+            _httpOk = r.ok;
+            try { await r.arrayBuffer(); } catch { /* 消费响应体，避免 keep-alive 连接被未读 body 占用 */ }
+          } catch { _httpOk = false; }
+          if (_httpOk !== _lastGmProHttpOk) {
+            if (_httpOk) {
+              logger?.info?.('heartbeat: gm-pro HTTP API recovered', { baseUrl: _gmBase });
+            } else {
+              logger?.warn?.('heartbeat: gm-pro HTTP API unavailable', { baseUrl: _gmBase });
+            }
+          }
+          _lastGmProHttpOk = _httpOk;
+        } catch (hErr) {
+          logger?.debug?.('heartbeat: gm-pro HTTP health check failed (non-fatal)', { err: hErr instanceof Error ? hErr.message : String(hErr) });
+        }
+
         // --- 3. Experience distillation (scheduled async, default every 2h) ---
         const distillIntervalMs = api.pluginConfig?.distillationIntervalMs ?? 2 * 60 * 60 * 1000;
         if (expStore && typeof expStore.fetchPending === "function") {
