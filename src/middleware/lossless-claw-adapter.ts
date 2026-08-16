@@ -27,7 +27,7 @@ import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
-import { getSessionLlmSnapshot, getActiveLocalLlmSnapshot, buildLocalLlmComplete } from '../plugin/distillation.js';
+import { getSessionLlmSnapshot, getActiveLocalLlmSnapshot, buildLocalLlmComplete, resolveLocalSnapshotForModel } from '../plugin/distillation.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -598,9 +598,16 @@ export class LosslessClawAdapter {
     const _lcSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
       ? params.sessionKey.trim()
       : '';
-    const _lcSnap = _lcSk
+    let _lcSnap = _lcSk
       ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
       : getActiveLocalLlmSnapshot();
+    // BUGFIX: 无会话/活跃快照时（如尚未有 agent 轮次、或最近一轮是远程模型被清空），
+    // 若本次 compact 携带了本地 agent 模型（params.model），直接按模型名 + provider
+    // 配置解析出快照。否则 lossless-claw 回退到自身配置模型（如 Qwen3.6-35B-A3B-MTP），
+    // 该模型在 ollama 端点上 404，导致 ALL PROVIDERS EXHAUSTED。
+    if (!_lcSnap?.model) {
+      _lcSnap = resolveLocalSnapshotForModel((params as any).model, (params as any).baseURL);
+    }
     if (_lcSnap?.model) {
       try {
         const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);

@@ -137,6 +137,32 @@ function resolveProviderBaseURL(model: string): string | null {
 }
 
 /**
+ * 仅凭模型名 + provider 配置解析出一个本地模型快照（无需已记录的会话快照）。
+ * 用于 adapter.compact / 压缩等场景：当无会话/活跃快照时，若本次调用携带了本地
+ * agent 模型名，直接按"模型名 + openclaw.json provider 地址"构造快照，从而注入
+ * 正确的本地模型与地址，避免回退到 lossless-claw 自身配置模型（如 Qwen3.6... → 404）。
+ *
+ * @param model agent 模型名（如 "qwen3.8:27b" / "ollama/qwen3.8:27b"）
+ * @param baseURL 可选已知 baseURL（recordRuntimeLlm 记录的网关/原始地址），provider
+ *                解析不到地址时作为兜底
+ * @returns 本地模型快照；非本地模型或无法判定时返回 null
+ */
+export function resolveLocalSnapshotForModel(model?: unknown, baseURL?: unknown): RuntimeLlmSnapshot | null {
+  if (model == null) return null;
+  const m = String(model);
+  if (!m) return null;
+  if (!(baseURL && isLocalLlm(String(baseURL), m)) && !isOllamaModel(m)) {
+    return null; // 非本地模型，不注入
+  }
+  const providerBaseURL = resolveProviderBaseURL(m) || (baseURL ? String(baseURL) : null);
+  return {
+    model: m,
+    baseURL: providerBaseURL ?? null,
+    apiKey: '',
+  };
+}
+
+/**
  * 记录某会话的主模型快照。仅当主模型为本地部署时写入，避免污染远程场景。
  *
  * 参数：
