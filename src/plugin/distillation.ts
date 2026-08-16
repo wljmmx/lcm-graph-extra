@@ -137,10 +137,13 @@ export function getLastRuntimeLlmSnapshot(): RuntimeLlmSnapshot | null {
  * 且忽略调用方传入的 model，始终使用传入的本地模型。
  *
  * @param snapshot 本地主模型快照（model / baseURL / apiKey）
+ * @param fallbackBaseURL 可选兜底 baseURL（snapshot.baseURL 为网关地址时使用）
  */
-export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
+export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot, fallbackBaseURL?: string): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
   const model = snapshot.model;
-  const baseURL = snapshot.baseURL || 'http://127.0.0.1:18789/v1';
+  // BUGFIX: 当 snapshot.baseURL 是网关地址（127.0.0.1:18789）时，优先使用
+  // fallbackBaseURL（调用方传入的 config 实际 Ollama 地址），而非网关地址。
+  const baseURL = _resolveActualBaseURL(snapshot.baseURL, fallbackBaseURL);
   const apiKey = snapshot.apiKey || '';
   return async (p: any) => {
     const { callLlm: _callLlm } = await import('../utils/llm-call.js');
