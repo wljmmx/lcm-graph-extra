@@ -196,6 +196,13 @@ const pluginEntry: any = definePluginEntry({
     // P-CB-8: 防止并发恢复（onClose 和 heartbeat 可能同时触发）
     let _snapshotRecoveryInProgress = false;
 
+    // compact() 入口同会话冷却：SDK 后台维护（turnMaintenanceMode:'background'）每轮
+    // turn 结束后都会调用本插件的 compact()，若每次都真的执行 DAG 压缩，会在活跃对话中
+    // 反复打满本地 LLM pending 队列。按会话记录最近一次实际提交压缩的时间戳，冷却期内
+    // 且无显式 force/溢出压力时跳过。手动压缩（lcmg_compact / /compact）走独立路径不受影响。
+    const _lcmCompactLastTs = new Map<string, number>();
+    const _lcmCompactCooldownDefaultMs = 120_000;
+
     /**
      * P-CB-8: 指数退避重试启动 snapshot server。
      * 修复前：心跳中只尝试一次，失败后等 5 分钟下一轮。
@@ -944,6 +951,37 @@ const pluginEntry: any = definePluginEntry({
           // 但传给 lossless-claw 的 force 参数固定为 true（见下），因为我们的 compact hook
           // 是 /compact 的入口，必须确保 lossless-claw 执行压缩而非因 threshold 没超而跳过。
           const _forceCompact = _uncompressedCount > _dedupRounds;
+
+          // ── compact() 入口同会话冷却 ──
+          // SDK 后台维护（turnMaintenanceMode:'background'）每轮 turn 结束都会调用本 compact()。
+          // 若每次都真的执行 DAG 压缩，会在活跃对话中反复调用 lossless-claw 压缩、打满本地 LLM
+          // pending 队列。仅在"无显式 force / 无真实溢出 / 无积压"时应用同会话冷却；
+          // 显式强制压缩与真实压力（输入溢出 / DB 积压超 dedupRounds）不受影响。
+          if (params.force !== true && !_isInputOverflow && !_forceCompact) {
+            const _lcmCompactKey = _compactSessionKey || _compactSessionId || '';
+            if (_lcmCompactKey) {
+              const _lcmCooldownMs = (_lcmMonitor as any)?.compactCooldownMs ?? _lcmCompactCooldownDefaultMs;
+              const _lcmNow = Date.now();
+              const _lcmLast = _lcmCompactLastTs.get(_lcmCompactKey);
+              if (_lcmLast != null && _lcmNow - _lcmLast < _lcmCooldownMs) {
+                logger?.debug?.('[compact] skipped (cooldown)', {
+                  sessionKey: _lcmCompactKey,
+                  cooldownMs: _lcmCooldownMs,
+                  elapsedMs: _lcmNow - _lcmLast,
+                  force: params.force,
+                  isInputOverflow: _isInputOverflow,
+                  forceCompact: _forceCompact,
+                });
+                return { ok: false, compacted: false, reason: 'cooldown' };
+              }
+              _lcmCompactLastTs.set(_lcmCompactKey, _lcmNow);
+              // 防止 Map 无限增长：会话数过多时清理最旧条目
+              if (_lcmCompactLastTs.size > 1000) {
+                const _oldestKey = _lcmCompactLastTs.keys().next().value;
+                if (_oldestKey !== undefined) _lcmCompactLastTs.delete(_oldestKey);
+              }
+            }
+          }
 
           // BUGFIX: backfill — 对已存在但 DAG 不全的会话（之前 bootstrap 传 messages:[] 的会话），
           // lossless-claw 因 bootstrapped 标记拒绝重新导入，我们直接读取 sessionFile
