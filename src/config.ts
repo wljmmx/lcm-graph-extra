@@ -313,6 +313,9 @@ export const PluginConfigSchema = Type.Object({
     compactTokenBudget: Type.Number({ default: 154_624, minimum: 0 }),
     compactTimeout: Type.Number({ default: 60_000, minimum: 0 }),
     maxSummaryTokenRatio: Type.Number({ default: 0.45, minimum: 0, maximum: 1 }),
+    // 预压缩冷却时间（ms）：同一会话在冷却期内不重复提交预压缩任务，
+    // 避免活跃对话中每轮 assemble 都触发 compact，打满本地 LLM pending 队列。
+    preCompactCooldownMs: Type.Number({ default: 60_000, minimum: 0 }),
     // v2.5.1: 消除 retrieval 配置冗余。
     // 此处不再设置 low/medium/high 的字段默认值，仅保留 schema 结构校验。
     // 单一数据源：pluginConfig.retrieval.limits（低压默认值）→ 运行时 resolveContextProfile
@@ -543,7 +546,8 @@ export function validateConfig(input: unknown): PluginConfig {
     highPressureThreshold: 0.85, mediumPressureThreshold: 0.70,
     proactiveThreshold: 0.65, systemPromptOverheadTokens: 17_000,
     // 0.59 × 262144 ≈ 154665，取整
-    compactTokenBudget: 154_624, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45
+    compactTokenBudget: 154_624, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45,
+    preCompactCooldownMs: 60_000
   };
   // distillationLlm 未配置时保持 undefined，由 resolveDistillationLlm 的 fallback 处理
   // （优先复用主模型 → LLM_MODEL 环境变量 → gpt-4o-mini）

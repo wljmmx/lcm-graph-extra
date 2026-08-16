@@ -34,40 +34,11 @@ import { injectContext } from './injection.js';
 import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
 import type { AssembleContext, AssembleResult } from './types.js';
 
-/**
- * BUGFIX: 根据 summary 覆盖范围计算应保留的原始消息数。
- *
- * 修复前：上下文替换用粗粒度 "prepend 所有 summary + keep last N" 策略，
- * 不知道每个 summary 具体覆盖了哪些消息，导致：
- *   1. 已覆盖的消息在 summary 和原始消息中重复出现（token 浪费）
- *   2. 多个 summary 时全部 prepend 导致上下文膨胀
- *
- * 修复后：综合 summary.entryCount 和 DB 的 getUncompressedMessageCount
- * 计算实际未被覆盖的消息数，仅保留这些消息作为原始上下文。
- *
- * @param summaries          摘要列表（含 entryCount 覆盖范围）
- * @param totalMessages      当前消息总数
- * @param uncompressedFromDb DB 报告的未压缩消息数（-1 表示不可用）
- * @returns 应保留的原始消息数（最少 2 条，最多 totalMessages）
- */
-function computeKeepCount(
-  summaries: Array<{ entryCount?: number }>,
-  totalMessages: number,
-  uncompressedFromDb: number,
-): number {
-  // Priority 1: 使用 summary entryCount（DAG 直接提供的覆盖消息数）
-  const totalCovered = summaries.reduce((sum, s) => sum + ((s as any).entryCount || 0), 0);
-  if (totalCovered > 0 && totalCovered < totalMessages) {
-    const uncovered = totalMessages - totalCovered;
-    return Math.max(2, Math.min(uncovered, totalMessages));
-  }
-  // Priority 2: 使用 DB 的 getUncompressedMessageCount
-  if (uncompressedFromDb >= 0) {
-    return Math.max(2, Math.min(uncompressedFromDb, totalMessages));
-  }
-  // Priority 3: 回退到默认值 8
-  return Math.min(totalMessages, 8);
-}
+// 预压缩冷却：按会话记录最近一次提交预压缩的时间戳。
+// 活跃对话中每轮 assemble 在 tokenRatio > 0.55 时都会走到预压缩分支，
+// 若无冷却会在几秒内反复提交 compact，打满本地 LLM pending 队列。
+// 同一会话在冷却期内不再重复提交（冷启动时也允许首次立即触发）。
+const _preCompactLastTs = new Map<string, number>();
 
 /**
  * 根据 dedupRounds 构建时序上下文，严格按消息时间顺序交错排列 summary 和原始消息。
@@ -145,15 +116,24 @@ function buildChronologicalContext(
     const totalCovered = summaries.reduce((sum, s) => sum + s.entryCount, 0);
     const uncovered = Math.max(0, totalMessages - totalCovered);
 
-    // 所有 summary 段（按 earliestAt ASC 顺序，即最旧在前）
-    for (const summary of summaries) {
-      segments.push({ type: 'summary', summary });
-    }
-
-    // 末尾的原始消息
-    if (uncovered > 0) {
-      const rawSlice = messages.slice(-uncovered);
-      segments.push({ type: 'raw', messages: rawSlice, count: rawSlice.length });
+    if (totalCovered > 0) {
+      // 有可用的覆盖信息：摘要（最旧在前）+ 未被覆盖的最近原文
+      for (const summary of summaries) {
+        segments.push({ type: 'summary', summary });
+      }
+      if (uncovered > 0) {
+        const rawSlice = messages.slice(-uncovered);
+        segments.push({ type: 'raw', messages: rawSlice, count: rawSlice.length });
+      }
+    } else {
+      // BUGFIX: 无覆盖信息（entryCount 缺失/全为 0）时，无法定位摘要与原文的先后关系，
+      // 全部保留会导致"摘要+全文"重复出现；且 summary 按 entryCount=0 计入预算恒被保留。
+      // 退化为仅保留最近 dedupRounds 条原文，宁可丢弃摘要的压缩收益，也不让上下文膨胀
+      // 反复触发压缩。
+      const rawSlice = messages.slice(-Math.min(dedupRounds, totalMessages));
+      if (rawSlice.length > 0) {
+        segments.push({ type: 'raw', messages: rawSlice, count: rawSlice.length });
+      }
     }
   }
 
@@ -431,29 +411,50 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // 1b. Token ratio > 0.55 warning + async pre-compaction trigger
     // ==================================================================
     if (tokenRatio > 0.55 && !needsCompact) {
-      ctx.logger?.warn?.(
-        "window monitor: token ratio above 0.55, triggering async pre-compaction",
-        { tokenRatio: Number(tokenRatio.toFixed(3)), effectiveTokenCount, estimatedTokens, contextWindow },
-      );
-      if (ctx.losslessClawAdapter?.connected) {
-        const preCompactSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
-          : typeof params.session_id === 'string' ? params.session_id
-          : '';
-        const preCompactConversationId = getConversationId(preCompactSessionKey);
-        if (preCompactConversationId != null) {
-          const _lcSid = params.sessionId != null ? String(params.sessionId)
-            : (params.session_id != null ? String(params.session_id) : String(preCompactConversationId));
-          backgroundTasks.register('compact:pre-emptive', ctx.losslessClawAdapter.compact({
-            sessionId: _lcSid,
-            sessionKey: preCompactSessionKey,
-            sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
-            // 预压缩是"预防性"动作，不应强制压缩：force:false 让 lossless-claw 自行判断
-            // DAG 是否真的达到压缩阈值（达到才压），避免低压区间（tokenRatio 刚过 0.55）
-            // 每次 assemble 都强制压缩一遍，打满本地 LLM pending 队列。
-            force: false,
-            currentTokenCount: effectiveTokenCount,
-            compactionTarget: 'threshold',
-          }).then(() => {}, () => {}));
+      const preCompactSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
+        : typeof params.session_id === 'string' ? params.session_id
+        : '';
+      // 预压缩冷却：同一会话在 preCompactCooldownMs 内不重复提交。
+      // 每次 assemble 都可能走到这个分支，若不冷却会每轮都触发 compact，
+      // 导致活跃对话中本地 LLM 被反复调用（15-30s 一次），pending 队列被打满。
+      const preCompactCooldownMs = (wm as any)?.preCompactCooldownMs ?? 60_000;
+      const _now = Date.now();
+      const _lastTs = preCompactSessionKey ? _preCompactLastTs.get(preCompactSessionKey) : undefined;
+      if (_lastTs != null && _now - _lastTs < preCompactCooldownMs) {
+        ctx.logger?.debug?.(
+          "window monitor: pre-compaction skipped (cooldown)",
+          { sessionKey: preCompactSessionKey || null, cooldownMs: preCompactCooldownMs, elapsedMs: _now - _lastTs },
+        );
+      } else {
+        if (preCompactSessionKey) {
+          _preCompactLastTs.set(preCompactSessionKey, _now);
+          // 防止 Map 无限增长：会话数过多时清理最旧条目
+          if (_preCompactLastTs.size > 1000) {
+            const _oldestKey = _preCompactLastTs.keys().next().value;
+            if (_oldestKey !== undefined) _preCompactLastTs.delete(_oldestKey);
+          }
+        }
+        ctx.logger?.warn?.(
+          "window monitor: token ratio above 0.55, triggering async pre-compaction",
+          { tokenRatio: Number(tokenRatio.toFixed(3)), effectiveTokenCount, estimatedTokens, contextWindow },
+        );
+        if (ctx.losslessClawAdapter?.connected) {
+          const preCompactConversationId = getConversationId(preCompactSessionKey);
+          if (preCompactConversationId != null) {
+            const _lcSid = params.sessionId != null ? String(params.sessionId)
+              : (params.session_id != null ? String(params.session_id) : String(preCompactConversationId));
+            backgroundTasks.register('compact:pre-emptive', ctx.losslessClawAdapter.compact({
+              sessionId: _lcSid,
+              sessionKey: preCompactSessionKey,
+              sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+              // 预压缩是"预防性"动作，不应强制压缩：force:false 让 lossless-claw 自行判断
+              // DAG 是否真的达到压缩阈值（达到才压），避免低压区间（tokenRatio 刚过 0.55）
+              // 每次 assemble 都强制压缩一遍，打满本地 LLM pending 队列。
+              force: false,
+              currentTokenCount: effectiveTokenCount,
+              compactionTarget: 'threshold',
+            }).then(() => {}, () => {}));
+          }
         }
       }
     }
