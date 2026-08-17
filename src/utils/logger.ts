@@ -225,16 +225,3 @@ export function serializeError(err: unknown, depth = 0): Record<string, unknown>
   return err;
 }
 
-// [TEMP-DEBUG 2026-08-17] 绕过宿主日志(会吞参数字段)，直写 /tmp 文件用于 closed-loop 断点定位。
-// ⚠️ 核实后必须删除，勿保留进生产。
-// [TEMP-DEBUG 2026-08-17] module 级 import，确保 ESM 下 appendFileSync 可用
-import { appendFileSync } from 'node:fs';
-
-export function debugTrace(tag: string, obj: Record<string, unknown>): void {
-  try {
-    const line = `${new Date().toISOString()} [${tag}] ${JSON.stringify(obj)}\n`;
-    appendFileSync('/tmp/lcm-closed-loop-debug.log', line);
-  } catch {
-    // 写文件失败静默，不影响主流程
-  }
-}

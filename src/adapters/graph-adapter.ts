@@ -15,7 +15,7 @@ import * as neo4jDriver from 'neo4j-driver';
 import type { RetrievalResult, RetrievalSource, RetrievalType } from '../types.js';
 import type { Neo4jConfig } from '../types.js';
 import { ConflictLogger } from '../async/conflict-logger.js';
-import { debugTrace } from '../utils/logger.js';
+
 import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
 import { createLocalEmbedFn } from './embed-fn';
@@ -1923,38 +1923,23 @@ export class GraphAdapter {
   ): Promise<void> {
     if (!sessionKey || !assistantReply?.trim()) {
       // [DEBUG-CLOSED-LOOP 消费端] 断点1: session 空或回复为空
-      debugTrace('consume-SKIP-arg', {
-        sessionKey: sessionKey?.slice(0, 16),
-        replyLen: assistantReply?.trim()?.length ?? 0,
-      });
+      
       return;
     }
     const rec = this.consumeSessionRecall(sessionKey);
     if (!rec || rec.nodeIds.length === 0) {
       // [DEBUG-CLOSED-LOOP 消费端] 断点2: consume 无节点(上一轮未 recordRecall 或缓存未存活)
-      debugTrace('consume-EMPTY', {
-        sessionKey: sessionKey.slice(0, 16),
-        recIsNull: !rec,
-        nodeIdsLen: rec?.nodeIds?.length ?? 0,
-      });
+      
       return;
     }
     const recalledNodes = await this.loadNodesByIds(rec.nodeIds);
     if (recalledNodes.length === 0) {
       // [DEBUG-CLOSED-LOOP 消费端] 断点3: 节点集有 id 但 loadNodesByIds 解析为空
-      debugTrace('consume-NODES-EMPTY', {
-        sessionKey: sessionKey.slice(0, 16),
-        nodeIdsLen: rec.nodeIds.length,
-      });
+      
       return;
     }
     const query = rec.query || '';
-    debugTrace('consume-OK', {
-      sessionKey: sessionKey.slice(0, 16),
-      nodeIdsLen: rec.nodeIds.length,
-      loadedNodes: recalledNodes.length,
-      hasRecaller: !!this._recaller && typeof (this._recaller as any)?.processFeedback === 'function',
-    });
+    
     await this.processFeedback(query, recalledNodes, assistantReply, sessionId);
   }
 
