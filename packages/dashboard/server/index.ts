@@ -124,15 +124,21 @@ async function main(): Promise<void> {
     // XFF 头可被客户端伪造，直接读取会绕过限流；
     // 若部署在反代后，应配置 Fastify trustProxy 让框架正确解析 req.ip
     keyGenerator: (req) => req.ip,
-    // 健康检查豁免，避免被限流影响存活探测
-    // H2: 同时豁免前端 MonitorView 的只读轮询端点（health/agent/graph-health），
-    //     避免多 tab 叠加 + 用户交互接近 100/min 时被 429
+    // 限流只作用于"写操作"（POST/PATCH/PUT/DELETE），只读 GET 全部豁免。
+    // 依据：
+    //  - 本服务全部 GET 路由均为纯只读查询/只读代理（经验列表、graph/gm-pro 状态、moa、
+    //    extract-rebuild 进度、operation-logs、config 读等；/api/gm-pro/proxy/* 的 GET 走
+    //    只读白名单 matchesReadWhitelist）。
+    //  - 前端合法轮询强度足以打满全局 100/min：重建进度 GET /api/extract-rebuild/progress
+    //    每 2s ≈30/min、任务 job 轮询 GET /api/gm-pro/proxy/extract/rebuild-all/job/:id
+    //    每 3s ≈20/min、监控页 gm-pro/moa 轮询 ≈12-15/min，多 Tab 再成倍叠加，
+    //    原全局计数会把无关的只读轮询也 429 打断。
+    //  - 安全意图（防暴力枚举 / 滥用 MCP 写操作）集中在写请求上：POST /api/mcp/invoke、
+    //    config/gm-pro/moa 写、gm-pro 写代理、benchmark run 等均保持限流。
     allowList: (req) => {
       const path = req.url.split('?')[0];
+      if (req.method === 'GET') return true;
       if (path === '/api/ping' || path === '/ping') return true;
-      if (path.startsWith('/api/health/')) return true;
-      if (path === '/api/agent/status') return true;
-      if (path === '/api/graph/health') return true;
       return false;
     },
     errorResponseBuilder: (_req, context) => ({

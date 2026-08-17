@@ -108,7 +108,7 @@ npm start
 
 | 措施 | 实现位置 | 说明 |
 |------|---------|------|
-| 速率限制 | `server/index.ts` `@fastify/rate-limit` | 全局 100 req/30s（生产 200/30s），防爆破 |
+| 速率限制 | `server/index.ts` `@fastify/rate-limit` | 写操作（POST/PATCH/PUT/DELETE）每 60s/IP 最多 100 次（可用 `DASHBOARD_RATE_LIMIT_MAX`/`DASHBOARD_RATE_LIMIT_WINDOW` 调整），只读 GET 豁免——避免前端 2~120s 轮询与重建进度轮询被 429 打断 |
 | 安全响应头 | `server/index.ts` `onSend` hook | `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` |
 | MCP 工具白名单 | `server/routes/mcp.ts` `ALLOWED_MCP_TOOLS` | `POST /api/mcp/invoke` 仅转发 11 个已知工具，拒绝任意工具调用 |
 | 路径安全校验 | 前端 `validateOpenclawPath` + 后端 `validatePathUnderOpenclaw` | backup/restore/import 路径必须落在 `~/.openclaw` 下，拒绝 `..` 穿越 |
