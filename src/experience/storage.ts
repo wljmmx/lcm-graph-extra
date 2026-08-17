@@ -334,8 +334,16 @@ export class ExperienceStorage {
         await this.adapter.query(
           `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${prop}] OPTIONS { analyzer: "cjk" }`,
         );
-      } catch {
-        // 索引创建失败非致命（可能 Neo4j 版本不支持 FULLTEXT INDEX）
+      } catch (idxErr) {
+        // 索引创建失败非致命（可能 Neo4j 版本不支持 FULLTEXT INDEX），
+        // 但必须记录真实错误，否则心跳会反复"强制重建"却看不到原因
+        const errMsg = idxErr instanceof Error ? idxErr.message : String(idxErr);
+        if (!/already exists|IF NOT EXISTS/i.test(errMsg)) {
+          (this.adapter as any)?.logger?.warn?.(
+            '[ExperienceStorage] CREATE FULLTEXT INDEX failed',
+            { name, prop, err: errMsg },
+          );
+        }
       }
     }
   }
@@ -352,11 +360,14 @@ export class ExperienceStorage {
     const names = ['experience_summary_idx', 'experience_context_idx', 'experience_title_idx'];
     for (const name of names) {
       try {
-        // BUGFIX: Neo4j 的 db.index.fulltext.queryNodes 索引名必须是编译期字面量，
-        // 不能作为参数（传参 `$idx` 会一律抛 "Expected an index name" → 恒判定不可用
-        // → 心跳无限强制重建）。索引名是本模块内常量（无注入风险），直接内联。
+        // BUGFIX: Neo4j 的 db.index.fulltext.queryNodes 索引名必须是编译期「字符串字面量」。
+        // 1) 不能用参数 $idx —— 传参一律抛 "Parameter ... not allowed for an index name"
+        //    → 探测恒失败 → 心跳无限强制重建。
+        // 2) 也不能用反引号 `name` —— 反引号是转义标识符（变量引用），此处会抛
+        //    "Variable `xxx` not defined"，同样探测恒失败。
+        // 正确写法是单引号字符串字面量 'xxx'。索引名是本模块内常量（无注入风险）。
         await this.adapter.query(
-          `CALL db.index.fulltext.queryNodes(\`${name}\`, 'probe') YIELD node RETURN node LIMIT 1`,
+          `CALL db.index.fulltext.queryNodes('${name}', 'probe') YIELD node RETURN node LIMIT 1`,
         );
       } catch {
         return false; // 任一索引缺失/损坏 → 需要重建
