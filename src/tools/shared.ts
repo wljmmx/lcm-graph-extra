@@ -365,7 +365,7 @@ export async function detectNeo4jEdition(): Promise<Neo4jEdition> {
 /**
  * 幂等建立 Neo4j schema（约束 + 全文索引 + 向量索引）。
  * 对齐 gm-pro v2.4.1：按版别选用向量索引精细参数。
- *  - Enterprise：m=16 / ef_construction=128 / ef_search=64 / scalar 量化
+ *  - Enterprise：m=16 / ef_construction=128 / scalar 量化 + default_search_expansion_factor=1.5（HFQ 增强重打分）
  *  - Community/未知：跳过量化和 HNSW 精细选项，仅基础 multi-label 向量索引
  * 任一语句失败仅吞掉（IF NOT EXISTS 幂等；老版本不支持时回落过程化调用），不阻塞调用方。
  */
@@ -407,9 +407,33 @@ export async function ensureNeo4jSchema(): Promise<void> {
           ["conversation_search", "ConversationMessage", "[n.content]"],
         ];
         for (const [name, label, props] of fulltext) {
-          try {
-            await session.run(`CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { analyzer: "cjk" }`);
-          } catch { /* may exist */ }
+          // BUGFIX: 不同 Neo4j 版本对 FULLTEXT 的 CREATE 语法要求不同：
+          //   - Neo4j 2026.x / Cypher 5.26+：仅接受 OPTIONS { indexConfig: { `fulltext.analyzer`: 'cjk' } }
+          //     （旧式 OPTIONS { analyzer: "cjk" } 会被拒：Invalid input 'analyzer' for 'OPTIONS'. Expected 'indexConfig'）
+          //   - 旧版 5.x：接受 OPTIONS { analyzer: "cjk" }
+          //   - 极旧版本：两者都不接受 → 裸 CREATE（默认 analyzer）
+          // 按优先级依次尝试，任一成功即视为建好。全部失败必须告警（而不是静默吞掉），
+          // 否则索引缺失会让 queryNodes 每次调用都抛 "no such fulltext schema index"，
+          // 图谱召回整体静默为 0（此前问题：catch{} 吞错 → 索引永远建不起来且无人察觉）。
+          const candidates = [
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { analyzer: "cjk" }`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props}`,
+          ];
+          let ftErr: unknown = null;
+          for (const ftCypher of candidates) {
+            try {
+              await session.run(ftCypher);
+              ftErr = null;
+              break;
+            } catch (e) { ftErr = e; }
+          }
+          if (ftErr) {
+            getGlobalLogger()?.warn?.(
+              '[lcm-graph-extra] CREATE FULLTEXT INDEX failed for ALL syntax variants',
+              { name, label, err: ftErr instanceof Error ? ftErr.message : String(ftErr) },
+            );
+          }
         }
 
         // 向量索引（Neo4j 5.11+）：跨 Task|Skill|Event 单索引
@@ -425,9 +449,9 @@ export async function ensureNeo4jSchema(): Promise<void> {
                   \`vector.dimensions\`: ${dim},
                   \`vector.similarity_function\`: 'cosine',
                   \`vector.quantization.type\`: 'scalar',
+                  \`vector.default_search_expansion_factor\`: 1.5,
                   \`vector.hnsw.m\`: 16,
-                  \`vector.hnsw.ef_construction\`: 128,
-                  \`vector.hnsw.ef_search\`: 64
+                  \`vector.hnsw.ef_construction\`: 128
                 }
               }
             `);
