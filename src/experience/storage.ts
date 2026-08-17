@@ -352,9 +352,11 @@ export class ExperienceStorage {
     const names = ['experience_summary_idx', 'experience_context_idx', 'experience_title_idx'];
     for (const name of names) {
       try {
+        // BUGFIX: Neo4j 的 db.index.fulltext.queryNodes 索引名必须是编译期字面量，
+        // 不能作为参数（传参 `$idx` 会一律抛 "Expected an index name" → 恒判定不可用
+        // → 心跳无限强制重建）。索引名是本模块内常量（无注入风险），直接内联。
         await this.adapter.query(
-          `CALL db.index.fulltext.queryNodes($idx, 'probe') YIELD node RETURN node LIMIT 1`,
-          { idx: name },
+          `CALL db.index.fulltext.queryNodes(\`${name}\`, 'probe') YIELD node RETURN node LIMIT 1`,
         );
       } catch {
         return false; // 任一索引缺失/损坏 → 需要重建
