@@ -8,7 +8,7 @@ import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
 import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
-import { serializeError } from '../utils/logger.js';
+import { serializeError, debugTrace } from '../utils/logger.js';
 import { shouldUpdateGoal, getGoal } from '../plugin/goal-cache.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
@@ -431,7 +431,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                     graphRes[0] && typeof (graphRes[0] as any)?.metadata === 'object'
                       ? Object.keys((graphRes[0] as any).metadata as Record<string, unknown>)
                       : [];
-                  ctx.logger?.info?.('[afterTurn][DEBUG-CLOSED-LOOP] collect', {
+                  debugTrace('afterTurn-collect', {
                     sessionKey: sessionKey.slice(0, 16),
                     graphResLen: graphRes.length,
                     nodeIdsLen: nodeIds.length,
@@ -447,7 +447,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                     }
                   }
                 } else {
-                  ctx.logger?.info?.('[afterTurn][DEBUG-CLOSED-LOOP] collect SKIP', {
+                  debugTrace('afterTurn-collect-SKIP', {
                     sessionKey: sessionKey.slice(0, 16),
                     graphResLen: graphRes?.length ?? 'undefined',
                     hasRecordFn: !!ctx.graphAdapter.recordRecallToSessionCache,
