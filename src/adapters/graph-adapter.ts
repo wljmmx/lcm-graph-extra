@@ -1308,8 +1308,6 @@ export class GraphAdapter {
   // P1-10: upsertEntities 已移除 —— per-entity N+1 死代码（零调用方），
   // 生产路径走 batchUpsert（由 extractAndUpsertFromTurn 调用）。
 
-  // P3-9 GMR-4: processFeedback 已移除 —— 空实现（恒返回 0）且无任何生产代码调用，属死代码。
-  
   /**
    * Run raw Cypher query (for experience storage layer).
    *
