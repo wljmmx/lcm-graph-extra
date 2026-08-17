@@ -1920,12 +1920,40 @@ export class GraphAdapter {
     assistantReply: string,
     sessionId?: string,
   ): Promise<void> {
-    if (!sessionKey || !assistantReply?.trim()) return;
+    if (!sessionKey || !assistantReply?.trim()) {
+      // [DEBUG-CLOSED-LOOP 消费端] 断点1: session 空或回复为空
+      this.logger?.info?.('[graph-adapter][DEBUG-CLOSED-LOOP] consume SKIP-arg', {
+        sessionKey: sessionKey?.slice(0, 16),
+        replyLen: assistantReply?.trim()?.length ?? 0,
+      });
+      return;
+    }
     const rec = this.consumeSessionRecall(sessionKey);
-    if (!rec || rec.nodeIds.length === 0) return;
+    if (!rec || rec.nodeIds.length === 0) {
+      // [DEBUG-CLOSED-LOOP 消费端] 断点2: consume 无节点(上一轮未 recordRecall 或缓存未存活)
+      this.logger?.info?.('[graph-adapter][DEBUG-CLOSED-LOOP] consume EMPTY', {
+        sessionKey: sessionKey.slice(0, 16),
+        recIsNull: !rec,
+        nodeIdsLen: rec?.nodeIds?.length ?? 0,
+      });
+      return;
+    }
     const recalledNodes = await this.loadNodesByIds(rec.nodeIds);
-    if (recalledNodes.length === 0) return;
+    if (recalledNodes.length === 0) {
+      // [DEBUG-CLOSED-LOOP 消费端] 断点3: 节点集有 id 但 loadNodesByIds 解析为空
+      this.logger?.info?.('[graph-adapter][DEBUG-CLOSED-LOOP] consume NODES-EMPTY', {
+        sessionKey: sessionKey.slice(0, 16),
+        nodeIdsLen: rec.nodeIds.length,
+      });
+      return;
+    }
     const query = rec.query || '';
+    this.logger?.info?.('[graph-adapter][DEBUG-CLOSED-LOOP] consume OK', {
+      sessionKey: sessionKey.slice(0, 16),
+      nodeIdsLen: rec.nodeIds.length,
+      loadedNodes: recalledNodes.length,
+      hasRecaller: !!this._recaller && typeof (this._recaller as any)?.processFeedback === 'function',
+    });
     await this.processFeedback(query, recalledNodes, assistantReply, sessionId);
   }
 

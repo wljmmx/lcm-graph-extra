@@ -425,6 +425,20 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                   const nodeIds = graphRes
                     .map((r: any) => r?.metadata?.nodeId)
                     .filter(Boolean) as string[];
+                  // [DEBUG-CLOSED-LOOP 采集端] 记录 L3 结果结构与 nodeId 提取结果，定位断点
+                  const firstKeys = graphRes[0] ? Object.keys(graphRes[0] as Record<string, unknown>) : [];
+                  const firstMetaKeys =
+                    graphRes[0] && typeof (graphRes[0] as any)?.metadata === 'object'
+                      ? Object.keys((graphRes[0] as any).metadata as Record<string, unknown>)
+                      : [];
+                  ctx.logger?.info?.('[afterTurn][DEBUG-CLOSED-LOOP] collect', {
+                    sessionKey: sessionKey.slice(0, 16),
+                    graphResLen: graphRes.length,
+                    nodeIdsLen: nodeIds.length,
+                    firstKeys,
+                    firstMetaKeys,
+                    elig: true,
+                  });
                   if (nodeIds.length) {
                     try {
                       ctx.graphAdapter.recordRecallToSessionCache(sessionKey, query, nodeIds);
@@ -432,6 +446,13 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                       ctx.logger?.debug?.('[afterTurn] O7: recordRecallToSessionCache failed (non-fatal)', { err: rrErr instanceof Error ? rrErr.message : String(rrErr) });
                     }
                   }
+                } else {
+                  ctx.logger?.info?.('[afterTurn][DEBUG-CLOSED-LOOP] collect SKIP', {
+                    sessionKey: sessionKey.slice(0, 16),
+                    graphResLen: graphRes?.length ?? 'undefined',
+                    hasRecordFn: !!ctx.graphAdapter.recordRecallToSessionCache,
+                    elig: isLearningEligibleSession(sessionKey),
+                  });
                 }
               } else {
                 ctx.logger?.info?.('[afterTurn] O7: L3 skipped (graphAdapter not present)', { sessionKey: sessionKey.slice(0, 16) });
