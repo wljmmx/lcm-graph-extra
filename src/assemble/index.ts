@@ -195,8 +195,12 @@ function buildGoalAnchorMsg(sessionKey: string): Array<{ role: string; content: 
   if (!goal) return [];
   const switched = getGoalSwitchCount(sessionKey) > 0;
   const prev = getPreviousGoal(sessionKey);
-  const anchor = buildGoalAnchor(goal, switched, prev);
-  return [{ role: 'user', content: anchor }];
+  // v2.7.1 FIX: goal 锚点统一走 systemPromptAddition 通道（injection.ts:409）。
+  // 不再以 role:'user' 合成消息形式注入消息流 —— 该路径会污染对话历史，
+  // 触发 lossless-claw afterTurn 对齐失败（failing closed）。
+  // 本函数保留签名以兼容调用点，返回空数组即全局停用 user 通道。
+  void buildGoalAnchor; void switched; void prev;
+  return [];
 }
 
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
