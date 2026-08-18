@@ -325,7 +325,7 @@ export class ExperienceStorage {
           await this.adapter.query(`DROP INDEX ${INDEX_NAME} IF EXISTS`);
         } catch { /* 删除失败不阻塞（可能已不存在/被占用） */ }
         await this.adapter.query(
-          `CREATE FULLTEXT INDEX ${INDEX_NAME} IF NOT EXISTS FOR (e:${LABEL}) ON [e.${INDEX_FIELDS.join(', e.')} ] OPTIONS { analyzer: "cjk" }`,
+          `CREATE FULLTEXT INDEX ${INDEX_NAME} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${INDEX_FIELDS.join(', e.')} ] OPTIONS {indexConfig: {"fulltextAnalyzerName": "cjk"}}`,
         );
       }
     } catch (idxErr) {
