@@ -437,7 +437,10 @@ const pluginEntry: any = definePluginEntry({
 
         // R-8: 确保 EXPERIENCE 节点全文索引（summary/context/title）
         try {
-          await expStore.ensureIndexes();
+          const initIdxOk = await expStore.ensureIndexes();
+          if (!initIdxOk) {
+            logger?.warn?.("init: EXPERIENCE indexes creation failed (non-fatal, will retry in heartbeat)");
+          }
         } catch (e) {
           logger?.warn?.("init: EXPERIENCE indexes creation failed (non-fatal)", { err: (e as Error).message });
         }
@@ -2567,7 +2570,12 @@ const pluginEntry: any = definePluginEntry({
                   : true;
                 if (!_ftOk) {
                   logger?.warn?.('heartbeat: EXPERIENCE fulltext index unusable, forcing rebuild');
-                  await expStore.ensureIndexes(true);
+                  const rebuildOk = await expStore.ensureIndexes(true);
+                  if (!rebuildOk) {
+                    logger?.warn?.('heartbeat: EXPERIENCE index rebuild failed, will retry next cycle');
+                    _expIndexesVerified = false;
+                    return; // 退出整个 heartbeat，跳过后续 schema 检查和 gm-pro 探测
+                  }
                 }
                 _expIndexesVerified = true;
                 logger?.debug?.('heartbeat: EXPERIENCE fulltext indexes verified');

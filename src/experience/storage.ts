@@ -306,12 +306,13 @@ export class ExperienceStorage {
    * 再重建（幂等迁移历史 TEXT 索引），随后创建/确认 FULLTEXT 索引（cjk 分析器，
    * 中文友好）。任一语句失败仅吞掉，不阻塞调用方。
    */
-  async ensureIndexes(force = false): Promise<void> {
+  async ensureIndexes(force = false): Promise<boolean> {
     const fulltextIndexes: Array<[string, string]> = [
       ['experience_summary_idx', 'summary'],
       ['experience_context_idx', 'context'],
       ['experience_title_idx', 'title'],
     ];
+    let anyFailed = false;
     for (const [name, prop] of fulltextIndexes) {
       try {
         // 已存在同名非 FULLTEXT 索引（历史 TEXT 索引）或 force 重建时 → 先删除再重建。
@@ -338,6 +339,7 @@ export class ExperienceStorage {
         // 索引创建失败非致命（可能 Neo4j 版本不支持 FULLTEXT INDEX），
         // 但必须记录真实错误，否则心跳会反复"强制重建"却看不到原因
         const errMsg = idxErr instanceof Error ? idxErr.message : String(idxErr);
+        anyFailed = true;
         if (!/already exists|IF NOT EXISTS/i.test(errMsg)) {
           (this.adapter as any)?.logger?.warn?.(
             '[ExperienceStorage] CREATE FULLTEXT INDEX failed',
@@ -346,6 +348,7 @@ export class ExperienceStorage {
         }
       }
     }
+    return !anyFailed;
   }
 
   /**
