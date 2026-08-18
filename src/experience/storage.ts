@@ -297,58 +297,48 @@ export class ExperienceStorage {
    * R-8: 确保 EXPERIENCE 节点的全文索引存在。
    *
    * P1-3 全文检索路径 `_searchByFulltextIndex` 调用
-   * `db.index.fulltext.queryNodes('experience_summary_idx', ...)`，该过程
+   * `db.index.fulltext.queryNodes('experience_search', ...)`，该过程
    * 只接受 FULLTEXT 索引。历史版本在此误建 TEXT INDEX，导致运行时抛
-   * "There is no such fulltext schema index: experience_summary_idx"，
+   * "There is no such fulltext schema index: experience_search"，
    * 全文检索路径永远不可用（静默降级到 CONTAINS）。
    *
-   * 这里对每个字段：先按名字检查已存在索引的类型，若非 FULLTEXT 则先删除
-   * 再重建（幂等迁移历史 TEXT 索引），随后创建/确认 FULLTEXT 索引（cjk 分析器，
-   * 中文友好）。任一语句失败仅吞掉，不阻塞调用方。
+   * 单 label 单索引，多字段合并（与 task_search / event_search 一致）。
+   * 先按名字检查已存在索引的类型，若非 FULLTEXT 则先删除再重建（幂等迁移
+   * 历史 TEXT 索引），随后创建/确认 FULLTEXT 索引（cjk 分析器，中文友好）。
+   * 失败记录真实错误，不阻塞调用方。
    */
   async ensureIndexes(force = false): Promise<boolean> {
-    const fulltextIndexes: Array<[string, string]> = [
-      ['experience_summary_idx', 'summary'],
-      ['experience_context_idx', 'context'],
-      ['experience_title_idx', 'title'],
-    ];
-    let anyFailed = false;
-    for (const [name, prop] of fulltextIndexes) {
-      try {
-        // 已存在同名非 FULLTEXT 索引（历史 TEXT 索引）或 force 重建时 → 先删除再重建。
-        // 注意：只依赖 SHOW INDEXES 判定类型不可靠——若 FULLTEXT 索引损坏/缓存过期，
-        // SHOW 仍报 FULLTEXT、CREATE ... IF NOT EXISTS 会是空操作，queryNodes 依旧失败。
-        // 因此 force 时无条件 DROP IF EXISTS + CREATE，确保真按规范重建。
-        let needRecreate = force;
-        if (!force) {
-          const rows = await this.adapter.query('SHOW INDEXES YIELD name, type');
-          const existing = (rows ?? []).find((r: any) => (r as any).name === name);
-          if (existing && String((existing as any).type).toUpperCase() !== 'FULLTEXT') {
-            needRecreate = true;
-          }
-        }
-        if (needRecreate) {
-          try {
-            await this.adapter.query(`DROP INDEX ${name} IF EXISTS`);
-          } catch { /* 删除失败不阻塞（可能已不存在/被占用） */ }
-        }
-        await this.adapter.query(
-          `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${prop}] OPTIONS { analyzer: "cjk" }`,
-        );
-      } catch (idxErr) {
-        // 索引创建失败非致命（可能 Neo4j 版本不支持 FULLTEXT INDEX），
-        // 但必须记录真实错误，否则心跳会反复"强制重建"却看不到原因
-        const errMsg = idxErr instanceof Error ? idxErr.message : String(idxErr);
-        anyFailed = true;
-        if (!/already exists|IF NOT EXISTS/i.test(errMsg)) {
-          (this.adapter as any)?.logger?.warn?.(
-            '[ExperienceStorage] CREATE FULLTEXT INDEX failed',
-            { name, prop, err: errMsg },
-          );
+    const INDEX_NAME = 'experience_search';
+    const INDEX_FIELDS = ['summary', 'context', 'title'];
+    try {
+      // 已存在非 FULLTEXT 索引或 force 重建时 → 先删除再重建
+      let needRecreate = force;
+      if (!force) {
+        const rows = await this.adapter.query('SHOW INDEXES YIELD name, type');
+        const existing = (rows ?? []).find((r: any) => (r as any).name === INDEX_NAME);
+        if (existing && String((existing as any).type).toUpperCase() !== 'FULLTEXT') {
+          needRecreate = true;
         }
       }
+      if (needRecreate) {
+        try {
+          await this.adapter.query(`DROP INDEX ${INDEX_NAME} IF EXISTS`);
+        } catch { /* 删除失败不阻塞（可能已不存在/被占用） */ }
+        await this.adapter.query(
+          `CREATE FULLTEXT INDEX ${INDEX_NAME} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${INDEX_FIELDS.join(', e.')} ] OPTIONS { analyzer: "cjk" }`,
+        );
+      }
+    } catch (idxErr) {
+      const errMsg = idxErr instanceof Error ? idxErr.message : String(idxErr);
+      if (!/already exists|IF NOT EXISTS/i.test(errMsg)) {
+        (this.adapter as any)?.logger?.warn?.(
+          '[ExperienceStorage] CREATE FULLTEXT INDEX failed',
+          { index: INDEX_NAME, fields: INDEX_FIELDS, err: errMsg },
+        );
+      }
+      return false;
     }
-    return !anyFailed;
+    return true;
   }
 
   /**
@@ -360,7 +350,7 @@ export class ExperienceStorage {
    * @returns 所有全文索引均可用
    */
   async checkFulltextIndexes(): Promise<boolean> {
-    const names = ['experience_summary_idx', 'experience_context_idx', 'experience_title_idx'];
+    const names = ['experience_search'];
     for (const name of names) {
       try {
         // BUGFIX: Neo4j 的 db.index.fulltext.queryNodes 索引名必须是编译期「字符串字面量」。
@@ -489,7 +479,7 @@ export class ExperienceStorage {
     const filterClause = hasFilters ? `\n           ${SEARCH_QUERY_TAG_FILTER}` : '';
 
     // 使用全文索引查询节点，再应用过滤和排序
-    const cypher = `CALL db.index.fulltext.queryNodes('experience_summary_idx', $queryKeyword) YIELD node AS e, score AS ftScore
+    const cypher = `CALL db.index.fulltext.queryNodes('experience_search', $queryKeyword) YIELD node AS e, score AS ftScore
          WHERE e:${LABEL}
            AND e.status = 'DISTILLED'
            AND (e.state IS NULL OR e.state <> 'superseded')
