@@ -818,8 +818,9 @@ describe('ExperienceStorage 全文索引查询时自愈', () => {
             queryMatch: 0.8,
           }];
         }
-        // 模拟历史遗留的同名 TEXT 索引（ensureIndexes 应识别并先删除再建 FULLTEXT）
-        if (c.startsWith('SHOW INDEXES')) { schemaOps.push('SHOW'); return [{ name: 'experience_summary_idx', type: 'TEXT' } as Record<string, unknown>]; }
+        // 自愈走 force 无条件重建：不依赖 SHOW INDEXES 判定类型（SHOW 报 FULLTEXT 但索引损坏
+        // 时 IF NOT EXISTS 是空操作、永远修不好），改为 DROP IF EXISTS + CREATE 真按规范重建。
+        if (c.startsWith('SHOW INDEXES')) { schemaOps.push('SHOW'); return []; }
         if (c.startsWith('DROP INDEX')) { schemaOps.push('DROP'); return []; }
         if (c.startsWith('CREATE FULLTEXT INDEX')) { schemaOps.push('CREATE'); return []; }
         return [];
@@ -829,9 +830,10 @@ describe('ExperienceStorage 全文索引查询时自愈', () => {
     const storage = new ExperienceStorage(adapter);
     const results = await storage.searchByQuery({ query: 'React', minScore: 0.6, limit: 5 });
 
-    // 自愈生效：首次失败 → ensureIndexes（SHOW + DROP 旧 TEXT + CREATE FULLTEXT）→ 重试成功
+    // 自愈生效：首次失败 → ensureIndexes(force=true)（DROP 旧索引 + CREATE FULLTEXT，不经 SHOW）→ 重试成功
+    // force 模式不依赖 SHOW INDEXES（旧契约），避免"SHOW 报 FULLTEXT 但索引实际损坏"的自愈死角
     expect(fulltextCalls).toBe(2);
-    expect(schemaOps).toContain('SHOW');
+    expect(schemaOps).not.toContain('SHOW');
     expect(schemaOps).toContain('DROP');
     expect(schemaOps).toContain('CREATE');
     expect(results.length).toBe(1);
