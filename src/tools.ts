@@ -33,7 +33,7 @@ import {
   type DashboardToolContext,
 } from './tools/shared.js';
 
-export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange };
+export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange, ensureNeo4jSchema };
 export type { DashboardToolContext };
 
 export function registerOperationalTools(api: any): void {
