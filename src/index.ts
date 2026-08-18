@@ -447,7 +447,7 @@ const pluginEntry: any = definePluginEntry({
 
         // 确保 Neo4j schema 在初始化时创建（约束 + 全文 + 向量索引）
         try {
-          await ensureNeo4jSchema(graphAdapter);
+          await ensureNeo4jSchema();
         } catch (e) {
           logger?.warn?.("init: ensureNeo4jSchema failed (non-fatal, will retry in heartbeat)", { err: (e as Error).message });
         }
