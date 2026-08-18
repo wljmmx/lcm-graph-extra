@@ -408,7 +408,7 @@ export async function ensureNeo4jSchema(): Promise<void> {
         ];
         for (const [name, label, props] of fulltext) {
           // BUGFIX: 不同 Neo4j 版本对 FULLTEXT 的 CREATE 语法要求不同：
-          //   - Neo4j 2026.x / Cypher 5.26+：仅接受 OPTIONS { indexConfig: { `fulltext.analyzer`: 'cjk' } }
+          //   - Neo4j 5.x / Cypher 5.x：OPTIONS { indexConfig: { fulltextAnalyzerName: 'cjk' } }
           //     （旧式 OPTIONS { analyzer: "cjk" } 会被拒：Invalid input 'analyzer' for 'OPTIONS'. Expected 'indexConfig'）
           //   - 旧版 5.x：接受 OPTIONS { analyzer: "cjk" }
           //   - 极旧版本：两者都不接受 → 裸 CREATE（默认 analyzer）
@@ -416,9 +416,9 @@ export async function ensureNeo4jSchema(): Promise<void> {
           // 否则索引缺失会让 queryNodes 每次调用都抛 "no such fulltext schema index"，
           // 图谱召回整体静默为 0（此前问题：catch{} 吞错 → 索引永远建不起来且无人察觉）。
           const candidates = [
-            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
-            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { analyzer: "cjk" }`,
-            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props}`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON ${props} OPTIONS { indexConfig: { "fulltextAnalyzerName": "cjk" } }`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON ${props} OPTIONS { analyzer: "cjk" }`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON ${props}`,
           ];
           let ftErr: unknown = null;
           for (const ftCypher of candidates) {
