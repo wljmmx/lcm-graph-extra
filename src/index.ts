@@ -18,7 +18,7 @@
 
 // @ts-ignore - plugin-sdk types only available at runtime
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
-import { registerOperationalToolsWithDashboard, closeNeo4jDriver, mergeEntriesNeo4jConfig, type DashboardToolContext } from './tools.js';
+import { registerOperationalToolsWithDashboard, closeNeo4jDriver, mergeEntriesNeo4jConfig, ensureNeo4jSchema, type DashboardToolContext } from './tools.js';
 import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboard-snapshot.js';
 import { getSchedulerStats } from './core/debt-manager.js';
 import { UsageTracker } from "./async/usage-tracker"
@@ -443,6 +443,13 @@ const pluginEntry: any = definePluginEntry({
           }
         } catch (e) {
           logger?.warn?.("init: EXPERIENCE indexes creation failed (non-fatal)", { err: (e as Error).message });
+        }
+
+        // 确保 Neo4j schema 在初始化时创建（约束 + 全文 + 向量索引）
+        try {
+          await ensureNeo4jSchema(graphAdapter);
+        } catch (e) {
+          logger?.warn?.("init: ensureNeo4jSchema failed (non-fatal, will retry in heartbeat)", { err: (e as Error).message });
         }
 
         // S1-1: Initialize Merger for entity-level cross-engine dedup
