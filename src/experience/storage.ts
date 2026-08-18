@@ -309,7 +309,7 @@ export class ExperienceStorage {
    */
   async ensureIndexes(force = false): Promise<boolean> {
     const INDEX_NAME = 'experience_search';
-    const INDEX_FIELDS = ['summary', 'context', 'title'];
+    const INDEX_FIELDS = ['summary', 'context', 'title', 'detail'];
     try {
       // 已存在非 FULLTEXT 索引或 force 重建时 → 先删除再重建
       let needRecreate = force;
