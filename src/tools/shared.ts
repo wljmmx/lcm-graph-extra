@@ -386,12 +386,12 @@ export async function ensureNeo4jSchema(): Promise<void> {
 
         // 约束：各业务标签 id 唯一（自动建索引，消除 MERGE/MATCH 全图扫描）
         const idConstraints: Array<[string, string]> = [
-          ["ConversationMessage", "lcm_msg_id"],
-          ["MemoryFile", "lcm_mem_id"],
-          ["Task", "lcm_task_id"],
-          ["Skill", "lcm_skill_id"],
-          ["Event", "lcm_event_id"],
-          ["GmMessage", "lcm_gm_msg_id"],
+          ["ConversationMessage", "gm_msg_id"],
+          ["MemoryFile", "gm_node_id_memoryfile"],
+          ["Task", "gm_node_id_task"],
+          ["Skill", "gm_node_id_skill"],
+          ["Event", "gm_node_id_event"],
+          ["GmMessage", "gm_message_id"],
         ];
         for (const [label, name] of idConstraints) {
           try {
