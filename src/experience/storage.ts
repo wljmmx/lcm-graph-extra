@@ -312,11 +312,16 @@ export class ExperienceStorage {
     const INDEX_FIELDS = ['summary', 'context', 'title', 'detail'];
     try {
       // 已存在非 FULLTEXT 索引或 force 重建时 → 先删除再重建
+      // 索引不存在时也创建（IF NOT EXISTS 幂等，但需要显式创建）
       let needRecreate = force;
       if (!force) {
         const rows = await this.adapter.query('SHOW INDEXES YIELD name, type');
         const existing = (rows ?? []).find((r: any) => (r as any).name === INDEX_NAME);
-        if (existing && String((existing as any).type).toUpperCase() !== 'FULLTEXT') {
+        if (!existing) {
+          // 索引不存在 → 需要创建
+          needRecreate = true;
+        } else if (String((existing as any).type).toUpperCase() !== 'FULLTEXT') {
+          // 存在但不是 FULLTEXT 类型 → 重建
           needRecreate = true;
         }
       }
