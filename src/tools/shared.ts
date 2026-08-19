@@ -408,17 +408,21 @@ export async function ensureNeo4jSchema(): Promise<void> {
         ];
         for (const [name, label, props] of fulltext) {
           // BUGFIX: 不同 Neo4j 版本对 FULLTEXT 的 CREATE 语法要求不同：
-          //   - Neo4j 5.x / Cypher 5.x：OPTIONS { indexConfig: { fulltextAnalyzerName: 'cjk' } }
-          //     （旧式 OPTIONS { analyzer: "cjk" } 会被拒：Invalid input 'analyzer' for 'OPTIONS'. Expected 'indexConfig'）
+          //   - Neo4j 5.x / Cypher 5.x：OPTIONS { indexConfig: { `fulltext.analyzer`: "cjk" } }
+          //     （键是带反引号的裸标识符 `fulltext.analyzer`，不能加引号；旧式 OPTIONS { analyzer: "cjk" } 会被拒）
           //   - 旧版 5.x：接受 OPTIONS { analyzer: "cjk" }
           //   - 极旧版本：两者都不接受 → 裸 CREATE（默认 analyzer）
           // 按优先级依次尝试，任一成功即视为建好。全部失败必须告警（而不是静默吞掉），
           // 否则索引缺失会让 queryNodes 每次调用都抛 "no such fulltext schema index"，
           // 图谱召回整体静默为 0（此前问题：catch{} 吞错 → 索引永远建不起来且无人察觉）。
+          // BUGFIX(2026-08-19): Neo4j 5.x FULLTEXT 索引完整语法必须带 ON EACH（列表形式），
+          // 且 indexConfig 键为裸标识符 `fulltext.analyzer`（反引号包裹，不能加引号）。
+          // 此前三个变体全缺 ON EACH 且键名/引号错误 → 每次启动全部失败。
+          // 实测（Neo4j 5.x）：`ON EACH [n.x] OPTIONS { indexConfig: { `fulltext.analyzer`: "cjk" } }` ✅
+          // 回退顺序：cjk 精确 → 默认 analyzer（保底建索引，避免 queryNodes 抛 no such index）。
           const candidates = [
-            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON ${props} OPTIONS { indexConfig: { "fulltextAnalyzerName": "cjk" } }`,
-            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON ${props} OPTIONS { analyzer: "cjk" }`,
-            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON ${props}`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props} OPTIONS { indexConfig: { \`fulltext.analyzer\`: "cjk" } }`,
+            `CREATE FULLTEXT INDEX ${name} IF NOT EXISTS FOR (n:${label}) ON EACH ${props}`,
           ];
           let ftErr: unknown = null;
           for (const ftCypher of candidates) {
