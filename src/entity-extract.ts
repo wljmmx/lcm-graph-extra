@@ -136,14 +136,22 @@ export function extractEntities(query: string): ExtractedEntities {
 export function matchEntityScore(
   content: string,
   entities: ExtractedEntities
-): { match: boolean; score: number; matchedTerms: string[] } {
+): { match: boolean; score: number; matchedTerms: string[]; maxScore: number } {
   if (!entities || entities.tokens.length === 0) {
-    return { match: true, score: 1.0, matchedTerms: [] };
+    return { match: true, score: 1.0, matchedTerms: [], maxScore: 1.0 };
   }
 
   const contentLower = content.toLowerCase();
   const matchedTerms: string[] = [];
   let score = 0;
+
+  // maxScore: 当前内容理论上能得到的最高分（用于过滤降级判断）
+  let maxScore = 0;
+  if (entities.terms.length > 0) maxScore += 0.4;
+  if (entities.properNouns.length > 0) maxScore += 0.3;
+  if (entities.techTerms.length > 0) maxScore += 0.2;
+  if (entities.tokens.length > 0) maxScore += 0.1;
+  maxScore = Math.min(1.0, maxScore);
 
   // 高精度匹配：术语（中文短语 + 专有名词）
   for (const term of entities.terms) {
@@ -183,7 +191,7 @@ export function matchEntityScore(
   // 至少匹配到 0.15 分才认为相关
   const match = score >= 0.15;
 
-  return { match, score, matchedTerms };
+  return { match, score, matchedTerms, maxScore };
 }
 /**
  * Phase 2: 置信度级别

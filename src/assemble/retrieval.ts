@@ -23,6 +23,8 @@ import type { RetrievalResult } from '../types.js';
 import { randomUUID } from 'node:crypto';
 import { extractEntities, matchEntityScore } from '../entity-extract.js';
 import { needsQueryRewrite, rewriteQuery } from './query-rewrite.js';
+// P0-7: 话题切换检测（防止跨话题复用旧缓存/旧压测统计/旧场景分类）
+import { detectTopicSwitch } from '../topic-switch.js';
 
 /**
  * v2.8.1 非MoA 修复: 查询主题相似度。
@@ -183,10 +185,16 @@ export async function performRetrieval(
     && (Date.now() - cached.ts < PREFETCH_CACHE_TTL)
     && querySimilarity(cached.query, qmdQuery) >= 0.3;
 
+  // P0-7: 话题切换检测 —— 上一轮查询与当前查询重叠度极低时，即使 querySimilarity
+  // 通过（如两问都含公共词"问题"），也判定为话题切换：不消费预取缓存，并记录
+  // 日志供排查。防止旧话题的预取结果/压测统计污染新话题。
+  const topicSwitch = detectTopicSwitch(cached?.query ?? '', qmdQuery);
+  const topicSwitched = !!cached && topicSwitch.switched;
+
   let rawQmd: any[] = [];
   let rawGraph: any[] = [];
 
-  if (cacheUsable && cached) {
+  if (cacheUsable && !topicSwitched && cached) {
     // 使用上一轮 afterTurn 预取的全量结果
     rawQmd = cached.qmdResults || [];
     rawGraph = cached.graphResults || [];
@@ -202,12 +210,14 @@ export async function performRetrieval(
       cachedQuery: cached.query?.slice(0, 60),
     });
   } else {
-    if (cached && !cacheUsable) {
-      ctx.logger?.debug?.('[assemble] O7: prefetch cache rejected (query mismatch or expired)', {
+    if (cached && (!cacheUsable || topicSwitched)) {
+      ctx.logger?.debug?.('[assemble] O7: prefetch cache rejected (query mismatch, expired, or topic switch)', {
         sessionKey: sessionKey.slice(0, 16),
         cachedQuery: cached.query?.slice(0, 60),
         currentQuery: qmdQuery.slice(0, 60),
         sim: querySimilarity(cached.query, qmdQuery).toFixed(2),
+        overlap: topicSwitch.overlap.toFixed(2),
+        topicSwitched,
         cacheAgeMs: Date.now() - cached.ts,
       });
     } else {
@@ -378,6 +388,9 @@ export async function performRetrieval(
   const ENTITY_FILTER_THRESHOLD = 0.15; // 至少匹配到 0.15 分才认为相关
   let filteredQmdCount = 0, filteredGraphCount = 0, filteredExpCount = 0;
   if (extractedEntities.tokens.length > 0) {
+    // P0-7: 过滤前备份原始结果，供"全空降级"恢复
+    const rawExpResults = expResults;
+
     // QMD: filter by content match
     const beforeCount = qmdResults.length;
     qmdResults = qmdResults.filter((r: any) => {
@@ -411,6 +424,21 @@ export async function performRetrieval(
         graph: { before: beforeGraphCount, after: graphResults.length, filtered: filteredGraphCount },
         exp: { before: beforeExpCount, after: expResults.length, filtered: filteredExpCount },
       });
+    }
+
+    // P0-7: 过滤降级 — 过滤后全空时，退回首轮原始结果，避免模型"无上下文空转"。
+    // 检索是尽力而为：宁可给未过滤的候选，也不让模型面对空注入。
+    const totalAfter = qmdResults.length + graphResults.length + expResults.length;
+    if (totalAfter === 0) {
+      ctx.logger?.warn?.('[assemble] P0-7: entity filter emptied all results, falling back to raw candidates', {
+        qmd: { before: beforeCount, after: 0 },
+        graph: { before: beforeGraphCount, after: 0 },
+        exp: { before: beforeExpCount, after: 0 },
+      });
+      // 仅当 raw 候选存在时才回退
+      if (rawQmd.length > 0) qmdResults = rawQmd;
+      if (rawGraph.length > 0) graphResults = rawGraph;
+      if (rawExpResults?.length > 0) expResults = rawExpResults;
     }
   }
 
