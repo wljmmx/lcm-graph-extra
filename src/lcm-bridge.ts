@@ -311,6 +311,16 @@ export function writeCompactionDebt(
 ): boolean {
   // P0-2 H-1: 复用单例 DB + 预编译 statement（不再每次 open/close）
   try {
+    // v2.7.2 G-U-FIX: 5 分钟同理由频控 —— 目标切换误报风暴下防止反复重置 debt。
+    // SQL 侧用 datetime('now') 比较，避免 JS 本地时区与 SQLite UTC 的 8h 偏差。
+    const recentStmt = getStmt('checkCompactionDebtRecent',
+      `SELECT 1 FROM conversation_compaction_maintenance
+       WHERE conversation_id = ? AND reason = ?
+         AND requested_at > datetime('now', '-5 minutes')
+       LIMIT 1`);
+    if (recentStmt && recentStmt.get(conversationId, reason)) {
+      return true; // 窗口内已有同理由 debt，幂等跳过
+    }
     const stmt = getStmt('writeCompactionDebt',
       `INSERT OR REPLACE INTO conversation_compaction_maintenance
        (conversation_id, pending, requested_at, reason, running, token_budget, current_token_count, updated_at)

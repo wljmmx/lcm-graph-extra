@@ -240,6 +240,11 @@ export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
   }
 
   const trimmed = newGoal.trim();
+  // v2.7.2 G-U-FIX: 完全相同的目标文本 -> 直接判定为同一话题，不切换。
+  // 修复误报风暴：同一长任务消息被重复判为 goal switch（93 次/会话），
+  // 导致 compaction debt 反复写入、上下文被无谓压缩。
+  if (entry.goal === trimmed) return false;
+
   let score = 0;
 
   // ── 负面信号 ──
@@ -284,7 +289,9 @@ export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
   // 疑问词/问号 + 非极短（≥6 字）
   const hasQuestionMark = /[?？]/.test(trimmed);
   const hasInterrogative = /(怎么|如何|什么|哪些|哪个|谁|为什么|是否|能不能|可不可以|可以吗|有没有|怎样|何时|多久|多大|多少)/.test(trimmed);
-  if ((hasQuestionMark || hasInterrogative) && trimmed.length >= 6) score += 3;
+  // v2.7.2 G-U-FIX: 疑问词仅在低/零重叠（真正的新话题）时才作为强信号加分。
+  // 高重叠时疑问词多是同话题追问（"怎么优化？"），不应触发切换。
+  if ((hasQuestionMark || hasInterrogative) && trimmed.length >= 6 && similarity <= 0.6) score += 3;
 
   // 关键词零重叠 → 明确话题切换
   if (hasZeroOverlap) score += 2;
