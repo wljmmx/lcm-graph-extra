@@ -10,6 +10,7 @@ import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { serializeError } from '../utils/logger.js';
 import { shouldUpdateGoal, getGoal } from '../plugin/goal-cache.js';
+import { resolveSessionCacheKey } from '../utils/session-key.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
 import type { AfterTurnContext } from './types.js';
@@ -344,11 +345,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     // ==================================================================
     if (ctx.prefetchCache && userContent) {
       try {
-        const sessionKey = typeof params.sessionKey === 'string'
-          ? params.sessionKey
-          : typeof params.session_id === 'string'
-            ? params.session_id
-            : '';
+        const sessionKey = resolveSessionCacheKey(params);
 
         if (!sessionKey) {
           ctx.logger?.debug?.('[afterTurn] O7: prefetch skipped (no sessionKey)');
@@ -530,11 +527,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     // v2.7.0 G-U: 目标切换智能卸载 — 检测 goal switch 后写入高优先级 compaction debt
     // ==================================================================
     try {
-      const sessionKey = typeof params.sessionKey === 'string'
-        ? params.sessionKey
-        : typeof params.session_id === 'string'
-          ? params.session_id
-          : '';
+      const sessionKey = resolveSessionCacheKey(params);
       if (sessionKey && userContent) {
         const oldGoal = getGoal(sessionKey);
         const switched = shouldUpdateGoal(userContent, sessionKey);

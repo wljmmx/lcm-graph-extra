@@ -28,6 +28,7 @@ import { getOrCreateLosslessClawAdapter, resetSharedAdapter } from "./middleware
 import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helper";
 import { PluginConfigSchema, autoMatchMaxTokens, DEFAULT_CONFIG } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
+import { resolveSessionCacheKey } from "./utils/session-key.js";
 import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
 
 import {
@@ -643,7 +644,9 @@ const pluginEntry: any = definePluginEntry({
           // 使用上一轮会话的陈旧数据。bootstrap 在新会话启动时由 SDK 主动调用。
           try {
             const sid = params.sessionId != null ? String(params.sessionId) : '';
-            const sk = params.sessionKey ?? sid;
+            // BUG-AUDIT: 会话级缓存一律按 sessionId 隔离；清理也必须用 sessionId，
+            // 不能退化为 sessionKey（/new 时 sessionKey 不变，按其清除会清错桶/漏清目标桶）。
+            const sk = sid || (typeof params.sessionKey === 'string' ? params.sessionKey : '');
 
             // 1. 失效 conversation_id 缓存（10min TTL，不主动清除会导致 uncomp 统计错误）
             invalidateConvIdCache(sk, sid);
@@ -1077,8 +1080,8 @@ const pluginEntry: any = definePluginEntry({
             });
 
             // 利用 SDK 传入的 currentTokenCount 反推 SDK overhead 并缓存
-            const _sk = typeof params.sessionKey === 'string' ? params.sessionKey
-              : (typeof params.session_id === 'string' ? params.session_id : '');
+            // BUG-AUDIT: key 用 sessionId（/new 后换新），避免写入上一会话的缓存桶
+            const _sk = resolveSessionCacheKey(params);
             if (_sk && _currentTokens > 0) {
               const _msgTokens = cachedEstimateTokens(params.messages ?? []);
               updateSdkOverhead(_sk, _currentTokens, _msgTokens, 0);

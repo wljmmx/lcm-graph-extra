@@ -195,13 +195,13 @@
 {
   "lcmMonitor": {
     "enabled": true,
-    "contextWindow": 262144,
+    "contextWindow": 131072,
     "dedupRounds": 24,
     "highPressureThreshold": 0.85,
     "mediumPressureThreshold": 0.70,
     "proactiveThreshold": 0.65,
     "systemPromptOverheadTokens": 17000,
-    "compactTokenBudget": 114688,
+    "compactTokenBudget": 77332,
     "compactTimeout": 60000,
     "maxSummaryTokenRatio": 0.45,
     "retrievalLimits": {
@@ -210,9 +210,9 @@
       "high":   { "qmd": 1, "graph": 1, "exp": 0 }
     },
     "maxContextChars": {
-      "low":    12000,
-      "medium": 6000,
-      "high":   1600
+      "low":    6000,
+      "medium": 3000,
+      "high":   800
     }
   }
 }
@@ -221,29 +221,34 @@
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `lcmMonitor.enabled` | `boolean` | `true` | 窗口监控开关 |
-| `lcmMonitor.contextWindow` | `number` | `262144` | 上下文窗口大小（token） |
+| `lcmMonitor.contextWindow` | `number` | `131072` | 上下文窗口大小（token）。128K 窗口建议；其他窗口见下方"建议值推导" |
 | `lcmMonitor.dedupRounds` | `number` | `24` | 去重回顾轮数 |
 | `lcmMonitor.highPressureThreshold` | `number` | `0.85` | 高压力阈值 |
 | `lcmMonitor.mediumPressureThreshold` | `number` | `0.70` | 中压力阈值 |
 | `lcmMonitor.proactiveThreshold` | `number` | `0.65` | 主动压缩阈值 |
 | `lcmMonitor.systemPromptOverheadTokens` | `number` | `17000` | 系统提示词开销 token |
-| `lcmMonitor.compactTokenBudget` | `number` | `114688` | 压缩 token 预算 |
+| `lcmMonitor.compactTokenBudget` | `number` | `77332` | 压缩 token 预算 ≈ `⌊contextWindow × 0.59⌋`（128K 窗口下 131072 × 0.59 ≈ 77332） |
 | `lcmMonitor.compactTimeout` | `number` | `60000` | 压缩超时（ms） |
 | `lcmMonitor.maxSummaryTokenRatio` | `number` | `0.45` | 摘要 token 最大比例 |
 | `lcmMonitor.retrievalLimits.low` | `object` | `{qmd:5, graph:5, exp:3}` | 低压力检索限制 |
 | `lcmMonitor.retrievalLimits.medium` | `object` | `{qmd:3, graph:3, exp:1}` | 中压力检索限制 |
 | `lcmMonitor.retrievalLimits.high` | `object` | `{qmd:1, graph:1, exp:0}` | 高压力检索限制 |
-| `lcmMonitor.maxContextChars.low` | `number` | `12000` | 低压力最大字符数 |
-| `lcmMonitor.maxContextChars.medium` | `number` | `6000` | 中压力最大字符数 |
-| `lcmMonitor.maxContextChars.high` | `number` | `1600` | 高压力最大字符数 |
+| `lcmMonitor.maxContextChars.low` | `number` | `6000` | 低压力最大字符数（128K 窗口按 scale=0.5 自适应） |
+| `lcmMonitor.maxContextChars.medium` | `number` | `3000` | 中压力最大字符数（128K 窗口按 scale=0.5 自适应） |
+| `lcmMonitor.maxContextChars.high` | `number` | `800` | 高压力最大字符数（128K 窗口按 scale=0.5 自适应） |
 
 ### 压力等级规则
 
 | 等级 | 触发条件 | 检索量 | 注入量 | 行为 |
 |------|---------|--------|--------|------|
-| low | 正常 | qmd:5, graph:5, exp:3 | 12000 chars | 全量检索 + LLM 重排 |
-| medium | msg>24 或 ratio>0.70 | qmd:3, graph:3, exp:1 | 6000 chars | 异步 compact + 摘要注入 |
-| high | msg>48 或 ratio>0.85 | qmd:1, graph:1, exp:0 | 1600 chars | 同步 compact + 降级上下文 |
+| low | 正常 | qmd:5, graph:5, exp:3 | 6000 chars | 全量检索 + LLM 重排 |
+| medium | msg>24 或 ratio>0.70 | qmd:3, graph:3, exp:1 | 3000 chars | 异步 compact + 摘要注入 |
+| high | msg>48 或 ratio>0.85 | qmd:1, graph:1, exp:0 | 800 chars | 同步 compact + 降级上下文 |
+
+> **建议值推导（以 128K 上下文 = 131072 tokens 为基准）**：
+> - `compactTokenBudget` = `⌊contextWindow × 0.59⌋`（0.59 为 lossless-claw `COMPACT_RATIO`），131072 × 0.59 ≈ **77332**。
+> - `maxContextChars` = 262144 基准默认值（12000/6000/1600）× scale（`scale = contextWindow / 262144`）。128K 下 scale = 0.5 → **6000/3000/800**。
+> - 若你的模型为其他窗口（如 64K/32K），按同公式相应缩放即可。
 
 ---
 
@@ -255,8 +260,8 @@
     "enabled": true,
     "mode": "auto",
     "triggerThreshold": 20000,
-    "softThresholdTokens": 163840,
-    "keepRecentTokens": 131072
+    "softThresholdTokens": 81920,
+    "keepRecentTokens": 65536
   }
 }
 ```
@@ -266,8 +271,8 @@
 | `compaction.enabled` | `boolean` | `true` | 压缩开关 |
 | `compaction.mode` | `string` | - | 压缩模式 |
 | `compaction.triggerThreshold` | `number` | `20000` | 触发压缩的 token 阈值 |
-| `compaction.softThresholdTokens` | `number` | `163840` | 软阈值 token |
-| `compaction.keepRecentTokens` | `number` | `131072` | 保留最近 token |
+| `compaction.softThresholdTokens` | `number` | `81920` | 软阈值 token（128K 建议 ≈ `0.625 × contextWindow`，131072 × 0.625） |
+| `compaction.keepRecentTokens` | `number` | `65536` | 保留最近 token（128K 建议 ≈ `0.5 × contextWindow`，131072 × 0.5） |
 
 **环境变量**：`LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS` 覆盖同步 compact 超时（默认 300s）。
 
@@ -644,7 +649,7 @@ Call lcm_describe(id="<file_id above>", expandFile=true) to fetch the full outpu
       },
       "lcmMonitor": {
         "enabled": true,
-        "contextWindow": 262144,
+        "contextWindow": 131072,
         "proactiveThreshold": 0.65
       },
       "moa": {

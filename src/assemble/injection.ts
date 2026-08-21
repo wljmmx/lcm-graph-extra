@@ -46,6 +46,8 @@ function setCachedSdkGuidance(availableTools: string[], citationsMode: string, g
   sdkGuidanceCache.set(key, { guidance, ts: Date.now() });
 }
 
+import { resolveSessionCacheKey } from '../utils/session-key.js';
+
 export async function injectContext(
   ctx: AssembleContext,
   params: any,
@@ -67,11 +69,8 @@ export async function injectContext(
   queryRewriteResult?: any,
 ): Promise<InjectionOutput> {
   // Session-isolated cross-round dedup
-  const sessionKey = typeof params.sessionKey === 'string'
-    ? params.sessionKey
-    : typeof params.session_id === 'string'
-      ? params.session_id
-      : 'default';
+  // BUG-AUDIT: 会话级 key 统一用 sessionId（/new 后换新，天然隔离），避免 sessionKey 稳定导致串会话
+  const sessionKey = resolveSessionCacheKey(params) || 'default';
   const sd = getSessionDedup(sessionKey);
 
   // Knowledge Injection Budget: 长对话中减少检索内容注入，防止上下文污染
@@ -386,11 +385,7 @@ export async function injectContext(
 
   {
     // Goal Anchoring: 注入目标任务提醒，防止长对话注意力漂移
-    const sessionKey = typeof params.sessionKey === 'string'
-      ? params.sessionKey
-      : typeof params.session_id === 'string'
-        ? params.session_id
-        : '';
+    const sessionKey = resolveSessionCacheKey(params);
     const goalAnchor = buildGoalAnchor(
       getGoal(sessionKey),
       getGoalSwitchCount(sessionKey) > 0,
@@ -459,11 +454,7 @@ export async function injectContext(
     }
     let rebuilt = '';
     // Goal Anchoring: 在 token 预算裁剪后也保留目标提醒
-    const sessionKeyForRebuild = typeof params.sessionKey === 'string'
-      ? params.sessionKey
-      : typeof params.session_id === 'string'
-        ? params.session_id
-        : '';
+    const sessionKeyForRebuild = resolveSessionCacheKey(params);
     const goalAnchorRebuild = buildGoalAnchor(
       getGoal(sessionKeyForRebuild),
       getGoalSwitchCount(sessionKeyForRebuild) > 0,

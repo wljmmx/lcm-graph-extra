@@ -29,6 +29,7 @@ import {
 import { resolveContextProfile } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
+import { resolveSessionCacheKey } from '../utils/session-key.js';
 import { performRetrieval } from './retrieval.js';
 import { injectContext } from './injection.js';
 import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
@@ -272,8 +273,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     }
 
     // Smart Tool Guidance: 会话级工具追踪（L1-L4 策略），在每轮 assemble 开头调用
-    const _toolSessionKey = typeof params.sessionKey === 'string' ? params.sessionKey
-      : typeof params.session_id === 'string' ? params.session_id : '';
+    // BUG-AUDIT: 会话级缓存 key 统一用 sessionId（/new 后换新，天然隔离），避免 sessionKey 稳定导致串会话
+    const _toolSessionKey = resolveSessionCacheKey(params);
     beginToolGuidanceRound(_toolSessionKey, params.messages ?? []);
 
     // Goal Anchoring: 跟踪最新用户意图，防止长对话注意力漂移
@@ -329,7 +330,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
     const resolvedCtx = resolveContextProfile(providerModelCtx, wm || undefined, retrievalBaseLimits, profileTierLimits);
     contextWindow = resolvedCtx.contextWindow;
-    _overheadCacheKey = (params as any).sessionKey ?? (params as any).conversationId ?? "default";
+    // BUG-AUDIT: overhead 预算同样按 sessionId 隔离，避免 /new 后沿用上会话的注入开销统计
+    _overheadCacheKey = resolveSessionCacheKey(params) || ((params as any).conversationId ?? "default");
     const overheadTokens = getOverhead(_overheadCacheKey);
     const effectiveTokenCount = estimatedTokens + overheadTokens;
     let tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
