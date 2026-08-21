@@ -3,7 +3,15 @@
  *
  * 从查询中提取关键实体，用于检索结果的主题一致性过滤。
  * 支持：中文/英文混合、技术术语、专有名词、代码标识符
+ *
+ * 模糊相似度复用（BUG-AUDIT 2026-08-21）：
+ * 子串匹配只能打中"字面包含"的近相关；对结果自带的【结构化实体名】
+ * （graph 的 name/subject、qmd 的 title）复用 entity-extractor 的
+ * normalizeEntityName + entityNameSimilarity 做模糊相关判断，
+ * 让"实体筛选 vs 实体过滤"这类近似实体也能命中。
  */
+
+import { normalizeEntityName, entityNameSimilarity } from './entity-extractor.js';
 
 export interface ExtractedEntities {
   /** 提取的关键词列表 */
@@ -155,6 +163,9 @@ export function extractEntities(query: string): ExtractedEntities {
   };
 }
 
+/** 结构化实体名的模糊相关阈值：entityNameSimilarity 归一化后 >= 该值视为相关。 */
+const FUZZY_ENTITY_THRESHOLD = 0.5;
+
 /**
  * 判断检索结果是否与提取的实体匹配
  * 
@@ -162,10 +173,16 @@ export function extractEntities(query: string): ExtractedEntities {
  * 1. 结果内容包含任意提取的术语 → 高匹配
  * 2. 结果内容包含任意提取的技术术语 → 中匹配
  * 3. 结果内容包含任意提取的 token → 低匹配
+ * 4.（复用去重相似度）若传入结果的结构化实体名 entityName，对 query 的
+ *    术语/专有名词/技术术语用 entityNameSimilarity 做模糊相关判断，
+ *    命中"字面不完全一致但相近"的实体（如"实体筛选"↔"实体过滤"）。
+ *
+ * @param entityName 结果自带的实体名（graph 的 name/subject、qmd 的 title 等）。可选。
  */
 export function matchEntityScore(
   content: string,
-  entities: ExtractedEntities
+  entities: ExtractedEntities,
+  entityName?: string,
 ): { match: boolean; score: number; matchedTerms: string[]; maxScore: number } {
   if (!entities || entities.tokens.length === 0) {
     return { match: true, score: 1.0, matchedTerms: [], maxScore: 1.0 };
@@ -212,6 +229,30 @@ export function matchEntityScore(
         matchedTerms.push(token);
       }
       score += 0.1;
+    }
+  }
+
+  // 复用去重的实体名相似度：补足子串匹配打不中的"近似实体"
+  // 仅对结构化/较短的实体名有意义，见文件头 BUG-AUDIT 说明。
+  if (entityName && entityName.trim()) {
+    const normName = normalizeEntityName(entityName);
+    if (normName.length >= 2) {
+      const fuzzyMatch = (unit: string): boolean => {
+        if (matchedTerms.includes(unit)) return false; // 子串已命中，避免重复计分
+        const normUnit = normalizeEntityName(unit);
+        if (normUnit.length < 2) return false;
+        return entityNameSimilarity(normName, normUnit) >= FUZZY_ENTITY_THRESHOLD;
+      };
+
+      for (const term of entities.terms) {
+        if (fuzzyMatch(term)) { matchedTerms.push(term); score += 0.4; }
+      }
+      for (const noun of entities.properNouns) {
+        if (fuzzyMatch(noun)) { matchedTerms.push(noun); score += 0.3; }
+      }
+      for (const tt of entities.techTerms) {
+        if (fuzzyMatch(tt)) { matchedTerms.push(tt); score += 0.2; }
+      }
     }
   }
 

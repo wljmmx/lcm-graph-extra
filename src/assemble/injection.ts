@@ -197,7 +197,8 @@ export async function injectContext(
         return { filtered: false, weight: 1.0, confidence: '[实体匹配度：无法评估]' };
       }
       const content = r.content ?? r.name ?? r.subject ?? r.id ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities);
+      const entityName = r.name ?? r.subject ?? r.title ?? undefined;
+      const { match, score } = matchEntityScore(content, extractedEntities, entityName);
       const level = getConfidenceLevel(score);
       const label = confidenceLabel(level);
       // 权重策略：高置信度 1.0, 中置信度 0.7, 低置信度 + 低检索分 → 过滤
@@ -254,7 +255,7 @@ export async function injectContext(
         return { filtered: false, weight: 1.0, confidence: '[实体匹配度：无法评估]' };
       }
       const content = r.content ?? r.title ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities);
+      const { match, score } = matchEntityScore(content, extractedEntities, r.title);
       const level = getConfidenceLevel(score);
       const label = confidenceLabel(level);
       // 权重策略：高置信度 1.0, 中置信度 0.7, 低置信度 + 低检索分 → 过滤

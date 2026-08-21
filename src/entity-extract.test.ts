@@ -66,3 +66,30 @@ describe('matchEntityScore — 中文匹配', () => {
     expect(match).toBe(true);
   });
 });
+
+describe('matchEntityScore — 复用去重相似度的实体名模糊判断', () => {
+  // query 的术语子串在正文中打不中，但结果的结构化实体名与 query 术语近似时，
+  // 复用 entityNameSimilarity 应能命中（如"实体筛选" vs "实体过滤"）
+  it('传入近似实体名时，字面不一致也能命中（复用模糊相似度）', () => {
+    const e = extractEntities('实体过滤');
+    const content = '一段与字面完全不一致的正文叙述';
+    // 不传 entityName：子串匹配不到 → 不匹配
+    expect(matchEntityScore(content, e).match).toBe(false);
+    // 传近似实体名 '实体筛选'：相似度 0.5 过阈值 → 命中
+    const r = matchEntityScore(content, e, '实体筛选');
+    expect(r.match).toBe(true);
+    expect(r.matchedTerms).toContain('实体');
+  });
+
+  it('不相关实体名不触发模糊命中', () => {
+    const e = extractEntities('实体过滤');
+    const { match } = matchEntityScore('无关的正文叙述', e, '天气与出行');
+    expect(match).toBe(false);
+  });
+
+  it('完全相同的实体名必然命中', () => {
+    const e = extractEntities('实体过滤');
+    const { match } = matchEntityScore('正文完全不包含查询词', e, '实体过滤');
+    expect(match).toBe(true);
+  });
+});

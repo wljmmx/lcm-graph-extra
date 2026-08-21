@@ -395,7 +395,8 @@ export async function performRetrieval(
     const beforeCount = qmdResults.length;
     qmdResults = qmdResults.filter((r: any) => {
       const content = r.content ?? r.title ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities);
+      // 传入结构化标题做模糊实体相关判断（复用 entity-extract 的去重相似度）
+      const { match, score } = matchEntityScore(content, extractedEntities, r.title);
       return match;
     });
     filteredQmdCount = beforeCount - qmdResults.length;
@@ -404,7 +405,8 @@ export async function performRetrieval(
     const beforeGraphCount = graphResults.length;
     graphResults = graphResults.filter((r: any) => {
       const content = r.content ?? r.name ?? r.summary ?? r.id ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities);
+      const entityName = r.name ?? r.title ?? r.subject ?? undefined;
+      const { match, score } = matchEntityScore(content, extractedEntities, entityName);
       return match;
     });
     filteredGraphCount = beforeGraphCount - graphResults.length;
