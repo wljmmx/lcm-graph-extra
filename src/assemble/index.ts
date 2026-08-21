@@ -30,6 +30,7 @@ import { resolveContextProfile } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import { resolveSessionCacheKey } from '../utils/session-key.js';
+import { ensureFinalUserMessage } from '../utils/ensure-final-user.js';
 import { performRetrieval } from './retrieval.js';
 import { injectContext } from './injection.js';
 import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
@@ -1434,10 +1435,6 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       }
     }
 
-    const degraded = degradedReasons.length > 0;
-    if (degraded) {
-      ctx.logger?.warn?.("[assemble] degraded paths triggered", { reasons: degradedReasons });
-    }
     const validatedMessages = Array.isArray(finalMessages) && finalMessages.length > 0
       ? finalMessages
       : (params.messages ?? []);
@@ -1445,16 +1442,50 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     if (validatedMessages !== finalMessages) {
       messageTokens = estimateTokensFromMessages(validatedMessages);
     }
+
+    // ── 交付前不变式守卫：确保 messages 含非空 user 且以 user 结尾 ──
+    // 非污染（见 src/utils/ensure-final-user.ts）：只截断悬挂尾巴到最近真实 user；
+    // 无 user 时回退原始转录；总 wedge 才 fail-closed 降级、绝不伪造查询。
+    const _originalTranscript = Array.isArray(params.messages) ? params.messages : [];
+    const _guardSession = (typeof params.sessionKey === 'string' ? params.sessionKey
+      : (typeof params.session_id === 'string' ? params.session_id : ''));
+    const _guard = ensureFinalUserMessage(validatedMessages, _originalTranscript);
+    const guardedMessages = _guard.messages;
+    if (_guard.note === 'from_original') {
+      ctx.logger?.warn?.('[assemble] delivery guard: no user in rebuilt messages; fell back to raw transcript (non-polluting)', {
+        note: _guard.note,
+        before: validatedMessages.length,
+        after: guardedMessages.length,
+      });
+      markDegraded('missing_user_message_fallback_raw');
+    } else if (_guard.note === 'none') {
+      // 总 wedge：转录本身无 user，不伪造查询；高等级告警供治本定位
+      ctx.logger?.error?.('[assemble] delivery guard: NO user message in transcript (total wedge); fail-closed, not synthesizing', {
+        msgCount: guardedMessages.length,
+        conversationId: getConversationId(_guardSession),
+      });
+      markDegraded('no_user_in_transcript');
+    }
+    // guard 若裁剪/回退，token 估算需同步（仅 changed 时重算）
+    const guardedTokens = guardedMessages === validatedMessages
+      ? messageTokens
+      : estimateTokensFromMessages(guardedMessages);
+
     const validatedAddition = (typeof systemPromptAddition === "string" && systemPromptAddition.trim().length > 0)
       ? systemPromptAddition
       : undefined;
+
+    const degraded = degradedReasons.length > 0;
+    if (degraded) {
+      ctx.logger?.warn?.("[assemble] degraded paths triggered", { reasons: degradedReasons });
+    }
 
     try {
       // P0-6: 已改为静态导入
       healthMetrics.recordUxMetrics({
         degraded,
         degradedReasons: degraded ? degradedReasons : undefined,
-        estimatedTokens: messageTokens + additionTokens,
+        estimatedTokens: guardedTokens + additionTokens,
         maxContextChars,
         experienceHit: Array.isArray(expResults) && expResults.length > 0,
         experienceQueried: hasToolCategory(extractAvailableTools(params), "experience"),
@@ -1463,8 +1494,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       ctx.logger?.debug?.("recordUxMetrics failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
     }
     return {
-      messages: validatedMessages,
-      estimatedTokens: messageTokens + additionTokens,
+      messages: guardedMessages,
+      estimatedTokens: guardedTokens + additionTokens,
       systemPromptAddition: validatedAddition,
       promptAuthority: validatedAddition ? "preassembly_may_overflow" : "assembled",
       degraded,
@@ -1497,9 +1528,19 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         }
       }
     }
+    // 交付前不变式守卫同样作用于错误降级出口（仍会外包给 LLM 的消息不得缺 user）
+    const _errOrig = Array.isArray(params.messages) ? params.messages : [];
+    const _errGuard = ensureFinalUserMessage(finalMessages, _errOrig);
+    const _errMsgs = _errGuard.messages;
+    if (_errGuard.note === 'from_original') {
+      ctx.logger?.warn?.('[assemble] delivery guard (error path): no user in rebuilt messages; fell back to raw transcript', { note: _errGuard.note, before: finalMessages.length, after: _errMsgs.length });
+    } else if (_errGuard.note === 'none') {
+      ctx.logger?.error?.('[assemble] delivery guard (error path): total wedge, no user message; fail-closed', { msgCount: _errMsgs.length });
+      markDegraded('no_user_in_transcript');
+    }
     return {
-      messages: finalMessages,
-      estimatedTokens: estimateTokensFromMessages(finalMessages),
+      messages: _errMsgs,
+      estimatedTokens: estimateTokensFromMessages(_errMsgs),
       systemPromptAddition: undefined,
       promptAuthority: "assembled",
       degraded: true,
