@@ -17,10 +17,43 @@ export interface ExtractedEntities {
 }
 
 /**
+ * 常见中文虚词/助词 2 字 gram。
+ * 这些 pair 语义价值极低，过滤掉可减少无意义匹配噪音、降低误召回。
+ * 只含语法/语气功能词，绝不包含技术术语（如"推理""检索""实体"），避免误删有效命中。
+ */
+const CJK_STOP_GRAMS = new Set([
+  '我们', '你们', '他们', '这些', '那些', '这个', '那个', '一个', '一种',
+  '还有', '就是', '但是', '然后', '因为', '所以', '如果', '虽然', '以及', '并且',
+  '可以', '需要', '是否', '怎么', '怎样', '什么', '为什么', '一下', '这里', '那里',
+  '请帮', '帮我', '帮忙', '请问', '麻烦', '谢谢', '句话',
+]);
+
+/**
+ * 从中文查询中提取"可匹配实体子词"。
+ *
+ * 用滑动 2 字窗口（bigram）而非 `[一-鿿]{2,4}` 的非重叠 2-4 字窗口：
+ * 旧的取法会把"实体过滤规则"切成"一下实体 / 过滤规则 / 是否完善"等
+ * 与周围字符粘连的无效片段，检索内容（摘要/经验）几乎不含这些字面串，
+ * 导致中文结果全部匹配失败而被过滤 → Phase 1 全空 → P0-7 频繁回退到原始候选。
+ * 滑动 bigram 保留"实体 / 过滤 / 规则"这类真正可命中的子词。
+ */
+function extractChineseGrams(query: string, into: string[]): void {
+  const runs = query.match(/[\u4e00-\u9fff]{2,}/g);
+  if (!runs) return;
+  for (const run of runs) {
+    for (let i = 0; i + 2 <= run.length; i++) {
+      const gram = run.slice(i, i + 2);
+      if (CJK_STOP_GRAMS.has(gram)) continue;
+      if (!into.includes(gram)) into.push(gram);
+    }
+  }
+}
+
+/**
  * 从查询中提取实体
  * 
  * 策略：
- * 1. 提取中文分词（2-4字常见名词短语）
+ * 1. 提取中文实体子词（滑动 2 字 bigram，过滤虚词）
  * 2. 提取英文/驼峰/大写字母开头的标识符
  * 3. 提取技术术语（package.json 风格、npm 包名）
  * 4. 提取路径/文件名模式
@@ -36,11 +69,8 @@ export function extractEntities(query: string): ExtractedEntities {
   const techTerms: string[] = [];
   const tokens: string[] = [];
 
-  // 1. 提取中文名词短语（2-4个连续中文字符）
-  const chinesePhrases = query.match(/[一-鿿]{2,4}/g);
-  if (chinesePhrases) {
-    terms.push(...chinesePhrases.filter(t => t.length >= 2));
-  }
+  // 1. 提取中文实体子词（滑动 2 字 bigram，过滤虚词）
+  extractChineseGrams(query, terms);
 
   // 2. 提取英文/驼峰/大写字母开头的标识符
   const identifiers = query.match(/[A-Z][a-zA-Z0-9]*(?:-[a-zA-Z0-9]+)*/g);
