@@ -383,65 +383,55 @@ export async function performRetrieval(
     graphResults = rawGraph;
   }
 
-  // ---- Phase 1: 实体匹配过滤（三层主题锚定） ----
-  // 对每层检索结果按实体匹配度过滤，过滤无关结果，保留高相关结果
-  const ENTITY_FILTER_THRESHOLD = 0.15; // 至少匹配到 0.15 分才认为相关
-  let filteredQmdCount = 0, filteredGraphCount = 0, filteredExpCount = 0;
+  // ---- Phase 1: 实体相关度打分（一次计算，多处消费） ----
+  // 架构根治（see docstring）：不再硬删结果，而是为每条结果统一计算一次 _entityScore，
+  // 交由 injection L2/L3/L4 消费。检索是尽力而为，宁可给候选、按来源融合权重排序，
+  // 也不做"词法硬删"——尤其是 graph 通道，其 score 已含 M/embedding 语义分，
+  // 词法硬删会误丢 M 认为相关的节点（原 P0-7 全空回退的直接诱因）。
+  const ENTITY_FILTER_THRESHOLD = 0.15; // 仅用于观测：低于该分视为"低实体命中"
+  const attachEntityScore = (r: any, getContent: () => string, getName?: () => string | undefined): any => {
+    if (!extractedEntities || extractedEntities.tokens.length === 0) {
+      return { ...r, _entityScore: 1.0 };
+    }
+    const { score } = matchEntityScore(getContent(), extractedEntities, getName?.());
+    return { ...r, _entityScore: score };
+  };
+
+  // QMD
+  qmdResults = qmdResults.map((r: any) =>
+    attachEntityScore(r, () => r.content ?? r.title ?? '', () => r.title),
+  );
+  // Graph：结构化实体名参与模糊相似度；语义相关由 graph 自身 score(M/embedding) 提供
+  graphResults = graphResults.map((r: any) =>
+    attachEntityScore(
+      r,
+      () => r.content ?? r.name ?? r.summary ?? r.id ?? '',
+      () => r.name ?? r.title ?? r.subject ?? undefined,
+    ),
+  );
+  // Experience
+  expResults = expResults.map((e: any) =>
+    attachEntityScore(e, () => e.experience?.summary ?? e.experience?.content ?? e.summary ?? ''),
+  );
+
+  // 观测（S3）：统计低实体命中数，用于评估"信任 graph 语义分"的效果，不做过滤
   if (extractedEntities.tokens.length > 0) {
-    // P0-7: 过滤前备份原始结果，供"全空降级"恢复
-    const rawExpResults = expResults;
-
-    // QMD: filter by content match
-    const beforeCount = qmdResults.length;
-    qmdResults = qmdResults.filter((r: any) => {
-      const content = r.content ?? r.title ?? '';
-      // 传入结构化标题做模糊实体相关判断（复用 entity-extract 的去重相似度）
-      const { match, score } = matchEntityScore(content, extractedEntities, r.title);
-      return match;
-    });
-    filteredQmdCount = beforeCount - qmdResults.length;
-
-    // Graph: filter by content/matchCount
-    const beforeGraphCount = graphResults.length;
-    graphResults = graphResults.filter((r: any) => {
-      const content = r.content ?? r.name ?? r.summary ?? r.id ?? '';
-      const entityName = r.name ?? r.title ?? r.subject ?? undefined;
-      const { match, score } = matchEntityScore(content, extractedEntities, entityName);
-      return match;
-    });
-    filteredGraphCount = beforeGraphCount - graphResults.length;
-
-    // Experience: filter by summary/tags
-    const beforeExpCount = expResults.length;
-    expResults = expResults.filter((e: any) => {
-      const content = e.experience?.summary ?? e.experience?.content ?? e.summary ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities);
-      return match;
-    });
-    filteredExpCount = beforeExpCount - expResults.length;
-
-    if (filteredQmdCount > 0 || filteredGraphCount > 0 || filteredExpCount > 0) {
-      ctx.logger?.info?.('[assemble] Phase 1: entity-filtered irrelevant results', {
-        qmd: { before: beforeCount, after: qmdResults.length, filtered: filteredQmdCount },
-        graph: { before: beforeGraphCount, after: graphResults.length, filtered: filteredGraphCount },
-        exp: { before: beforeExpCount, after: expResults.length, filtered: filteredExpCount },
+    const lowEntity = (arr: any[]) => arr.filter((r: any) => (r._entityScore ?? 1) < ENTITY_FILTER_THRESHOLD).length;
+    const lowQmd = lowEntity(qmdResults);
+    const lowGraph = lowEntity(graphResults);
+    const lowExp = lowEntity(expResults);
+    if (lowQmd > 0 || lowGraph > 0 || lowExp > 0) {
+      ctx.logger?.debug?.('[assemble] Phase 1: low-entity results kept (soft scoring, trust semantic source)', {
+        qmd: { total: qmdResults.length, lowEntity: lowQmd },
+        graph: { total: graphResults.length, lowEntity: lowGraph },
+        exp: { total: expResults.length, lowEntity: lowExp },
       });
     }
-
-    // P0-7: 过滤降级 — 过滤后全空时，退回首轮原始结果，避免模型"无上下文空转"。
-    // 检索是尽力而为：宁可给未过滤的候选，也不让模型面对空注入。
-    const totalAfter = qmdResults.length + graphResults.length + expResults.length;
-    if (totalAfter === 0) {
-      ctx.logger?.warn?.('[assemble] P0-7: entity filter emptied all results, falling back to raw candidates', {
-        qmd: { before: beforeCount, after: 0 },
-        graph: { before: beforeGraphCount, after: 0 },
-        exp: { before: beforeExpCount, after: 0 },
-      });
-      // 仅当 raw 候选存在时才回退
-      if (rawQmd.length > 0) qmdResults = rawQmd;
-      if (rawGraph.length > 0) graphResults = rawGraph;
-      if (rawExpResults?.length > 0) expResults = rawExpResults;
-    }
+  } else {
+    // P0-7 语义：仅当某来源检索结果**天然真空**（非被过滤清空）才回退到 raw 候选。
+    // 经验无独立 raw 副本（expResults 即结果本身），且经验不再被过滤，无需回退。
+    if (qmdResults.length === 0 && rawQmd.length > 0) qmdResults = rawQmd;
+    if (graphResults.length === 0 && rawGraph.length > 0) graphResults = rawGraph;
   }
 
   const parallelMs = Date.now() - parallelStart;
@@ -652,8 +642,5 @@ export async function performRetrieval(
     qmdQuery,
     extractedEntities,
     queryRewriteResult,
-    filteredQmdCount,
-    filteredGraphCount,
-    filteredExpCount,
   };
 }

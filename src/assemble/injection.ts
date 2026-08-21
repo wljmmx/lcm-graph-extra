@@ -19,7 +19,7 @@ import { buildKnowledgeGuidance } from './guidance.js';
 // P1-1: 动态 import 提升为静态导入，避免每次 injectContext 的 await import 开销
 import { backgroundTasks } from '../async/task-registry.js';
 import { detectConflicts } from '../merger.js';
-import { matchEntityScore, getConfidenceLevel, confidenceLabel } from '../entity-extract.js';
+import { getConfidenceLevel, confidenceLabel } from '../entity-extract.js';
 import { getGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
@@ -127,19 +127,8 @@ export async function injectContext(
   // Layer 4: Experience
   let finalExpResults = expResults;
   if (expResults.length > 0) {
-    // Phase 1: 实体匹配度过滤 — 经验注入前过滤无关经验
-    const expEntityMatchFilter = (e: any): boolean => {
-      if (!extractedEntities || extractedEntities.tokens.length === 0) return true;
-      const content = e.experience?.summary ?? e.experience?.content ?? e.summary ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities);
-      return match;
-    };
-
-    const expFilteredCount = expResults.length;
-    expResults = expResults.filter(expEntityMatchFilter);
-    if (expFilteredCount > 0 && expResults.length < expFilteredCount) {
-      ctx.logger?.debug?.('[injection] Layer 4 (experience) entity-filtered', { before: expFilteredCount, after: expResults.length });
-    }
+    // S2: 经验不再按词法实体硬删——以 S-7 用户画像 boost 为主排序，实体分数弱化。
+    // 相关度已在 performRetrieval 统一打上 _entityScore，此处不再重复 matchEntityScore。
 
     let personalizedResults = expResults;
     try {
@@ -191,99 +180,51 @@ export async function injectContext(
 
   // Layer 3: Neo4j knowledge graph
   if (graphResults && Array.isArray(graphResults) && graphResults.length > 0) {
-    // Phase 1: 实体匹配度过滤 + 权重排序
-    const graphEntityMatchFilter = (r: any): { filtered: boolean; weight: number; confidence: string } => {
-      if (!extractedEntities || extractedEntities.tokens.length === 0) {
-        return { filtered: false, weight: 1.0, confidence: '[实体匹配度：无法评估]' };
-      }
-      const content = r.content ?? r.name ?? r.subject ?? r.id ?? '';
-      const entityName = r.name ?? r.subject ?? r.title ?? undefined;
-      const { match, score } = matchEntityScore(content, extractedEntities, entityName);
-      const level = getConfidenceLevel(score);
-      const label = confidenceLabel(level);
-      // 权重策略：高置信度 1.0, 中置信度 0.7, 低置信度 + 低检索分 → 过滤
-      let weight = 1.0;
-      let filtered = false;
-      if (level === 'high') {
-        weight = 1.0;
-      } else if (level === 'medium') {
-        weight = 0.7;
-      } else {
-        // 低置信度：如果检索分数也低（< 0.3），则过滤掉
-        const rScore = r.score ?? 0.5;
-        if (rScore < 0.3) {
-          filtered = true;
-        } else {
-          weight = 0.5;
-        }
-      }
-      return { filtered, weight, confidence: label };
-    };
-
-    // 先过滤，再按 权重*检索分 排序
-    const filteredGraph = graphResults.filter((r: any) => !graphEntityMatchFilter(r).filtered);
-    const sortedGraph = filteredGraph
+    // S2: graph 信任自身语义分（M/embedding 相关度），不再按词法实体硬删。
+    // 实体分由 performRetrieval 统一打上 _entityScore，仅作标签展示。
+    const graphEsOf = (r: any): number => (typeof r?._entityScore === 'number' ? r._entityScore : 1.0);
+    const sortedGraph = graphResults
       .map((r: any) => {
-        const { weight } = graphEntityMatchFilter(r);
         const rScore = r.score ?? 0.5;
-        return { ...r, _weightedScore: rScore * weight };
+        // graph 权重按语义分档（M/embedding 相关度）
+        const gw = rScore >= 0.7 ? 1.0 : rScore >= 0.4 ? 0.8 : 0.6;
+        return { ...r, _weightedScore: rScore * gw, _entityScore: graphEsOf(r) };
       })
       .sort((a: any, b: any) => b._weightedScore - a._weightedScore);
 
     const graphBody = sortedGraph
       .slice(0, budgetedLimits.graph)
       .map((r: any) => {
-        const gScore = r.score ?? 0.5;
-        const { weight, confidence } = graphEntityMatchFilter(r);
-        const adjustedScore = (gScore * weight * 100).toFixed(0);
+        const confidence = confidenceLabel(getConfidenceLevel(r._entityScore));
+        const adjustedScore = (r._weightedScore * 100).toFixed(0);
         const title = r.title ?? r.name ?? r.subject ?? '';
         const snippet = (r.content ?? r.id ?? '').slice(0, 500);
         return confidence + ' ' + title + '\n' + snippet + (adjustedScore ? ' (调整后: ' + adjustedScore + '%)' : '');
       })
       .join('\n');
-    if (sortedGraph.length > 0 && sortedGraph.length < graphResults.length) {
-      ctx.logger?.debug?.('[injection] Layer 3 (graph) entity-filtered', { before: graphResults.length, after: sortedGraph.length });
-    }
+    // S3 观测：graph 保留率 + 低实体命中数（评估"信任语义分"效果，不做过滤）
+    const lowEntityGraph = sortedGraph.filter((r: any) => (r._entityScore ?? 1) < 0.15).length;
+    ctx.logger?.debug?.('[injection] Layer 3 (graph) soft-scored', {
+      total: graphResults.length,
+      shown: Math.min(sortedGraph.length, budgetedLimits.graph),
+      lowEntity: lowEntityGraph,
+    });
     addSection('## 🔗 知识图谱（历史知识参考）', graphBody, 4);
   }
 
   // Layer 2: qmd search snippet results
   if (qmdResults && Array.isArray(qmdResults) && qmdResults.length > 0) {
-    // Phase 1: 实体匹配度过滤 + 权重排序
-    const entityMatchFilter = (r: any): { filtered: boolean; weight: number; confidence: string } => {
-      if (!extractedEntities || extractedEntities.tokens.length === 0) {
-        return { filtered: false, weight: 1.0, confidence: '[实体匹配度：无法评估]' };
-      }
-      const content = r.content ?? r.title ?? '';
-      const { match, score } = matchEntityScore(content, extractedEntities, r.title);
-      const level = getConfidenceLevel(score);
-      const label = confidenceLabel(level);
-      // 权重策略：高置信度 1.0, 中置信度 0.7, 低置信度 + 低检索分 → 过滤
-      let weight = 1.0;
-      let filtered = false;
-      if (level === 'high') {
-        weight = 1.0;
-      } else if (level === 'medium') {
-        weight = 0.7;
-      } else {
-        // 低置信度：如果检索分数也低（< 0.3），则过滤掉
-        const rScore = r.score ?? 0.5;
-        if (rScore < 0.3) {
-          filtered = true;
-        } else {
-          weight = 0.5;
-        }
-      }
-      return { filtered, weight, confidence: label };
+    // S1/S2: 消费检索阶段统一按来源融合的 _entityScore 做权重，不再重复 matchEntityScore 计算。
+    // S2 qmd = 检索分 × 实体分（软加权），不再按实体硬删。
+    const qmdEsOf = (r: any): number => (typeof r?._entityScore === 'number' ? r._entityScore : 1.0);
+    const qmdEntityWeight = (es: number): number => {
+      const level = getConfidenceLevel(es);
+      return level === 'high' ? 1.0 : level === 'medium' ? 0.7 : 0.5;
     };
-
-    // 先过滤，再按 权重*检索分 排序
-    const filteredQmd = qmdResults.filter((r: any) => !entityMatchFilter(r).filtered);
-    const sortedQmd = filteredQmd
+    const sortedQmd = qmdResults
       .map((r: any) => {
-        const { weight } = entityMatchFilter(r);
         const rScore = r.score ?? 0.5;
-        return { ...r, _weightedScore: rScore * weight };
+        return { ...r, _weightedScore: rScore * qmdEntityWeight(qmdEsOf(r)) };
       })
       .sort((a: any, b: any) => b._weightedScore - a._weightedScore);
 
@@ -303,10 +244,7 @@ export async function injectContext(
       .filter((r: any) => (r.score == null || r.score >= 0.3) && String(r.content ?? '').trim().length >= 20)
       .join('\n');
     if (qmdItems) {
-    if (sortedQmd.length > 0 && sortedQmd.length < qmdResults.length) {
-      ctx.logger?.debug?.('[injection] Layer 2 (qmd) entity-filtered', { before: qmdResults.length, after: sortedQmd.length });
-    }
-    addSection('## 📄 记忆文件（参考）', qmdItems, 3);
+      addSection('## 📄 记忆文件（参考）', qmdItems, 3);
     }
   }
 
