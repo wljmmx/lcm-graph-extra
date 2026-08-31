@@ -20,12 +20,12 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.7.2-beta.2",
+      "minGatewayVersion": "2026.7.2-beta.2"
     },
     "build": {
-      "openclawVersion": "2026.3.24-beta.2",
-      "pluginSdkVersion": "2026.3.24-beta.2"
+      "openclawVersion": "2026.7.2-beta.2",
+      "pluginSdkVersion": "2026.7.2-beta.2"
     }
   },
   "scripts": {
@@ -58,7 +58,7 @@
     "vite": "^5.4.21"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.24-beta.2"
+    "openclaw": ">=2026.7.2-beta.2"
   },
   "peerDependenciesMeta": {
     "@openclaw/graph-memory-pro": {

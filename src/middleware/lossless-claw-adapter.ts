@@ -90,7 +90,19 @@ interface LosslessClawEngine {
     runtimeContext?: Record<string, unknown>;
     runtimeSettings?: any;
     legacyCompactionParams?: Record<string, unknown>;
+    sessionTarget?: Record<string, unknown>;
   }): Promise<void>;
+  // OpenClaw 2026.7.2+ durable-turn 契约：功率等写入逻辑轮，返回 committed/duplicate
+  commitTurn?(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    advancementKey: string;
+    admission: any;
+    terminal: boolean;
+    messages: any[];
+    tokenBudget?: number;
+  }): Promise<{ status: 'committed' | 'duplicate'; committedAt?: string }>;
   bootstrap?(params: {
     sessionId: string;
     sessionKey?: string;
@@ -145,6 +157,9 @@ class MemorySupplementCtxEngine implements LosslessClawEngine {
   }
   async afterTurn(params: any): Promise<void> {
     await this.inner.afterTurn?.(params);
+  }
+  async commitTurn(params: any): Promise<any> {
+    return this.inner.commitTurn?.(params) ?? { status: 'committed' };
   }
   async assemble(params: any): Promise<any> {
     return this.inner.assemble?.(params) ?? { messages: params.messages ?? [], estimatedTokens: 0 };
@@ -444,6 +459,7 @@ export class LosslessClawAdapter {
     runtimeContext?: Record<string, unknown>;
     runtimeSettings?: any;
     legacyCompactionParams?: Record<string, unknown>;
+    sessionTarget?: Record<string, unknown>;
   }): Promise<void> {
     if (!this._connected || !this.engine) return;
     if (typeof this.engine.afterTurn !== 'function') return;
@@ -789,6 +805,31 @@ export class LosslessClawAdapter {
     } catch (err) {
       this.logger?.warn?.('[lossless-claw-adapter] assemble failed', { err: serializeError(err) });
       return { messages: params.messages ?? [], estimatedTokens: 0 };
+    }
+  }
+
+  /** 透传给 lossless-claw 的 commitTurn（OpenClaw durable-turn 逻辑轮提交） */
+  async commitTurn(params: {
+    sessionId: string;
+    sessionKey?: string;
+    sessionFile?: string;
+    advancementKey: string;
+    admission: any;
+    terminal: boolean;
+    messages: any[];
+    tokenBudget?: number;
+  }): Promise<{ status: 'committed' | 'duplicate'; committedAt?: string }> {
+    if (!this._connected || !this.engine || typeof this.engine.commitTurn !== 'function') {
+      // 无下游契约（旧版 lossless-claw）时乐观提交，交由上层 CE 幂等去重兜底
+      return { status: 'committed' };
+    }
+    try {
+      const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
+      const normalizedParams = coerceSessionId({ ...params, messages: normalizedMessages });
+      return await this.engine.commitTurn(normalizedParams);
+    } catch (err) {
+      this.logger?.warn?.('[lossless-claw-adapter] commitTurn failed', { err: serializeError(err) });
+      return { status: 'committed' };
     }
   }
 

@@ -29,6 +29,7 @@ import { resolveNeo4jConfig, resolveEmbeddingConfig } from "./config/neo4j-helpe
 import { PluginConfigSchema, autoMatchMaxTokens, DEFAULT_CONFIG } from "./config.js";
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
 import { resolveSessionCacheKey } from "./utils/session-key.js";
+import { evaluateTurnCommit } from "./utils/commit-turn.js";
 import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
 
 import {
@@ -111,6 +112,11 @@ const PREFETCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10min TTL（允许跨长对话�
 const tokenEstimateCache = new Map<string, { tokens: number; ts: number }>();
 const TOKEN_ESTIMATE_CACHE_TTL_MS = 30 * 1000; // 30s TTL（短 TTL 确保一致性）
 const TOKEN_ESTIMATE_CACHE_MAX = 100;
+
+// OpenClaw durable-turn：已提交逻辑轮的幂等记录（key = `${sessionId}|${turnId}`）。
+// 模块级单例，供 commitTurn 去重 & bootstrap 按 sessionId 清理，防止 /new 后跨会话误判。
+const committedTurnKeys = new Set<string>();
+const COMMITTED_TURN_MAX = 2000;
 
 function cachedEstimateTokens(messages: any[]): number {
   if (!Array.isArray(messages) || messages.length === 0) return 0;
@@ -572,9 +578,17 @@ const pluginEntry: any = definePluginEntry({
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.1.12",
+        version: "2.2.0",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
+        // OpenClaw 2026.7.2+ durable-turn 契约：声明 currentTurnFence + 幂等提交，
+        // 否则宿主整轮走 legacy 路径（含重试）。
+        transcriptSemantics: {
+          currentTurnFence: 'before-current-turn-entry-v1',
+          turnAdvancementIdempotency: 'atomic-idempotent-v1',
+        },
+        // 仅接受所需 host 注入字段，避免未知字段干扰 assemble/compact
+        acceptedHostParams: ['sessionKey', 'prompt', 'runtimeContext', 'runtimeSettings'],
         // SDK ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn"
         // 为每个 operation 声明所需 host capabilities，确保 SDK 在 host 不支持时
         // 抛出明确错误而非静默降级。
@@ -668,6 +682,13 @@ const pluginEntry: any = definePluginEntry({
               const { clearSessionToolTracker } = await import("./plugin/tool-guidance.js");
               clearSessionToolTracker(sk);
             } catch { /* non-fatal */ }
+            // durable-turn：按 sessionId 清空已提交逻辑轮幂等记录，防止 /new 后跨会话去重误判
+            try {
+              const _prefix = `${sid}|`;
+              for (const k of Array.from(committedTurnKeys)) {
+                if (typeof k === 'string' && k.startsWith(_prefix)) committedTurnKeys.delete(k);
+              }
+            } catch { /* non-fatal */ }
 
             // 3. 清除 MoA 缓存（防止上一轮 MoA 结果被误用）
             try {
@@ -728,6 +749,64 @@ const pluginEntry: any = definePluginEntry({
         }
         const count = (params.messages ?? []).length;
         return { ingestedCount: count };
+      },
+
+      async commitTurn(params: {
+        advancementKey: string;
+        admission: any;
+        terminal: boolean;
+        messages: any[];
+        sessionId?: string;
+        sessionKey?: string;
+        sessionFile?: string;
+        tokenBudget?: number;
+      }) {
+        try {
+          const sessionId = params.sessionId != null ? String(params.sessionId) : '';
+          const decision = evaluateTurnCommit({
+            sessionId,
+            advancementKey: params.advancementKey,
+            logicalTurnId: params.admission?.logicalTurnId,
+            seen: committedTurnKeys,
+          });
+
+          // ① 幂等去重 / 陈旧提交判定
+          if (decision.duplicate) {
+            if (decision.keyMismatch) {
+              logger?.warn?.('[lcm-graph-extra] commitTurn: advancementKey mismatch (stale admission)', {
+                sessionId, advancementKey: params.advancementKey, logicalTurnId: params.admission?.logicalTurnId,
+              });
+            }
+            return { status: 'duplicate', committedTurnId: decision.turnId };
+          }
+
+          // ② 委托 lossless-claw 持久化（幂等递交）
+          let committed = false;
+          try {
+            const r = await _losslessClawAdapter?.commitTurn?.(params) ?? null;
+            committed = r?.status === 'committed';
+          } catch (e) {
+            logger?.warn?.('[lcm-graph-extra] commitTurn: adapter commit failed (non-fatal)', {
+              err: e instanceof Error ? e.message : String(e),
+            });
+          }
+
+          // ③ 记录幂等 key（LRU 上限裁剪）
+          committedTurnKeys.add(decision.key);
+          if (committedTurnKeys.size > COMMITTED_TURN_MAX) {
+            const first = committedTurnKeys.values().next().value;
+            if (first != null) committedTurnKeys.delete(first);
+          }
+
+          return {
+            status: committed ? 'committed' : 'duplicate',
+            committedTurnId: decision.turnId,
+          };
+        } catch (err) {
+          // 提交失败不中断推理：fail-safe 乐观返回 committed
+          logger?.error?.('[lcm-graph-extra] commitTurn failed', { err: serializeError(err) });
+          return { status: 'committed' };
+        }
       },
 
       /**
