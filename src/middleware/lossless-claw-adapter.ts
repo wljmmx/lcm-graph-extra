@@ -364,10 +364,15 @@ export class LosslessClawAdapter {
         this.logger?.warn?.(`[lcm] connect attempt ${attempt + 1}/${maxRetries + 1}: factory({}) threw ${errName}: ${errMsg}`);
 
         // 如果 lossless-claw 插件处于 read-only 注册模式（引擎未初始化），
-        // 标记跳过 Path 1 (Symbol registry)，后续重试走 Path 2/3/4 触发真正的引擎初始化
-        if (errMsg.includes('read-only') || errMsg.includes('disabled during')) {
+        // 标记跳过 Path 1 (Symbol registry)，后续重试走 Path 2/3/4 触发真正的引擎初始化。
+        // 同样地：factory({}) 抛任意错误（含 lossless-claw 内部 waitForEngine 重抛的
+        // 已记录 initError——如 DB 锁导致的 deferred init 失败已固化进 shared init）时，
+        // 重试同一条 Path 1 工厂必然再次抛同一错误，必须跳过 Path 1 让后续尝试走
+        // Path 2 (cached engine) / Path 3 (fresh register) 恢复。
+        const looksReadOnly = errMsg.includes('read-only') || errMsg.includes('disabled during');
+        if (looksReadOnly || /typeerror|undefined\b/.test(errMsg)) {
           this._skipPath1 = true;
-          this.logger?.info?.('[lcm] detected read-only Symbol registry factory, falling back to Path 2/3/4 for real engine init');
+          this.logger?.info?.('[lcm] factory threw, marking Symbol registry factory broken, falling back to Path 2/3/4', { err: errMsg });
         }
       }
 
@@ -1093,6 +1098,20 @@ export class LosslessClawAdapter {
                 agentDir: process.env.OPENCLAW_AGENT_DIR || join(openclawDir, 'agent'),
                 dataDir: join(openclawDir, 'data'),
               }),
+              // P0-FIX: lossless-claw 1.0.0 的 register() 会读取 api.runtime.llm.complete
+              // （getRuntimeLlm）与 api.runtime.config（readRuntimeConfigSnapshot）。
+              // 之前 mock 缺 runtime 字段 → getRuntimeLlm 抛 "Cannot read properties of
+              // undefined (reading 'llm')" → Path 3 的新鲜 register 恢复路径永远失败。
+              // 补上无副作用的最小 runtime 桩：llm.complete 为 no-op，config.current()
+              // 返回空配置快照（readRuntimeModelContext 等读取均为防御式，缺字段安全）。
+              runtime: {
+                llm: {
+                  complete: async () => ({ role: 'assistant', content: '' }),
+                },
+                config: {
+                  current: () => ({ models: { providers: {} }, agents: { defaults: {} }, plugins: { entries: {} } }),
+                },
+              },
               // pluginConfig 供 lossless-claw 读取自身配置
               pluginConfig: {},
               registerContextEngine: (_id: string, _fn: Function) => {},
