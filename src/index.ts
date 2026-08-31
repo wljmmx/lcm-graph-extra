@@ -754,12 +754,14 @@ const pluginEntry: any = definePluginEntry({
       async commitTurn(params: {
         advancementKey: string;
         admission: any;
-        terminal: boolean;
+        terminal: any; // SDK: TranscriptEntryAnchor
         messages: any[];
-        sessionId?: string;
+        sessionId: string;
         sessionKey?: string;
-        sessionFile?: string;
-        tokenBudget?: number;
+        sessionTarget?: any; // SDK: ContextEngineSessionTarget
+        runtimeContext?: Record<string, unknown>;
+        runtimeSettings?: any;
+        isHeartbeat?: boolean;
       }) {
         try {
           const sessionId = params.sessionId != null ? String(params.sessionId) : '';

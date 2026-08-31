@@ -96,12 +96,14 @@ interface LosslessClawEngine {
   commitTurn?(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile?: string;
+    sessionTarget?: any; // SDK: ContextEngineSessionTarget
     advancementKey: string;
     admission: any;
-    terminal: boolean;
+    terminal: any; // SDK: TranscriptEntryAnchor
     messages: any[];
-    tokenBudget?: number;
+    runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: any;
+    isHeartbeat?: boolean;
   }): Promise<{ status: 'committed' | 'duplicate'; committedAt?: string }>;
   bootstrap?(params: {
     sessionId: string;
@@ -812,12 +814,14 @@ export class LosslessClawAdapter {
   async commitTurn(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile?: string;
+    sessionTarget?: any; // SDK: ContextEngineSessionTarget
     advancementKey: string;
     admission: any;
-    terminal: boolean;
+    terminal: any; // SDK: TranscriptEntryAnchor
     messages: any[];
-    tokenBudget?: number;
+    runtimeContext?: Record<string, unknown>;
+    runtimeSettings?: any;
+    isHeartbeat?: boolean;
   }): Promise<{ status: 'committed' | 'duplicate'; committedAt?: string }> {
     if (!this._connected || !this.engine || typeof this.engine.commitTurn !== 'function') {
       // 无下游契约（旧版 lossless-claw）时乐观提交，交由上层 CE 幂等去重兜底
