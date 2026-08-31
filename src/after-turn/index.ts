@@ -285,7 +285,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
               backgroundTasks.register('afterturn:s9-topic-shift', (async () => {
                 try {
                   const { withGmProFallback } = await import("../adapters/gm-pro-fallback.js");
-                  const consolidated = await withGmProFallback<{ consolidatedIds: string[] } | null>(
+                  const consolidated = await withGmProFallback<string[] | null>(
                     'consolidateBuffer',
                     async (mod) => {
                       const bufferNodes = allMsgs
@@ -297,12 +297,13 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                           description: '',
                           content: m.content ?? '',
                         }));
-                      return await mod.consolidateBuffer({ nodes: bufferNodes, sessionId: _sessionId });
+                      // 上游 v2.4.2 签名：consolidateBuffer(nodes: GmNode[]) => Promise<string[]>
+                      return await mod.consolidateBuffer(bufferNodes);
                     },
                     async () => null,
                     { label: 'S-9 consolidateBuffer' },
                   );
-                  if (!consolidated || !consolidated.consolidatedIds?.length) {
+                  if (!consolidated?.length) {
                     // 本地主模型时，LosslessClawAdapter.compact 内部会统一注入本地 llm.complete
                     await ctx.losslessClawAdapter.compact({
                       sessionId: _sessionId,

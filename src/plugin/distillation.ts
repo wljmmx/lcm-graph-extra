@@ -703,7 +703,8 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
                         async () => null, // fallback 到后续 Cypher linkRelated
                         { label: 'S-11 linkNodes' },
                       );
-                      if (linkResult?.created) gmProLinked++;
+                      // 上游 v2.4.2 linkNodes 返回 Promise<void>（成功返回 void/undefined，失败或降级返回 null）
+                      if (linkResult !== null) gmProLinked++;
                     }
                   }
                 } catch (gmProErr) {

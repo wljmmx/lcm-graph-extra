@@ -222,11 +222,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             gmProNodes = await withGmProFallback<any[] | null>(
               'getNodesByTimeRange',
               async (mod) => {
+                // 上游 v2.4.2 签名：getNodesByTimeRange({ start, end, timeField, type?, limit? })
+                // timeField 取 updatedAt（最近活跃）；experiences 不在上游 NodeType(TASK/SKILL/EVENT) 内，故不传 type
                 const r = await mod.getNodesByTimeRange({
-                  from: timeFilter.fromTs ?? 0,
-                  to: timeFilter.toTs ?? Date.now(),
+                  start: timeFilter.fromTs ?? 0,
+                  end: timeFilter.toTs ?? Date.now(),
+                  timeField: 'updatedAt',
                   limit: Math.trunc(limitParam),
-                  label: 'EXPERIENCE',
                 });
                 return Array.isArray(r) ? r : (r?.nodes ?? null);
               },
@@ -251,8 +253,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           conditions.push("e.type = $expType");
           queryParams.expType = typeFilter;
         }
-        // S-8': 当 gm-pro 已返回时间过滤结果时，Cypher 不再叠加时间条件（避免双过滤）
-        if (!gmProNodes) {
+        // S-8': 当 gm-pro 已返回非空时间过滤结果时，Cypher 不再叠加时间条件（避免双过滤）。
+        //        gm-pro 空结果（[]）说明未命中，应继续走 Cypher 时间过滤，避免丢失时间范围。
+        if (!gmProNodes || gmProNodes.length === 0) {
           if (timeFilter.fromTs) {
             conditions.push("coalesce(e.createdAt, e.updatedAt, 0) >= $fromTs");
             queryParams.fromTs = neo4jDriver.int(timeFilter.fromTs) as any;
@@ -1092,7 +1095,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 async () => null, // fallback 不做（由后续 Cypher 处理）
                 { label: 'G-10 evolveNode' },
               );
-              if (result?.evolved) gmProEvolvedSet.add(nodeId);
+              // 上游 v2.4.2 evolveNode 返回 Promise<void>（成功返回 void/undefined，失败或降级返回 null）
+              if (result !== null) gmProEvolvedSet.add(nodeId);
             }
 
             // Fallback: Cypher 直接 SET（仅处理 gm-pro 未成功的节点，避免双重处理）

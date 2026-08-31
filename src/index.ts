@@ -2804,16 +2804,21 @@ const pluginEntry: any = definePluginEntry({
               try {
                 const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
                 // 优先调用 gm-pro incrementalMaintain API
-                const result = await withGmProFallback<{ processedCount: number; remainingCount: number } | null>(
+                const result = await withGmProFallback<{
+                  processedNodes?: number;
+                  durationMs?: number;
+                  phasesRun?: string[];
+                } | null>(
                   'incrementalMaintain',
                   async (mod) => {
-                    return await mod.incrementalMaintain({ maxBatchSize: 200 });
+                    // 上游 v2.4.2 签名：incrementalMaintain() 无参数，返回 IncrementalMaintenanceResult
+                    return await mod.incrementalMaintain();
                   },
                   async () => null, // 无 gm-pro 时跳过（全量维护由 TTL 负责）
                   { label: 'incremental-maintain' },
                 );
-                if (result?.processedCount && result.processedCount > 0) {
-                  logger?.info?.(`heartbeat: gm-pro incremental maintain processed ${result.processedCount} nodes (${result.remainingCount} remaining)`);
+                if (result?.processedNodes && result.processedNodes > 0) {
+                  logger?.info?.(`heartbeat: gm-pro incremental maintain processed ${result.processedNodes} nodes (${result.durationMs ?? '?'}ms, phases ${(result.phasesRun ?? []).join(',')})`);
                 }
               } catch (e) {
                 logger?.debug?.("heartbeat: incremental maintain skipped (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
