@@ -628,17 +628,17 @@ const chartCols = '1 s:1 m:2';
             <div v-if="db" class="tier-current-dist">
               <div class="tier-dist-row">
                 <span class="tier-dist-label">Low</span>
-                <NProgress type="line" :percentage="currentTierDistribution.lowPct" :color="CHART.value.success" :show-indicator="false" :height="8" style="flex: 1" />
+                <NProgress type="line" :percentage="currentTierDistribution.lowPct" :color="CHART.success" :show-indicator="false" :height="8" style="flex: 1" />
                 <span class="tier-dist-value mono">{{ currentTierDistribution.low }} ({{ currentTierDistribution.lowPct.toFixed(0) }}%)</span>
               </div>
               <div class="tier-dist-row">
                 <span class="tier-dist-label">Medium</span>
-                <NProgress type="line" :percentage="currentTierDistribution.mediumPct" :color="CHART.value.warning" :show-indicator="false" :height="8" style="flex: 1" />
+                <NProgress type="line" :percentage="currentTierDistribution.mediumPct" :color="CHART.warning" :show-indicator="false" :height="8" style="flex: 1" />
                 <span class="tier-dist-value mono">{{ currentTierDistribution.medium }} ({{ currentTierDistribution.mediumPct.toFixed(0) }}%)</span>
               </div>
               <div class="tier-dist-row">
                 <span class="tier-dist-label">High</span>
-                <NProgress type="line" :percentage="currentTierDistribution.highPct" :color="CHART.value.danger" :show-indicator="false" :height="8" style="flex: 1" />
+                <NProgress type="line" :percentage="currentTierDistribution.highPct" :color="CHART.danger" :show-indicator="false" :height="8" style="flex: 1" />
                 <span class="tier-dist-value mono">{{ currentTierDistribution.high }} ({{ currentTierDistribution.highPct.toFixed(0) }}%)</span>
               </div>
             </div>
