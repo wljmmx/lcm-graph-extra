@@ -2168,15 +2168,26 @@ const pluginEntry: any = definePluginEntry({
         snapshotConfig = { port, host, providers };
         snapshotServerStop = snapshotHandle.stop;
         // 启动是异步的（含端口探测 + listen），不能立即 log "listening"。
-        // 用一个延迟检查：500ms 后读取 handle.started 判断最终状态。
+        // 轮询等待直到结果确定（started 或 failureReason 非空），上限 2500ms，
+        // 对齐 probeTimeoutMs=500 + shutdownStaleInstance=~1200 + listen，
+        // 避免 600ms 一次性检查和异步启动的竞态。
         const handleForLog = snapshotHandle;
-        setTimeout(() => {
+        (async () => {
+          const maxWaitMs = 2500;
+          const startWait = Date.now();
+          while (Date.now() - startWait < maxWaitMs) {
+            if (handleForLog.started || handleForLog.failureReason !== undefined) {
+              break;
+            }
+            await new Promise(r => setTimeout(r, 100));
+          }
           if (handleForLog.started) {
             logger?.info?.(`[lcm-graph-extra] dashboard snapshot server listening on ${host}:${port}`);
           } else {
-            logger?.warn?.(`[lcm-graph-extra] dashboard snapshot server NOT started on ${host}:${port}: ${handleForLog.failureReason || 'unknown reason'} (non-fatal, plugin continues)`);
+            const reason = handleForLog.failureReason ?? 'startup still pending after max wait';
+            logger?.warn?.(`[lcm-graph-extra] dashboard snapshot server NOT started on ${host}:${port}: ${reason} (non-fatal, plugin continues)`);
           }
-        }, 600);
+        })();
 
         // 修复：插件热重载时新实例的 snapshot server 会立即启动，但 graphAdapter
         // 是懒加载的（首次 assemble 才创建）。如果用户还没发起对话，snapshot
