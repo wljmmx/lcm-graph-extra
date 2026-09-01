@@ -161,6 +161,11 @@ const pluginEntry: any = definePluginEntry({
   id: "lcm-graph-extra",
   name: "LCM Graph Extra",
   description: "Coordinates lossless-claw, qmd, and graph-memory-pro for enhanced context assembly",
+  // SDK 2026.8.1: 规范要求 kind 声明在 openclaw.plugin.json（manifest）里，
+  // runtime-entry 的 kind 仅作为旧插件兼容 fallback（DefinePluginEntryOptions.kind 已标 @deprecated）。
+  // 恰好与 manifest.kind="context-engine" 一致，loader kindsEqual 校验通过，
+  // 同时保证 discovery/isolated 装载路径下出口也能自述插件类型。
+  kind: "context-engine",
   configSchema: buildJsonPluginConfigSchema(PluginConfigSchema as any),
   register(api: any): void {
     const logger = api.logger;
@@ -578,7 +583,8 @@ const pluginEntry: any = definePluginEntry({
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        version: "2.2.0",
+        // 与 openclaw.plugin.json / package.json / definePluginEntry.version 保持一致
+        version: "2.1.12",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         // OpenClaw 2026.7.2+ durable-turn 契约：声明 currentTurnFence + 幂等提交，
