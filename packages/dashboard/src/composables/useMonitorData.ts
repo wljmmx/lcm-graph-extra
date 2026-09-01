@@ -2,6 +2,14 @@
  * 共享监控数据层：统一封装所有轮询查询，各子页面按需引入。
  *
  * TanStack Query cache-key 相同 => 不会重复请求，跨组件共享数据。
+ *
+ * ── 冷启动 race 双保险 ──
+ * 前端 apiGet 层已有网络层 transient 自重试（200ms → 400ms → 800ms），
+ * 本层再通过 TanStack Query 的 retry 做兜底：
+ *   - 网络层 transient (TypeError/AbortError)：重试 2 次指数退避
+ *   - 业务层错误 (ApiError HTTP 4xx/5xx)：快速失败，不重试
+ * 两层组合后，冷启动 race 下 transient 错误会被 apiGet 层吞掉，
+ * 不会冒泡到 TanStack 的 isError 状态。
  */
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useQuery } from '@tanstack/vue-query';
@@ -16,6 +24,7 @@ import {
   type GraphHealthResponse,
 } from '../api/health';
 import { fetchMoaPerformance, type MoaPerformanceData } from '../api/moa';
+import { ApiError } from '../api/client';
 import {
   fetchGmProHealth,
   fetchGmProTop,
@@ -31,6 +40,28 @@ import {
   type GmProServiceStatus,
 } from '../api/gm-pro';
 import { useTheme } from './useTheme';
+
+/**
+ * TanStack Query retry 策略：
+ * 网络层 transient (TypeError/AbortError) 重试 2 次；
+ * ApiError HTTP 业务错误快速失败不重试。
+ *
+ * 注意：退避延迟（200ms→400ms→800ms）已在 apiGet 层完成，
+ * 本层只负责"要不要重试"的判定，返回 boolean 即可。
+ */
+function monitorRetry(
+  failureCount: number,
+  error: unknown,
+): boolean {
+  const err = error as Error | undefined;
+  // ApiError：业务层确定性错误（HTTP 非 2xx），不重试
+  if (err instanceof ApiError) return false;
+  // TypeError / AbortError：网络层 transient（冷启动 race / 连接被拒），最多重试 2 次
+  if ((err instanceof TypeError || err?.name === 'AbortError') && failureCount < 2) {
+    return true;
+  }
+  return false;
+}
 
 export function useMonitorData() {
   const { isDark } = useTheme();
@@ -51,6 +82,7 @@ export function useMonitorData() {
     queryFn: fetchHealthLatest,
     refetchInterval: 10_000,
     staleTime: 5_000,
+    retry: monitorRetry,
   });
 
   // ── 2. health-history (60s) ──
@@ -60,6 +92,7 @@ export function useMonitorData() {
     queryFn: () => fetchHealthHistory(historyN.value),
     refetchInterval: 60_000,
     staleTime: 30_000,
+    retry: monitorRetry,
   });
 
   // ── 3. agent-status (30s) ──
@@ -68,6 +101,7 @@ export function useMonitorData() {
     queryFn: fetchAgentStatus,
     refetchInterval: 30_000,
     staleTime: 15_000,
+    retry: monitorRetry,
   });
 
   // ── 4. graph-health (30s) ──
@@ -76,6 +110,7 @@ export function useMonitorData() {
     queryFn: fetchGraphHealth,
     refetchInterval: 30_000,
     staleTime: 15_000,
+    retry: monitorRetry,
   });
 
   // ── 5. gm-pro-health (30s) ──
