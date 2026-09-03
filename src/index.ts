@@ -216,6 +216,31 @@ const pluginEntry: any = definePluginEntry({
     const _lcmCompactLastTs = new Map<string, number>();
     const _lcmCompactCooldownDefaultMs = 120_000;
 
+    // ── SDK 2026.8.1 防挂起兜底：assemble / afterTurn 全局期限 ──
+    //
+    // 契约核实（node_modules/openclaw dist）：
+    // - host 的 assembleHarnessContextEngine 对引擎 assemble **不设超时**，
+    //   assemble 参数也**不携带 abortSignal**（契约里只有 compact/maintain 有）；
+    // - finalizeHarnessContextEngineTurn 对 afterTurn 同样无超时直接 await；
+    // - executeLocalTurn 在 finally 中释放 turn claim —— 若引擎挂起导致 run
+    //   promise 永不 settle，claim 永不释放，后续轮次报
+    //   "Session ... already has an active turn claim"，session 卡死直到 /new。
+    //
+    // 因此引擎必须自限：任何子调用（LLM rerank / qmd / Neo4j / lossless-claw）
+    // 挂起时，到达期限即降级返回，绝不拖挂 run 管道。
+    const _assembleDeadlineMs = Math.max(
+      5_000,
+      parseInt(process.env.LCM_GRAPH_EXTRA_ASSEMBLE_TIMEOUT_MS || '0', 10)
+        || ((api.pluginConfig as any)?.lcmMonitor?.assembleDeadlineMs as number | undefined)
+        || 60_000,
+    );
+    const _afterTurnDeadlineMs = Math.max(
+      5_000,
+      parseInt(process.env.LCM_GRAPH_EXTRA_AFTERTURN_TIMEOUT_MS || '0', 10)
+        || ((api.pluginConfig as any)?.lcmMonitor?.afterTurnDeadlineMs as number | undefined)
+        || 30_000,
+    );
+
     /**
      * P-CB-8: 指数退避重试启动 snapshot server。
      * 修复前：心跳中只尝试一次，失败后等 5 分钟下一轮。
@@ -841,53 +866,79 @@ const pluginEntry: any = definePluginEntry({
         // 变量，ctx 中仍然是 null，导致首次 assemble 的 L2/L3/L4 全部报
         // "Cannot read properties of null" 错误。
         // 修复后：先 await ensureInitialized 确保闭包变量已赋值，再构造 ctx。
-        try {
-          await ensureInitialized();
-        } catch (initErr) {
-          const msg = initErr instanceof Error ? initErr.message : String(initErr);
-          logger?.warn?.("assemble: init failed, returning empty", { err: msg });
+        //
+        // 防挂起兜底（SDK 2026.8.1 契约核实）：host 的 assembleHarnessContextEngine
+        // 对引擎 assemble 不设超时，assemble 参数也不携带 abortSignal（只有
+        // compact/maintain 有）。若引擎挂起（init / LLM rerank / qmd / Neo4j /
+        // lossless-claw 任一子调用），run promise 永不 settle → executeLocalTurn
+        // 的 finally（释放 turn claim）永不执行 → 后续轮次报
+        // "Session ... already has an active turn claim"，session 卡死直到 /new。
+        // 因此期限必须覆盖**全流程**（含 ensureInitialized，其内部 connect 可能挂起）。
+        const outcome = await raceDeadline(async () => {
+          try {
+            await ensureInitialized();
+          } catch (initErr) {
+            const msg = initErr instanceof Error ? initErr.message : String(initErr);
+            logger?.warn?.("assemble: init failed, returning empty", { err: msg });
+            return {
+              messages: params.messages ?? [],
+              estimatedTokens: 0,
+              systemPromptAddition: undefined,
+              promptAuthority: "assembled" as const,
+              degraded: true,
+              degradedReasons: ["init_failed: " + msg],
+            };
+          }
+
+          // R-1: 委托给 src/assemble/index.ts（ctx 在 init 后构造，捕获已赋值的闭包变量）
+          const ctx: AssembleContext = {
+            api,
+            logger,
+            qmdClient,
+            graphAdapter,
+            expStore,
+            merger,
+            losslessClawAdapter: _losslessClawAdapter,
+            retrievalGateway: _retrievalGateway,
+            cascadeManager,
+            modelRegistry: _modelRegistry,
+            lastEmbedHealth: _lastEmbedHealth,
+            tracker,
+            ensureInitialized,
+            resolveDistillationLlm,
+            sessionWarmupCache,
+            lastAssembleExpIdsBySession,
+            sessionQualityScores,
+            llmRerankCache,
+            l2QueryCache,
+            l4QueryCache,
+            // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
+            cacheSize: api.pluginConfig.retrieval?.cacheSize ?? 50,
+            // v2.7.0 P4: 冲突检测异步缓存
+            conflictCache,
+            // v2.8.0 O7: 异步预取缓存
+            prefetchCache,
+            userProfile,
+            setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
+          };
+          return assembleCore(ctx, params);
+        }, _assembleDeadlineMs, 'assemble');
+
+        if (outcome.status === 'deadline') {
+          logger?.warn?.("assemble: deadline exceeded, returning degraded result (unmodified messages)", {
+            deadlineMs: _assembleDeadlineMs,
+            sessionKey: params.sessionKey,
+          });
           return {
             messages: params.messages ?? [],
             estimatedTokens: 0,
             systemPromptAddition: undefined,
             promptAuthority: "assembled",
             degraded: true,
-            degradedReasons: ["init_failed: " + msg],
+            degradedReasons: ["assemble_deadline_exceeded"],
           };
         }
-
-        // R-1: 委托给 src/assemble/index.ts
-        const ctx: AssembleContext = {
-          api,
-          logger,
-          qmdClient,
-          graphAdapter,
-          expStore,
-          merger,
-          losslessClawAdapter: _losslessClawAdapter,
-          retrievalGateway: _retrievalGateway,
-          cascadeManager,
-          modelRegistry: _modelRegistry,
-          lastEmbedHealth: _lastEmbedHealth,
-          tracker,
-          ensureInitialized,
-          resolveDistillationLlm,
-          sessionWarmupCache,
-          lastAssembleExpIdsBySession,
-          sessionQualityScores,
-          llmRerankCache,
-          l2QueryCache,
-          l4QueryCache,
-          // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
-          cacheSize: api.pluginConfig.retrieval?.cacheSize ?? 50,
-          // v2.7.0 P4: 冲突检测异步缓存
-          conflictCache,
-          // v2.8.0 O7: 异步预取缓存
-          prefetchCache,
-          userProfile,
-          setLastRetrievalQuery: (q: string) => { lastRetrievalQuery = q; },
-        };
-        return assembleCore(ctx, params);
+        return outcome.value;
       },
 
       async afterTurn(params: any) {
@@ -921,7 +972,28 @@ const pluginEntry: any = definePluginEntry({
           // v2.8.0 O7: 异步预取缓存 — afterTurn 全量预取 L2+L3+L4 供下一轮 assemble 使用
           prefetchCache,
         };
-        await afterTurnCore(ctx, params);
+        // 防挂起兜底：finalizeHarnessContextEngineTurn 对 afterTurn 无超时直接 await，
+        // 挂起会阻塞 run settle → turn claim 滞留。超期限即放弃本轮 afterTurn（尽力而为）。
+        const dl = deadlinePromise(_afterTurnDeadlineMs, 'afterTurn');
+        const coreP = Promise.resolve(afterTurnCore(ctx, params));
+        coreP.catch(() => {}); // 期限胜出后 core 迟到 reject 时不产生 unhandledRejection
+        try {
+          await Promise.race([coreP, dl.promise]);
+        } catch (deadlineErr) {
+          const msg = deadlineErr instanceof Error ? deadlineErr.message : String(deadlineErr);
+          if (msg.includes('deadline')) {
+            // afterTurn 为尽力而为：host 捕获异常也只是置 postTurnFinalizationSucceeded=false，
+            // 这里直接返回（不抛）避免阻塞 finalize；遗留工作由下一轮 heartbeat / maintain 补偿。
+            logger?.warn?.("afterTurn: core deadline exceeded, skipping rest of post-turn work this turn", {
+              deadlineMs: _afterTurnDeadlineMs,
+              sessionKey: params.sessionKey,
+            });
+            return;
+          }
+          throw deadlineErr;
+        } finally {
+          dl.cancel();
+        }
       },
 
       async compact(params: any) {
