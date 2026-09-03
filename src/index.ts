@@ -789,17 +789,29 @@ const pluginEntry: any = definePluginEntry({
           }
 
           // ② 委托 lossless-claw 持久化（幂等递交）
-          let committed = false;
+          // SDK 2026.8.1 闭环：commitTurn 失败必须抛错——host 捕获后会保留
+          // context_engine_turn_outbox 行并重试（"Hosts may retry the same
+          // advancement key after process or plugin failure"）。修复前失败也
+          // 记录幂等 key 并返回 duplicate，host 会删除 outbox 行，该轮在引擎
+          // 存储中永久丢失（后续 compact/summary 基于缺失数据）。
+          let downstream: { status?: string } | null = null;
           try {
-            const r = await _losslessClawAdapter?.commitTurn?.(params) ?? null;
-            committed = r?.status === 'committed';
+            downstream = await _losslessClawAdapter?.commitTurn?.(params) ?? null;
           } catch (e) {
-            logger?.warn?.('[lcm-graph-extra] commitTurn: adapter commit failed (non-fatal)', {
+            logger?.warn?.('[lcm-graph-extra] commitTurn: adapter commit failed, letting host retry', {
               err: e instanceof Error ? e.message : String(e),
             });
+            throw e; // 交由 host outbox 重试，闭环
           }
 
-          // ③ 记录幂等 key（LRU 上限裁剪）
+          // ③ 仅在下游给出确定结果时记录幂等 key（LRU 上限裁剪）；
+          //    不确定结果（无 adapter / 未知 status）抛错让 host 重试。
+          const downstreamStatus = downstream?.status;
+          if (downstreamStatus !== 'committed' && downstreamStatus !== 'duplicate') {
+            throw new Error(
+              `commitTurn: downstream result indeterminate (status=${String(downstreamStatus)})`,
+            );
+          }
           committedTurnKeys.add(decision.key);
           if (committedTurnKeys.size > COMMITTED_TURN_MAX) {
             const first = committedTurnKeys.values().next().value;
@@ -807,13 +819,17 @@ const pluginEntry: any = definePluginEntry({
           }
 
           return {
-            status: committed ? 'committed' : 'duplicate',
+            status: downstreamStatus,
             committedTurnId: decision.turnId,
           };
         } catch (err) {
-          // 提交失败不中断推理：fail-safe 乐观返回 committed
-          logger?.error?.('[lcm-graph-extra] commitTurn failed', { err: serializeError(err) });
-          return { status: 'committed' };
+          // 抛错闭环：host 在 outbox drain 中捕获并保留行重试；下一轮开始前
+          // 若仍失败，host 会 degradeBeforeStart 回退 legacy 引擎（安全降级），
+          // 不会污染会话状态。commitTurn 不在推理关键路径上，抛错不中断推理。
+          logger?.error?.('[lcm-graph-extra] commitTurn failed, host will retry via outbox', {
+            err: serializeError(err),
+          });
+          throw err;
         }
       },
 
@@ -1727,10 +1743,27 @@ const pluginEntry: any = definePluginEntry({
       },
       async maintain(params: any) {
         // S10-1: Periodic maintenance — delegate to lossless-claw + local cleanup
+        // SDK 2026.8.1 契约：maintain 携带 abortSignal（后台 deferred 维护 worker 在
+        // shutdown/stop 时 abort），引擎须在中止时及时停止工作。
         const signal = (params as any).abortSignal || (params as any).signal;
         if (signal?.aborted) {
           return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: 'aborted' };
         }
+
+        // abort race：与 lossless-claw 委托 Promise 竞速，host abort 时立即返回，
+        // 避免 SQLite DAG 维护等阻塞操作在 stop/shutdown 后继续空转
+        let abortListener: (() => void) | null = null;
+        const abortOnMaintain = signal
+          ? new Promise<never>((_, reject) => {
+              if (signal.aborted) {
+                reject(new Error('maintenance aborted'));
+                return;
+              }
+              abortListener = () => reject(new Error('maintenance aborted'));
+              signal.addEventListener('abort', abortListener, { once: true });
+            })
+          : null;
+        if (abortOnMaintain) abortOnMaintain.catch(() => {}); // 预吞 reject，避免 unhandledRejection
 
         try {
           let changed = false;
@@ -1743,20 +1776,39 @@ const pluginEntry: any = definePluginEntry({
               // P0-2: maintain 也需 String 化 sessionId，与 compact 一致
               // （lossless-claw maintain 内部同样调用 sessionId?.trim()）
               const _maintainSid = params.sessionId ?? params.session_id;
-              const lcResult = await _losslessClawAdapter.maintain({
-                sessionId: _maintainSid != null ? String(_maintainSid) : '',
-                sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
-                sessionKey: params.sessionKey ?? '',
-                runtimeContext: {},
-              });
+              const lcResult = await Promise.race([
+                _losslessClawAdapter.maintain({
+                  sessionId: _maintainSid != null ? String(_maintainSid) : '',
+                  sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                  sessionKey: params.sessionKey ?? '',
+                  // SDK 契约透传：runtimeContext 携带 rewriteTranscriptEntries /
+                  // llm.complete / allowDeferredCompactionExecution 等，不可吞掉；
+                  // sessionTarget / runtimeSettings 一并透传给下游。
+                  sessionTarget: (params as any).sessionTarget,
+                  runtimeSettings: (params as any).runtimeSettings,
+                  runtimeContext: (params as any).runtimeContext ?? {},
+                  abortSignal: signal,
+                }),
+                ...(abortOnMaintain ? [abortOnMaintain] : []),
+              ]);
               if (lcResult) {
                 changed = changed || (lcResult.changed ?? false);
                 bytesFreed += lcResult.bytesFreed ?? 0;
                 rewrittenEntries += lcResult.rewrittenEntries ?? 0;
               }
             } catch (lcErr) {
+              const lcMsg = lcErr instanceof Error ? lcErr.message : String(lcErr);
+              if (lcMsg.includes('aborted')) {
+                logger?.debug?.("maintain: lossless-claw delegate aborted by host signal");
+                return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: 'aborted' };
+              }
               logger?.debug?.("maintain: lossless-claw delegate failed (non-fatal)", { err: serializeError(lcErr) });
             }
+          }
+
+          // abort 复检：委托完成后再确认信号未中止，中止则跳过本地维护
+          if (signal?.aborted) {
+            return { changed, bytesFreed, rewrittenEntries, reason: 'aborted' };
           }
 
           // 2. Local: evict stale dedup via LRU cache
@@ -1770,6 +1822,8 @@ const pluginEntry: any = definePluginEntry({
         } catch (err) {
           logger?.warn?.("maintain: failed (non-fatal)", { err: serializeError(err) });
           return { changed: false, bytesFreed: 0, rewrittenEntries: 0, reason: String(err) };
+        } finally {
+          if (abortListener && signal) { try { signal.removeEventListener('abort', abortListener); } catch {} }
         }
       },
 

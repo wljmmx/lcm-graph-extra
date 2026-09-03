@@ -847,8 +847,11 @@ export class LosslessClawAdapter {
     sessionId: string;
     sessionFile: string;
     sessionKey?: string;
+    sessionTarget?: any; // SDK: ContextEngineSessionTarget
     runtimeContext?: Record<string, unknown>;
     runtimeSettings?: any;
+    /** SDK 2026.8.1：host 在 stop/shutdown 时 abort，下游应在中止时及时停止维护工作 */
+    abortSignal?: AbortSignal;
   }): Promise<{ changed: boolean; bytesFreed: number; rewrittenEntries: number; reason?: string }> {
     if (!this._connected || !this.engine) {
       return { changed: false, bytesFreed: 0, rewrittenEntries: 0 };
