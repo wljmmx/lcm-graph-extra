@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { readFileSync } from 'node:fs';
-import { ensureOllamaV1Path, ensureAnthropicMessagesPath } from '../utils/url.js';
+import { ensureOllamaV1Path, ensureAnthropicMessagesPath, isOllamaEndpoint } from '../utils/url.js';
 import { callLlm, isLocalLlm } from '../utils/llm-call.js';
 import { businessMetrics } from '../health-metrics.js';
 import { llmTimeout } from '../config/defaults.js';
@@ -105,9 +105,26 @@ function loadAgentProviders(): void {
 }
 
 /**
+ * OpenClaw 内置网关地址判定（loopback:18789）。
+ * SDK 注入的 runtimeContext.llm.baseURL 常指向它；2026.8.x 起网关的
+ * /v1/chat/completions 默认关闭且不透传 keep_alive，不能作为蒸馏/压缩
+ * 的直连端点，需优先用 provider 权威地址覆盖。
+ */
+function isGatewayBaseURL(baseURL: string | null | undefined): boolean {
+  if (!baseURL) return false;
+  try {
+    const u = new URL(baseURL);
+    const isLoopback = u.hostname === '127.0.0.1' || u.hostname === 'localhost' || u.hostname === '::1';
+    return isLoopback && u.port === '18789';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 解析 agent 使用的 provider 对应的真实 baseURL。
  * 匹配规则：优先 provider/model 前缀；否则按 modelId 短 ID 匹配；仍不中就取唯一
- * 配了 baseURL 的 provider。
+ * 配了 baseURL 的 provider；Ollama 命名模型可再兜底到唯一的 Ollama 端点。
  * @returns 找到的 provider baseURL，无则 null
  */
 function resolveProviderBaseURL(model: string): string | null {
@@ -119,21 +136,46 @@ function resolveProviderBaseURL(model: string): string | null {
   if (model.includes('/')) {
     const p = model.split('/')[0];
     const info = _providerInfos.get(p);
-    if (info?.baseURL) return info.baseURL;
+    if (info?.baseURL && !isGatewayBaseURL(info.baseURL)) return info.baseURL;
   }
 
   // 2) 短 ID 匹配：agent model 命中的 provider
   const shortId = model.includes('/') ? model.split('/').pop() : model;
   if (shortId) {
     for (const [, info] of _providerInfos) {
-      if (info.baseURL && info.modelIds.has(shortId)) return info.baseURL;
+      if (info.baseURL && !isGatewayBaseURL(info.baseURL) && info.modelIds.has(shortId)) return info.baseURL;
     }
   }
 
-  // 3) 兜底：仅一个 provider 配了 baseURL 时使用它
+  // 3) 兜底：仅一个 provider 配了 baseURL 时使用它（排除网关地址）
   const registered: string[] = [];
-  for (const [, info] of _providerInfos) if (info.baseURL) registered.push(info.baseURL);
-  return registered.length === 1 ? registered[0] : null;
+  for (const [, info] of _providerInfos) {
+    if (info.baseURL && !isGatewayBaseURL(info.baseURL)) registered.push(info.baseURL);
+  }
+  if (registered.length === 1) return registered[0];
+
+  // 3b) Ollama 命名模型（qwen3.6:27b 等）：多个 provider 时优先唯一的
+  //     Ollama 端点（:11434），避免误配到远程 provider 或网关地址。
+  if (isOllamaModel(model)) {
+    const ollamaBases: string[] = [];
+    for (const [, info] of _providerInfos) {
+      if (info.baseURL && !isGatewayBaseURL(info.baseURL) && isOllamaEndpoint(info.baseURL)) {
+        ollamaBases.push(info.baseURL);
+      }
+    }
+    if (ollamaBases.length === 1) return ollamaBases[0];
+  }
+  return null;
+}
+
+/**
+ * 网关地址守卫：若 baseURL 是 OpenClaw 内置网关（loopback:18789），尝试用
+ * openclaw.json provider 权威地址覆盖；解析不到时保留原值（兼容旧网关
+ * 桥接行为，配合 gateway.http.endpoints.chatCompletions 仍可工作）。
+ */
+function overrideGatewayBaseURL(model: string, baseURL: string): string {
+  if (!isGatewayBaseURL(baseURL)) return baseURL;
+  return resolveProviderBaseURL(model) ?? baseURL;
 }
 
 /**
@@ -240,7 +282,11 @@ export function getLastRuntimeLlmSnapshot(): RuntimeLlmSnapshot | null {
  */
 export function buildLocalLlmComplete(snapshot: RuntimeLlmSnapshot): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
   const model = snapshot.model;
-  const baseURL = snapshot.baseURL || 'http://127.0.0.1:18789/v1';
+  // 网关地址守卫：快照缺失 baseURL 或携带网关地址时，优先解析 provider 权威地址，
+  // 避免直连 127.0.0.1:18789（新版网关 /v1/chat/completions 默认关闭 → 404）。
+  const baseURL = snapshot.baseURL
+    ? overrideGatewayBaseURL(model, snapshot.baseURL)
+    : (resolveProviderBaseURL(model) ?? 'http://127.0.0.1:18789/v1');
   const apiKey = snapshot.apiKey || '';
   return async (p: any) => {
     const { callLlm: _callLlm } = await import('../utils/llm-call.js');
@@ -280,18 +326,25 @@ export function resolveDistillationLlm(apiRef: any) {
     || '1h';
   // Session model is local (Ollama, vLLM/unsloth, etc.) → reuse it to avoid GPU model swapping
   if (runtimeLlm?.model && runtimeLlm?.baseURL && isLocalLlm(runtimeLlm.baseURL, runtimeLlm.model)) {
+    // 网关地址守卫：SDK 注入的 runtimeContext.llm / 快照的 baseURL 可能是
+    // OpenClaw 网关（127.0.0.1:18789），新版网关 /v1/chat/completions 默认
+    // 关闭（404）且不透传 keep_alive。优先覆盖为 provider 权威地址。
     return {
       model: runtimeLlm.model,
       apiKey: runtimeLlm.apiKey || '',
-      baseURL: runtimeLlm.baseURL,
+      baseURL: overrideGatewayBaseURL(String(runtimeLlm.model), String(runtimeLlm.baseURL)),
       keepAlive: defaultKeepAlive,
     };
   }
   if (runtimeLlm?.model && isOllamaModel(runtimeLlm.model)) {
+    // 同上：baseURL 缺失或为网关地址时，优先解析 provider 权威地址
+    const resolvedBase = runtimeLlm.baseURL
+      ? overrideGatewayBaseURL(String(runtimeLlm.model), String(runtimeLlm.baseURL))
+      : (resolveProviderBaseURL(String(runtimeLlm.model)) ?? 'http://127.0.0.1:18789/v1');
     return {
       model: runtimeLlm.model,
       apiKey: runtimeLlm.apiKey || '',
-      baseURL: ensureOllamaV1Path(runtimeLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+      baseURL: ensureOllamaV1Path(resolvedBase),
       keepAlive: defaultKeepAlive,
     };
   }
