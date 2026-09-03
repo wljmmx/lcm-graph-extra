@@ -180,6 +180,13 @@ async function main(): Promise<void> {
       api.get('/ping', async () => {
         return { ok: true, ts: Date.now() };
       });
+      // 鉴权探测路由：受 onRequest 钩子保护（DASHBOARD_AUTH 启用时返回 401 +
+      // WWW-Authenticate）。前端"登录"链接以导航方式打开本路由，触发浏览器原生
+      // Basic Auth 认证框；认证成功后浏览器会为同源 fetch 自动附带凭据，
+      // 监控页轮询在下一个周期自动恢复（无需刷新页面）。
+      api.get('/auth/whoami', async () => {
+        return { ok: true, authenticated: isAuthEnabled(), ts: Date.now() };
+      });
     },
     { prefix: '/api' },
   );

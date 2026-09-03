@@ -28,6 +28,7 @@ import { useMonitorData } from '../../composables/useMonitorData';
 import { useTheme } from '../../composables/useTheme';
 import { formatTime, formatTimeWithSeconds, formatBucketLabel, bucketKeyBySize, timeRangeToMs, timeRangeLabel, bucketSizeLabel, type TimeRange, type BucketSize } from '../../utils/format';
 import { invokeResetBreaker } from '../../api/maintain';
+import { ApiError, apiGet } from '../../api/client';
 import type { HealthSnapshot } from '../../api/health';
 
 const { isDark: themeIsDark } = useTheme();
@@ -36,10 +37,10 @@ const message = useMessage();
 
 // ── 共享数据层 ──
 const {
-  latestData, latestLoading, latestIsError,
-  historyData, historyLoading, historyIsError, historyN,
-  agentIsError,
-  graphHealthIsError,
+  latestData, latestLoading, latestIsError, latestError,
+  historyData, historyLoading, historyIsError, historyError, historyN,
+  agentIsError, agentError,
+  graphHealthIsError, graphHealthError,
   db, memory,
   CHART,
 } = useMonitorData();
@@ -51,14 +52,65 @@ onMounted(() => { window.addEventListener('resize', onResize); });
 onBeforeUnmount(() => { window.removeEventListener('resize', onResize); });
 
 // ── 错误告警汇总：把分散的多个 NAlert 收敛为一条可展开的汇总告警 ──
-const errorSources = computed(() => {
-  const items: { key: string; label: string; hint: string }[] = [];
-  if (latestIsError) items.push({ key: 'latest', label: '健康指标', hint: '/api/health/latest 不可达，请检查插件 snapshot 服务（:7423）' });
-  if (agentIsError) items.push({ key: 'agent', label: 'Agent 状态', hint: '/api/agent/status 不可达' });
-  if (graphHealthIsError) items.push({ key: 'graph', label: '图谱健康', hint: '/api/graph/health 不可达' });
-  if (historyIsError) items.push({ key: 'history', label: '时序历史', hint: '/api/health/history 不可达' });
+// 诊断逻辑：根据具体错误类型给出可执行的排查指引，而非一律"不可达"：
+// - ApiError 401 → DASHBOARD_AUTH 已启用但前端请求未携带凭据（浏览器对 fetch
+//   的 401 不会弹认证框），引导用户点"登录"以导航方式触发浏览器原生 Basic Auth
+// - 网络层错误（TypeError/AbortError）→ dashboard 后端 :7421 未启动或已崩溃
+//   （dev 模式页面由 vite :7422 提供，后端挂掉页面仍能打开，所有 /api 代理失败）
+// - 其他 HTTP 错误 → 显示状态码 + 原始信息
+// 注意：插件 snapshot（:7423）不可达不会导致这些查询报错——后端降级返回 200
+// （memory:null / status:unknown），仅影响数据内容，不影响"可达性"判定。
+interface ErrorSource {
+  key: string;
+  label: string;
+  path: string;
+  hint: string;
+}
+
+function describeQueryError(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 401) {
+      return 'HTTP 401：后端已启用 Basic Auth（DASHBOARD_AUTH），本页请求未携带凭据。点击"登录"完成认证后返回本页即可自动恢复';
+    }
+    const detail = err.message.length > 120 ? `${err.message.slice(0, 120)}…` : err.message;
+    return `HTTP ${err.status}：${detail}`;
+  }
+  const e = err as Error | undefined;
+  if (e && (e instanceof TypeError || e.name === 'AbortError' || /fetch|network/i.test(e.message))) {
+    return '网络层失败：dashboard 后端（:7421）未启动或已崩溃。dev 模式确认 `npm run dev` 的 server 进程存活；生产模式检查 `npm start` 进程';
+  }
+  return e?.message ? `未知错误：${e.message}` : '未知错误';
+}
+
+const errorSources = computed<ErrorSource[]>(() => {
+  const items: ErrorSource[] = [];
+  // 注意：useMonitorData 返回的是原始 Ref，script 内判断必须用 .value。
+  // 修复前 `if (latestIsError)` 判断的是 Ref 对象本身（永远 truthy），
+  // 导致告警横幅在所有查询成功（HTTP 200）时也常驻显示"未知错误"。
+  if (latestIsError.value) items.push({ key: 'latest', label: '健康指标', path: '/api/health/latest', hint: describeQueryError(latestError.value) });
+  if (agentIsError.value) items.push({ key: 'agent', label: 'Agent 状态', path: '/api/agent/status', hint: describeQueryError(agentError.value) });
+  if (graphHealthIsError.value) items.push({ key: 'graph', label: '图谱健康', path: '/api/graph/health', hint: describeQueryError(graphHealthError.value) });
+  if (historyIsError.value) items.push({ key: 'history', label: '时序历史', path: '/api/health/history', hint: describeQueryError(historyError.value) });
   return items;
 });
+
+// 任一数据源 401 → 显示"登录"入口（以导航方式打开受保护路由，触发浏览器原生
+// Basic Auth 认证框；认证后浏览器为同源 fetch 自动附带凭据）
+const needAuth = computed(() =>
+  [latestError.value, agentError.value, graphHealthError.value, historyError.value].some(
+    (e) => e instanceof ApiError && e.status === 401,
+  ),
+);
+
+// 认证完成后点击"已登录，刷新页面"：探测 whoami 通了则整页刷新，让所有查询立即重拉
+async function refetchAfterAuth(): Promise<void> {
+  try {
+    await apiGet('/api/auth/whoami');
+    window.location.reload();
+  } catch {
+    message.warning('认证仍未生效，请先在登录页签完成认证');
+  }
+}
 
 // ── 时间范围 + 统计粒度 ──
 const timeRangeOptions = [
@@ -529,7 +581,7 @@ const chartCols = '1 s:1 m:2';
       </span>
     </div>
 
-    <!-- 错误告警（收敛为单条汇总，逐项列明失败来源） -->
+    <!-- 错误告警（收敛为单条汇总，逐项列明失败来源与具体原因） -->
     <NAlert
       v-if="errorSources.length"
       type="error"
@@ -540,8 +592,16 @@ const chartCols = '1 s:1 m:2';
       <div class="alert-summary-list">
         <div v-for="e in errorSources" :key="e.key" class="alert-summary-item">
           <span class="alert-summary-label">{{ e.label }}</span>
+          <span class="alert-summary-path mono">{{ e.path }}</span>
           <span class="alert-summary-hint">{{ e.hint }}</span>
         </div>
+      </div>
+      <!-- 401 场景：以导航方式打开受保护路由，触发浏览器原生 Basic Auth 认证框 -->
+      <div v-if="needAuth" style="margin-top: 8px; display: flex; gap: 8px; align-items: center">
+        <NButton size="small" type="primary" tag="a" href="/api/auth/whoami" target="_blank">
+          登录（输入 DASHBOARD_AUTH 凭据）
+        </NButton>
+        <NButton size="small" quaternary @click="refetchAfterAuth">已登录，刷新页面</NButton>
       </div>
     </NAlert>
     <NAlert v-if="latestLoading && !latestData" type="info" :show-icon="true" title="正在加载最新健康指标…" style="margin-top: 12px" />
@@ -695,6 +755,11 @@ const chartCols = '1 s:1 m:2';
 }
 .alert-summary-label {
   font-weight: 600;
+  white-space: nowrap;
+}
+.alert-summary-path {
+  font-size: var(--fs-caption);
+  color: var(--color-text-tertiary);
   white-space: nowrap;
 }
 .alert-summary-hint {

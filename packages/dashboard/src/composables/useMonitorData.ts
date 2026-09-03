@@ -77,7 +77,7 @@ export function useMonitorData() {
   }));
 
   // ── 1. health-latest (10s) ──
-  const { data: latestData, isLoading: latestLoading, isError: latestIsError } = useQuery({
+  const { data: latestData, isLoading: latestLoading, isError: latestIsError, error: latestError } = useQuery({
     queryKey: ['health-latest'],
     queryFn: fetchHealthLatest,
     refetchInterval: 10_000,
@@ -87,7 +87,7 @@ export function useMonitorData() {
 
   // ── 2. health-history (60s) ──
   const historyN = ref(24);
-  const { data: historyData, isLoading: historyLoading, isError: historyIsError } = useQuery({
+  const { data: historyData, isLoading: historyLoading, isError: historyIsError, error: historyError } = useQuery({
     queryKey: ['health-history', historyN],
     queryFn: () => fetchHealthHistory(historyN.value),
     refetchInterval: 60_000,
@@ -96,7 +96,7 @@ export function useMonitorData() {
   });
 
   // ── 3. agent-status (30s) ──
-  const { data: agentData, isLoading: agentLoading, isError: agentIsError } = useQuery({
+  const { data: agentData, isLoading: agentLoading, isError: agentIsError, error: agentError } = useQuery({
     queryKey: ['agent-status'],
     queryFn: fetchAgentStatus,
     refetchInterval: 30_000,
@@ -105,7 +105,7 @@ export function useMonitorData() {
   });
 
   // ── 4. graph-health (30s) ──
-  const { data: graphHealthData, isLoading: graphHealthLoading, isError: graphHealthIsError } = useQuery({
+  const { data: graphHealthData, isLoading: graphHealthLoading, isError: graphHealthIsError, error: graphHealthError } = useQuery({
     queryKey: ['graph-health'],
     queryFn: fetchGraphHealth,
     refetchInterval: 30_000,
@@ -244,10 +244,10 @@ export function useMonitorData() {
 
   return {
     // 原始数据
-    latestData, latestLoading, latestIsError,
-    historyData, historyLoading, historyIsError, historyN,
-    agentData, agentLoading, agentIsError,
-    graphHealthData, graphHealthLoading, graphHealthIsError,
+    latestData, latestLoading, latestIsError, latestError,
+    historyData, historyLoading, historyIsError, historyError, historyN,
+    agentData, agentLoading, agentIsError, agentError,
+    graphHealthData, graphHealthLoading, graphHealthIsError, graphHealthError,
     moaPerfData, moaPerfLoading,
     // derived
     db, memory, agent, graphHealth, moaPerf,
