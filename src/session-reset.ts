@@ -52,6 +52,12 @@ export async function invalidateSessionStateForReset(
       const { clearSessionToolTracker } = await import('./plugin/tool-guidance.js');
       clearSessionToolTracker(sk);
     } catch { /* non-fatal */ }
+    try {
+      // G-MODEL-SYNC: 清理该会话的主模型快照与远程标记，
+      // /new 后由下一轮 recordRuntimeLlm 重新记录
+      const { clearSessionLlmState } = await import('./plugin/distillation.js');
+      clearSessionLlmState(sk);
+    } catch { /* non-fatal */ }
     // durable-turn：按 sessionId 清空已提交逻辑轮幂等记录，防止 /new 后跨会话去重误判
     if (committedTurnKeys) {
       try {

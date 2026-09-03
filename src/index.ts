@@ -176,6 +176,12 @@ const pluginEntry: any = definePluginEntry({
     // 若宿主未注入 logger，降级到 createLogger()（按 LOG_LEVEL 环境变量控制级别）。
     setGlobalLogger(logger ? adaptLogger(logger) : createLogger());
 
+    // G-MODEL-SYNC: 注入 plugin api 引用，供 lossless-claw adapter 的注入判定
+    // 解析 distillationLlm 插件配置（远程主模型会话 → 配置模型与地址）。
+    try {
+      distillationModule.setDistillationApiRef?.(api);
+    } catch { /* non-fatal */ }
+
     // -----------------------------------------------------------------------
     // Lazy singleton instances — created once, reused across all assemble calls
     // -----------------------------------------------------------------------

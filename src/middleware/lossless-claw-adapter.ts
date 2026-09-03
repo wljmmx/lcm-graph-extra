@@ -27,7 +27,7 @@ import { dirname, join, sep } from 'node:path';
 import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
-import { getSessionLlmSnapshot, getActiveLocalLlmSnapshot, buildLocalLlmComplete, resolveLocalSnapshotForModel } from '../plugin/distillation.js';
+import { getSessionLlmSnapshot, getActiveLocalLlmSnapshot, buildLocalLlmComplete, resolveLocalSnapshotForModel, isSessionRemoteModel, resolveConfiguredDistillationLlm, buildConfiguredLlmComplete, isOllamaModel } from '../plugin/distillation.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -479,42 +479,32 @@ export class LosslessClawAdapter {
         prePromptMessageCount: params.prePromptMessageCount ?? 0,
       });
 
-      // ── G-MODEL-SYNC（与 compact 对齐）：本地主模型时注入自建 llm.complete ──
+      // ── G-MODEL-SYNC（与 compact 对齐）：按会话主模型注入 LLM ──
       // lossless-claw 的 afterTurn（轮后维护 / 后台压缩）会调用 runtime.llm.complete。
       // 若原样透传 SDK 注入的 runtimeContext.llm（网关 127.0.0.1:18789），
       // 新版网关 /v1/chat/completions 需要鉴权 → 401 → 降级到备用远程模型。
-      // 本地模型快照存在时，用直连本地的自建 complete 覆盖三个读取位置
-      // （顶层 / runtimeContext / legacyCompactionParams，与 index.ts compact 的
-      // BUGFIX 剥离位置一致），确保轮后维护/后台压缩走本地模型真实端点。
-      const _lcSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
-        ? params.sessionKey.trim()
-        : (typeof (params as any).session_id === 'string' ? (params as any).session_id.trim() : '');
-      let _lcSnap = _lcSk
-        ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
-        : getActiveLocalLlmSnapshot();
-      if (!_lcSnap?.model) {
-        _lcSnap = resolveLocalSnapshotForModel((params as any).model, (params as any).baseURL);
-      }
-      if (_lcSnap?.model) {
-        try {
-          const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);
-          const _lcLlm = { complete: _lcLocalComplete };
+      // 分支契约（resolveEngineLlmInjection）：本地模型 → 直连本地 complete；
+      // 远程模型 → distillationLlm 配置；无法判定 → 不改动 params。
+      // 覆盖三个读取位置（顶层 / runtimeContext / legacyCompactionParams）。
+      try {
+        const _inj = this.resolveEngineLlmInjection(params);
+        if (_inj) {
           normalizedParams = {
             ...normalizedParams,
-            llm: _lcLlm,
-            runtimeContext: { ...(normalizedParams.runtimeContext ?? {}), llm: _lcLlm },
-            legacyCompactionParams: { ...(normalizedParams.legacyCompactionParams ?? {}), llm: _lcLlm },
+            llm: _inj.llm,
+            runtimeContext: { ...(normalizedParams.runtimeContext ?? {}), llm: _inj.llm },
+            legacyCompactionParams: { ...(normalizedParams.legacyCompactionParams ?? {}), llm: _inj.llm },
           };
-          this.logger?.info?.('[lossless-claw-adapter] afterTurn uses agent local model', {
-            sessionKey: _lcSk || null,
-            model: _lcSnap.model,
-            baseURL: _lcSnap.baseURL ?? null,
-          });
-        } catch (lcInjectErr) {
-          this.logger?.warn?.('[lossless-claw-adapter] afterTurn local-llm injection failed, using default', {
-            err: lcInjectErr instanceof Error ? lcInjectErr.message : String(lcInjectErr),
+          this.logger?.info?.('[lossless-claw-adapter] afterTurn llm injection', {
+            source: _inj.source,
+            model: _inj.model,
+            baseURL: _inj.baseURL ?? null,
           });
         }
+      } catch (lcInjectErr) {
+        this.logger?.warn?.('[lossless-claw-adapter] afterTurn llm injection failed, using default', {
+          err: lcInjectErr instanceof Error ? lcInjectErr.message : String(lcInjectErr),
+        });
       }
 
       await this.engine.afterTurn(normalizedParams);
@@ -609,6 +599,87 @@ export class LosslessClawAdapter {
   // ── 核心能力：DAG 压缩 ──
 
   /**
+   * G-MODEL-SYNC 统一注入判定：按会话主模型决定压缩/轮后维护使用的 LLM。
+   *
+   * 分支（用户契约："本地模型复用本地模型，非本地模型用配置数据"）：
+   *  1. 本地模型（会话快照命中，或未记录时回退活跃快照/按模型名解析）：
+   *     → 注入直连本地的自建 complete（真实端点 + keep_alive，绕开网关 401/404）
+   *  2. 远程模型（isSessionRemoteModel 已标记）：→ 注入 distillationLlm 配置的
+   *     complete，不复用其他会话的本地快照（防跨会话串用），也不透传 SDK
+   *     网关 llm
+   *  3. 无法判定：返回 null，调用方不改动 params（lossless-claw 用自身配置）
+   *
+   * @returns 注入用的 llm 对象与描述；null 表示不注入
+   */
+  private resolveEngineLlmInjection(params: any): {
+    llm: { complete: (p: any) => Promise<any> };
+    source: 'local-snapshot' | 'active-local' | 'model-resolve' | 'configured';
+    model: string;
+    baseURL?: string | null;
+  } | null {
+    const _sk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
+      ? params.sessionKey.trim()
+      : (typeof params.session_id === 'string' ? params.session_id.trim() : '');
+
+    // ① 本会话已判定为远程 → 用插件配置（不回退活跃本地快照，防跨会话串用）
+    if (_sk && isSessionRemoteModel(_sk)) {
+      try {
+        const cfg = resolveConfiguredDistillationLlm();
+        if (cfg?.model && cfg?.baseURL) {
+          return {
+            llm: { complete: buildConfiguredLlmComplete(cfg) },
+            source: 'configured',
+            model: cfg.model,
+            baseURL: cfg.baseURL,
+          };
+        }
+      } catch { /* 配置解析失败，继续走兜底 */ }
+      return null;
+    }
+
+    // ② 本地快照：优先本会话；无 sessionKey 或尚未记录（首轮前）时回退活跃本地模型
+    let _snap = _sk
+      ? (getSessionLlmSnapshot(_sk) ?? getActiveLocalLlmSnapshot())
+      : getActiveLocalLlmSnapshot();
+    if (_snap?.model) {
+      return {
+        llm: { complete: buildLocalLlmComplete(_snap) },
+        source: _sk && getSessionLlmSnapshot(_sk) ? 'local-snapshot' : 'active-local',
+        model: _snap.model,
+        baseURL: _snap.baseURL,
+      };
+    }
+
+    // ③ 无快照但本次携带了本地 agent 模型名 → 按模型名 + provider 配置解析
+    _snap = resolveLocalSnapshotForModel((params as any).model, (params as any).baseURL);
+    if (_snap?.model) {
+      return {
+        llm: { complete: buildLocalLlmComplete(_snap) },
+        source: 'model-resolve',
+        model: _snap.model,
+        baseURL: _snap.baseURL,
+      };
+    }
+
+    // ④ 非本地（模型名可判定远程）→ 插件配置；否则不注入
+    const _model = typeof (params as any).model === 'string' ? (params as any).model : '';
+    if (_model && !isOllamaModel(_model)) {
+      try {
+        const cfg = resolveConfiguredDistillationLlm();
+        if (cfg?.model && cfg?.baseURL) {
+          return {
+            llm: { complete: buildConfiguredLlmComplete(cfg) },
+            source: 'configured',
+            model: cfg.model,
+            baseURL: cfg.baseURL,
+          };
+        }
+      } catch { /* fallthrough */ }
+    }
+    return null;
+  }
+
+  /**
    * 调用 lossless-claw 的 DAG 压缩。
    *
    * @throws {Error} 如果未连接
@@ -644,53 +715,35 @@ export class LosslessClawAdapter {
     // 避免 lossless-claw 内部 sessionId.trim() 抛 TypeError
     params = coerceSessionId(params);
 
-    // ── G-MODEL-SYNC: 本地主模型时，让 lossless-claw 压缩直接使用本地模型 ──
+    // ── G-MODEL-SYNC: 按会话主模型决定 lossless-claw 压缩使用的 LLM ──
     // 统一在此注入，覆盖所有 compact 调用方（/compact 主路径、assemble 预压缩、
     // S-9 主题切换、hooks 压力响应等），避免每处重复实现。
-    // 判定依据（按 sessionKey 分键 + 活跃模型回退）：
-    //  - 优先取本会话（params.sessionKey / session_id）的本地主模型快照，
-    //    不同 agent/会话各自用各自的模型，避免跨会话串用。
-    //  - 无 sessionKey（cron / 心跳等后台任务）时，回退到最近一次活跃本地模型。
-    //  - 本地模型 → 注入自建 llm.complete（基于 callLlm 直连本地模型），
-    //    lossless-claw 摘要/DAG LLM 直接走本地模型，不再读取自身配置，避免本地
-    //    模型与配置模型反复加载/卸载、GPU 争抢。自建 complete 绕过 OpenClaw SDK
-    //    对 llm.allowModelOverride 的策略检查（我们自行 fetch）。
-    //  - 远程/无快照 → 不改动 params，lossless-claw 回退到其自身 LLM 配置。
-    const _lcSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
-      ? params.sessionKey.trim()
-      : (typeof (params as any).session_id === 'string' ? (params as any).session_id.trim() : '');
-    let _lcSnap = _lcSk
-      ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
-      : getActiveLocalLlmSnapshot();
-    // BUGFIX: 无会话/活跃快照时（如尚未有 agent 轮次、或最近一轮是远程模型被清空），
-    // 若本次 compact 携带了本地 agent 模型（params.model），直接按模型名 + provider
-    // 配置解析出快照。否则 lossless-claw 回退到自身配置模型（如 Qwen3.6-35B-A3B-MTP），
-    // 该模型在 ollama 端点上 404，导致 ALL PROVIDERS EXHAUSTED。
-    if (!_lcSnap?.model) {
-      _lcSnap = resolveLocalSnapshotForModel((params as any).model, (params as any).baseURL);
-    }
-    if (_lcSnap?.model) {
-      try {
-        const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);
-        const _lcLlm = { complete: _lcLocalComplete };
-        const _lcRt = { ...((params as any).runtimeContext ?? {}), llm: _lcLlm };
-        const _lcLg = { ...((params as any).legacyParams ?? {}), llm: _lcLlm };
+    // 分支契约（resolveEngineLlmInjection）：
+    //  - 本地模型 → 自建 llm.complete 直连本地端点（keep_alive，绕开网关 401/404）
+    //  - 远程模型 → distillationLlm 配置的模型与地址（不复用其他会话的本地快照）
+    //  - 无法判定 → 不改动 params，lossless-claw 回退到其自身 LLM 配置。
+    // 自建 complete 绕过 OpenClaw SDK 对 llm.allowModelOverride 的策略检查（我们自行 fetch）。
+    try {
+      const _inj = this.resolveEngineLlmInjection(params);
+      if (_inj) {
+        const _lcRt = { ...((params as any).runtimeContext ?? {}), llm: _inj.llm };
+        const _lcLg = { ...((params as any).legacyParams ?? {}), llm: _inj.llm };
         params = {
           ...params,
           runtimeContext: _lcRt,
           legacyParams: _lcLg,
-          runtimeModelOverride: _lcSnap.model,
+          runtimeModelOverride: _inj.model,
         };
-        this.logger?.info?.('[lossless-claw-adapter] compact uses agent local model', {
-          sessionKey: _lcSk || null,
-          model: _lcSnap.model,
-          baseURL: _lcSnap.baseURL ?? null,
-        });
-      } catch (lcInjectErr) {
-        this.logger?.warn?.('[lossless-claw-adapter] compact local-llm injection failed, using default', {
-          err: lcInjectErr instanceof Error ? lcInjectErr.message : String(lcInjectErr),
+        this.logger?.info?.('[lossless-claw-adapter] compact llm injection', {
+          source: _inj.source,
+          model: _inj.model,
+          baseURL: _inj.baseURL ?? null,
         });
       }
+    } catch (lcInjectErr) {
+      this.logger?.warn?.('[lossless-claw-adapter] compact llm injection failed, using default', {
+        err: lcInjectErr instanceof Error ? lcInjectErr.message : String(lcInjectErr),
+      });
     }
 
     try {

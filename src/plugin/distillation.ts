@@ -68,6 +68,8 @@ type RuntimeLlmSnapshot = {
 };
 /** 按 sessionKey 分键的本地主模型快照 */
 const _sessionLlmSnapshots = new Map<string, RuntimeLlmSnapshot>();
+/** 已判定为远程主模型的会话集合（区分"远程"与"尚未记录"，防跨会话串用本地快照） */
+const _sessionRemoteModels = new Set<string>();
 /** 最近一次活跃的本地主模型快照（供 cron 等无 sessionKey 场景） */
 let _activeLocalLlmSnapshot: RuntimeLlmSnapshot | null = null;
 
@@ -226,9 +228,14 @@ export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown, sessionK
   const isLocal = (baseURL && isLocalLlm(baseURL, model)) || isOllamaModel(model);
   const sk = typeof sessionKey === 'string' && sessionKey.trim() ? sessionKey.trim() : '';
   if (!isLocal) {
-    // 主模型切到远程：删除该会话的快照；不更新活跃本地模型，
+    // 主模型切到远程：删除该会话的快照并打远程标记；不更新活跃本地模型，
     // 保证该会话/后台任务随后回退到蒸馏配置，而非旧本地模型。
-    if (sk) _sessionLlmSnapshots.delete(sk);
+    // 远程标记用于区分"已判定为远程"与"尚未记录"（首轮前），
+    // 前者不得回退活跃本地快照（避免跨会话串用其他会话的本地模型）。
+    if (sk) {
+      _sessionLlmSnapshots.delete(sk);
+      _sessionRemoteModels.add(sk);
+    }
     return;
   }
   // BUGFIX: SDK 注入的 baseURL 常是 OpenClaw 网关地址（127.0.0.1:18789），
@@ -243,7 +250,10 @@ export function recordRuntimeLlm(runtimeLlm: any, agentModel?: unknown, sessionK
     baseURL: baseURL ?? null,
     apiKey: runtimeLlm?.apiKey ? String(runtimeLlm.apiKey) : '',
   };
-  if (sk) _sessionLlmSnapshots.set(sk, snap);
+  if (sk) {
+    _sessionLlmSnapshots.set(sk, snap);
+    _sessionRemoteModels.delete(sk);
+  }
   _activeLocalLlmSnapshot = snap;
 }
 
@@ -376,6 +386,107 @@ export function resolveDistillationLlm(apiRef: any) {
     apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
     baseURL: ensureOllamaV1Path(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
     keepAlive: defaultKeepAlive,
+  };
+}
+
+/** 模块级 plugin api 引用，供 adapter 等无 apiRef 的调用方解析插件配置 */
+let _pluginApiRef: any = null;
+/** register 时由 index.ts 调用，注入 plugin api 单例（用于读取 pluginConfig） */
+export function setDistillationApiRef(api: any): void {
+  _pluginApiRef = api;
+}
+
+/**
+ * 判断某会话的主模型是否已判定为远程。
+ * 与 getSessionLlmSnapshot 返回 null 的区别：
+ * - true：该会话最近一轮已记录为远程主模型 → 不应回退活跃本地快照（防跨会话串用）
+ * - false：未记录（首轮前）或本地 → 可按原有回退链处理
+ */
+export function isSessionRemoteModel(sessionKey?: unknown): boolean {
+  const sk = typeof sessionKey === 'string' && sessionKey.trim() ? sessionKey.trim() : '';
+  if (!sk) return false;
+  return _sessionRemoteModels.has(sk);
+}
+
+/**
+ * 会话重置（/new 等）时清理该会话的模型快照与远程标记。
+ * 下一轮 recordRuntimeLlm 会按新会话的实际模型重新记录。
+ */
+export function clearSessionLlmState(sessionKey?: unknown): void {
+  const sk = typeof sessionKey === 'string' && sessionKey.trim() ? sessionKey.trim() : '';
+  if (!sk) return;
+  _sessionLlmSnapshots.delete(sk);
+  _sessionRemoteModels.delete(sk);
+}
+
+/**
+ * 解析"纯配置"的蒸馏 LLM（跳过 runtimeContext.llm / 活跃本地快照回退）。
+ * 用于远程主模型会话的压缩/轮后维护：用户明确要求"非本地模型就用配置数据"，
+ * 不复用其他会话的本地模型，也不透传 SDK 网关 llm。
+ */
+export function resolveConfiguredDistillationLlm(apiRef?: any) {
+  const ref = apiRef ?? _pluginApiRef;
+  const pluginConfig = ref?.pluginConfig ?? ref?.config ?? {};
+  const defaultKeepAlive = pluginConfig?.distillationLlm?.keepAlive
+    || pluginConfig?.embedding?.keepAlive
+    || '1h';
+  const dLlm = pluginConfig?.distillationLlm;
+  if (dLlm?.provider === 'openclaw_hooks') return {
+    model: dLlm.model || 'ollama/qwen3.6:27b',
+    apiKey: '',
+    baseURL: ensureOllamaV1Path(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+    keepAlive: dLlm.keepAlive || defaultKeepAlive,
+  };
+  if (dLlm?.provider === 'unsloth') return {
+    model: dLlm.model || 'qwen2.5-72b',
+    apiKey: dLlm.apiKey || '',
+    baseURL: ensureAnthropicMessagesPath(dLlm.baseURL || 'http://127.0.0.1:8000'),
+    keepAlive: dLlm.keepAlive || defaultKeepAlive,
+  };
+  if (dLlm?.provider && dLlm?.model) {
+    return {
+      model: dLlm.model,
+      apiKey: dLlm.apiKey || '',
+      baseURL: ensureOllamaV1Path(dLlm.baseURL || 'http://127.0.0.1:18789/v1'),
+      keepAlive: dLlm.keepAlive || defaultKeepAlive,
+    };
+  }
+  return {
+    model: process.env.LLM_MODEL || dLlm?.model || 'gpt-4o-mini',
+    apiKey: process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+    baseURL: ensureOllamaV1Path(process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
+    keepAlive: defaultKeepAlive,
+  };
+}
+
+/**
+ * 构建基于插件配置（distillationLlm）的 llm.complete 函数。
+ * 用于远程主模型会话：压缩/轮后维护走配置的模型与地址，而非 SDK 网关 llm
+ * （401）或 lossless-claw 自身的 fallback provider 链。
+ * 忽略调用方传入的 model，始终使用配置模型。
+ */
+export function buildConfiguredLlmComplete(llm: { model: string; apiKey?: string; baseURL: string; keepAlive?: string }): (p: any) => Promise<{ text: string; provider?: string; model?: string }> {
+  const model = llm.model;
+  const apiKey = llm.apiKey || '';
+  const keepAlive = llm.keepAlive || undefined;
+  return async (p: any) => {
+    const { callLlm: _callLlm } = await import('../utils/llm-call.js');
+    const _msgs: any[] = Array.isArray(p?.messages) ? p.messages : [];
+    const _text = p?.systemPrompt
+      ? `${p.systemPrompt}\n\n${_msgs.map((m: any) => `${m.role ?? 'user'}: ${m.content ?? ''}`).join('\n')}`
+      : _msgs.map((m: any) => `${m.role ?? 'user'}: ${m.content ?? ''}`).join('\n');
+    const _r = await _callLlm({
+      baseURL: llm.baseURL,
+      apiKey,
+      model, // 忽略调用方传入的 model，始终用配置模型
+      prompt: typeof p?.prompt === 'string' && p.prompt ? p.prompt : _text,
+      temperature: p?.temperature ?? 0.3,
+      maxTokens: p?.maxTokens ?? 1024,
+      keepAlive,
+      think: p?.think,
+      signal: p?.signal,
+    });
+    return { text: _r?.text ?? '', model };
   };
 }
 
