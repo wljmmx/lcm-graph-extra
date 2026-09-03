@@ -40,6 +40,7 @@ import {
   estimateTokensFromMessages,
   getUncompressedMessageCount,
 } from "./lcm-bridge.js";
+import { invalidateSessionStateForReset } from "./session-reset.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
 
 // ---------------------------------------------------------------------------
@@ -661,48 +662,14 @@ const pluginEntry: any = definePluginEntry({
           return { bootstrapped: false, reason: 'bootstrap_error: ' + (err?.message ?? String(err)) };
         } finally {
           // 会话重置（/new 等）：清除旧会话的所有缓存，防止 uncomp、压力等级等
-          // 使用上一轮会话的陈旧数据。bootstrap 在新会话启动时由 SDK 主动调用。
+          // 使用上一轮会话的陈旧数据。
+          // 注意：host 仅在会话已有转录文件（hadSessionFile）时才调用 bootstrap，
+          // /new 产生的新会话走 before_reset 钩子清理（见 register() 中的
+          // api.on('before_reset')），此处仅作为带历史文件启动路径的兜底。
           try {
             const sid = params.sessionId != null ? String(params.sessionId) : '';
-            // BUG-AUDIT: 会话级缓存一律按 sessionId 隔离；清理也必须用 sessionId，
-            // 不能退化为 sessionKey（/new 时 sessionKey 不变，按其清除会清错桶/漏清目标桶）。
-            const sk = sid || (typeof params.sessionKey === 'string' ? params.sessionKey : '');
-
-            // 1. 失效 conversation_id 缓存（10min TTL，不主动清除会导致 uncomp 统计错误）
-            invalidateConvIdCache(sk, sid);
-
-            // 2. 清除会话级缓存（overhead / dedup / goal / tool-guidance）
-            try {
-              const { clearOverheadCache } = await import("./plugin/overhead-cache.js");
-              clearOverheadCache(sk);
-            } catch { /* non-fatal */ }
-            try {
-              const { clearSessionDedup } = await import("./plugin/dedup-cache.js");
-              clearSessionDedup(sk);
-            } catch { /* non-fatal */ }
-            try {
-              const { clearGoalCache } = await import("./plugin/goal-cache.js");
-              clearGoalCache(sk);
-            } catch { /* non-fatal */ }
-            try {
-              const { clearSessionToolTracker } = await import("./plugin/tool-guidance.js");
-              clearSessionToolTracker(sk);
-            } catch { /* non-fatal */ }
-            // durable-turn：按 sessionId 清空已提交逻辑轮幂等记录，防止 /new 后跨会话去重误判
-            try {
-              const _prefix = `${sid}|`;
-              for (const k of Array.from(committedTurnKeys)) {
-                if (typeof k === 'string' && k.startsWith(_prefix)) committedTurnKeys.delete(k);
-              }
-            } catch { /* non-fatal */ }
-
-            // 3. 清除 MoA 缓存（防止上一轮 MoA 结果被误用）
-            try {
-              const { getMoaResultCache } = await import("./moa/orchestrator.js");
-              getMoaResultCache(); // 读取并清空
-            } catch { /* non-fatal */ }
-
-            logger?.info?.("[bootstrap] session caches invalidated for new session", { sessionKey: sk });
+            const sk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
+            await invalidateSessionStateForReset(sk, sid, logger, committedTurnKeys);
           } catch { /* non-fatal */ }
 
           // H-6: 会话启动时预加载高频经验（非阻塞，失败静默）
@@ -3194,6 +3161,33 @@ const pluginEntry: any = definePluginEntry({
     
     // Expose for manual trigger
     (api as any).__lcmHeartbeat = runHeartbeat;
+
+    // -----------------------------------------------------------------------
+    // before_reset typed hook（SDK 2026.8.1 会话重置闭环）
+    //
+    // host 在 /new / 程序化 session reset 时触发 before_reset，ctx 携带
+    // 旧会话 sessionId（sessionKey 保持不变）。这是 /new 场景唯一可靠的
+    // 清理通知点：host 仅在 hadSessionFile=true 时才调用引擎 bootstrap()，
+    // /new 产生的新会话没有转录文件，bootstrap 不会执行。
+    //
+    // 注册方式：typed hook 必须用 api.on()；api.registerHook() 对
+    // PluginHookName（如 before_reset）的注册会被 loader 警告并忽略
+    // （"dispatched by the typed hook runner only"）。
+    // -----------------------------------------------------------------------
+    if (typeof (api as any).on === 'function') {
+      try {
+        (api as any).on('before_reset', async (_event: unknown, ctx: any) => {
+          const prevSid = ctx?.sessionId != null ? String(ctx.sessionId) : '';
+          const sk = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey : '';
+          await invalidateSessionStateForReset(sk, prevSid, logger, committedTurnKeys);
+        });
+        logger?.debug?.("[lcm-graph-extra] before_reset hook registered (session reset closure)");
+      } catch (hookErr) {
+        logger?.warn?.("[lcm-graph-extra] before_reset hook registration failed", { err: String(hookErr) });
+      }
+    } else {
+      logger?.warn?.("[lcm-graph-extra] api.on unavailable; /new session cache cleanup relies on bootstrap fallback only");
+    }
 
     // -----------------------------------------------------------------------
     // Compaction Provider（兼容 OpenClaw SDK compaction-safeguard 模式）
