@@ -41,6 +41,7 @@ import {
   getUncompressedMessageCount,
 } from "./lcm-bridge.js";
 import { invalidateSessionStateForReset } from "./session-reset.js";
+import { raceDeadline } from "./utils/deadline.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
 
 // ---------------------------------------------------------------------------
@@ -619,8 +620,16 @@ const pluginEntry: any = definePluginEntry({
           currentTurnFence: 'before-current-turn-entry-v1',
           turnAdvancementIdempotency: 'atomic-idempotent-v1',
         },
-        // 仅接受所需 host 注入字段，避免未知字段干扰 assemble/compact
-        acceptedHostParams: ['sessionKey', 'prompt', 'runtimeContext', 'runtimeSettings'],
+        // 仅接受所需 host 注入字段，避免未知字段干扰 assemble/compact。
+        // SDK 2026.8.1 契约（docs.openclaw.ai/concepts/context-engine）：
+        // CONTEXT_ENGINE_HOST_PARAMS = { sessionKey, prompt, runtimeSettings,
+        // sessionTarget, runtimeContext, abortSignal }，host 按本声明做交集投影，
+        // 未声明的字段不会被注入（compact 的 abortSignal 例外恒保留）。
+        // 必须包含 abortSignal：stop/shutdown 的取消信号经它传给 maintain()，
+        // 缺失会被 host 剥掉 → 后台维护无法被取消（SDK registry
+        // projectContextEngineHostParams 的过滤规则）。
+        // sessionTarget：maintain/compact 的会话目标（含 store scope）透传给下游。
+        acceptedHostParams: ['sessionKey', 'prompt', 'runtimeContext', 'runtimeSettings', 'sessionTarget', 'abortSignal'],
         // SDK ContextEngineOperation = "agent-run" | "manual-compact" | "subagent-spawn"
         // 为每个 operation 声明所需 host capabilities，确保 SDK 在 host 不支持时
         // 抛出明确错误而非静默降级。
@@ -974,25 +983,15 @@ const pluginEntry: any = definePluginEntry({
         };
         // 防挂起兜底：finalizeHarnessContextEngineTurn 对 afterTurn 无超时直接 await，
         // 挂起会阻塞 run settle → turn claim 滞留。超期限即放弃本轮 afterTurn（尽力而为）。
-        const dl = deadlinePromise(_afterTurnDeadlineMs, 'afterTurn');
-        const coreP = Promise.resolve(afterTurnCore(ctx, params));
-        coreP.catch(() => {}); // 期限胜出后 core 迟到 reject 时不产生 unhandledRejection
-        try {
-          await Promise.race([coreP, dl.promise]);
-        } catch (deadlineErr) {
-          const msg = deadlineErr instanceof Error ? deadlineErr.message : String(deadlineErr);
-          if (msg.includes('deadline')) {
-            // afterTurn 为尽力而为：host 捕获异常也只是置 postTurnFinalizationSucceeded=false，
-            // 这里直接返回（不抛）避免阻塞 finalize；遗留工作由下一轮 heartbeat / maintain 补偿。
-            logger?.warn?.("afterTurn: core deadline exceeded, skipping rest of post-turn work this turn", {
-              deadlineMs: _afterTurnDeadlineMs,
-              sessionKey: params.sessionKey,
-            });
-            return;
-          }
-          throw deadlineErr;
-        } finally {
-          dl.cancel();
+        const outcome = await raceDeadline(() => afterTurnCore(ctx, params), _afterTurnDeadlineMs, 'afterTurn');
+        if (outcome.status === 'deadline') {
+          // afterTurn 为尽力而为：host 捕获异常也只是置 postTurnFinalizationSucceeded=false，
+          // 这里直接返回（不抛）避免阻塞 finalize；遗留工作由下一轮 heartbeat / maintain 补偿。
+          logger?.warn?.("afterTurn: deadline exceeded, skipping rest of post-turn work this turn", {
+            deadlineMs: _afterTurnDeadlineMs,
+            sessionKey: params.sessionKey,
+          });
+          return;
         }
       },
 
