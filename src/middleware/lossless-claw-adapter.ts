@@ -835,7 +835,18 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
       const normalizedParams = coerceSessionId({ ...params, messages: normalizedMessages });
-      return await this.engine.commitTurn(normalizedParams);
+      const result: any = await this.engine.commitTurn(normalizedParams);
+      // lossless-claw 1.0.0 兼容：内层 commitTurn resolve 即持久化成功，但可能
+      // 不按契约返回 status 字段（返回 void / 其他形状）。此处规范化为
+      // { status: 'committed' }，避免上层 CE 判定 indeterminate 抛错、host
+      // 无限重试并逐轮降级 legacy 引擎。
+      if (result && (result.status === 'committed' || result.status === 'duplicate')) {
+        return result;
+      }
+      this.logger?.warn?.('[lossless-claw-adapter] commitTurn: inner engine resolved without status, normalizing to committed', {
+        resultShape: result == null ? 'nullish' : Object.keys(result).join(','),
+      });
+      return { status: 'committed' };
     } catch (err) {
       this.logger?.warn?.('[lossless-claw-adapter] commitTurn failed', { err: serializeError(err) });
       return { status: 'committed' };

@@ -771,6 +771,14 @@ const pluginEntry: any = definePluginEntry({
         isHeartbeat?: boolean;
       }) {
         try {
+          // 竞态修复：host 在逻辑轮开始前 drain outbox 调用 commitTurn，
+          // 时序上可能早于首次 assemble。此处确保子系统（含 lossless-claw
+          // adapter）已初始化，避免 adapter 为 null 被误判为 indeterminate
+          // 导致逐轮降级 legacy。ensureInitialized 幂等，已初始化时立即返回。
+          try {
+            await ensureInitialized();
+          } catch { /* 初始化失败不阻断，由下方 downstream 判空兜底 */ }
+
           const sessionId = params.sessionId != null ? String(params.sessionId) : '';
           const decision = evaluateTurnCommit({
             sessionId,
@@ -805,13 +813,28 @@ const pluginEntry: any = definePluginEntry({
             throw e; // 交由 host outbox 重试，闭环
           }
 
-          // ③ 仅在下游给出确定结果时记录幂等 key（LRU 上限裁剪）；
-          //    不确定结果（无 adapter / 未知 status）抛错让 host 重试。
+          // ③ 仅在下游给出确定结果时记录幂等 key（LRU 上限裁剪）。
+          //    - adapter 完全缺失（downstream == null）：暂时性失败，抛错让 host 重试；
+          //    - 下游已 resolve（未抛错即持久化成功）但未按契约返回 status 字段
+          //      （lossless-claw 1.0.0 返回 void / 无 status 形状）：视为 committed，
+          //      避免 host 无限重试并逐轮降级 legacy；
+          //    - 明确的异常 status 字符串：仍抛错让 host 重试。
           const downstreamStatus = downstream?.status;
-          if (downstreamStatus !== 'committed' && downstreamStatus !== 'duplicate') {
+          if (downstream == null) {
             throw new Error(
               `commitTurn: downstream result indeterminate (status=${String(downstreamStatus)})`,
             );
+          }
+          const knownStatus = downstreamStatus === 'committed' || downstreamStatus === 'duplicate';
+          if (!knownStatus && downstreamStatus !== undefined) {
+            throw new Error(
+              `commitTurn: downstream result indeterminate (status=${String(downstreamStatus)})`,
+            );
+          }
+          if (!knownStatus) {
+            logger?.warn?.('[lcm-graph-extra] commitTurn: downstream resolved without status field, treating as committed', {
+              sessionId, advancementKey: params.advancementKey,
+            });
           }
           committedTurnKeys.add(decision.key);
           if (committedTurnKeys.size > COMMITTED_TURN_MAX) {
@@ -820,7 +843,7 @@ const pluginEntry: any = definePluginEntry({
           }
 
           return {
-            status: downstreamStatus,
+            status: knownStatus ? downstreamStatus : 'committed',
             committedTurnId: decision.turnId,
           };
         } catch (err) {
