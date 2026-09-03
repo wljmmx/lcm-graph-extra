@@ -473,11 +473,49 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
 
-      const normalizedParams = coerceSessionId({
+      let normalizedParams: any = coerceSessionId({
         ...params,
         messages: normalizedMessages,
         prePromptMessageCount: params.prePromptMessageCount ?? 0,
       });
+
+      // ── G-MODEL-SYNC（与 compact 对齐）：本地主模型时注入自建 llm.complete ──
+      // lossless-claw 的 afterTurn（轮后维护 / 后台压缩）会调用 runtime.llm.complete。
+      // 若原样透传 SDK 注入的 runtimeContext.llm（网关 127.0.0.1:18789），
+      // 新版网关 /v1/chat/completions 需要鉴权 → 401 → 降级到备用远程模型。
+      // 本地模型快照存在时，用直连本地的自建 complete 覆盖三个读取位置
+      // （顶层 / runtimeContext / legacyCompactionParams，与 index.ts compact 的
+      // BUGFIX 剥离位置一致），确保轮后维护/后台压缩走本地模型真实端点。
+      const _lcSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
+        ? params.sessionKey.trim()
+        : (typeof (params as any).session_id === 'string' ? (params as any).session_id.trim() : '');
+      let _lcSnap = _lcSk
+        ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
+        : getActiveLocalLlmSnapshot();
+      if (!_lcSnap?.model) {
+        _lcSnap = resolveLocalSnapshotForModel((params as any).model, (params as any).baseURL);
+      }
+      if (_lcSnap?.model) {
+        try {
+          const _lcLocalComplete = buildLocalLlmComplete(_lcSnap);
+          const _lcLlm = { complete: _lcLocalComplete };
+          normalizedParams = {
+            ...normalizedParams,
+            llm: _lcLlm,
+            runtimeContext: { ...(normalizedParams.runtimeContext ?? {}), llm: _lcLlm },
+            legacyCompactionParams: { ...(normalizedParams.legacyCompactionParams ?? {}), llm: _lcLlm },
+          };
+          this.logger?.info?.('[lossless-claw-adapter] afterTurn uses agent local model', {
+            sessionKey: _lcSk || null,
+            model: _lcSnap.model,
+            baseURL: _lcSnap.baseURL ?? null,
+          });
+        } catch (lcInjectErr) {
+          this.logger?.warn?.('[lossless-claw-adapter] afterTurn local-llm injection failed, using default', {
+            err: lcInjectErr instanceof Error ? lcInjectErr.message : String(lcInjectErr),
+          });
+        }
+      }
 
       await this.engine.afterTurn(normalizedParams);
     } catch (err) {
@@ -620,7 +658,7 @@ export class LosslessClawAdapter {
     //  - 远程/无快照 → 不改动 params，lossless-claw 回退到其自身 LLM 配置。
     const _lcSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
       ? params.sessionKey.trim()
-      : '';
+      : (typeof (params as any).session_id === 'string' ? (params as any).session_id.trim() : '');
     let _lcSnap = _lcSk
       ? (getSessionLlmSnapshot(_lcSk) ?? getActiveLocalLlmSnapshot())
       : getActiveLocalLlmSnapshot();
