@@ -225,6 +225,27 @@ describe("retrieval O7: 异步预取缓存", () => {
       const second = cache.getAndConsume("session-1");
       expect(second).toBeNull();
     });
+
+    it("缓存命中时返回上一轮预取的 OpenClaw 官方记忆 openclawResults", () => {
+      const cache = new PrefetchCacheSimulator();
+      const mockMem = [
+        { chunkId: "c1", agentId: "agent-a", path: "memory/project.md", text: "用户偏好使用中文记录项目进度", importance: 8 },
+      ];
+      cache.set("session-mem", {
+        qmdResults: [],
+        graphResults: [],
+        expResults: [],
+        openclawResults: mockMem,
+        query: "项目进度",
+        ts: Date.now(),
+      });
+
+      const result = cache.getAndConsume("session-mem");
+      expect(result).not.toBeNull();
+      expect(result!.openclawResults).toHaveLength(1);
+      expect(result!.openclawResults![0].chunkId).toBe("c1");
+      expect(result!.openclawResults![0].importance).toBe(8);
+    });
   });
 
   describe("缓存未命中", () => {

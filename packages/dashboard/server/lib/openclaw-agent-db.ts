@@ -9,7 +9,8 @@
  * 设计：
  *   - 只读打开 node:sqlite（readOnly），不写任何文件；
  *   - 防御性 schema：表缺失/列改名时降级空结果，不抛错；
- *   - 检索走 memory_index_chunks.text LIKE，元数据 join recall_metadata / provenance；
+ *   - 检索走 memory_index_chunks.text 多词 OR（整句 + 拉丁词 + CJK bigram，提升中文召回率）；
+ *   - agent 库发现结果带 TTL 缓存（默认 30s），避免每次检索全盘扫描目录；
  *   - env OPENCLAW_AGENTS_DIR 可覆盖 agents 根目录（测试注入）。
  */
 
@@ -55,7 +56,7 @@ function resolveAgentsDir(): string {
 }
 
 /** 扫描全部 agent 库：~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite */
-function discoverAgentDbs(agentsDir: string): Array<{ agentId: string; dbPath: string }> {
+function scanAgentDbs(agentsDir: string): Array<{ agentId: string; dbPath: string }> {
   if (!existsSync(agentsDir)) return [];
   const out: Array<{ agentId: string; dbPath: string }> = [];
   for (const agentId of readdirSync(agentsDir)) {
@@ -63,6 +64,28 @@ function discoverAgentDbs(agentsDir: string): Array<{ agentId: string; dbPath: s
     if (existsSync(dbPath)) out.push({ agentId, dbPath });
   }
   return out.sort((a, b) => a.agentId.localeCompare(b.agentId));
+}
+
+/**
+ * agent 库发现缓存：按 agentsDir 缓存扫描结果，避免每次检索 readdirSync 全盘扫。
+ */
+const DISCOVERY_TTL_DEFAULT_MS = 30_000;
+const DISCOVERY_CACHE_MAX = 100;
+const discoveryCache = new Map<string, { ts: number; dbs: Array<{ agentId: string; dbPath: string }> }>();
+
+/** 清空库发现缓存（agent 目录变化 / 测试隔离时调用） */
+export function clearAgentDbDiscoveryCache(dirs?: string): void {
+  if (dirs) discoveryCache.delete(dirs);
+  else discoveryCache.clear();
+}
+
+function discoverAgentDbs(agentsDir: string): Array<{ agentId: string; dbPath: string }> {
+  const cached = discoveryCache.get(agentsDir);
+  if (cached && Date.now() - cached.ts < DISCOVERY_TTL_DEFAULT_MS) return cached.dbs;
+  const dbs = scanAgentDbs(agentsDir);
+  if (discoveryCache.size >= DISCOVERY_CACHE_MAX) discoveryCache.clear();
+  discoveryCache.set(agentsDir, { ts: Date.now(), dbs });
+  return dbs;
 }
 
 /** 只读打开；失败返回 null */
@@ -89,6 +112,16 @@ function tableExists(db: DatabaseSyncLike, name: string): boolean {
 /** LIKE 转义（\ % _） */
 function escapeLikePattern(q: string): string {
   return q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+/** 拆 query 为命中词：拉丁/数字词（小写） + 连续 CJK 相邻 bigram */
+function tokenizeQuery(q: string): string[] {
+  const out = new Set<string>();
+  for (const m of q.match(/[a-z0-9][a-z0-9._:/+#-]{1,}/gi) ?? []) out.add(m.toLowerCase());
+  for (const run of q.match(/[\u4e00-\u9fff\u3400-\u4dbf]+/g) ?? []) {
+    for (let i = 0; i < run.length - 1; i++) out.add(run.slice(i, i + 2));
+  }
+  return [...out];
 }
 
 const CHUNK_BASE_COLS = 'id, path, source, model, text, updated_at';
@@ -164,8 +197,9 @@ function toRow(agentId: string, r: BaseChunkRow, meta?: { importance: number | n
 }
 
 /**
- * 跨 agent 检索官方记忆（关键词 LIKE + 元数据），按 importance → 更新时间排序。
+ * 跨 agent 检索官方记忆（多词 OR 命中 text + 元数据），按 importance → 更新时间排序。
  * 返回 0 条表示无匹配或 openclaw 2.0 布局不存在（均不抛错）。
+ * 用户显式输入 %/_（通配符意图）时仅整句字面 LIKE，保持原语义。
  */
 export function searchOpenClawMemory(q: string, limit: number = 10): OpenClawMemoryRow[] {
   const query = String(q ?? '').trim();
@@ -174,7 +208,13 @@ export function searchOpenClawMemory(q: string, limit: number = 10): OpenClawMem
   const agents = discoverAgentDbs(agentsDir);
   if (agents.length === 0) return [];
   const perAgent = Math.max(1, limit);
-  const pattern = `%${escapeLikePattern(query)}%`;
+  const hasExplicitWildcard = query.includes('%') || query.includes('_');
+  const patterns = hasExplicitWildcard
+    ? [`%${escapeLikePattern(query)}%`]
+    : [query, ...tokenizeQuery(query)]
+        .filter((t, i, arr) => arr.indexOf(t) === i)
+        .map((t) => `%${escapeLikePattern(t)}%`);
+  const orSql = patterns.map(() => "text LIKE ? ESCAPE '\\'").join(' OR ');
   const out: OpenClawMemoryRow[] = [];
 
   for (const agent of agents) {
@@ -183,8 +223,8 @@ export function searchOpenClawMemory(q: string, limit: number = 10): OpenClawMem
     try {
       if (!tableExists(db, 'memory_index_chunks')) continue;
       const rows = db
-        .prepare(`SELECT ${CHUNK_BASE_COLS} FROM memory_index_chunks WHERE text LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?`)
-        .all(pattern, perAgent) as BaseChunkRow[];
+        .prepare(`SELECT ${CHUNK_BASE_COLS} FROM memory_index_chunks WHERE ${orSql} ORDER BY updated_at DESC LIMIT ?`)
+        .all(...patterns, perAgent * 2) as BaseChunkRow[];
       const ids = rows.map((r) => String(r.id ?? '')).filter(Boolean);
       const metaMap = loadRecallMeta(db, ids);
       const provMap = loadProvenance(db, ids);

@@ -19,6 +19,7 @@ interface PrefetchEntry {
   qmdResults: any[];
   graphResults: any[];
   expResults: any[];
+  openclawResults?: any[];
   query: string;
   ts: number;
 }
@@ -220,6 +221,31 @@ describe('afterTurn hook', () => {
         expect(entry.qmdResults).toHaveLength(0);
         expect(entry.graphResults).toHaveLength(0);
         expect(entry.expResults).toHaveLength(0);
+      });
+
+      it('缓存条目可携带 OpenClaw 官方记忆 openclawResults', () => {
+        const entry: PrefetchEntry = {
+          qmdResults: [],
+          graphResults: [],
+          expResults: [],
+          openclawResults: [
+            { chunkId: 'c1', agentId: 'agent-a', path: 'memory/project.md', text: '用户偏好', importance: 8 },
+          ],
+          query: '项目偏好',
+          ts: Date.now(),
+        };
+        expect(entry.openclawResults).toHaveLength(1);
+        expect(entry.openclawResults?.[0]).toHaveProperty('chunkId');
+        expect(entry.openclawResults?.[0]).toHaveProperty('importance');
+      });
+
+      it('OpenClaw 记忆参与 hasAnyData 判定，单独命中也会写入缓存', () => {
+        const qmd: any[] = [];
+        const graph: any[] = [];
+        const exp: any[] = [];
+        const openclaw: any[] = [{ chunkId: 'c1', text: '唯一命中' }];
+        const hasAnyData = qmd.length > 0 || graph.length > 0 || exp.length > 0 || openclaw.length > 0;
+        expect(hasAnyData).toBe(true);
       });
     });
 

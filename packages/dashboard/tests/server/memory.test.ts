@@ -48,6 +48,7 @@ vi.mock('../../server/lib/neo4j', () => ({
 import { getDb } from '../../server/lib/db';
 import { runReadQuery } from '../../server/lib/neo4j';
 import { registerMemoryRoutes } from '../../server/routes/memory';
+import { clearAgentDbDiscoveryCache } from '../../server/lib/openclaw-agent-db';
 
 const mockGetDb = vi.mocked(getDb);
 const mockRunReadQuery = vi.mocked(runReadQuery);
@@ -136,7 +137,8 @@ afterEach(async () => {
   await app.close();
   // 恢复 global.fetch
   global.fetch = originalFetch;
-  // 清理 openclaw 引擎测试临时目录与环境
+  // 清理 openclaw 引擎测试临时目录、环境与发现缓存
+  clearAgentDbDiscoveryCache();
   if (tmpAgentsDir) {
     try {
       rmSync(tmpAgentsDir, { recursive: true, force: true });
@@ -423,6 +425,24 @@ describe('GET /api/memory/search', () => {
     expect(body.results.openclaw).toHaveLength(1);
     expect(body.results.openclaw[0].content).toContain('记忆对接');
     expect(body.total).toBe(1);
+  });
+
+  it('openclaw 引擎多词 OR 召回：子词命中（语义近似）', async () => {
+    seedOpenClawMemory([
+      { id: 'c1', path: 'memory/note.md', text: '季度目标：完成记忆对接改造', importance: 9 },
+      { id: 'c2', path: 'memory/tmp.md', text: '完全没有关系的测试文本', importance: 1 },
+    ]);
+
+    // "对接"未作为整句出现，但 bigram 子词命中 c1 → 宽召回
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/memory/search?q=对接&engines=openclaw_only',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.results.openclaw).toHaveLength(1);
+    expect(body.results.openclaw[0].content).toContain('记忆对接改造');
+    expect(body.results.openclaw[0].score).toBe(1.9);
   });
 
   it('empty agents dir → openclaw 引擎返回空数组（不抛错）', async () => {

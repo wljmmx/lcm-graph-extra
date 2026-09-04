@@ -67,6 +67,7 @@ export async function injectContext(
   scenario: string | null,
   extractedEntities?: { terms: string[]; properNouns: string[]; techTerms: string[]; tokens: string[] },
   queryRewriteResult?: any,
+  openclawResults?: any[],
 ): Promise<InjectionOutput> {
   // Session-isolated cross-round dedup
   // BUG-AUDIT: 会话级 key 统一用 sessionId（/new 后换新，天然隔离），避免 sessionKey 稳定导致串会话
@@ -122,6 +123,39 @@ export async function injectContext(
     allSessionHashes.add(h);
     currentRoundHashes.push(h);
     sections.push({ label, body, layer });
+  }
+
+  // Layer 1.5: OpenClaw 官方长期记忆（per-agent SQLite 记忆索引，比经验更接近"事实/偏好"）
+  // 复用 performRetrieval 打上的 _entityScore 做主题一致性软加权，不硬删；最多注入 3 条。
+  if (openclawResults && Array.isArray(openclawResults) && openclawResults.length > 0) {
+    const memEsOf = (r: any): number => (typeof r?._entityScore === 'number' ? r._entityScore : 1.0);
+    const memImportanceWeight = (imp: number | null): number =>
+      imp == null ? 0.5 : imp >= 8 ? 1.0 : imp >= 5 ? 0.85 : 0.65;
+    const sortedMem = openclawResults
+      .map((r: any) => {
+        const imp = typeof r?.importance === 'number' ? r.importance : null;
+        return { ...r, _weightedScore: (r.score ?? 0.5) * memImportanceWeight(imp) * memEsOf(r) };
+      })
+      .sort((a: any, b: any) => b._weightedScore - a._weightedScore);
+    const memBudget = Math.max(1, Math.min(budgetedLimits.exp, 3));
+    const memBody = sortedMem
+      .slice(0, memBudget)
+      .map((r: any) => {
+        const imp = typeof r?.importance === 'number' ? r.importance : null;
+        const text = (r.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+        return '- [' + (imp != null ? `importance: ${imp}` : 'memory') + '] ' + (r.path ?? '').slice(0, 120) + (text ? ': ' + text : '');
+      })
+      .join('\n');
+    addSection(
+      '## 🧠 长期记忆（官方记忆索引）',
+      '以下事实来自 agent 官方长期记忆索引，仅在与当前问题相关时引用。\n\n' + memBody,
+      6,
+    );
+    ctx.logger?.debug?.('[injection] Layer 1.5 (openclaw memory) injected', {
+      total: openclawResults.length,
+      shown: memBudget,
+      lowEntity: sortedMem.filter((r: any) => (r._entityScore ?? 1) < 0.15).length,
+    });
   }
 
   // Layer 4: Experience

@@ -1019,6 +1019,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       retrievalOutput.scenario ?? null,
     retrievalOutput.extractedEntities,
     retrievalOutput.queryRewriteResult,
+    retrievalOutput.openclawResults,
     );
 
     systemPromptAddition = injectionOutput.systemPromptAddition;
