@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.13] - 2026-09-04
+
+### Fixed
+
+- **FIX-CR11: 压缩前复查主轮门控** — `processSingleDebt` 在调用压缩前复查 `isMainTurnActive()`，主轮活跃时抛错走既有 catch → `markDebtFailed` 保留债务供下次 poll 重试，避免 Ollama LLM 压缩与主生成串行排队导致 host "stopped making progress" 中断
+- **FIX-CR01-b / FIX-CR03: 补齐异步缓存淘汰** — heartbeat 周期清理新增 `evictStaleSadWeights` / `evictStaleOverheadPublic` / `evictStaleCompressedResults`，此前仅 lazy evict
+- **FIX-CR10: 关键 catch 补日志** — register/bootstrap/heartbeat 等处的静默 `catch {}` 补上 debug/warn 日志，便于内存泄漏与淘汰失效定位
+- **蒸馏让路主轮** — heartbeat 触发的 `runDistillation` 传入 `deferToMainTurn: true`
+- **会话重置缓存清理** — index.ts 导出 `clearLastAssembleExpIdsBySession` / 预热缓存清理函数，供 session-reset.ts 动态 import 调用
+- connection-pool / after-turn / tools 等若干稳定性修复
+
 ## [Unreleased] - 2026-08-11
+
 
 ### Changed
 
