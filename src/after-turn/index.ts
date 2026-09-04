@@ -8,6 +8,7 @@ import { backgroundTasks } from '../async/task-registry.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
 import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
+import { compressToolResultsAsync } from './tool-result-compressor.js';
 import { serializeError } from '../utils/logger.js';
 import { shouldUpdateGoal, getGoal } from '../plugin/goal-cache.js';
 import { resolveSessionCacheKey } from '../utils/session-key.js';
@@ -62,6 +63,21 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     ctx.logger?.debug?.("lossless-claw afterTurn failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
   }
   // lossless-claw afterTurn completed
+
+  // 异步压缩本轮新增的工具结果（下一轮 assemble 生效）
+  try {
+    const _compressSessionKey = typeof params.sessionKey === 'string'
+      ? params.sessionKey
+      : typeof params.session_id === 'string' ? params.session_id : '';
+    if (_compressSessionKey && (params.messages?.length ?? 0) > 0) {
+      compressToolResultsAsync({
+        messages: params.messages,
+        prePromptMessageCount: params.prePromptMessageCount ?? 0,
+        sessionKey: _compressSessionKey,
+        logger: ctx.logger,
+      });
+    }
+  } catch { /* non-fatal */ }
 
   try {
     // Split messages into prior (history) and recent (this turn)

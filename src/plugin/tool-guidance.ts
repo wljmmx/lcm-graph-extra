@@ -6,10 +6,19 @@
  *   L2 渐进披露 —— 首轮不注入工具，agent 真正需要时才提示
  *   L3 使用追踪 —— 已使用的工具不再重复提示
  *   L4 疲劳衰减 —— 连续 N 轮未用某工具，降低其推荐权重
+ *   L5 任务分解 —— 场景+关键词分解为有序子任务，按步骤推荐工具（规则版，不依赖 LLM）
  *
  * SessionToolTracker 是会话级状态，按 sessionKey 隔离。
  * 主入口：buildSmartToolGuidance()，替代旧版硬编码工具列表。
  */
+
+import { decomposeTask, hasDecompositionTemplate } from './task-decomposer.js';
+import {
+  recordSadFeedback,
+  isRecommendable,
+  sortByWeight,
+  setCategorizer,
+} from './sad-feedback.js';
 
 /** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
 export function extractAvailableTools(params: any): string[] {
@@ -333,25 +342,26 @@ const CATEGORY_LABELS: Record<string, string> = {
 };
 
 /**
- * 归类一个工具：返回其所属的语义类别列表。
- * 优先查 LCM 工具的 TOOL_CATEGORIES，再按名称模式推断。
+ * 归类一个工具：返回其所属的语义类别列表（LCM 显式类别 ∪ 名称模式推断的通用类别）。
+ *
+ * 返回并集而非二选一：LCM 工具既属于其专属桶（如 lcmg_search → graph），
+ * 也匹配通用能力词（lcmg_search → search）。这样场景模板（按通用类别匹配）
+ * 才能命中 LCM 工具，使任务分解与场景推荐对 LCM 工具生效。
  */
-function categorizeTool(toolName: string): string[] {
+export function categorizeTool(toolName: string): string[] {
   const lower = toolName.toLowerCase();
+  const cats = new Set<string>();
   // 1. 精确匹配 LCM 工具类别
-  const explicitCats: string[] = [];
   for (const [cat, names] of Object.entries(TOOL_CATEGORIES)) {
-    if (names.has(lower)) explicitCats.push(cat);
+    if (names.has(lower)) cats.add(cat);
   }
-  if (explicitCats.length > 0) return explicitCats;
-  // 2. 名称模式推断
-  const cats: string[] = [];
+  // 2. 名称模式推断（通用能力类别）
   for (const [cat, patterns] of Object.entries(TOOL_NAME_PATTERNS)) {
     if (patterns.some((re) => re.test(lower))) {
-      cats.push(cat);
+      cats.add(cat);
     }
   }
-  return cats;
+  return [...cats];
 }
 
 /** 工具描述：已知工具用精确描述，未知工具按类别标签推断 */
@@ -468,6 +478,9 @@ export function extractUsedTools(messages: any[]): string[] {
 /**
  * 标记轮次开始并回填上一轮工具使用情况。
  * 调用时机：每次 assemble 开始时（在 buildSmartToolGuidance 之前）。
+ *
+ * SAD 反馈循环：回填后调用 recordSadFeedback 更新权重（用了→增强同类，
+ * 未用→降权），替代旧版 L4 纯疲劳衰减的二元剔除。
  */
 export function beginToolGuidanceRound(
   sessionKey: string,
@@ -479,21 +492,30 @@ export function beginToolGuidanceRound(
   // 回填上一轮：检查上一轮注入的工具是否被 agent 实际调用
   const usedTools = extractUsedTools(messages);
   const usedSet = new Set(usedTools);
+  const prevRoundInjections: { tool: string; used: boolean; round: number }[] = [];
   for (const inj of state.injections) {
     if (inj.round === state.round - 1) {
       inj.used = usedSet.has(inj.tool);
+      prevRoundInjections.push({ tool: inj.tool, used: inj.used, round: inj.round });
     }
   }
-}
 
-/** 疲劳衰减阈值：连续未使用超过 N 轮后不再推荐 */
-const FATIGUE_THRESHOLD = 3;
+  // SAD：基于上一轮使用情况更新权重（用了增强同类，未用降权）
+  if (prevRoundInjections.length > 0) {
+    try {
+      const availableTools = messages.flatMap((m: any) =>
+        Array.isArray(m?.content) ? m.content.filter((b: any) => b?.type === 'tool_use' && typeof b?.name === 'string').map((b: any) => b.name.toLowerCase()) : [],
+      );
+      recordSadFeedback(sessionKey, prevRoundInjections, availableTools);
+    } catch { /* non-fatal */ }
+  }
+}
 
 /** 渐进披露：前 N 轮不注入工具指引（让 agent 先专注理解任务） */
 const PROGRESSIVE_DISCLOSURE_ROUNDS = 0;
 
 /**
- * 构建智能工具指引（4 层策略）。
+ * 构建智能工具指引（4 层策略 + L5 任务分解）。
  *
  * 替代旧版硬编码 `## 记忆系统分工` 的常量注入。
  * 仅在以下条件之一满足时注入工具指引：
@@ -504,10 +526,16 @@ const PROGRESSIVE_DISCLOSURE_ROUNDS = 0;
  *   - 连续 3 轮未使用 → 疲劳衰减，不再提示（L4）
  *   - 高压力 tier → 不注入任何工具指引以节省上下文
  *
+ * L5 任务分解模式（传入 userQuery 且场景有分解模板时启用）：
+ *   - 将请求分解为有序子任务，每步绑定能力类别
+ *   - 按子任务顺序推荐工具，引导 LLM 分步执行而非堆叠调用
+ *   - 无模板时回退到 L1 平铺列表
+ *
  * @param tier 压力层级（high 时直接返回空字符串）
  * @param scenario 当前场景（可为 null）
  * @param availableTools 可用工具列表（包含 LCM 工具 + 系统工具）
  * @param sessionKey 会话标识
+ * @param userQuery 最新用户消息（可选，启用 L5 任务分解）
  * @returns 工具指引字符串，空字符串表示本轮不注入
  */
 export function buildSmartToolGuidance(
@@ -515,6 +543,7 @@ export function buildSmartToolGuidance(
   scenario: string | null,
   availableTools: string[],
   sessionKey: string,
+  userQuery?: string,
 ): string {
   // 高压力模式：不注入任何工具指引，节省上下文
   if (tier === 'high') return '';
@@ -523,6 +552,25 @@ export function buildSmartToolGuidance(
 
   // L2 渐进披露：前 N 轮不注入工具指引
   if (state.round <= PROGRESSIVE_DISCLOSURE_ROUNDS) return '';
+
+  // L5 任务分解模式：场景有模板 + 提供了用户消息 → 有序子任务推荐
+  if (scenario && userQuery && hasDecompositionTemplate(scenario)) {
+    const { subtasks } = decomposeTask(scenario, userQuery);
+    if (subtasks.length > 0) {
+      // 至少有一个子任务能匹配到工具才走分解模式
+      const hasAnyMatch = subtasks.some((st) =>
+        availableTools.some((tool) => categorizeTool(tool).includes(st.category)),
+      );
+      if (hasAnyMatch) {
+        const guidance = renderDecomposedGuidance(subtasks, availableTools, state, sessionKey);
+        if (guidance) {
+          state.lastHadGuidance = true;
+          return guidance;
+        }
+      }
+    }
+    // 分解模式未命中工具则回退到 L1
+  }
 
   // 确定本轮候选工具
   let candidateTools: string[] = [];
@@ -537,16 +585,13 @@ export function buildSmartToolGuidance(
     return '';
   }
 
-  // L3+L4：过滤已使用和疲劳的工具
+  // L3+SAD：过滤已使用（L3 避免唠叨）+ 权重过低（SAD 替代旧版 L4 疲劳衰减）
   const unusedTools = candidateTools.filter((tool) => {
     const relevantInjections = state.injections.filter((i) => i.tool === tool);
-    // L3：已使用过 → 不再提示
+    // L3：已使用过 → 不再提示（避免对同一工具唠叨）
     if (relevantInjections.some((i) => i.used)) return false;
-    // L4：连续未使用超过阈值 → 疲劳衰减
-    const unusedStreak = relevantInjections.reduce((streak, inj) => {
-      return inj.used ? 0 : streak + 1;
-    }, 0);
-    return unusedStreak < FATIGUE_THRESHOLD;
+    // SAD：有效权重低于阈值 → 渐次淡出（替代旧版 L4 连续未用硬剔除）
+    return isRecommendable(tool, sessionKey);
   });
 
   if (unusedTools.length === 0) {
@@ -554,8 +599,11 @@ export function buildSmartToolGuidance(
     return '';
   }
 
+  // SAD：按有效权重降序排序，高权重工具优先推荐
+  const orderedTools = sortByWeight(unusedTools, sessionKey);
+
   // 记录本轮注入
-  for (const tool of unusedTools) {
+  for (const tool of orderedTools) {
     state.injections.push({ tool, round: state.round, used: false });
   }
   state.lastHadGuidance = true;
@@ -566,7 +614,7 @@ export function buildSmartToolGuidance(
     '以下工具可能在当前场景有用。已自动注入的知识库通常已包含所需信息，',
     '优先基于已有上下文直接执行，仅在必要时使用工具。',
   );
-  for (const tool of unusedTools) {
+  for (const tool of orderedTools) {
     const desc = inferToolDescription(tool);
     lines.push(`- **${tool}**${desc ? ': ' + desc : ''}`);
   }
@@ -588,3 +636,121 @@ export function evictStaleToolTrackers(): void {
 export function clearSessionToolTracker(sessionKey: string): void {
   trackerCache.delete(sessionKey);
 }
+
+// ============================================================================
+// L5 任务分解模式 —— 规则版子任务序列驱动有序推荐
+// ============================================================================
+
+/**
+ * 为每个子任务匹配可用工具（按子任务的能力类别）。
+ * 同一工具可命中多个子任务，但只在首次出现的子任务中展示，避免重复。
+ */
+function matchToolsForSubtasks(
+  subtasks: { step: number; name: string; hint: string; category: string; optional?: boolean }[],
+  availableTools: string[],
+): { step: number; name: string; hint: string; tools: string[]; optional?: boolean }[] {
+  const usedTools = new Set<string>();
+  const result: { step: number; name: string; hint: string; tools: string[]; optional?: boolean }[] = [];
+
+  for (const st of subtasks) {
+    const matched: string[] = [];
+    for (const tool of availableTools) {
+      if (usedTools.has(tool)) continue;
+      const cats = categorizeTool(tool);
+      if (cats.includes(st.category)) {
+        matched.push(tool);
+        usedTools.add(tool);
+      }
+    }
+    // 即使无工具命中，也保留该子任务作为"步骤指引"（LLM 可用非工具方式完成）
+    result.push({ step: st.step, name: st.name, hint: st.hint, tools: matched, optional: st.optional });
+  }
+
+  return result;
+}
+
+/**
+ * 构建任务分解模式的工具指引文本（由 buildSmartToolGuidance 调用）。
+ *
+ * 与旧版平铺列表的区别：
+ *   - 工具按子任务顺序出现，引导 LLM 分步执行而非堆叠调用
+ *   - 每步附带 hint 说明这一步要做什么
+ *   - 无工具命中的子任务仍保留，作为"步骤提示"
+ *
+ * 应用 L3+SAD 过滤：已用（L3 避免唠叨）+ 权重过低（SAD 替代旧版 L4 疲劳）的工具从对应步骤移除，
+ * 若某必选子任务的所有工具均被过滤，该子任务整体保留但标注"无可用工具"。
+ */
+function renderDecomposedGuidance(
+  subtasks: { step: number; name: string; hint: string; category: string; optional?: boolean }[],
+  availableTools: string[],
+  state: SessionToolState,
+  sessionKey: string,
+): string {
+  const stepTools = matchToolsForSubtasks(subtasks, availableTools);
+
+  const lines: string[] = ['## 任务分解与工具推荐'];
+  lines.push(
+    '当前请求可拆解为以下有序步骤，请按步骤推进，每步完成后再进入下一步。',
+    '已自动注入的知识库通常已包含所需信息，优先基于已有上下文直接执行，仅在必要时使用工具。',
+  );
+
+  for (const st of stepTools) {
+    // L3+SAD 过滤本步骤的工具
+    const filteredTools = st.tools.filter((tool) => {
+      const relevantInjections = state.injections.filter((i) => i.tool === tool);
+      // L3：已使用过 → 不再提示（避免对同一工具唠叨）
+      if (relevantInjections.some((i) => i.used)) return false;
+      // SAD：有效权重低于阈值 → 渐次淡出（替代旧版 L4 连续未用硬剔除）
+      return isRecommendable(tool, sessionKey);
+    });
+    // SAD：按权重降序排序
+    const orderedTools = sortByWeight(filteredTools, sessionKey);
+
+    const optTag = st.optional ? '（可选）' : '';
+    lines.push(`\n### 步骤 ${st.step}：${st.name}${optTag}`);
+    lines.push(`_目标：${st.hint}_`);
+
+    if (orderedTools.length > 0) {
+      // 记录本轮注入
+      for (const tool of orderedTools) {
+        state.injections.push({ tool, round: state.round, used: false });
+      }
+      for (const tool of orderedTools) {
+        const desc = inferToolDescription(tool);
+        lines.push(`- **${tool}**${desc ? ': ' + desc : ''}`);
+      }
+    } else if (st.tools.length > 0) {
+      // 有候选工具但全被过滤 → 提示已用/权重过低
+      lines.push('- _候选工具已使用或暂时不推荐_');
+    } else {
+      // 该步骤无工具命中 → 纯步骤提示
+      lines.push('- _本步骤无需特定工具，可直接执行_');
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * 提取最新用户消息文本（用于任务分解的关键词匹配）。
+ */
+export function extractLatestUserQuery(messages: any[]): string {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== 'user') continue;
+    const content = msg.content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      const textParts = content
+        .filter((b: any) => b?.type === 'text' || typeof b?.text === 'string')
+        .map((b: any) => b.text);
+      if (textParts.length > 0) return textParts.join('\n');
+    }
+  }
+  return '';
+}
+
+// 模块加载末尾：向 sad-feedback 注册分类器，打破循环依赖（晚绑定）。
+// 必须在 categorizeTool 定义之后执行；放于模块尾部保证 hoisting 已完成。
+setCategorizer(categorizeTool);

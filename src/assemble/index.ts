@@ -4,7 +4,7 @@
  * 组合 retrieval / injection / guidance 三个子模块，实现完整的 assemble 生命周期。
  */
 
-import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance } from '../plugin/tool-guidance.js';
+import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance, extractLatestUserQuery } from '../plugin/tool-guidance.js';
 import { detectScenario, SCENARIO_LABELS, detectToolSearchMode, buildModeAwareGuidance } from '../tools/tool-catalog.js';
 import { getOverhead, setOverhead, getSdkOverhead, updateSdkOverhead } from '../plugin/overhead-cache.js';
 import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
@@ -37,6 +37,7 @@ import { ensureFinalUserMessage } from '../utils/ensure-final-user.js';
 import { performRetrieval } from './retrieval.js';
 import { injectContext } from './injection.js';
 import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
+import { applyCompressedToolResults } from '../after-turn/tool-result-compressor.js';
 import type { AssembleContext, AssembleResult } from './types.js';
 
 // 预压缩冷却：按会话记录最近一次提交预压缩的时间戳。
@@ -247,6 +248,28 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       });
     }
   }
+
+  // 异步工具结果压缩：用 afterTurn 预先生成的压缩版替换旧工具结果原文
+  // fresh tail 与 stubLargeToolPayloads 对齐，避免压缩当前轮结果
+  {
+    const _compressSessionKey = typeof params.sessionKey === 'string'
+      ? params.sessionKey
+      : typeof params.session_id === 'string' ? params.session_id : '';
+    if (_compressSessionKey && finalMessages.length > 0) {
+      const _compressFreshTail = _stubConfig.enabled ? _stubConfig.freshTailCount : 8;
+      const _compressResult = applyCompressedToolResults(
+        finalMessages, _compressSessionKey, _compressFreshTail,
+      );
+      if (_compressResult.replacedCount > 0) {
+        finalMessages = _compressResult.messages;
+        ctx.logger?.info?.('[assemble] applied compressed tool results', {
+          replaced: _compressResult.replacedCount,
+          tokensSaved: _compressResult.tokensSaved,
+        });
+      }
+    }
+  }
+
   let qmdResults: any = [];
   let graphResults: any = [];
   let expResults: any = [];
@@ -1349,10 +1372,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     const _msgTokens = cachedMsgTokens;
     const _hasBudgetForGuidance = _msgTokens < (contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.50;
 
+    // L5 任务分解：提取最新用户消息，传入 buildSmartToolGuidance 用于场景+关键词分解
+    const _latestUserQuery = extractLatestUserQuery(finalMessages);
+
     if (_hasBudgetForGuidance && typeof modelFullId === 'string' && (modelFullId.startsWith('ollama/') || modelFullId.startsWith('ollama-256k/'))
         && availableTools.length > 0) {
       const smartGuidance = buildSmartToolGuidance(
-        tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey,
+        tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey, _latestUserQuery,
       );
       if (smartGuidance) {
         systemPromptAddition += '\n\n' + smartGuidance;
@@ -1363,7 +1389,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     if (_hasBudgetForGuidance && (typeof modelFullId !== 'string' || (!modelFullId.startsWith('ollama/') && !modelFullId.startsWith('ollama-256k/')))) {
       if (availableTools.length > 0) {
         const smartGuidance = buildSmartToolGuidance(
-          tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey,
+          tier, retrievalOutput.scenario ?? null, availableTools, _toolSessionKey, _latestUserQuery,
         );
         if (smartGuidance && systemPromptAddition.length > 0) {
           systemPromptAddition += '\n\n' + smartGuidance;

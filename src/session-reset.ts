@@ -53,6 +53,16 @@ export async function invalidateSessionStateForReset(
       clearSessionToolTracker(sk);
     } catch { /* non-fatal */ }
     try {
+      // 工具结果异步压缩缓存清理（防止 /new 后旧轮工具结果被误替换）
+      const { clearCompressedToolResults } = await import('./after-turn/tool-result-compressor.js');
+      clearCompressedToolResults(sk);
+    } catch { /* non-fatal */ }
+    try {
+      // SAD 反馈循环权重缓存清理（防止 /new 后旧权重污染新会话推荐）
+      const { clearSadWeights } = await import('./plugin/sad-feedback.js');
+      clearSadWeights(sk);
+    } catch { /* non-fatal */ }
+    try {
       // G-MODEL-SYNC: 清理该会话的主模型快照与远程标记，
       // /new 后由下一轮 recordRuntimeLlm 重新记录
       const { clearSessionLlmState } = await import('./plugin/distillation.js');
