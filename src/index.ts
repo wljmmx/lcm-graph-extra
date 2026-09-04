@@ -42,6 +42,7 @@ import {
 } from "./lcm-bridge.js";
 import { invalidateSessionStateForReset } from "./session-reset.js";
 import { raceDeadline } from "./utils/deadline.js";
+import { beginMainTurn, endMainTurn, isMainTurnActive } from "./async/main-turn-gate.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
 
 // ---------------------------------------------------------------------------
@@ -921,6 +922,11 @@ const pluginEntry: any = definePluginEntry({
           distillationModule.recordRuntimeLlm?.(rllm, params.model, _sk);
         } catch { /* ignore */ }
 
+        // 主轮门控：assemble 开始即持门，afterTurn 结束释放 —— 中间恰好覆盖
+        // host 的 LLM 生成窗口（本地大模型可达数分钟）。期间后台 LLM 任务
+        // （蒸馏 / 债务压缩）让路，避免与主模型生成在本地 Ollama 串行排队争抢。
+        beginMainTurn(String((params as any)?.sessionKey ?? (params as any)?.session_id ?? ''));
+
         // 捕获活跃模型 ID，供 compact 回查模型实际上下文窗口
         const modelId = typeof params.model === "string" ? params.model : "";
         if (modelId && _modelRegistry) {
@@ -1021,13 +1027,16 @@ const pluginEntry: any = definePluginEntry({
       },
 
       async afterTurn(params: any) {
-        // G-MODEL-SYNC: 同步写入主模型快照（afterTurn 与 assemble 可能先后调用，
-        // 两者都调用 recordRuntimeLlm 以保证任何路径触发的后续后台任务都能拿到）
+        // G-MODEL-SYNC + 主轮门控：记录主模型快照；_gateSk 与 assemble 的持门
+        // key 使用完全相同的规范化（String(sessionKey ?? session_id ?? '')），
+        // finally 中释放，覆盖 assemble → host 生成 → afterTurn 整个主轮窗口。
+        const _gateSk = String((params as any)?.sessionKey ?? (params as any)?.session_id ?? '');
         try {
           const rllm = (params as any)?.runtimeContext?.llm;
           const _sk = (params as any)?.sessionKey ?? (params as any)?.session_id ?? '';
           distillationModule.recordRuntimeLlm?.(rllm, params.model, _sk);
         } catch { /* ignore */ }
+        try {
 
         // R-1: 委托给 src/after-turn/index.ts
         const ctx: AfterTurnContext = {
@@ -1062,6 +1071,11 @@ const pluginEntry: any = definePluginEntry({
             sessionKey: params.sessionKey,
           });
           return;
+        }
+        } finally {
+          // 主轮门控释放：无论正常完成 / 期限超时 / 异常都释放，
+          // 防止门滞留导致后台任务（蒸馏/债务压缩）被永久阻塞
+          endMainTurn(_gateSk);
         }
       },
 
@@ -2922,14 +2936,23 @@ const pluginEntry: any = definePluginEntry({
         if (expStore && typeof expStore.fetchPending === "function") {
           const elapsed = Date.now() - lastDistillationRun;
           if (elapsed >= distillIntervalMs) {
-            lastDistillationRun = Date.now();
-            // 注册到 backgroundTasks 以便 dispose 时等待
-            backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger).then(() => {
-              // P2-1: 蒸馏后新经验变为 DISTILLED 可被检索，失效 L4 缓存
-              l4QueryCache.clear();
-            }).catch((e: any) => {
-              logger?.warn?.("distillation batch failed", { err: String(e) });
-            }));
+            // 主轮门控：主对话轮进行中（含 host 生成窗口）时推迟蒸馏 ——
+            // 蒸馏是批量 LLM 调用，会让路主模型。不更新 lastDistillationRun，
+            // 下一轮心跳（5min 后）自然重试，不丢失。
+            let _mainTurnBusy = false;
+            try { _mainTurnBusy = isMainTurnActive(); } catch { /* non-fatal */ }
+            if (_mainTurnBusy) {
+              logger?.debug?.("heartbeat: distillation deferred (main turn active)");
+            } else {
+              lastDistillationRun = Date.now();
+              // 注册到 backgroundTasks 以便 dispose 时等待
+              backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger).then(() => {
+                // P2-1: 蒸馏后新经验变为 DISTILLED 可被检索，失效 L4 缓存
+                l4QueryCache.clear();
+              }).catch((e: any) => {
+                logger?.warn?.("distillation batch failed", { err: String(e) });
+              }));
+            }
           }
 
           // --- N-3: EXPERIENCE TTL cleanup (every ~24h) ---
@@ -3295,7 +3318,10 @@ const pluginEntry: any = definePluginEntry({
             await onCompaction(instance);
           },
           { config: api.pluginConfig, logger: logger },
-          { pollIntervalMs: 60_000, maxConcurrent: 2, urgentThreshold: 0.7 }
+          // v2.7.3: maxConcurrent 2→1 —— 本地 Ollama 本就串行排队，2 个并发
+          // 压缩只是双倍排队 + 与主模型争抢；单并发配合主轮门控（pollAndDispatch
+          // 入口让路）已足够。urgentThreshold 0.7：高紧迫债务优先。
+          { pollIntervalMs: 60_000, maxConcurrent: 1, urgentThreshold: 0.7 }
         );
         logger?.info?.("debt-manager: resident scheduler started");
       } catch (schedErr) {

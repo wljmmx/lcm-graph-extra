@@ -335,6 +335,13 @@ export function getSchedulerStats(): SchedulerStats {
   };
 }
 
+// ─── Session File Index (v2.7.3) ────────────────────────
+// processSingleDebt 原先每次扫描全部 .lossless/sessions/*.json 并逐个 JSON.parse
+// —— 每笔债务 O(所有会话) 的重复解析。此处缓存 文件名 → {mtimeMs, sessionId,
+// sessionKey}，仅 mtime 变化的文件才重新读取。容量上限与去重缓存对齐。
+const _sessionFileIndex = new Map<string, { mtimeMs: number; sessionId?: string; sessionKey?: string }>();
+const _SESSION_FILE_INDEX_MAX = 500;
+
 // ─── Process Single Debt ────────────────────────────────
 
 async function processSingleDebt(debt: DebtRecord): Promise<void> {
@@ -366,10 +373,26 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
           const files = (await fs.promises.readdir(losslessSessionDir)).filter((f: string) => f.endsWith(".json"));
           for (const fname of files) {
             try {
-              const data = JSON.parse(await fs.promises.readFile(path.join(losslessSessionDir, fname), "utf8"));
+              const full = path.join(losslessSessionDir, fname);
+              // v2.7.3: mtime 缓存 —— 未变更的 session 文件跳过 JSON.parse
+              const st = await fs.promises.stat(full);
+              const cached = _sessionFileIndex.get(fname);
+              if (cached && cached.mtimeMs === st.mtimeMs) {
+                if (cached.sessionId === realSessionId || cached.sessionKey === sessionKey) {
+                  sessionFile = full;
+                  break;
+                }
+                continue;
+              }
+              const data = JSON.parse(await fs.promises.readFile(full, "utf8"));
+              if (_sessionFileIndex.size >= _SESSION_FILE_INDEX_MAX) {
+                const oldest = _sessionFileIndex.keys().next().value;
+                if (oldest !== undefined) _sessionFileIndex.delete(oldest);
+              }
+              _sessionFileIndex.set(fname, { mtimeMs: st.mtimeMs, sessionId: data.sessionId, sessionKey: data.sessionKey });
               // BUG-AUDIT: 用反查到的真实 sessionId/sessionKey 匹配，而非 String(conversationId)
               if (data.sessionId === realSessionId || data.sessionKey === sessionKey) {
-                sessionFile = path.join(wsDir, ".lossless", "sessions", fname);
+                sessionFile = full;
                 break;
               }
             } catch (e) {
@@ -419,6 +442,17 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
 
 async function pollAndDispatch(): Promise<void> {
   if (!_onCompactionFn || !_apiContext) return;
+
+  // 主轮门控：主对话轮进行中（assemble → host 生成 → afterTurn）时让路，
+  // 下一轮 poll（60s 后）自然重试。债务本质是"可推迟的工作"，
+  // 抢在主模型生成期间跑压缩 LLM 只会加剧 Ollama 排队。
+  try {
+    const { isMainTurnActive } = await import('../async/main-turn-gate.js');
+    if (isMainTurnActive()) {
+      _apiContext.logger?.debug?.("debt-manager: main turn active, deferring debt dispatch");
+      return;
+    }
+  } catch { /* gate 不可用时维持原行为 */ }
 
   const pending = getPendingDebts();
   if (pending.length === 0) return;

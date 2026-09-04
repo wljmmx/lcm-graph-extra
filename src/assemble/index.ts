@@ -26,6 +26,9 @@ import {
   getUncompressedMessageCount,
   trimSummariesToBudget,
 } from '../lcm-bridge.js';
+// v2.7.3 债务闭环：直接压缩成功后清偿债务，避免债务调度器 60s 后
+// 重复 force compact（no-op）+ 无谓的 memory 文件备份
+import { clearDebt } from '../core/debt-manager.js';
 import { resolveContextProfile } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
@@ -501,7 +504,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             sessionId: _lcSid, sessionKey, sessionFile, force: true,
             tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
             compactionTarget: 'threshold',
-          }).then(() => {}, () => {}));
+          }).then((_r: any) => {
+            // v2.7.3 债务闭环：直接压缩成功即清偿，防止调度器 60s 后重复 no-op force compact
+            if (_r?.compacted && conversationId != null) {
+              try { clearDebt(conversationId, 'cleared_by_direct_compact_medium'); } catch { /* non-fatal */ }
+            }
+          }, () => {}));
 
           if (hasExistingSummary) {
             // SECONDARY: token 预算裁剪 — 先裁剪 summary 的 token 总量
@@ -640,6 +648,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                   });
                   if (_r.ok && _r.compacted) {
                     ctx.logger?.info?.('[assemble] overflow retry compact succeeded', { budget: _budget });
+                    // v2.7.3 债务闭环：overflow 债务在重试成功后即清偿
+                    if (conversationId != null) {
+                      try { clearDebt(conversationId, 'cleared_by_overflow_retry'); } catch { /* non-fatal */ }
+                    }
                     return;
                   }
                 } catch { /* continue to next budget */ }
@@ -653,7 +665,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 compactTimer = setTimeout(() => reject(new Error('Compact timeout')), compactTimeout);
               });
               compactTimeoutPromise.catch(() => {});
-              await Promise.race([
+              const _syncCompactResult = await Promise.race([
                 ctx.losslessClawAdapter.compact({
                   sessionId: _lcSid, sessionKey, sessionFile, force: true,
                   tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
@@ -662,6 +674,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 compactTimeoutPromise,
               ]);
               if (compactTimer) clearTimeout(compactTimer);
+              // v2.7.3 债务闭环：同步压缩成功即清偿高压债务
+              if ((_syncCompactResult as any)?.compacted && conversationId != null) {
+                try { clearDebt(conversationId, 'cleared_by_direct_compact_sync'); } catch { /* non-fatal */ }
+              }
               const freshSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
               if (freshSummaries.length > 0) {
                 // SECONDARY: token 预算裁剪
