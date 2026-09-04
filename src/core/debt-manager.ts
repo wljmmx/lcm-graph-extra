@@ -423,6 +423,20 @@ async function processSingleDebt(debt: DebtRecord): Promise<void> {
       unregister: () => {},
     };
 
+    // FIX-CR11: 压缩前复查主轮门控。
+    // dispatch（pollAndDispatch）时已检查，但 session 文件扫描可能耗时，
+    // 期间用户可能发新消息触发主轮生成。压缩是 Ollama LLM 调用，与主生成
+    // 串行排队会导致 host "stopped making progress" 中断。复查到主轮活跃时
+    // 抛错 → 走现有 catch → markDebtFailed 保留债务供下次 poll 重试（P3-5 失败不清账）。
+    let _gateActive = false;
+    try {
+      const { isMainTurnActive } = await import('../async/main-turn-gate.js');
+      _gateActive = isMainTurnActive();
+    } catch { /* gate 不可用时按不活跃处理，继续压缩 */ }
+    if (_gateActive) {
+      throw new Error('main turn active, deferring compaction to next poll');
+    }
+
     await _onCompactionFn(instance);
     clearDebt(debt.conversationId, "compacted_by_debt_manager");
 

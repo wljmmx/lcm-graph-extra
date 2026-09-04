@@ -14,6 +14,7 @@ import { ensureOllamaV1Path, ensureAnthropicMessagesPath, isOllamaEndpoint } fro
 import { callLlm, isLocalLlm } from '../utils/llm-call.js';
 import { businessMetrics } from '../health-metrics.js';
 import { llmTimeout } from '../config/defaults.js';
+import { isMainTurnActive } from '../async/main-turn-gate.js';
 
 export function isOllamaModel(model: string): boolean {
   // 判断主会话模型是否为 Ollama 本地模型。
@@ -824,6 +825,21 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     // 收集 distillOne 的错误详情，取第一条供结果展示（避免用户只看到 "see logs"）
     const distillErrors: string[] = [];
     for (let i = 0; i < pending.length; i += concurrency) {
+      // FIX-CR11: 批次间复查主轮门控。
+      // 蒸馏在 dispatch 时（heartbeat）已检查门控，但批次循环可能持续数分钟，
+      // 期间用户可能发新消息触发主轮生成。若不复查，蒸馏的 Ollama 调用会与
+      // 主生成在本地 Ollama 串行排队 → 主生成无 token 流 → host 判定
+      // "stopped making progress" 中断。复查到主轮活跃时停止发起新批次
+      //（在途批次自然完成，无法取消已发出的 Ollama 请求），剩余经验下轮 heartbeat 重试。
+      try {
+        if (isMainTurnActive()) {
+          log?.info?.('distillation: main turn became active mid-batch, deferring remaining', {
+            processed: i,
+            remaining: pending.length - i,
+          });
+          break;
+        }
+      } catch { /* gate 不可用时维持原行为 */ }
       const batch = pending.slice(i, i + concurrency);
       await Promise.allSettled(batch.map((raw: any) => (async () => {
         // 记录 errorSink 长度，用于提取本条经验的失败原因
