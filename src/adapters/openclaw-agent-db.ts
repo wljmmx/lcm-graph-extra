@@ -14,7 +14,9 @@
  * 设计约束：
  *   - 一律只读打开（node:sqlite readOnly），不写任何文件；
  *   - 对官方 schema 采用防御性读取：表/列缺失或改名时降级为空结果，不抛错；
- *   - embedding 为 TEXT（模型相关编码），本模块不解析向量，检索走文本 LIKE；
+ *   - embedding 为 TEXT（模型相关编码，query 侧无同模型编码器），本模块不做向量余弦，
+ *     检索改为多词 OR 召回（拉丁词 + CJK bigram + 整句），提升中文/同义召回率；
+ *   - agent 库发现结果带 TTL 缓存（默认 30s），避免每次检索全盘扫描目录；
  *   - 迁移布局（目录/表名）以官方 database-schemas 文档为准。
  */
 
@@ -100,6 +102,8 @@ export interface OpenClawAgentDbOptions {
   agentsDir?: string;
   /** 每个 agent 最多返回的 chunk 数 */
   maxChunksPerAgent?: number;
+  /** 库发现结果缓存 TTL（ms）；0 表示禁用缓存（每次全盘扫描）。默认 30s */
+  discoveryTtlMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,10 +118,20 @@ function resolveAgentsDir(): string {
 }
 
 /**
- * 扫描 ~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite，返回全部 agent 库。
- * 目录缺失或库文件不存在时返回空数组（不抛错）。
+ * agent 库发现缓存：按 agentsDir 缓存扫描结果，避免每次检索 readdirSync 全盘扫。
+ * 缓存数量上限 100（超出时清空重建，防止异常增长）。
  */
-export function discoverAgentDbs(agentsDir: string = resolveAgentsDir()): AgentDbPath[] {
+const DISCOVERY_TTL_DEFAULT_MS = 30_000;
+const DISCOVERY_CACHE_MAX = 100;
+const discoveryCache = new Map<string, { ts: number; dbs: AgentDbPath[] }>();
+
+/** 清空库发现缓存（agent 目录发生变化 / 测试隔离时调用） */
+export function clearAgentDbDiscoveryCache(): void {
+  discoveryCache.clear();
+}
+
+/** 无缓存的实际扫描实现 */
+function scanAgentDbs(agentsDir: string): AgentDbPath[] {
   if (!existsSync(agentsDir)) return [];
   const out: AgentDbPath[] = [];
   for (const agentId of readdirSync(agentsDir)) {
@@ -125,6 +139,34 @@ export function discoverAgentDbs(agentsDir: string = resolveAgentsDir()): AgentD
     if (existsSync(dbPath)) out.push({ agentId, dbPath });
   }
   return out.sort((a, b) => a.agentId.localeCompare(b.agentId));
+}
+
+/**
+ * 扫描 ~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite，返回全部 agent 库。
+ * 目录缺失或库文件不存在时返回空数组（不抛错）。
+ * 带 TTL 缓存（默认 30s）；传 options.discoveryTtlMs=0 强制每次扫描。
+ */
+export function discoverAgentDbs(
+  agentsDirOrOptions?: string | OpenClawAgentDbOptions,
+): AgentDbPath[] {
+  const opts: OpenClawAgentDbOptions =
+    agentsDirOrOptions != null && typeof agentsDirOrOptions === 'object'
+      ? agentsDirOrOptions
+      : { agentsDir: agentsDirOrOptions as string | undefined };
+  const agentsDir = opts.agentsDir ?? resolveAgentsDir();
+  const ttlMs = opts.discoveryTtlMs ?? DISCOVERY_TTL_DEFAULT_MS;
+
+  if (ttlMs > 0) {
+    const cached = discoveryCache.get(agentsDir);
+    if (cached && Date.now() - cached.ts < ttlMs) return cached.dbs;
+  }
+
+  const dbs = scanAgentDbs(agentsDir);
+  if (ttlMs > 0) {
+    if (discoveryCache.size >= DISCOVERY_CACHE_MAX) discoveryCache.clear();
+    discoveryCache.set(agentsDir, { ts: Date.now(), dbs });
+  }
+  return dbs;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +197,20 @@ function tableExists(db: DatabaseSyncLike, name: string): boolean {
 /** LIKE 转义（\ % _），配合 ESCAPE '\' 使用 */
 export function escapeLikePattern(q: string): string {
   return q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+/**
+ * 官方 embedding 为模型相关 TEXT 编码、query 侧无同模型编码器，无法直接做向量余弦。
+ * 务实替代：把 query 拆成多命中词（整句 + 拉丁/数字词 + 连续 CJK 相邻 bigram），
+ * OR 召回后合并排序——中文"进度"命中"项目进度"、缩写/大小写变体等场景召回率更高。
+ */
+export function tokenizeMemoryQuery(q: string): string[] {
+  const out = new Set<string>();
+  for (const m of q.match(/[a-z0-9][a-z0-9._:/+#-]{1,}/gi) ?? []) out.add(m.toLowerCase());
+  for (const run of q.match(/[\u4e00-\u9fff\u3400-\u4dbf]+/g) ?? []) {
+    for (let i = 0; i < run.length - 1; i++) out.add(run.slice(i, i + 2));
+  }
+  return [...out];
 }
 
 /** chunk 基础列（memory_index_chunks）；列缺失时降级 [] */
@@ -256,18 +312,21 @@ function sortChunks(a: AgentMemoryChunk, b: AgentMemoryChunk): number {
 
 function searchAgentDb(
   agent: AgentDbPath,
-  pattern: string,
+  patterns: string[],
   limit: number,
   maxTextLen: number,
 ): AgentMemoryChunk[] {
   const db = openReadOnly(agent.dbPath);
   if (!db) return [];
   try {
-    // 1) 基础检索：按正文 LIKE（官方 memory_index_chunks.text）
+    // 1) 基础检索：多词 OR 命中官方 memory_index_chunks.text（提升中文/同义召回率）
     if (!tableExists(db, 'memory_index_chunks')) return [];
+    if (patterns.length === 0) return [];
+    const orSql = patterns.map(() => "text LIKE ? ESCAPE '\\'").join(' OR ');
+    // LIMIT 放大 2 倍再内存排序，避免"最新优先截断"丢 importance 高但较旧的行
     const baseRows = db
-      .prepare(`SELECT ${CHUNK_BASE_COLS} FROM memory_index_chunks WHERE text LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?`)
-      .all(pattern, limit) as BaseChunkRow[];
+      .prepare(`SELECT ${CHUNK_BASE_COLS} FROM memory_index_chunks WHERE ${orSql} ORDER BY updated_at DESC LIMIT ?`)
+      .all(...patterns, limit * 2) as BaseChunkRow[];
 
     const chunkIds = baseRows.map((r) => String(r.id ?? '')).filter(Boolean);
     const metaMap = loadRecallMeta(db, chunkIds);
@@ -280,7 +339,7 @@ function searchAgentDb(
       return c;
     });
     chunks.sort(sortChunks);
-    return chunks;
+    return chunks.slice(0, limit);
   } catch {
     return [];
   } finally {
@@ -294,19 +353,27 @@ function searchAgentDb(
 
 /**
  * 跨 agent 库关键词检索官方记忆。
- * 命中优先级：importance → 更新时间；每 agent 截断 maxChunksPerAgent。
+ * 命中策略：整句 LIKE + 拉丁词 + CJK bigram OR 召回（详见 tokenizeMemoryQuery），
+ * 排序优先级：importance → 更新时间；每 agent 截断 maxChunksPerAgent。
  */
 export function searchAgentMemory(q: string, options: OpenClawAgentDbOptions = {}): AgentMemoryChunk[] {
   const query = String(q ?? '').trim();
   if (!query) return [];
-  const agents = discoverAgentDbs(options.agentsDir);
+  const agents = discoverAgentDbs(options.agentsDir ? { agentsDir: options.agentsDir, discoveryTtlMs: options.discoveryTtlMs } : { discoveryTtlMs: options.discoveryTtlMs });
   // 空目录（未安装 openclaw 2.0 布局）→ 空结果
   if (agents.length === 0) return [];
   const perAgent = Math.max(1, options.maxChunksPerAgent ?? 10);
-  const pattern = `%${escapeLikePattern(query)}%`;
+  // 用户显式使用 %/_（通配符意图）时仅整句字面 LIKE，保持原语义；
+  // 否则做多词 OR 召回（整句优先 + 拉丁词 + CJK bigram 兜底）
+  const hasExplicitWildcard = query.includes('%') || query.includes('_');
+  const patterns = hasExplicitWildcard
+    ? [`%${escapeLikePattern(query)}%`]
+    : [query, ...tokenizeMemoryQuery(query)]
+        .filter((t, i, arr) => arr.indexOf(t) === i)
+        .map((t) => `%${escapeLikePattern(t)}%`);
   const out: AgentMemoryChunk[] = [];
   for (const agent of agents) {
-    out.push(...searchAgentDb(agent, pattern, perAgent, 4000));
+    out.push(...searchAgentDb(agent, patterns, perAgent, 4000));
   }
   out.sort(sortChunks);
   return out;

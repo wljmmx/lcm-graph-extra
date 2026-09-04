@@ -157,6 +157,7 @@ export async function performRetrieval(
   let qmdResults: any[] = [];
   let graphResults: any[] = [];
   let expResults: any[] = [];
+  let openclawResults: any[] = [];
   let l2_ms = 0, l3_ms = 0, l4_ms = 0;
 
   // R-5': 动态混合简化 —— 按 scenario 调整 retrievalLimits 比例
@@ -200,6 +201,7 @@ export async function performRetrieval(
     rawQmd = cached.qmdResults || [];
     rawGraph = cached.graphResults || [];
     expResults = cached.expResults || [];
+    openclawResults = cached.openclawResults || [];
     ctx.prefetchCache?.delete(sessionKey); // 消费后清除，避免重复使用
 
     ctx.logger?.info?.('[assemble] O7: using prefetch cache', {
@@ -207,6 +209,7 @@ export async function performRetrieval(
       qmdCount: rawQmd.length,
       graphCount: rawGraph.length,
       expCount: expResults.length,
+      openclawCount: openclawResults.length,
       cacheAgeMs: Date.now() - cached.ts,
       cachedQuery: cached.query?.slice(0, 60),
     });
@@ -242,6 +245,15 @@ export async function performRetrieval(
         ]);
         l4_ms = Date.now() - expStart;
         if (Array.isArray(expRes) && expRes.length > 0) expResults = expRes;
+      } catch { /* non-fatal */ }
+    }
+
+    // OpenClaw 官方记忆：本地 per-agent SQLite 同步快查（几 ms 级），cache miss 时兜底
+    if (openclawResults.length === 0 && qmdQuery.trim().length > 0) {
+      try {
+        const { searchAgentMemory } = await import('../adapters/openclaw-agent-db.js');
+        const memRes = searchAgentMemory(qmdQuery.slice(0, 300), { maxChunksPerAgent: 3 });
+        if (Array.isArray(memRes) && memRes.length > 0) openclawResults = memRes;
       } catch { /* non-fatal */ }
     }
   }
@@ -414,6 +426,10 @@ export async function performRetrieval(
   expResults = expResults.map((e: any) =>
     attachEntityScore(e, () => e.experience?.summary ?? e.experience?.content ?? e.summary ?? ''),
   );
+  // OpenClaw 官方记忆：同样以 Phase 1 实体做主题一致性软打分（不做硬删）
+  openclawResults = openclawResults.map((r: any) =>
+    attachEntityScore(r, () => r.text ?? r.path ?? '', () => r.path ?? undefined),
+  );
 
   // 观测（S3）：统计低实体命中数，用于评估"信任 graph 语义分"的效果，不做过滤
   if (extractedEntities.tokens.length > 0) {
@@ -421,11 +437,13 @@ export async function performRetrieval(
     const lowQmd = lowEntity(qmdResults);
     const lowGraph = lowEntity(graphResults);
     const lowExp = lowEntity(expResults);
-    if (lowQmd > 0 || lowGraph > 0 || lowExp > 0) {
+    const lowMem = lowEntity(openclawResults);
+    if (lowQmd > 0 || lowGraph > 0 || lowExp > 0 || lowMem > 0) {
       ctx.logger?.debug?.('[assemble] Phase 1: low-entity results kept (soft scoring, trust semantic source)', {
         qmd: { total: qmdResults.length, lowEntity: lowQmd },
         graph: { total: graphResults.length, lowEntity: lowGraph },
         exp: { total: expResults.length, lowEntity: lowExp },
+        openclaw: { total: openclawResults.length, lowEntity: lowMem },
       });
     }
   } else {
@@ -618,6 +636,7 @@ export async function performRetrieval(
     qmdResults,
     graphResults,
     expResults,
+    openclawResults,
     fullDocs,
     l2_ms,
     l3_ms,

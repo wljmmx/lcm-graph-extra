@@ -15,6 +15,8 @@ import {
   recentAgentMemory,
   agentMemoryHealth,
   escapeLikePattern,
+  tokenizeMemoryQuery,
+  clearAgentDbDiscoveryCache,
 } from './openclaw-agent-db';
 
 const req = createRequire(import.meta.url);
@@ -73,6 +75,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearAgentDbDiscoveryCache();
   if (tmpRoot) {
     try {
       rmSync(tmpRoot, { recursive: true, force: true });
@@ -137,6 +140,63 @@ describe('searchAgentMemory', () => {
     // 用 % 查询不应命中（转义后字面匹配）
     expect(searchAgentMemory('%完成')).toEqual([]);
     expect(searchAgentMemory('100%')).toHaveLength(1);
+  });
+
+  it('多词 OR 召回：子词命中（无同模型 embedding 时的语义近似）', () => {
+    seedAgentDb('agent-a', [
+      { id: 'c1', path: 'a.md', text: '用户偏好使用中文记录项目进度', importance: 8 },
+      { id: 'c2', path: 'b.md', text: '本周跑输了基准收益', importance: 3 },
+      { id: 'c3', path: 'c.md', text: '完成量统计表', importance: 2 },
+    ]);
+    // 整句未含"进度"二字，但 bigram 子词"进度"命中 c1 → 宽召回
+    const hits = searchAgentMemory('进度');
+    expect(hits.map((h) => h.chunkId)).toContain('c1');
+    // 完全无关的记忆不会被召回
+    expect(hits.map((h) => h.chunkId)).not.toContain('c2');
+  });
+
+  it('多词 OR 召回：拉丁词子串命中（大小写不敏感）', () => {
+    seedAgentDb('agent-a', [
+      { id: 'c1', path: 'a.ts', text: 'Refactor the QMDClient retry loop' },
+      { id: 'c2', path: 'b.ts', text: '实现状态机转换' },
+    ]);
+    const hits = searchAgentMemory('qmdclient');
+    expect(hits.map((h) => h.chunkId)).toContain('c1');
+    expect(hits.map((h) => h.chunkId)).not.toContain('c2');
+  });
+});
+
+describe('tokenizeMemoryQuery', () => {
+  it('拆出拉丁词（小写）与 CJK bigram', () => {
+    const tokens = tokenizeMemoryQuery('QMDClient 项目进度');
+    expect(tokens).toContain('qmdclient');
+    expect(tokens).toContain('项目');
+    expect(tokens).toContain('目进');
+    expect(tokens).toContain('进度');
+  });
+
+  it('无有效词时返回空数组', () => {
+    expect(tokenizeMemoryQuery('%%--  ')).toEqual([]);
+  });
+});
+
+describe('discoverAgentDbs 缓存', () => {
+  it('TTL 内复用扫描结果，新增 agent 不立即可见（可清缓存或忽略 TTL）', () => {
+    seedAgentDb('agent-a', []);
+    expect(discoverAgentDbs()).toHaveLength(1);
+    // 缓存内新增 agent-b → 仍返回缓存（1 个）
+    seedAgentDb('agent-b', []);
+    expect(discoverAgentDbs()).toHaveLength(1);
+    // 显式清缓存后可见新增 agent
+    clearAgentDbDiscoveryCache();
+    expect(discoverAgentDbs()).toHaveLength(2);
+  });
+
+  it('discoveryTtlMs=0 时每次全盘扫描（不缓存）', () => {
+    seedAgentDb('agent-a', []);
+    expect(discoverAgentDbs({ discoveryTtlMs: 0 })).toHaveLength(1);
+    seedAgentDb('agent-b', []);
+    expect(discoverAgentDbs({ discoveryTtlMs: 0 })).toHaveLength(2);
   });
 });
 

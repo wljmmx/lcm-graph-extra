@@ -107,7 +107,7 @@ const CONFLICT_CACHE_TTL_MS = 5 * 60 * 1000; // 5min TTL
 
 // v2.8.0 O7: 异步预取缓存 — afterTurn 预取 L2/L3/L4 结果，下一轮 assemble 直接使用
 // 架构：当前轮永远只使用上一轮预取的结果，检索耗时完全从用户感知路径移除
-const prefetchCache = new Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; query: string; ts: number }>();
+const prefetchCache = new Map<string, { qmdResults: any[]; graphResults: any[]; expResults: any[]; openclawResults?: any[]; query: string; ts: number }>();
 const PREFETCH_CACHE_MAX = 200;
 const PREFETCH_CACHE_TTL_MS = 10 * 60 * 1000; // 10min TTL（允许跨长对话复用）
 

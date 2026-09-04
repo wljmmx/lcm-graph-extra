@@ -378,7 +378,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           // 异步预取 L2+L3+L4，不阻塞 afterTurn 返回
           // 不使用 backgroundTasks（避免 dispose 时被 5s 超时截断）
           (async () => {
-            const results: { qmd: any[]; graph: any[]; exp: any[] } = { qmd: [], graph: [], exp: [] };
+            const results: { qmd: any[]; graph: any[]; exp: any[]; openclaw: any[] } = { qmd: [], graph: [], exp: [], openclaw: [] };
 
             // L2: qmd lex+vec 并行检索
             try {
@@ -486,11 +486,30 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
               });
             }
 
+            // L1.5: OpenClaw 官方记忆（本地 per-agent SQLite，同步快查，几 ms 级）
+            // 复用 dashboard 同款官方记忆读取器；无 openclaw 2.0 布局 / 表缺失 → 空结果，非致命
+            try {
+              if (query.trim().length > 0) {
+                const { searchAgentMemory } = await import('../adapters/openclaw-agent-db.js');
+                const memRes = searchAgentMemory(query.slice(0, 300), { maxChunksPerAgent: 3 });
+                if (Array.isArray(memRes)) results.openclaw = memRes;
+                ctx.logger?.info?.('[afterTurn] O7: openclaw memory prefetched', {
+                  sessionKey: sessionKey.slice(0, 16),
+                  count: results.openclaw.length,
+                  agents: [...new Set(memRes.map((m: any) => m.agentId))],
+                });
+              }
+            } catch (memErr) {
+              ctx.logger?.debug?.('[afterTurn] O7: openclaw memory prefetch failed (non-fatal)', {
+                err: (memErr as Error)?.message ?? String(memErr),
+              });
+            }
+
             // 写入预取缓存（LRU 上限保护）
-            // v2.8.1 非MoA 修复: 仅当至少一层有数据才覆盖缓存; 若三层全空(检索失败),
+            // v2.8.1 非MoA 修复: 仅当至少一层有数据才覆盖缓存; 若各层全空(检索失败),
             // 保留上一份非空条目(last-known-good), 避免用空结果"毒化"缓存导致下一轮
             // 伪命中空数据 → 模型反复"我再查"。
-            const hasAnyData = results.qmd.length > 0 || results.graph.length > 0 || results.exp.length > 0;
+            const hasAnyData = results.qmd.length > 0 || results.graph.length > 0 || results.exp.length > 0 || results.openclaw.length > 0;
             if (ctx.prefetchCache) {
               if (hasAnyData) {
                 if (ctx.prefetchCache.size >= 200) {
@@ -501,6 +520,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                   qmdResults: results.qmd,
                   graphResults: results.graph,
                   expResults: results.exp,
+                  openclawResults: results.openclaw,
                   query,
                   ts: Date.now(),
                 });
@@ -509,6 +529,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                   qmdCount: results.qmd.length,
                   graphCount: results.graph.length,
                   expCount: results.exp.length,
+                  openclawCount: results.openclaw.length,
                 });
               } else {
                 const existing = ctx.prefetchCache.get(sessionKey);
@@ -518,6 +539,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                     qmdCount: existing.qmdResults?.length,
                     graphCount: existing.graphResults?.length,
                     expCount: existing.expResults?.length,
+                    openclawCount: existing.openclawResults?.length ?? 0,
                   });
                 } else {
                   ctx.logger?.warn?.('[afterTurn] O7: prefetch empty (all layers failed), no cache written', {
