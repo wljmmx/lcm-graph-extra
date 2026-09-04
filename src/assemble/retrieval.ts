@@ -14,6 +14,7 @@ import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { CascadeManager } from '../cascade-manager.js';
 import { backgroundTasks } from '../async/task-registry.js';
+import { resolveSessionCacheKey } from '../utils/session-key.js';
 import { serializeError } from '../utils/logger.js';
 // P0-6: 热路径 healthMetrics 静态导入
 import { healthMetrics } from '../health-metrics.js';
@@ -170,11 +171,11 @@ export async function performRetrieval(
   }
 
   // Session key for prefetch cache lookup
-  const sessionKey = typeof params.sessionKey === 'string'
-    ? params.sessionKey
-    : typeof params.session_id === 'string'
-      ? params.session_id
-      : '';
+  // FIX-SK1: 与写入侧（after-turn O7 用 resolveSessionCacheKey，sessionId 优先）统一。
+  // 修复前：此处取 raw sessionKey（稳定路由桶），写入侧取 sessionId → /new 后
+  // 两个 key 永不相等 → O7 预取缓存永远 miss，每轮 assemble 都走全量检索
+  // （含 embedding Ollama 调用），加剧主生成与检索的本地 LLM 串行排队。
+  const sessionKey = resolveSessionCacheKey(params);
 
   const PREFETCH_CACHE_TTL = 10 * 60 * 1000; // 10min
   const cached = sessionKey ? ctx.prefetchCache?.get(sessionKey) : undefined;

@@ -2952,7 +2952,7 @@ const pluginEntry: any = definePluginEntry({
             } else {
               lastDistillationRun = Date.now();
               // 注册到 backgroundTasks 以便 dispose 时等待
-              backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger).then(() => {
+              backgroundTasks.register('hb:distillation', runDistillation(expStore, api, logger, undefined, { deferToMainTurn: true }).then(() => {
                 // P2-1: 蒸馏后新经验变为 DISTILLED 可被检索，失效 L4 缓存
                 l4QueryCache.clear();
               }).catch((e: any) => {

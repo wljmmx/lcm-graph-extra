@@ -205,11 +205,10 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
 
     // G-8: LLM 异步验证回路
     {
-      const g8SessionKey = typeof params.sessionKey === 'string'
-        ? params.sessionKey
-        : typeof params.session_id === 'string'
-          ? params.session_id
-          : 'default';
+      // FIX-SK2: 与写入侧（assemble/injection.ts 用 resolveSessionCacheKey，sessionId 优先）统一。
+      // 修复前：此处取 raw sessionKey，写入侧取 sessionId → G-8 验证回路永远读不到
+      // 本轮 assemble 写入的经验 ID 列表，异步质量验证形同虚设。
+      const g8SessionKey = resolveSessionCacheKey(params) || 'default';
       const LAST_EXP_MAP_TTL_MS = 30 * 60 * 1000;
       const cached = ctx.lastAssembleExpIdsBySession.get(g8SessionKey);
       const lastAssembleExpIds = (cached && (Date.now() - cached.ts < LAST_EXP_MAP_TTL_MS)) ? cached.ids : [];
@@ -556,7 +555,17 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           // 写入高优先级债务，触发 debt-manager 对旧目标内容进行异步压缩
           try {
             const { getConversationId, writeCompactionDebt } = await import('../lcm-bridge.js');
-            const convId = getConversationId(sessionKey);
+            // FIX-SK3: getConversationId(sessionKey, sessionId) 双参正确传递。
+            // 修复前：把 resolveSessionCacheKey 的结果（sessionId 优先，通常是 sessionId 值）
+            // 当 sessionKey 实参传入 → 缓存 key 变成 `sk:<sessionId值>`、DB 按
+            // session_key 列查不到 → convId 恒为 null → goal_switch 债务永远写不进去，
+            // 旧目标内容得不到压缩，上下文持续膨胀。
+            // 修复后：raw sessionKey 与 sessionId 各自按语义传入（缓存 key sessionKey 优先，
+            // DB 查询先 session_key 后 session_id），与 assemble 侧调用（raw sessionKey）一致。
+            const rawSk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
+            const rawSid = typeof params.sessionId === 'string' ? params.sessionId
+              : typeof params.session_id === 'string' ? params.session_id : '';
+            const convId = getConversationId(rawSk || undefined, rawSid || undefined);
             if (convId != null) {
               writeCompactionDebt(
                 convId,

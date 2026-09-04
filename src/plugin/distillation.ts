@@ -686,7 +686,21 @@ export interface DistillationResult {
   maxRetries?: number;
 }
 
-export async function runDistillation(expStoreRef: any, apiRef: any, log: any, limit?: number): Promise<DistillationResult> {
+export async function runDistillation(
+  expStoreRef: any,
+  apiRef: any,
+  log: any,
+  limit?: number,
+  /**
+   * FIX-CR11 回归修正：是否在批次间让路主对话轮。
+   * - true（heartbeat 后台触发）：主轮变活跃时停止发起新批次，剩余下轮重试，
+   *   避免后台蒸馏与主生成在本地 Ollama 串行排队导致 "stopped making progress"。
+   * - false/缺省（lcmg_distill 工具 / dashboard 前台触发）：不让路 —— 前台调用
+   *   本身发生在主轮内（LLM 正在等工具结果），门控必然持住，让路会让手动蒸馏
+   *   立即中断且永远无法执行。
+   */
+  opts?: { deferToMainTurn?: boolean },
+): Promise<DistillationResult> {
   const result: DistillationResult = {
     pending: 0,
     succeeded: 0,
@@ -825,14 +839,16 @@ export async function runDistillation(expStoreRef: any, apiRef: any, log: any, l
     // 收集 distillOne 的错误详情，取第一条供结果展示（避免用户只看到 "see logs"）
     const distillErrors: string[] = [];
     for (let i = 0; i < pending.length; i += concurrency) {
-      // FIX-CR11: 批次间复查主轮门控。
+      // FIX-CR11: 批次间复查主轮门控（仅后台触发 deferToMainTurn=true 时）。
       // 蒸馏在 dispatch 时（heartbeat）已检查门控，但批次循环可能持续数分钟，
       // 期间用户可能发新消息触发主轮生成。若不复查，蒸馏的 Ollama 调用会与
       // 主生成在本地 Ollama 串行排队 → 主生成无 token 流 → host 判定
       // "stopped making progress" 中断。复查到主轮活跃时停止发起新批次
       //（在途批次自然完成，无法取消已发出的 Ollama 请求），剩余经验下轮 heartbeat 重试。
+      // 前台调用（lcmg_distill 工具 / dashboard）不检查：其本身在主轮内执行，
+      // 门控必然持住，检查会让手动蒸馏立即中断（FIX-CR11 回归修正）。
       try {
-        if (isMainTurnActive()) {
+        if (opts?.deferToMainTurn && isMainTurnActive()) {
           log?.info?.('distillation: main turn became active mid-batch, deferring remaining', {
             processed: i,
             remaining: pending.length - i,
