@@ -485,6 +485,8 @@ export function extractUsedTools(messages: any[]): string[] {
 export function beginToolGuidanceRound(
   sessionKey: string,
   messages: any[],
+  /** FIX-CR06: 传入完整可用工具列表，供 SAD 同类扩散使用（旧版仅从历史消息 tool_use 抽取，不完整） */
+  availableToolsParam?: string[],
 ): void {
   const state = getTracker(sessionKey);
   state.round++;
@@ -503,7 +505,9 @@ export function beginToolGuidanceRound(
   // SAD：基于上一轮使用情况更新权重（用了增强同类，未用降权）
   if (prevRoundInjections.length > 0) {
     try {
-      const availableTools = messages.flatMap((m: any) =>
+      // FIX-CR06: 优先用调用方传入的完整工具列表（含未被调用的工具），
+      // 否则回退到从历史消息 tool_use 块抽取（仅含被调用过的工具，同类扩散范围偏小）
+      const availableTools = availableToolsParam ?? messages.flatMap((m: any) =>
         Array.isArray(m?.content) ? m.content.filter((b: any) => b?.type === 'tool_use' && typeof b?.name === 'string').map((b: any) => b.name.toLowerCase()) : [],
       );
       recordSadFeedback(sessionKey, prevRoundInjections, availableTools);

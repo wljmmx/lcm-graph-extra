@@ -156,6 +156,12 @@ import { setMaxDedupRounds, evictStaleDedupPublic } from "./plugin/dedup-cache.j
 import { evictStaleToolTrackers } from "./plugin/tool-guidance.js";
 // Goal Anchoring — 会话级目标缓存清理
 import { evictStaleGoalCache } from "./plugin/goal-cache.js";
+// SAD 反馈循环 — 会话级权重缓存清理
+import { evictStaleSadWeights } from "./plugin/sad-feedback.js";
+// Overhead 缓存 — 异步淘汰（原仅 lazy evict）
+import { evictStaleOverheadPublic } from "./plugin/overhead-cache.js";
+// 工具结果异步压缩缓存 — 异步淘汰（原仅 lazy evict）
+import { evictStaleCompressedResults } from "./after-turn/tool-result-compressor.js";
 
 // Distillation helpers
 import * as distillationModule from "./plugin/distillation.js";
@@ -181,7 +187,7 @@ const pluginEntry: any = definePluginEntry({
     // 解析 distillationLlm 插件配置（远程主模型会话 → 配置模型与地址）。
     try {
       distillationModule.setDistillationApiRef?.(api);
-    } catch { /* non-fatal */ }
+    } catch (e) { logger?.debug?.("register: setDistillationApiRef failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
 
     // -----------------------------------------------------------------------
     // Lazy singleton instances — created once, reused across all assemble calls
@@ -711,7 +717,7 @@ const pluginEntry: any = definePluginEntry({
             const sid = params.sessionId != null ? String(params.sessionId) : '';
             const sk = typeof params.sessionKey === 'string' ? params.sessionKey : '';
             await invalidateSessionStateForReset(sk, sid, logger, committedTurnKeys);
-          } catch { /* non-fatal */ }
+          } catch (e) { logger?.warn?.("bootstrap: invalidateSessionStateForReset failed (non-fatal)", { sessionId: String(params.sessionId ?? ''), err: e instanceof Error ? e.message : String(e) }); }
 
           // H-6: 会话启动时预加载高频经验（非阻塞，失败静默）
           try {
@@ -728,7 +734,7 @@ const pluginEntry: any = definePluginEntry({
                 logger?.debug?.("[bootstrap] H-6 warmup: preloaded top experiences", { count: topExp.length, sessionKey: sk });
               }
             }
-          } catch { /* non-fatal */ }
+          } catch (e) { logger?.debug?.("bootstrap: H-6 warmup preload failed (non-fatal)", { sessionId: String(params.sessionId ?? ''), err: e instanceof Error ? e.message : String(e) }); }
         }
       },
 
@@ -2439,7 +2445,7 @@ const pluginEntry: any = definePluginEntry({
             names: backgroundTasks.pendingNames.slice(0, 10),
           });
         }
-      } catch { /* non-fatal */ }
+      } catch (e) { logger?.debug?.("heartbeat: background tasks in-flight check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
       try {
         // --- 1. Compaction pressure check (scan .lossless/ directories) ---
         // P2-4 M-8: 原 readdirSync/readFileSync/existsSync 同步阻塞事件循环；
@@ -2940,7 +2946,7 @@ const pluginEntry: any = definePluginEntry({
             // 蒸馏是批量 LLM 调用，会让路主模型。不更新 lastDistillationRun，
             // 下一轮心跳（5min 后）自然重试，不丢失。
             let _mainTurnBusy = false;
-            try { _mainTurnBusy = isMainTurnActive(); } catch { /* non-fatal */ }
+            try { _mainTurnBusy = isMainTurnActive(); } catch (e) { logger?.debug?.("heartbeat: isMainTurnActive check failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
             if (_mainTurnBusy) {
               logger?.debug?.("heartbeat: distillation deferred (main turn active)");
             } else {
@@ -3155,6 +3161,11 @@ const pluginEntry: any = definePluginEntry({
           evictStaleDedupPublic();
           evictStaleToolTrackers();
           evictStaleGoalCache();
+          // FIX-CR01-b / FIX-CR03: 补齐 SAD / overhead / tool-result-compressor 异步淘汰
+          // FIX-CR10: 关键 catch 补日志，便于内存泄漏/淘汰失效定位
+          try { evictStaleSadWeights(); } catch (e) { logger?.debug?.("heartbeat: evictStaleSadWeights failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
+          try { evictStaleOverheadPublic(); } catch (e) { logger?.debug?.("heartbeat: evictStaleOverheadPublic failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
+          try { evictStaleCompressedResults(); } catch (e) { logger?.debug?.("heartbeat: evictStaleCompressedResults failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
           hbDedupCleanupCounter = 0;
         }
 
@@ -3481,6 +3492,20 @@ Return the summary as plain text. Preserve the original language of the conversa
 });
 
 export default pluginEntry;
+
+// -----------------------------------------------------------------------
+// Session-level cache cleanup exports（供 session-reset.ts 动态 import 调用）
+// -----------------------------------------------------------------------
+
+/** 清除指定会话的 assemble 经验 ID 追踪缓存（/new 等会话重置场景） */
+export function clearLastAssembleExpIdsBySession(sessionKey: string): void {
+  if (sessionKey) lastAssembleExpIdsBySession.delete(sessionKey);
+}
+
+/** 清除指定会话的预热缓存（/new 等会话重置场景） */
+export function clearSessionWarmupCache(sessionKey: string): void {
+  if (sessionKey) sessionWarmupCache.delete(sessionKey);
+}
 
 // -----------------------------------------------------------------------
 // Backward-compatible named exports

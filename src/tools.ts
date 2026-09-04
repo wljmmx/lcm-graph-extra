@@ -574,7 +574,13 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       if (!existsSync(safeBackupPath)) {
         return { content: [{ type: "text" as const, text: `Backup not found: ${safeBackupPath}` }], details: { ok: false, error: `Backup not found: ${safeBackupPath}` }, isError: true };
       }
-      const data = JSON.parse(readFileSync(safeBackupPath, "utf-8"));
+      // FIX-CR02: 备份文件可能被手工编辑为非合法 JSON，解析失败时返回明确错误而非抛出未捕获异常
+      let data: any;
+      try {
+        data = JSON.parse(readFileSync(safeBackupPath, "utf-8"));
+      } catch (e: any) {
+        return { content: [{ type: "text" as const, text: `Error: Backup file is not valid JSON: ${e?.message ?? String(e)}` }], details: { ok: false, error: `Invalid JSON: ${e?.message ?? String(e)}` }, isError: true };
+      }
       const targets = params.targets ?? "all";
       const dryRun = params.dryRun ?? false;
       const report: string[] = [];
@@ -2152,7 +2158,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           };
         }
         const raw = readFileSync(configPath, 'utf-8');
-        const parsed = JSON.parse(raw);
+        // FIX-CR02: 配置文件可能被手工编辑为非合法 JSON，解析失败时返回明确错误
+        let parsed: any;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (e: any) {
+          return {
+            content: [{ type: "text" as const, text: `⚠️ 配置文件解析失败（非合法 JSON）: ${e?.message ?? String(e)}` }],
+            details: { ok: false, error: `JSON parse error: ${e?.message ?? String(e)}` },
+            isError: true,
+          };
+        }
         // 提取 lcm-graph-extra 配置段
         let config: Record<string, unknown>;
         const entriesConfig = parsed?.plugins?.entries?.['lcm-graph-extra']?.config;

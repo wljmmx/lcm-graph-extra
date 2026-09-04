@@ -39,35 +39,35 @@ export async function invalidateSessionStateForReset(
     try {
       const { clearOverheadCache } = await import('./plugin/overhead-cache.js');
       clearOverheadCache(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearOverheadCache failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     try {
       const { clearSessionDedup } = await import('./plugin/dedup-cache.js');
       clearSessionDedup(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearSessionDedup failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     try {
       const { clearGoalCache } = await import('./plugin/goal-cache.js');
       clearGoalCache(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearGoalCache failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     try {
       const { clearSessionToolTracker } = await import('./plugin/tool-guidance.js');
       clearSessionToolTracker(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearSessionToolTracker failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     try {
       // 工具结果异步压缩缓存清理（防止 /new 后旧轮工具结果被误替换）
       const { clearCompressedToolResults } = await import('./after-turn/tool-result-compressor.js');
       clearCompressedToolResults(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearCompressedToolResults failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     try {
       // SAD 反馈循环权重缓存清理（防止 /new 后旧权重污染新会话推荐）
       const { clearSadWeights } = await import('./plugin/sad-feedback.js');
       clearSadWeights(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearSadWeights failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     try {
       // G-MODEL-SYNC: 清理该会话的主模型快照与远程标记，
       // /new 后由下一轮 recordRuntimeLlm 重新记录
       const { clearSessionLlmState } = await import('./plugin/distillation.js');
       clearSessionLlmState(sk);
-    } catch { /* non-fatal */ }
+    } catch (e) { log?.debug?.('[session-reset] clearSessionLlmState failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     // durable-turn：按 sessionId 清空已提交逻辑轮幂等记录，防止 /new 后跨会话去重误判
     if (committedTurnKeys) {
       try {
@@ -75,15 +75,24 @@ export async function invalidateSessionStateForReset(
         for (const k of Array.from(committedTurnKeys)) {
           if (typeof k === 'string' && k.startsWith(_prefix)) committedTurnKeys.delete(k);
         }
-      } catch { /* non-fatal */ }
+      } catch (e) { log?.debug?.('[session-reset] committedTurnKeys cleanup failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
     }
 
     // 3. 清除 MoA 缓存（防止上一轮 MoA 结果被误用）
     try {
-      const { getMoaResultCache } = await import('./moa/orchestrator.js');
-      getMoaResultCache(); // 读取并清空
-    } catch { /* non-fatal */ }
+      const { getMoaResultCache, clearMoaRefCacheBySession } = await import('./moa/orchestrator.js');
+      getMoaResultCache(); // 读取并清空一次性结果缓存
+      clearMoaRefCacheBySession(sk); // 清除该会话的参考模型输出缓存
+    } catch (e) { log?.debug?.('[session-reset] MoA cache cleanup failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
+
+    // 4. 清除 index.ts 模块级 per-session Map（lastAssembleExpIds / warmup）
+    //    防止 /new 后旧会话的经验追踪和预热数据污染新会话
+    try {
+      const mod = await import('./index.js');
+      mod.clearLastAssembleExpIdsBySession?.(sk);
+      mod.clearSessionWarmupCache?.(sk);
+    } catch (e) { log?.debug?.('[session-reset] index.ts per-session cache cleanup failed (non-fatal)', { err: e instanceof Error ? e.message : String(e) }); }
 
     log?.info?.('[lcm-graph-extra] session state invalidated for reset', { sessionKey: sk, prevSessionId });
-  } catch { /* non-fatal */ }
+  } catch (e) { log?.warn?.('[session-reset] session state invalidation failed (non-fatal)', { sessionKey: sk, prevSessionId, err: e instanceof Error ? e.message : String(e) }); }
 }

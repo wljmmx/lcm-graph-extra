@@ -302,7 +302,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // Smart Tool Guidance: 会话级工具追踪（L1-L4 策略），在每轮 assemble 开头调用
     // BUG-AUDIT: 会话级缓存 key 统一用 sessionId（/new 后换新，天然隔离），避免 sessionKey 稳定导致串会话
     const _toolSessionKey = resolveSessionCacheKey(params);
-    beginToolGuidanceRound(_toolSessionKey, params.messages ?? []);
+    beginToolGuidanceRound(_toolSessionKey, params.messages ?? [], availableTools);
 
     // Goal Anchoring: 跟踪最新用户意图，防止长对话注意力漂移
     // 评分模型判定：仅明确新问题时更新缓存，续问不覆盖目标

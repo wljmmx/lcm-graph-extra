@@ -438,3 +438,8 @@ export function applyCompressedToolResults(
 export function clearCompressedToolResults(sessionKey: string): void {
   _sessionCompressedCache.delete(sessionKey);
 }
+
+/** 供 heartbeat 定时调用的异步淘汰入口（原仅 lazy evict on get/read） */
+export function evictStaleCompressedResults(): void {
+  evictStale();
+}

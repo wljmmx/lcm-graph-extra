@@ -77,7 +77,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
         logger: ctx.logger,
       });
     }
-  } catch { /* non-fatal */ }
+  } catch (e) { ctx.logger?.debug?.("[afterTurn] compressToolResultsAsync failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
 
   try {
     // Split messages into prior (history) and recent (this turn)
@@ -146,7 +146,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
             : '';
         if (sk) ctx.sessionQualityScores.set(sk, qualityMetrics.overallScore);
       }
-    } catch { /* non-fatal */ }
+    } catch (e) { ctx.logger?.debug?.("[afterTurn] quality metrics computation failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) }); }
 
     // ==================================================================
     // v2.3.6 链路 2（agent_end 自动反馈采集 → 反馈闭环）

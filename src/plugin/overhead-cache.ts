@@ -126,3 +126,8 @@ export function updateSdkOverhead(
 export function clearOverheadCache(sessionKey: string): void {
   _sessionOverheadCache.delete(sessionKey);
 }
+
+/** 供 heartbeat 定时调用的异步淘汰入口（原仅 lazy evict on get/read） */
+export function evictStaleOverheadPublic(): void {
+  evictStaleOverhead();
+}

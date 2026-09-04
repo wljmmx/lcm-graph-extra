@@ -102,33 +102,51 @@ export async function acquireDriver(config: Neo4jConfig, _depth = 0): Promise<an
 
   // 新建连接
   const neo4j = await import('neo4j-driver');
-  const driver = neo4j.default.driver(
-    config.uri,
-    neo4j.default.auth.basic(config.user || 'neo4j', config.password || ''),
-    {
-      maxConnectionLifetime: DRIVER_MAX_CONNECTION_LIFETIME_MS,
-      connectionLivenessCheckTimeout: 30 * 1000,
-      connectionAcquisitionTimeout: DEFAULTS.connectionPool.acquireTimeoutMs,
-    },
-  );
 
-  // 验证连接
-  try {
-    await driver.verifyConnectivity();
-  } catch (err) {
-    await driver.close().catch(() => {});
-    throw err;
+  // FIX-CR05: 首次新建连接（_depth=0）加指数退避重试（0s → 5s → 10s），
+  // 防止 Neo4j 临时不可用（重启/网络抖动）时立即报错。
+  // 递归调用（_depth>0）不重试，避免重试 × 递归的乘法效应。
+  const shouldRetry = _depth === 0;
+  const RETRY_DELAYS_MS = shouldRetry ? [0, 5_000, 10_000] : [0];
+  let lastErr: any;
+
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
+    if (RETRY_DELAYS_MS[attempt] > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+    }
+
+    const driver = neo4j.default.driver(
+      config.uri,
+      neo4j.default.auth.basic(config.user || 'neo4j', config.password || ''),
+      {
+        maxConnectionLifetime: DRIVER_MAX_CONNECTION_LIFETIME_MS,
+        connectionLivenessCheckTimeout: 30 * 1000,
+        connectionAcquisitionTimeout: DEFAULTS.connectionPool.acquireTimeoutMs,
+      },
+    );
+
+    // 验证连接
+    try {
+      await driver.verifyConnectivity();
+    } catch (err) {
+      lastErr = err;
+      await driver.close().catch(() => {});
+      continue; // 重试下一次
+    }
+
+    // 验证通过 → 入池返回
+    const entry: PoolEntry = {
+      driver,
+      refCount: 1,
+      lastUsed: Date.now(),
+      createdAt: Date.now(),
+    };
+    pool.set(key, entry);
+    return driver;
   }
 
-  const entry: PoolEntry = {
-    driver,
-    refCount: 1,
-    lastUsed: Date.now(),
-    createdAt: Date.now(),
-  };
-  pool.set(key, entry);
-
-  return driver;
+  // 所有重试均失败
+  throw lastErr ?? new Error('Neo4j connection failed after retries');
 }
 
 /**

@@ -201,6 +201,11 @@ export function peekMoaResultCache(): string | null {
   return moaResultCache;
 }
 
+/** 清除指定会话的 MoA 参考缓存（/new 等会话重置场景，防止旧轮参考输出被误用） */
+export function clearMoaRefCacheBySession(sessionKey: string): void {
+  if (sessionKey) moaRefCache.delete(sessionKey);
+}
+
 /** 查询聚合模型是否正在后台执行 */
 export function isMoaAggregatorPending(): boolean {
   return moaAggregatorPending;
