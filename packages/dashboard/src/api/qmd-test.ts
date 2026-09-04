@@ -5,7 +5,7 @@
  */
 import { apiGet, apiPost } from './client';
 
-/** 测试模式：'rest' 直连 POST /query（默认，稳定快速），'mcp' 完整 initialize + tools/call */
+/** 测试模式：'rest' 直连 POST /query（默认，稳定快速），'mcp' stateless 直接 tools/call "query"（无 initialize / 无会话） */
 export type TestMode = 'rest' | 'mcp';
 
 /** 单次测试结果摘要 */

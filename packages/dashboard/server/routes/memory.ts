@@ -187,49 +187,21 @@ const QMD_BASE_URL = process.env.QMD_URL ?? 'http://127.0.0.1:8081';
 // dashboard memory 搜索是用户主动查询，可稍宽松但仍需避免长时间阻塞
 const QMD_TIMEOUT_MS = 5_000;
 
-/** 缓存 MCP session id（与 qmd-client.ts 一致，避免重复 initialize） */
-let qmdSessionId: string | null = null;
-
-/** QMD MCP initialize 握手（获取 mcp-session-id） */
-async function qmdInitialize(): Promise<string> {
-  if (qmdSessionId) return qmdSessionId;
-  const resp = await fetch(`${QMD_BASE_URL}/mcp`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 'init',
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-11-25',
-        capabilities: { tools: {}, resources: {} },
-        clientInfo: { name: 'lcm-dashboard', version: '1.0' },
-      },
-    }),
-    signal: AbortSignal.timeout(QMD_TIMEOUT_MS),
-  });
-  if (!resp.ok) throw new Error(`QMD initialize HTTP ${resp.status}`);
-  const sid = resp.headers.get('mcp-session-id');
-  if (!sid) throw new Error('QMD initialize: 缺少 mcp-session-id 响应头');
-  qmdSessionId = sid;
-  return sid;
-}
-
 /** QMD 搜索：优先 MCP（完整 hybrid + SDK 自动展开），降级 REST /query（MCP embed 错误时 lex-only），最后 CLI 兜底 */
 async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]> {
   // 1. MCP tools/call "query" 优先 — 完整 hybrid 搜索（lex+vec+hyde + SDK 自动展开 + RRF + rerank）
+  //    当前 qmd MCP 为 stateless（2026-07-28）：无 initialize、无 mcp-session-id，
+  //    通过 MCP-Protocol-Version / Mcp-Method / Mcp-Name 头路由，结果在 structuredContent.results。
   let mcpEmbedError = false;
   try {
-    const sid = await qmdInitialize();
     const resp = await fetch(`${QMD_BASE_URL}/mcp`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
-        'mcp-session-id': sid,
+        'MCP-Protocol-Version': '2026-07-28',
+        'Mcp-Method': 'tools/call',
+        'Mcp-Name': 'query',
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
@@ -252,7 +224,11 @@ async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]
     });
     if (resp.ok) {
       const data = (await resp.json()) as {
-        result?: { content?: Array<{ type?: string; text?: string }>; isError?: boolean };
+        result?: {
+          content?: Array<{ type?: string; text?: string }>;
+          structuredContent?: { results?: Array<{ docid?: string; file?: string; title?: string; score?: number; snippet?: string; line?: number }> };
+          isError?: boolean;
+        };
         error?: { message?: string };
       };
       // 检测 embed 维度错误（REST 降级时需避开 vec）
@@ -260,30 +236,28 @@ async function searchQmd(q: string, limit: number): Promise<MemorySearchResult[]
       if (/dimension|embedding|mismatch/i.test(errMsg)) {
         mcpEmbedError = true;
       } else {
-        const text = data?.result?.content?.[0]?.text;
-        if (text) {
-          let parsed: Array<{
-            docid?: string; file?: string; title?: string;
-            score?: number; snippet?: string; line?: number;
-          }> = [];
-          try {
-            const v = JSON.parse(text);
-            if (Array.isArray(v)) parsed = v;
-          } catch {
-            // 非 JSON 文本（如 "No results found"），视为空
+        // 结构化结果优先（当前 qmd 权威输出），content[0].text 仅人类可读摘要
+        const structured = data?.result?.structuredContent?.results;
+        let raw: Array<{ docid?: string; file?: string; title?: string; score?: number; snippet?: string; line?: number }> = [];
+        if (Array.isArray(structured)) {
+          raw = structured;
+        } else {
+          const text = data?.result?.content?.[0]?.text;
+          if (text) {
+            try {
+              const v = JSON.parse(text);
+              if (Array.isArray(v)) raw = v;
+            } catch {
+              // 非 JSON 文本（如 "No results found"），视为空
+            }
           }
-          return parsed.map((r) => ({
-            source: 'qmd' as const,
-            content: r.title || r.snippet || r.file || r.docid || '',
-            file: r.file ?? '',
-            score: typeof r.score === 'number' ? r.score : 0,
-          }));
         }
-      }
-    } else {
-      // HTTP 错误：401/403 重置 session
-      if (resp.status === 401 || resp.status === 403) {
-        qmdSessionId = null;
+        return raw.map((r) => ({
+          source: 'qmd' as const,
+          content: r.title || r.snippet || r.file || r.docid || '',
+          file: r.file ?? '',
+          score: typeof r.score === 'number' ? r.score : 0,
+        }));
       }
     }
   } catch {

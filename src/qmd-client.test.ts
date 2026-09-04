@@ -36,64 +36,50 @@ vi.stubGlobal("fetch", mockFetch);
 // Helpers
 // ---------------------------------------------------------------------------
 
-// P1-12 FAIL-3: 修复 mock 以匹配实际 MCP 协议（initialize + tools/call 两步）。
-// 原 mockMcpOk 只 mock 一次响应且 body 是 { results: [...] }，但 QmdClient.queryViaMcp
-// 先发 initialize 请求（期望 mcp-session-id header），再发 tools/call 请求（期望
-// { result: { content: [{ text: JSON.stringify(results) }] } }）。
+// P1-12 FAIL-3: 修复 mock 以匹配实际 MCP 协议（stateless，2026-07-28）。
+// 当前 qmd MCP 为 stateless：无 initialize 握手、无 mcp-session-id。
+// 每次 tools/call 是单个独立 POST 到 /mcp，因此以下 mock 均为「1 次 fetch = 1 次 tools/call」。
+
+function mcpFetchResponse(result: unknown): Response {
+  return {
+    ok: true,
+    headers: { get: () => null },
+    json: async () => ({ jsonrpc: "2.0", id: 1, result }),
+  } as Response;
+}
+
 function mockMcpOk(body: unknown): void {
-  // 1st call: initialize response (with session id header)
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-  } as Response);
-  // 2nd call: tools/call response (body wrapped in MCP content format)
   const results = body && (body as any).results ? (body as any).results : body;
-  const text = JSON.stringify(results);
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text }] } }),
-  } as Response);
+  const arr = Array.isArray(results) ? results : [];
+  // 当前 qmd query tool：结构化结果在 structuredContent.results，
+  // content[0].text 是人类可读摘要（非 JSON）。
+  mockFetch.mockResolvedValueOnce(mcpFetchResponse({
+    content: [{ type: "text", text: `Found ${arr.length} results` }],
+    structuredContent: { results: arr },
+  }));
 }
 
 function mockMcpFail(status = 500): void {
-  // initialize succeeds, tools/call fails
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-  } as Response);
   mockFetch.mockResolvedValueOnce({
     ok: false,
     status,
+    statusText: `HTTP ${status}`,
     json: async () => ({}),
   } as Response);
 }
 
-/** MCP initialize 阶段抛错（如超时、连接失败） */
+/** MCP 调用阶段抛错（如超时、连接失败） */
 function mockMcpInitFail(): void {
   mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
 }
 
-/** MCP tools/call 阶段抛错（如超时、embed 错误）—— 通过 reject 模拟异常向上传播 */
+/** MCP tools/call 阶段抛错（如 embed 错误）—— 通过 reject 模拟异常向上传播 */
 function mockMcpCallReject(msg: string): void {
-  // initialize succeeds
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-  } as Response);
-  // tools/call 抛异常（用于模拟 embed 维度错误等）
   mockFetch.mockRejectedValueOnce(new Error(msg));
 }
 
 /** MCP tools/call 返回 JSON-RPC error（embed 错误等以 error 响应形式返回） */
 function mockMcpCallError(errorMessage: string): void {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-  } as Response);
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => ({
@@ -108,11 +94,6 @@ function mockMcpCallError(errorMessage: string): void {
  * textContent 是错误描述而非 JSON，对应 qmd-client.ts queryViaMcp 中 isError 分支。
  */
 function mockMcpIsError(errorText: string): void {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-  } as Response);
   mockFetch.mockResolvedValueOnce({
     ok: true,
     json: async () => ({
@@ -205,8 +186,8 @@ describe("QmdClient", () => {
         file: "test.md",
         score: 0.95,
       });
-      // MCP 协议需 2 次 fetch（initialize + tools/call），REST 不应被调用
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      // MCP stateless：单次 tools/call 即完成，REST 不应被调用
+      expect(mockFetch).toHaveBeenCalledTimes(1);
       // 不应调用 REST /query 端点
       expect(mockFetch).not.toHaveBeenCalledWith(
         expect.stringContaining("/query"),
@@ -228,12 +209,12 @@ describe("QmdClient", () => {
 
       expect(results).toHaveLength(1);
       expect(results[0].docid).toBe("#def");
-      // MCP initialize(1) + MCP tools/call(1) + REST(1) = 3 次 fetch
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      // MCP(1) + REST(1) = 2 次 fetch
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
     it("falls back to REST when MCP times out", async () => {
-      mockMcpInitFail(); // MCP initialize 超时
+      mockMcpInitFail(); // MCP tools/call 超时
       mockRestOk({
         results: [
           { docid: "#timeout", file: "t.md", title: "Timeout", score: 0.5, snippet: "", line: 1, context: null },
@@ -286,10 +267,10 @@ describe("QmdClient", () => {
 
       const results = await client.query({ searches: [{ type: "lex", query: "b" }] });
 
-      // 第一次: MCP init(1) + MCP call(1) + REST(1) = 3 fetch
+      // 第一次: MCP(1) + REST(1) = 2 fetch
       // 第二次: MCP=false + REST=false 都跳过，直接 CLI，0 fetch
-      // 总计 3 fetch
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      // 总计 2 fetch
+      expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(results[0].docid).toBe("#b");
     });
   });
@@ -456,8 +437,8 @@ describe("QmdClient", () => {
       // 应从 REST 拿到结果，而非返回空数组
       expect(results).toHaveLength(1);
       expect(results[0].docid).toBe("#rest");
-      // MCP init + tools/call + REST = 3 次 fetch
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      // MCP(1) + REST(1) = 2 次 fetch
+      expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
     it("falls back to CLI when MCP isError and REST both fail", async () => {
@@ -638,7 +619,7 @@ describe("QmdClient", () => {
       });
       const result = await client.get("test.md");
       expect(result).toBe("doc content");
-      expect(mockFetch).toHaveBeenCalledTimes(2); // initialize + tools/call
+      expect(mockFetch).toHaveBeenCalledTimes(1); // stateless：单次 tools/call
     });
 
     it("falls back to text field when resource.text missing", async () => {
@@ -732,7 +713,7 @@ describe("QmdClient", () => {
       });
       const result = await client.status();
       expect(result).toBe("Index: 100 docs, 5 collections");
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(1); // stateless：单次 tools/call
     });
 
     it("v1.1-10: falls back to CLI when MCP returns HTTP error", async () => {
@@ -782,25 +763,35 @@ describe("QmdClient", () => {
     });
   });
 
-  // ===================== session caching =================================
+  // ===================== stateless（无会话） ============================
 
-  describe("session caching", () => {
-    it("reuses mcp-session-id across multiple successful MCP calls", async () => {
-      // 第一次 query: MCP initialize + tools/call = 2 fetches
+  describe("stateless MCP (no mcp-session-id)", () => {
+    it("succeeds via a single tools/call without any session or initialize", async () => {
+      // 当前 qmd 无会话：每次 query 只发一次 tools/call，不需要 mcp-session-id
+      mockMcpOk({ results: [{ docid: "#1", file: "a.md", title: "A", score: 1, snippet: "", line: 0, context: null }] });
+      const results = await client.query({ searches: [{ type: "lex", query: "a" }] });
+      expect(results[0].docid).toBe("#1");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      // 验证请求头带 stateless 协议头，且不带 mcp-session-id
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(String(url)).toContain("/mcp");
+      const headers = (init as any).headers as Record<string, string>;
+      expect(headers["MCP-Protocol-Version"]).toBe("2026-07-28");
+      expect(headers["Mcp-Method"]).toBe("tools/call");
+      expect(headers["Mcp-Name"]).toBe("query");
+      expect(headers["mcp-session-id"]).toBeUndefined();
+    });
+
+    it("issues independent tools/call per query (no shared session)", async () => {
       mockMcpOk({ results: [{ docid: "#1", file: "a.md", title: "A", score: 1, snippet: "", line: 0, context: null }] });
       await client.query({ searches: [{ type: "lex", query: "a" }] });
-      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
 
-      // 第二次 query: session 已缓存，只发 tools/call = 1 fetch
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          jsonrpc: "2.0", id: 1,
-          result: { content: [{ type: "text", text: JSON.stringify([{ docid: "#2", file: "b.md", title: "B", score: 1, snippet: "", line: 0, context: null }]) }] },
-        }),
-      } as Response);
+      // 第二次 query：各自独立一次 tools/call，仍是 1 次 fetch
+      mockMcpOk({ results: [{ docid: "#2", file: "b.md", title: "B", score: 1, snippet: "", line: 0, context: null }] });
       const results = await client.query({ searches: [{ type: "lex", query: "b" }] });
-      expect(mockFetch).toHaveBeenCalledTimes(3); // 2 + 1
+      expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(results[0].docid).toBe("#2");
     });
   });
@@ -834,14 +825,8 @@ describe("QmdClient", () => {
     });
 
     it("MCP 工具调用超时后定时器被正确释放", async () => {
-      // MCP initialize 成功，但 tools/call 超时
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-        json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-      } as Response);
-      // tools/call 超时 → 抛 AbortError
-      mockFetch.mockRejectedValueOnce(new DOMException("The operation was aborted", "AbortError"));
+      // MCP 单次 tools/call 超时 → 抛 AbortError
+      mockMcpTimeout();
       // REST 降级
       mockRestOk({
         results: [{ docid: "#after-timeout", file: "t.md", title: "T", score: 0.6, snippet: "", line: 1, context: null }],
@@ -863,17 +848,12 @@ describe("QmdClient", () => {
     });
   });
 
-  // ===================== mcpInitialize failures ==========================
+  // ===================== stateless MCP 失败降级 ==========================
 
-  describe("mcpInitialize failures", () => {
-    it("throws and falls to REST when initialize returns non-200", async () => {
-      // MCP initialize 失败 → 抛错 → query() catch → mcpAvailable=false → REST
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 503,
-        headers: { get: () => null },
-        json: async () => ({}),
-      } as Response);
+  describe("stateless MCP failure fallback", () => {
+    it("throws and falls to REST when MCP returns non-200", async () => {
+      // 单次 tools/call 返回非 200 → 抛错 → query() catch → mcpAvailable=false → REST
+      mockMcpFail(503);
       mockRestOk({ results: [{ docid: "#r", file: "r.md", title: "R", score: 0.6, snippet: "", line: 1, context: null }] });
 
       const results = await client.query({ searches: [{ type: "lex", query: "test" }] });
@@ -881,17 +861,16 @@ describe("QmdClient", () => {
       expect(results[0].docid).toBe("#r");
     });
 
-    it("throws and falls to REST when initialize has no mcp-session-id header", async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        headers: { get: () => null }, // 无 mcp-session-id
-        json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-      } as Response);
-      mockRestOk({ results: [{ docid: "#r", file: "r.md", title: "R", score: 0.6, snippet: "", line: 1, context: null }] });
+    it("succeeds and reads structuredContent without any session header", async () => {
+      // 无会话服务端：无需 mcp-session-id，结果读 structuredContent.results
+      mockMcpOk({
+        results: [{ docid: "#ok", file: "ok.md", title: "OK", score: 0.9, snippet: "", line: 1, context: null }],
+      });
 
-      const results = await client.query({ searches: [{ type: "lex", query: "test" }] });
+      const results = await client.query({ searches: [{ type: "lex", query: "ok" }] });
       expect(results).toHaveLength(1);
-      expect(results[0].docid).toBe("#r");
+      expect(results[0].docid).toBe("#ok");
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 });
@@ -901,15 +880,11 @@ describe("QmdClient", () => {
 // ---------------------------------------------------------------------------
 
 function mockMcpToolsCall(resultBody: unknown): void {
-  // 1st fetch: initialize response (with session id header)
+  // stateless：单次 tools/call 即返回；get/multiGet/status 为纯 content 响应。
+  // resultBody 已是完整 JSON-RPC 响应（顶层含 result），直接作为 body 返回。
   mockFetch.mockResolvedValueOnce({
     ok: true,
-    headers: { get: (name: string) => name === "mcp-session-id" ? "test-session-1" : null },
-    json: async () => ({ jsonrpc: "2.0", id: "init", result: {} }),
-  } as Response);
-  // 2nd fetch: tools/call response
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
+    headers: { get: () => null },
     json: async () => resultBody,
   } as Response);
 }

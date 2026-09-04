@@ -79,27 +79,18 @@ const originalFetch = global.fetch;
 function mockQmdFetch(results: Array<Record<string, unknown>>) {
   const fetchMock = vi.fn().mockImplementation((url: string, opts: { body?: string } | undefined) => {
     const body = opts?.body ? JSON.parse(opts.body) : {};
-    // MCP 路径：URL 含 /mcp
+    // MCP 路径：URL 含 /mcp —— stateless（无 initialize），单个 tools/call 返回 structuredContent.results
     if (typeof url === 'string' && url.includes('/mcp')) {
-      if (body.method === 'initialize') {
-        // initialize 返回 mcp-session-id header
-        const headers = new Map<string, string>();
-        headers.set('mcp-session-id', 'test-session-id');
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          headers: { get: (k: string) => headers.get(k.toLowerCase()) },
-          json: () => Promise.resolve({ result: {} }),
-        });
-      }
-      // tools/call query 返回 text 内容（JSON 字符串）
       return Promise.resolve({
         ok: true,
         status: 200,
         headers: { get: () => null },
         json: () =>
           Promise.resolve({
-            result: { content: [{ type: 'text', text: JSON.stringify(results) }] },
+            result: {
+              content: [{ type: 'text', text: `Found ${results.length} results` }],
+              structuredContent: { results },
+            },
           }),
       });
     }
@@ -194,7 +185,7 @@ describe('GET /api/memory/search', () => {
     expect(body.results.neo4j[0].source).toBe('neo4j');
     expect(body.results.neo4j[0].type).toBe('TASK');
     expect(body.results.neo4j[0].pagerank).toBe(1.5);
-    // fetch 被调用（QMD initialize + query）
+    // fetch 被调用（QMD 单次 stateless tools/call）+ REST）
     expect(fetchMock).toHaveBeenCalled();
   });
 

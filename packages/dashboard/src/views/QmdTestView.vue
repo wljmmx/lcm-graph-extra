@@ -230,7 +230,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
                 REST 模式：直接 POST /query 调用 store.search()，无需 initialize 握手，绕过 MCP transport 层，适合排查 QMD 索引/embedding 性能
               </span>
               <span v-else class="muted">
-                MCP 模式：完整 initialize + tools/call "query" 流程，与 assemble L2_qmd 实际调用路径一致；长时间 tools/call 在 enableJsonResponse 模式下可能挂起超时
+                MCP 模式：stateless 直接 tools/call "query"（无 initialize，无会话），与 assemble L2_qmd 实际调用路径一致；长时间 tools/call 可能超时挂起
               </span>
             </div>
           </div>
@@ -555,7 +555,7 @@ const logCount = computed(() => result.value?.logs?.length ?? 0);
               REST 模式：直接 POST /query，统计查询延迟并输出交互日志与查询结果
             </template>
             <template v-else>
-              MCP 模式：完整 initialize + query 流程，统计握手/查询延迟并输出交互日志与查询结果
+              MCP 模式：stateless 直接 tools/call "query"，统计查询延迟并输出交互日志与查询结果
             </template>
           </span>
         </template>

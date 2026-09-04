@@ -7,7 +7,7 @@
  * 两种测试模式：
  * - mode='rest'（默认）：直接 POST /query，不经 MCP transport 层，更稳定快速
  *   QMD server.ts 提供 REST 端点 POST /query（或 /search），直接调用 store.search()
- * - mode='mcp'：完整 MCP initialize + tools/call "query"，用于测试 MCP 协议本身
+ * - mode='mcp'：stateless 直接 tools/call "query"（无 initialize / 无会话），用于测试 MCP 协议本身
  *   注意：MCP WebStandardStreamableHTTPServerTransport 的 enableJsonResponse 模式
  *   在长时间运行的 tools/call（含 LLM rerank）时可能挂起超时
  *
@@ -104,8 +104,8 @@ interface QmdTestQueryResult {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT_MS = 10_000;
-// QMD MCP 测试使用的 protocolVersion（与 qmd test/mcp.test.ts 一致）
-const MCP_PROTOCOL_VERSION = '2025-03-26';
+// QMD MCP 使用的协议版本（与 qmd 的 HTTP transport stateless 协议对应）
+const MCP_PROTOCOL_VERSION = '2026-07-28';
 
 // ---------------------------------------------------------------------------
 // REST 模式：直接 POST /query（不经 MCP transport 层）
@@ -162,52 +162,14 @@ async function restQuery(
 }
 
 // ---------------------------------------------------------------------------
-// MCP 模式：完整 initialize + tools/call "query"
+// MCP 模式：stateless（无会话）方式调用 tools/call "query"
 // ---------------------------------------------------------------------------
-
-/** MCP initialize 握手 —— 每次测试都新建 session（模拟冷启动） */
-async function mcpInitialize(
-  baseUrl: string,
-  timeoutMs: number,
-  log: (phase: QmdTestLogEntry['phase'], message: string, durationMs?: number) => void,
-): Promise<string> {
-  const start = Date.now();
-  const body = {
-    jsonrpc: '2.0',
-    id: 'init',
-    method: 'initialize',
-    params: {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: 'lcm-dashboard-qmd-test', version: '1.0' },
-    },
-  };
-  log('initialize', `POST ${baseUrl}/mcp (initialize)`);
-  const resp = await fetch(`${baseUrl}/mcp`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/event-stream',
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!resp.ok) {
-    throw new Error(`initialize HTTP ${resp.status} ${resp.statusText}`);
-  }
-  const sid = resp.headers.get('mcp-session-id');
-  if (!sid) {
-    throw new Error('initialize: 缺少 mcp-session-id 响应头');
-  }
-  const elapsed = Date.now() - start;
-  log('initialize', `initialize 成功，sessionId=${sid.slice(0, 12)}...`, elapsed);
-  return sid;
-}
+// 当前 qmd 的 HTTP transport 是无会话的：无 initialize 握手、无 mcp-session-id，
+// 每次请求通过 MCP-Protocol-Version / Mcp-Method / Mcp-Name 头独立路由。
 
 /** MCP tools/call "query" —— 模拟 assemble L2_qmd 调用，返回结果数 + 原始结果 */
 async function mcpQuery(
   baseUrl: string,
-  sid: string,
   query: string,
   limit: number,
   timeoutMs: number,
@@ -229,6 +191,11 @@ async function mcpQuery(
         minScore: 0,
         rerank: true,
       },
+      _meta: {
+        'io.modelcontextprotocol/protocolVersion': MCP_PROTOCOL_VERSION,
+        'io.modelcontextprotocol/clientInfo': { name: 'lcm-dashboard-qmd-test', version: '1.0' },
+        'io.modelcontextprotocol/clientCapabilities': {},
+      },
     },
   };
   log('query', `POST ${baseUrl}/mcp (tools/call: query, q="${query.slice(0, 60)}")`);
@@ -237,7 +204,9 @@ async function mcpQuery(
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
-      'mcp-session-id': sid,
+      'MCP-Protocol-Version': MCP_PROTOCOL_VERSION,
+      'Mcp-Method': 'tools/call',
+      'Mcp-Name': 'query',
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
@@ -369,32 +338,12 @@ async function runSingleTest(
     };
   }
 
-  // MCP 模式：initialize + tools/call
-  let sid: string;
-  let initMs: number;
-  try {
-    const initStart = Date.now();
-    sid = await mcpInitialize(baseUrl, timeoutMs, logFn);
-    initMs = Date.now() - initStart;
-  } catch (e) {
-    const errMsg = e instanceof Error ? e.message : String(e);
-    logFn('error', `initialize 失败: ${errMsg}`);
-    return {
-      result: {
-        success: false,
-        latencyMs: Date.now() - totalStart,
-        resultCount: 0,
-        error: `initialize 失败: ${errMsg}`,
-      },
-      queryResult: { iteration, success: false, count: 0, items: [] },
-    };
-  }
-
+  // MCP 模式：stateless，直接 tools/call（无 initialize / 无 session）
   let queryMs: number;
   let queryData: { count: number; items: QmdTestQueryItem[] };
   try {
     const queryStart = Date.now();
-    queryData = await mcpQuery(baseUrl, sid, query, limit, timeoutMs, logFn);
+    queryData = await mcpQuery(baseUrl, query, limit, timeoutMs, logFn);
     queryMs = Date.now() - queryStart;
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
@@ -404,7 +353,6 @@ async function runSingleTest(
         success: false,
         latencyMs: Date.now() - totalStart,
         resultCount: 0,
-        initMs,
         error: `query 失败: ${errMsg}`,
       },
       queryResult: { iteration, success: false, count: 0, items: [] },
@@ -412,14 +360,13 @@ async function runSingleTest(
   }
 
   const totalMs = Date.now() - totalStart;
-  logFn('info', `迭代 #${iteration} 完成，总耗时 ${totalMs}ms (init=${initMs}ms, query=${queryMs}ms)`);
+  logFn('info', `迭代 #${iteration} 完成，总耗时 ${totalMs}ms (query=${queryMs}ms)`);
 
   return {
     result: {
       success: true,
       latencyMs: totalMs,
       resultCount: queryData.count,
-      initMs,
       queryMs,
     },
     queryResult: {
