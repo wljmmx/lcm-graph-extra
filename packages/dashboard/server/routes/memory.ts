@@ -12,13 +12,14 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb } from '../lib/db';
 import { runReadQuery, toNumber } from '../lib/neo4j';
+import { searchOpenClawMemory } from '../lib/openclaw-agent-db';
 
 // ---------------------------------------------------------------------------
 // 类型定义（与 src/api/memory.ts 对齐）
 // ---------------------------------------------------------------------------
 
 export interface MemorySearchResult {
-  source: 'lcm' | 'qmd' | 'neo4j';
+  source: 'lcm' | 'qmd' | 'neo4j' | 'openclaw';
   content: string;
   file?: string;
   sessionId?: string;
@@ -33,9 +34,10 @@ export interface MemorySearchResponse {
     lcm: MemorySearchResult[];
     qmd: MemorySearchResult[];
     neo4j: MemorySearchResult[];
+    openclaw: MemorySearchResult[];
   };
   total: number;
-  errors?: { lcm?: string; qmd?: string; neo4j?: string };
+  errors?: { lcm?: string; qmd?: string; neo4j?: string; openclaw?: string };
 }
 
 export interface MemoryGraphNode {
@@ -327,6 +329,28 @@ async function searchNeo4j(q: string, limit: number): Promise<MemorySearchResult
 }
 
 // ---------------------------------------------------------------------------
+// OpenClaw 引擎：直读官方 per-agent SQLite 记忆索引（openclaw >= 2026.8）
+// ---------------------------------------------------------------------------
+
+/** 搜索官方记忆索引（memory_index_chunks + 元数据），失败返回空数组不抛错 */
+function searchOpenClaw(q: string, limit: number): MemorySearchResult[] {
+  try {
+    return searchOpenClawMemory(q, limit).map((r) => ({
+      source: 'openclaw' as const,
+      content: r.text || r.path || '',
+      file: r.path ? `${r.agentId}:${r.path}` : undefined,
+      sessionId: r.originClass ?? undefined,
+      type: r.source,
+      // 命中评分：基础 1.0 + importance 加成（1-10）→ 0-2 区间
+      score: 1.0 + (r.importance ?? 0) / 10,
+      timestamp: r.updatedAt ?? undefined,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 参数解析
 // ---------------------------------------------------------------------------
 
@@ -359,7 +383,7 @@ export async function registerMemoryRoutes(app: FastifyInstance): Promise<void> 
     const limit = parseLimit((req.query as Record<string, unknown>)?.limit, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
 
     const response: MemorySearchResponse = {
-      results: { lcm: [], qmd: [], neo4j: [] },
+      results: { lcm: [], qmd: [], neo4j: [], openclaw: [] },
       total: 0,
     };
 
@@ -372,6 +396,7 @@ export async function registerMemoryRoutes(app: FastifyInstance): Promise<void> 
     const wantLcm = engines === 'all' || engines === 'lcm_only';
     const wantQmd = engines === 'all' || engines === 'qmd_only';
     const wantNeo4j = engines === 'all' || engines === 'neo4j_only';
+    const wantOpenClaw = engines === 'all' || engines === 'openclaw_only';
 
     // 三引擎独立 try-catch，并行执行
     const tasks: Promise<void>[] = [];
@@ -418,12 +443,27 @@ export async function registerMemoryRoutes(app: FastifyInstance): Promise<void> 
       );
     }
 
+    if (wantOpenClaw) {
+      tasks.push(
+        Promise.resolve()
+          .then(() => {
+            response.results.openclaw = searchOpenClaw(q, limit);
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            errors.openclaw = msg;
+            response.results.openclaw = [];
+          }),
+      );
+    }
+
     await Promise.all(tasks);
 
     response.total =
       response.results.lcm.length +
       response.results.qmd.length +
-      response.results.neo4j.length;
+      response.results.neo4j.length +
+      response.results.openclaw.length;
     if (Object.keys(errors).length > 0) {
       response.errors = errors;
     }

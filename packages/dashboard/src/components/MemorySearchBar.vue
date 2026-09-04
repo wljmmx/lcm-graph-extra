@@ -22,12 +22,13 @@ const emit = defineEmits<{
   (e: 'search'): void;
 }>();
 
-// 引擎选项（all/lcm_only/qmd_only/neo4j_only）
+// 引擎选项（all/lcm_only/qmd_only/neo4j_only/openclaw_only）
 const enginesOptions: SelectOption[] = [
   { label: '全部引擎', value: 'all' },
   { label: 'LCM', value: 'lcm_only' },
   { label: 'QMD', value: 'qmd_only' },
   { label: 'Neo4j', value: 'neo4j_only' },
+  { label: 'OpenClaw', value: 'openclaw_only' },
 ];
 
 // 双向绑定：每个字段变化都更新整个 modelValue 对象

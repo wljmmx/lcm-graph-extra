@@ -2,12 +2,12 @@
  * 记忆查询 API 封装 + 类型定义。
  *
  * 与后端 server/routes/memory.ts 的响应契约对齐。
- * 三引擎并行 + 独立降级：单引擎失败返回空数组 + error 字段，不阻塞其他引擎。
+ * 四引擎并行 + 独立降级：单引擎失败返回空数组 + error 字段，不阻塞其他引擎。
  */
 import { apiGet } from './client';
 
 export interface MemorySearchResult {
-  source: 'lcm' | 'qmd' | 'neo4j';
+  source: 'lcm' | 'qmd' | 'neo4j' | 'openclaw';
   content: string;
   file?: string;
   sessionId?: string;
@@ -22,9 +22,10 @@ export interface MemorySearchResponse {
     lcm: MemorySearchResult[];
     qmd: MemorySearchResult[];
     neo4j: MemorySearchResult[];
+    openclaw: MemorySearchResult[];
   };
   total: number;
-  errors?: { lcm?: string; qmd?: string; neo4j?: string };
+  errors?: { lcm?: string; qmd?: string; neo4j?: string; openclaw?: string };
 }
 
 export interface MemoryGraphNode {
@@ -46,7 +47,7 @@ export interface MemoryGraphResponse {
 }
 
 /** 搜索引擎选择 */
-export type MemoryEngine = 'all' | 'lcm_only' | 'qmd_only' | 'neo4j_only';
+export type MemoryEngine = 'all' | 'lcm_only' | 'qmd_only' | 'neo4j_only' | 'openclaw_only';
 
 /** 跨引擎联合搜索 */
 export function fetchMemorySearch(

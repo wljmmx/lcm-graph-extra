@@ -450,7 +450,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       const backup: Record<string, unknown> = {
         version: "2.0", createdAt: new Date().toISOString(),
         neo4j: { entities: [], relationships: [] },
-        lcm: { conversations: [] }, files: [],
+        lcm: { conversations: [] }, files: [], openclaw: { agents: [] },
       };
 
       // Neo4j — BUGFIX(P1-5): 全表扫描加 LIMIT 防止超大图库 OOM
@@ -514,9 +514,39 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         getGlobalLogger()?.debug?.("backup: memory files read unavailable (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
       }
 
+      // OpenClaw 官方记忆（per-agent sqlite，openclaw >= 2026.8）—— 只读导出
+      // memory_index_chunks/text 从 ~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite 读取，
+      // 与 openclaw 2.0 的 SQLite 存储规范保持一致（文件布局已在 2.0 迁移为 sqlite 权威）。
+      try {
+        const { agentMemoryHealth, recentAgentMemory } = await import('./adapters/openclaw-agent-db.js');
+        const health = agentMemoryHealth();
+        const recent = recentAgentMemory(3);
+        (backup.openclaw as any).agents = health.map((h) => ({
+          agentId: h.agentId,
+          dbPath: h.dbPath,
+          schemaVersion: h.schemaVersion,
+          chunkCount: h.chunkCount,
+          sourceCount: h.sourceCount,
+          error: h.error,
+          recentChunks: recent
+            .filter((r) => r.agentId === h.agentId)
+            .map((r) => ({
+              chunkId: r.chunkId,
+              path: r.path,
+              importance: r.importance,
+              updatedAt: r.updatedAt,
+              text: r.text.slice(0, 5000),
+            })),
+        }));
+      } catch (e) {
+        getGlobalLogger()?.debug?.("backup: OpenClaw agent sqlite unavailable (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+      }
+
       // BUGFIX(P1-5): writeFileSync → fsp.writeFile（大 JSON 同步写会长时间阻塞事件循环）
       await fsp.writeFile(backupPath, JSON.stringify(backup, null, 2), "utf-8");
       const msgCount = (backup.lcm as any).conversations.reduce((a: number, c: any) => a + (c.messages?.length ?? 0), 0);
+      const ocAgents = (backup.openclaw as any)?.agents ?? [];
+      const ocChunks = ocAgents.reduce((a: number, g: any) => a + (g.chunkCount ?? 0), 0);
       const sizeKB = Math.round(JSON.stringify(backup).length / 1024);
       return {
         content: [{
@@ -526,6 +556,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             `  Neo4j: ${(backup.neo4j as any).entities.length} entities, ${(backup.neo4j as any).relationships.length} relationships`,
             `  lossless-claw: ${(backup.lcm as any).conversations.length} conversations, ${msgCount} messages`,
             `  Files: ${(backup.files as any[]).length} files`,
+            `  OpenClaw 官方记忆: ${ocAgents.length} agents, ${ocChunks} chunks`,
             `  Size: ${sizeKB} KB`,
           ].join("\n"),
         }],
@@ -538,6 +569,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             lcmConversations: (backup.lcm as any).conversations.length,
             lcmMessages: msgCount,
             files: (backup.files as any[]).length,
+            openclawAgents: ocAgents.length,
+            openclawChunks: ocChunks,
             sizeKB,
           },
         },
@@ -740,6 +773,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       const lines: string[] = [];
       let total = 0;
       let filesImported = 0;
+      let ocChunksImported = 0;
 
       // 关键性能修复：为 id 字段建立唯一约束（自动创建索引）。
       // 22 万文件毫秒级不复现的根因：MERGE/MATCH (n:MemoryFile {id}) 无索引时全图扫描，
@@ -927,6 +961,47 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
+      // OpenClaw 官方记忆索引（per-agent sqlite）→ MemoryFile 节点（source='openclaw-import'）。
+      // openclaw 2.0 起记忆正文以 sqlite 为权威存储，这里把官方索引 chunk（memory_index_chunks.text）
+      // 也纳入图谱，与文件导入互补，避免 2.0 迁移后文件布局缺数据。
+      if (params.source === "memory_files" || params.source === "all") {
+        if (signal?.aborted) {
+          return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+        }
+        try {
+          const { recentAgentMemory } = await import('./adapters/openclaw-agent-db.js');
+          const recent = recentAgentMemory(Math.max(1, limit)); // 每 agent 最新 limit 条
+          if (recent.length > 0) {
+            const { driver, session } = await neo4jSession();
+            try {
+              const rows = recent.map((r) => ({
+                id: `openclaw-${r.agentId}-${r.chunkId}`,
+                name: `${r.agentId}:${r.path}`,
+                content: (r.text ?? "").slice(0, 5000),
+                ts: r.updatedAt ?? Date.now(),
+                source: 'openclaw-import',
+                scores: '{}',
+              }));
+              const batchSize = Math.max(1, limit);
+              for (let i = 0; i < rows.length; i += batchSize) {
+                if (signal?.aborted) {
+                  return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+                }
+                await session.run(
+                  "UNWIND $rows AS m " +
+                  "MERGE (n:MemoryFile {id: m.id}) " +
+                  "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = m.source, n.state = 'active', n.scores = m.scores " +
+                  "SET n.name = m.name, n.content = m.content, n.createdAt = m.ts",
+                  { rows: rows.slice(i, i + batchSize) },
+                );
+                ocChunksImported = Math.min(rows.length, i + batchSize);
+              }
+            } finally { await closeNeo4j(driver, session); }
+            lines.push(`✅ Imported ${ocChunksImported} OpenClaw official memory chunks into Neo4j (source='openclaw-import')`);
+          }
+        } catch (e: any) { lines.push(`❌ OpenClaw memory import: ${e.message}`); }
+      }
+
       // 4) 导入完成后自动触发三级节点重建（Task/Skill/Event）。
       //    完全复用 graph-memory-pro 的批量重建 API（POST /api/extract/rebuild-all）。
       //    默认开启；openclaw.json → lcm-graph-extra.config.buildThreeLevel.onImport=false 可关闭。
@@ -971,6 +1046,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             limit,
             messagesImported: total,
             filesImported,
+            openclawChunksImported: ocChunksImported,
           },
         },
       };

@@ -6,10 +6,15 @@
  * - mock global fetch（QMD MCP REST 调用）
  * - 使用 fastify inject，避免真实 lcm.db / Neo4j / QMD
  *
- * 三引擎并行 + 独立降级是核心契约，重点覆盖。
+ * 四引擎并行 + 独立降级是核心契约，重点覆盖。
+ * openclaw 引擎直读官方 per-agent SQLite：测试用临时目录构造 openclaw-agent.sqlite。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { createRequire } from 'node:module';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // mock db lib（避免真实 lcm.db）
 vi.mock('../../server/lib/db', () => ({
@@ -131,7 +136,71 @@ afterEach(async () => {
   await app.close();
   // 恢复 global.fetch
   global.fetch = originalFetch;
+  // 清理 openclaw 引擎测试临时目录与环境
+  if (tmpAgentsDir) {
+    try {
+      rmSync(tmpAgentsDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+    tmpAgentsDir = null;
+  }
+  if (savedOpenClawAgentsDir !== undefined) {
+    if (savedOpenClawAgentsDir === null) delete process.env.OPENCLAW_AGENTS_DIR;
+    else process.env.OPENCLAW_AGENTS_DIR = savedOpenClawAgentsDir;
+    savedOpenClawAgentsDir = undefined;
+  }
 });
+
+// ---------------------------------------------------------------------------
+// openclaw 引擎辅助：构造官方 per-agent SQLite（memory_index_* 表）
+// ---------------------------------------------------------------------------
+
+let tmpAgentsDir: string | null = null;
+let savedOpenClawAgentsDir: string | undefined;
+
+/** 构造一个官方 schema 的 agent 库，并把 OPENCLAW_AGENTS_DIR 指向临时 agents 根目录 */
+function seedOpenClawMemory(chunks: Array<{ id: string; path: string; text: string; importance?: number; originClass?: string }>): void {
+  const req = createRequire(import.meta.url);
+  const { DatabaseSync } = req('node:sqlite') as { DatabaseSync: new (p: string) => { exec(s: string): void; prepare(s: string): { run(...a: unknown[]): unknown }; close(): void } };
+  savedOpenClawAgentsDir = process.env.OPENCLAW_AGENTS_DIR;
+  tmpAgentsDir = mkdtempSync(join(tmpdir(), 'openclaw-agents-'));
+  const dbDir = join(tmpAgentsDir, 'agent-a', 'agent');
+  mkdirSync(dbDir, { recursive: true });
+  process.env.OPENCLAW_AGENTS_DIR = tmpAgentsDir;
+
+  const dbPath = join(dbDir, 'openclaw-agent.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE memory_index_chunks (
+      id TEXT PRIMARY KEY, path TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'memory',
+      start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, hash TEXT NOT NULL,
+      model TEXT NOT NULL, text TEXT NOT NULL, embedding TEXT NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE memory_index_chunk_recall_metadata (
+      chunk_id TEXT PRIMARY KEY, importance INTEGER,
+      triggers TEXT, project_key TEXT
+    ) STRICT;
+    CREATE TABLE memory_index_chunk_provenance (
+      chunk_id TEXT PRIMARY KEY, origin_class TEXT NOT NULL,
+      session_kind TEXT NOT NULL, observed_at INTEGER NOT NULL, supersedes_key TEXT
+    ) STRICT;
+    CREATE TABLE memory_index_sources (
+      id INTEGER PRIMARY KEY, path TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'memory',
+      hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL,
+      UNIQUE (path, source)
+    ) STRICT;
+  `);
+  const ins = db.prepare('INSERT INTO memory_index_chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  for (const c of chunks) {
+    ins.run(c.id, c.path, 'memory', 1, 10, `hash-${c.id}`, 'test-embed', c.text, '[]', 1_700_000_000_000);
+    db.prepare('INSERT INTO memory_index_chunk_recall_metadata (chunk_id, importance, triggers, project_key) VALUES (?, ?, ?, ?)')
+      .run(c.id, c.importance ?? 5, '[]', 'demo');
+    db.prepare('INSERT INTO memory_index_chunk_provenance (chunk_id, origin_class, session_kind, observed_at, supersedes_key) VALUES (?, ?, ?, ?, NULL)')
+      .run(c.id, c.originClass ?? 'agent', 'interactive', 1_700_000_000_000);
+  }
+  db.close();
+}
 
 describe('GET /api/memory/search', () => {
   it('engines=all 返回三引擎结果（lcm + qmd + neo4j）', async () => {
@@ -299,8 +368,75 @@ describe('GET /api/memory/search', () => {
     expect(body.results.lcm).toEqual([]);
     expect(body.results.qmd).toEqual([]);
     expect(body.results.neo4j).toEqual([]);
+    expect(body.results.openclaw).toEqual([]);
     // 空查询不应触发任何引擎
     expect(mockRunReadQuery).not.toHaveBeenCalled();
+  });
+
+  // ===================== OpenClaw 引擎（官方 per-agent SQLite） ==========
+
+  it('engines=openclaw_only 从官方 agent sqlite 读取记忆索引', async () => {
+    seedOpenClawMemory([
+      { id: 'c1', path: 'memory/project.md', text: '用户偏好使用中文记录项目进度', importance: 8, originClass: 'owner' },
+      { id: 'c2', path: 'memory/tmp.md', text: '无关内容', importance: 1 },
+    ]);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/memory/search?q=项目进度&engines=openclaw_only',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // 仅命中 c1（含 项目进度），未命中 c2
+    expect(body.results.openclaw).toHaveLength(1);
+    const hit = body.results.openclaw[0];
+    expect(hit.source).toBe('openclaw');
+    expect(hit.content).toContain('项目进度');
+    expect(hit.file).toContain('agent-a:memory/project.md');
+    // score = 1.0 + importance/10
+    expect(hit.score).toBe(1.8);
+    // 其他引擎不应被调用
+    expect(body.results.lcm).toEqual([]);
+    expect(body.results.qmd).toEqual([]);
+    expect(body.results.neo4j).toEqual([]);
+    expect(mockRunReadQuery).not.toHaveBeenCalled();
+  });
+
+  it('engines=all 时 openclaw 引擎与其它引擎并行返回', async () => {
+    // lcm：空
+    mockGetDb.mockReturnValue(makeMockDb({ messages: [], conversations: [], summaries: [] }));
+    // neo4j：空
+    mockRunReadQuery.mockResolvedValueOnce(makeResult([]));
+    // qmd：空
+    mockQmdFetch([]);
+    // openclaw：构造官方记忆
+    seedOpenClawMemory([
+      { id: 'c1', path: 'memory/note.md', text: '季度目标：完成记忆对接改造', importance: 9 },
+    ]);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/memory/search?q=记忆对接&engines=all',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.results.openclaw).toHaveLength(1);
+    expect(body.results.openclaw[0].content).toContain('记忆对接');
+    expect(body.total).toBe(1);
+  });
+
+  it('empty agents dir → openclaw 引擎返回空数组（不抛错）', async () => {
+    // 空 agents 根目录（无 agent sqlite）→ 降级空数组
+    savedOpenClawAgentsDir = process.env.OPENCLAW_AGENTS_DIR;
+    tmpAgentsDir = mkdtempSync(join(tmpdir(), 'openclaw-agents-empty-'));
+    process.env.OPENCLAW_AGENTS_DIR = tmpAgentsDir;
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/memory/search?q=test&engines=openclaw_only',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.results.openclaw).toEqual([]);
   });
 });
 

@@ -32,6 +32,7 @@ const props = defineProps<{
 const lcmResults = computed<MemorySearchResult[]>(() => props.results?.results.lcm ?? []);
 const qmdResults = computed<MemorySearchResult[]>(() => props.results?.results.qmd ?? []);
 const neo4jResults = computed<MemorySearchResult[]>(() => props.results?.results.neo4j ?? []);
+const openclawResults = computed<MemorySearchResult[]>(() => props.results?.results.openclaw ?? []);
 const errors = computed(() => props.results?.errors ?? {});
 
 /** 把 content 按 query 拆分为片段（命中段标 hit=true），用于高亮渲染 */
@@ -62,13 +63,15 @@ function highlight(content: string, query: string | undefined): Array<{ text: st
  * - lcm（本地数据库）→ info（蓝）
  * - qmd（代码/文档）→ success（绿）
  * - neo4j（图谱）→ warning（橙）
+ * - openclaw（官方 SQLite 记忆索引）→ error（红）
  * - 其他 → default
  */
-function sourceColor(s: string): 'info' | 'success' | 'warning' | 'default' {
+function sourceColor(s: string): 'info' | 'success' | 'warning' | 'error' | 'default' {
   const key = s.toLowerCase();
   if (key === 'lcm') return 'info';
   if (key === 'qmd') return 'success';
   if (key === 'neo4j') return 'warning';
+  if (key === 'openclaw') return 'error';
   return 'default';
 }
 
@@ -77,6 +80,7 @@ const groups = computed(() => [
   { key: 'lcm' as const, label: 'LCM（lcm.db）', items: lcmResults.value },
   { key: 'qmd' as const, label: 'QMD（代码/文档）', items: qmdResults.value },
   { key: 'neo4j' as const, label: 'Neo4j（图谱）', items: neo4jResults.value },
+  { key: 'openclaw' as const, label: 'OpenClaw（官方记忆 SQLite）', items: openclawResults.value },
 ]);
 
 // 是否显示骨架屏：仅当 loading 且尚无结果时
