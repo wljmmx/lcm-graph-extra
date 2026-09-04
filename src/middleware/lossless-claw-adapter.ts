@@ -232,6 +232,9 @@ function coerceSessionId<T extends { sessionId?: unknown }>(params: T): T {
 // ---------------------------------------------------------------------------
 
 export class LosslessClawAdapter {
+  /** 同会话在途压缩去重（sessionKey → 标记）；防多轮 fire-and-forget compact 叠加打爆本地 LLM */
+  private static readonly _inFlightCompactions = new Set<string>();
+
   /** 缓存的 engine 实例 */
   private engine: LosslessClawEngine | null = null;
 
@@ -715,6 +718,27 @@ export class LosslessClawAdapter {
     // 避免 lossless-claw 内部 sessionId.trim() 抛 TypeError
     params = coerceSessionId(params);
 
+    // ── 在途去重：同一会话已有 compact 在跑时直接跳过 ──
+    // 背景：assemble 预压缩 / medium-tier / S-9 主题切换 / hooks 压力响应都是
+    // fire-and-forget backgroundTasks，连续多轮触发会对同一 session 叠加多个
+    // compact。每个 compact 内部要跑 LLM 摘要，本地 Ollama 串行排队时这些任务
+    // 互相挤压 + 与主模型生成争抢 → 主生成 stall（"stopped making progress"）。
+    // 去重后同 session 最多一个在途 compact；跳过是安全的——已在跑的那个会
+    // 完成本轮需要的压缩（force 压缩除外，见下方 force 直通）。
+    const _dedupSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
+      || (typeof params.sessionId === 'string' && params.sessionId.trim())
+      || '';
+    if (_dedupSk && !params.force) {
+      if (LosslessClawAdapter._inFlightCompactions.has(_dedupSk)) {
+        this.logger?.info?.('[lossless-claw-adapter] compact skipped: another compaction already in flight for session', {
+          sessionKey: _dedupSk,
+        });
+        return { ok: true, compacted: false, reason: 'already_in_flight' };
+      }
+      LosslessClawAdapter._inFlightCompactions.add(_dedupSk);
+    }
+    const _dedupHeld = _dedupSk && !params.force;
+
     // ── G-MODEL-SYNC: 按会话主模型决定 lossless-claw 压缩使用的 LLM ──
     // 统一在此注入，覆盖所有 compact 调用方（/compact 主路径、assemble 预压缩、
     // S-9 主题切换、hooks 压力响应等），避免每处重复实现。
@@ -867,6 +891,9 @@ export class LosslessClawAdapter {
         reason: errMsg,
         error: errMsg,
       };
+    } finally {
+      // 在途去重标记释放：无论成功/失败/超时都必须释放，否则该会话永久无法再压缩
+      if (_dedupHeld) LosslessClawAdapter._inFlightCompactions.delete(_dedupSk);
     }
   }
 

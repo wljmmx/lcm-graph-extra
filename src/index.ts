@@ -733,6 +733,9 @@ const pluginEntry: any = definePluginEntry({
 
       async ingest(params: { sessionId: string; sessionKey?: string; message: any; isHeartbeat?: boolean }) {
         // Forward to lossless-claw for actual message storage
+        // 防挂起兜底（10s）：ingest 在 host 消息写入关键路径上，lossless-claw
+        // 内部锁被压缩持有时会阻塞整个轮次；到期放弃本条（消息仍在转录层，
+        // 下一轮 ingestBatch/commitTurn 会补齐），不拖挂 run 管道。
         try {
           if (_losslessClawAdapter?.ingest) {
             // Validate required SDK fields
@@ -744,7 +747,17 @@ const pluginEntry: any = definePluginEntry({
               logger?.warn?.('[lcm-graph-extra] ingest: missing message');
               return { ingested: false };
             }
-            await _losslessClawAdapter.ingest(params);
+            const _ingestOutcome = await raceDeadline(
+              () => _losslessClawAdapter.ingest(params),
+              10_000,
+              'ingest',
+            );
+            if (_ingestOutcome.status === 'deadline') {
+              logger?.warn?.('[lcm-graph-extra] ingest: deadline exceeded, skipping this message (transcript layer still has it)', {
+                sessionId: params.sessionId,
+              });
+              return { ingested: false };
+            }
             return { ingested: true };
           }
           return { ingested: false };
@@ -755,8 +768,18 @@ const pluginEntry: any = definePluginEntry({
       },
 
       async ingestBatch(params: any) {
+        // 防挂起兜底（15s）：理由同 ingest；批量窗口更大故期限稍宽。
         try {
-          await _losslessClawAdapter?.ingestBatch?.(params);
+          const _batchOutcome = await raceDeadline(
+            () => (_losslessClawAdapter?.ingestBatch?.(params) ?? undefined),
+            15_000,
+            'ingestBatch',
+          );
+          if (_batchOutcome.status === 'deadline') {
+            logger?.warn?.('[lcm-graph-extra] ingestBatch: deadline exceeded, skipping batch', {
+                count: (params.messages ?? []).length,
+              });
+          }
         } catch (e) { /* non-fatal */
           logger?.debug?.("ingest failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }
@@ -809,9 +832,27 @@ const pluginEntry: any = definePluginEntry({
           // advancement key after process or plugin failure"）。修复前失败也
           // 记录幂等 key 并返回 duplicate，host 会删除 outbox 行，该轮在引擎
           // 存储中永久丢失（后续 compact/summary 基于缺失数据）。
+          //
+          // 防挂起兜底（15s）：host 在逻辑轮开始前同步 drain outbox，若 lossless-claw
+          // 内部（DB 写锁 / 压缩互斥）挂起，drain 阻塞 → 下一条消息一直等到
+          // agents.defaults.timeoutSeconds 超时（"Request timed out before a
+          // response was generated"）。到期即抛错：host 保留 outbox 行下轮重试，
+          // 契约闭环不变，只把"无限等待"变成"下一轮再试"。
+          const _commitDeadlineMs = Math.max(
+            5_000,
+            parseInt(process.env.LCM_GRAPH_EXTRA_COMMITTURN_TIMEOUT_MS || '0', 10) || 15_000,
+          );
           let downstream: { status?: string } | null = null;
           try {
-            downstream = await _losslessClawAdapter?.commitTurn?.(params) ?? null;
+            const _commitOutcome = await raceDeadline(
+              () => (_losslessClawAdapter?.commitTurn?.(params) ?? null),
+              _commitDeadlineMs,
+              'commitTurn',
+            );
+            if (_commitOutcome.status === 'deadline') {
+              throw new Error(`commitTurn: downstream timed out after ${_commitDeadlineMs}ms (adapter may hold session lock)`);
+            }
+            downstream = _commitOutcome.value;
           } catch (e) {
             logger?.warn?.('[lcm-graph-extra] commitTurn: adapter commit failed, letting host retry', {
               err: e instanceof Error ? e.message : String(e),
@@ -2373,6 +2414,18 @@ const pluginEntry: any = definePluginEntry({
       let pendingMessages = 0;
       let summaryFragments = 0;
       let maxTokenRatio = 0;
+      // 诊断：在途后台任务数与最老任务年龄。若 pendingCount 持续增长或最老任务
+      // 超过 ~10min，说明有 LLM 调用/子任务挂起成僵尸（callLlm 超时兜底生效前
+      // 的存量任务），是"运行一段时间后卡住"的前兆信号。
+      try {
+        const _pending = backgroundTasks.pendingCount;
+        if (_pending > 0) {
+          logger?.info?.(`heartbeat: background tasks in flight`, {
+            count: _pending,
+            names: backgroundTasks.pendingNames.slice(0, 10),
+          });
+        }
+      } catch { /* non-fatal */ }
       try {
         // --- 1. Compaction pressure check (scan .lossless/ directories) ---
         // P2-4 M-8: 原 readdirSync/readFileSync/existsSync 同步阻塞事件循环；

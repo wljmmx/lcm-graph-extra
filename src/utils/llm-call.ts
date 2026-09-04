@@ -111,6 +111,23 @@ function parseAnthropicResponse(data: any): LlmCallResult {
   return { text, reasoning, raw: data };
 }
 
+/**
+ * 默认调用超时：调用方未传 signal 时的兜底期限。
+ *
+ * 背景：callLlm 原先完全依赖调用方传 signal，而注入给 lossless-claw 的
+ * llm.complete（buildLocalLlmComplete / buildConfiguredLlmComplete）只透传
+ * p?.signal —— lossless-claw 不传 signal → 压缩/轮后维护的 LLM 调用无界。
+ * Ollama 串行排队或网络半开时请求永久挂起，fire-and-forget 后台任务
+ * 逐渐堆积成僵尸，最终拖垮会话（host "stopped making progress"/timeout）。
+ *
+ * 180s 取值依据：本地 27B 模型长输入摘要最坏 ~2min（distillMs 默认 120s
+ * 同类场景），留 50% 余量；短调用（rerank 等）均自带更短 signal，不受影响。
+ */
+const DEFAULT_CALL_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.LCM_GRAPH_EXTRA_LLM_CALL_TIMEOUT_MS || '0', 10) || 180_000,
+);
+
 export async function callLlm(params: LlmCallParams): Promise<LlmCallResult> {
   const format = detectApiFormat(params.baseURL, params.model);
   const endpoint = getEndpoint(params.baseURL, format);
@@ -130,11 +147,15 @@ export async function callLlm(params: LlmCallParams): Promise<LlmCallResult> {
     ? buildAnthropicBody(params)
     : buildOpenAiBody(params);
 
+  // 超时兜底：无 signal 时挂全局默认期限；调用方自带 signal（含 AbortSignal.timeout）
+  // 时完全尊重调用方，行为不变。
+  const signal = params.signal ?? AbortSignal.timeout(DEFAULT_CALL_TIMEOUT_MS);
+
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-    signal: params.signal,
+    signal,
   });
 
   if (!resp.ok) {
