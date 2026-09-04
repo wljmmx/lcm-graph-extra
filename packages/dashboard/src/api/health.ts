@@ -149,3 +149,42 @@ export interface GraphHealthResponse {
 export function fetchGraphHealth(): Promise<GraphHealthResponse> {
   return apiGet<GraphHealthResponse>('/api/graph/health');
 }
+
+// ─── v2.6.0: 图谱健康评分（GraphHealthMetric 快照）──────────────────────────
+
+/**
+ * graph-memory-pro v2.6.0 图谱 0-100 健康评分。
+ * 后端直读 Neo4j 中 GraphHealthMetric 节点（上游 maintenance Phase 6 落盘）。
+ */
+export interface GraphHealthScore {
+  available: boolean;
+  error?: string;
+  timestamp?: number;
+  /** 0-100 健康分 */
+  score?: number;
+  /** 五维评分（0-1）：连通性 / 密度 / 影响力 / 时效性 / 冲突 */
+  dims?: {
+    connectivity: number;
+    density: number;
+    influence: number;
+    freshness: number;
+    conflictFree: number;
+  };
+  metrics?: {
+    activeNodes: number;
+    totalEdges: number;
+    isolatedNodes: number;
+    isolatedRatio: number;
+    avgDegree: number;
+    avgPageRank: number;
+    highStaleRatio: number;
+    transitionalRatio: number;
+  };
+  /** 稀疏标记（score < 60 或 isolatedRatio > 0.3） */
+  sparse?: boolean;
+  anomalies?: string[];
+}
+
+export function fetchGraphHealthScore(): Promise<GraphHealthScore> {
+  return apiGet<GraphHealthScore>('/api/graph/health-score');
+}

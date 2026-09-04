@@ -11,6 +11,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { getOutboundAuthHeader } from '../lib/auth';
+import { runReadQuery, toNumber } from '../lib/neo4j';
 
 export interface GraphHealthResponse {
   status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
@@ -23,6 +24,39 @@ export interface GraphHealthResponse {
   details?: Record<string, unknown>;
   fetchedAt: number;
   error?: string;
+}
+
+/**
+ * graph-memory-pro v2.6.0 图谱健康评分（GraphHealthMetric 落盘快照）。
+ * 与上游 src/graph/maintenance/health.ts 的 GraphHealthScore 结构对齐。
+ */
+export interface GraphHealthScoreResponse {
+  available: boolean;
+  error?: string;
+  timestamp?: number;
+  /** 0-100 健康分 */
+  score?: number;
+  /** 五维评分（0-1） */
+  dims?: {
+    connectivity: number;
+    density: number;
+    influence: number;
+    freshness: number;
+    conflictFree: number;
+  };
+  metrics?: {
+    activeNodes: number;
+    totalEdges: number;
+    isolatedNodes: number;
+    isolatedRatio: number;
+    avgDegree: number;
+    avgPageRank: number;
+    highStaleRatio: number;
+    transitionalRatio: number;
+  };
+  /** 稀疏标记（score < 60 或 isolatedRatio > 0.3） */
+  sparse?: boolean;
+  anomalies?: string[];
 }
 
 export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<void> {
@@ -94,6 +128,52 @@ export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<v
         fetchedAt: Date.now(),
         error: `插件 snapshot 服务不可达 (${targetUrl}); 请检查插件是否已加载且 :7423 端口在监听`,
       } satisfies GraphHealthResponse);
+    }
+  });
+
+  // v2.6.0 对接：图谱健康评分（直读 Neo4j 中 graph-memory-pro 落盘的 GraphHealthMetric 快照）
+  app.get('/api/graph/health-score', async (req, reply) => {
+    try {
+      const result = await runReadQuery(
+        'MATCH (m:GraphHealthMetric) RETURN m ORDER BY m.timestamp DESC LIMIT 1',
+      );
+      const record = result.records[0];
+      if (!record) {
+        return reply.send({ available: false, error: '尚无 GraphHealthMetric 快照（graph-memory-pro v2.6.0+ 维护后会落盘）' } satisfies GraphHealthScoreResponse);
+      }
+      const m = record.get('m') as Record<string, unknown>;
+      const num = (v: unknown): number => toNumber(v) ?? 0;
+      const metrics = {
+        activeNodes: num(m.activeNodes),
+        totalEdges: num(m.totalEdges),
+        isolatedNodes: num(m.isolatedNodes),
+        isolatedRatio: num(m.isolatedRatio),
+        avgDegree: num(m.avgDegree),
+        avgPageRank: num(m.avgPageRank),
+        highStaleRatio: num(m.highStaleRatio),
+        transitionalRatio: num(m.transitionalRatio),
+      };
+      return reply.send({
+        available: true,
+        timestamp: num(m.timestamp),
+        score: num(m.score),
+        dims: {
+          connectivity: num(m.connectivity),
+          density: num(m.density),
+          influence: num(m.influence),
+          freshness: num(m.freshness),
+          conflictFree: num(m.conflictFree),
+        },
+        metrics,
+        sparse: m.sparse === true,
+      } satisfies GraphHealthScoreResponse);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log.warn({ err: msg }, 'graph health-score 查询失败（Neo4j 不可达）');
+      return reply.send({
+        available: false,
+        error: `Neo4j 查询失败: ${msg}`,
+      } satisfies GraphHealthScoreResponse);
     }
   });
 }

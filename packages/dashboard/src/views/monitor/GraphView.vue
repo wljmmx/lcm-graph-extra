@@ -38,6 +38,9 @@ const {
   graphHealth,
   graphHealthLoading,
   graphHealthIsError,
+  graphHealthScore,
+  graphHealthScoreLoading,
+  graphHealthScoreIsError,
   gmProHealth,
   gmProHealthLoading,
   gmProHealthIsError,
@@ -85,6 +88,9 @@ function onCommunityOpenNode(nodeId: string): void {
             :gm-pro-health="gmProHealth"
             :loading="gmProHealthLoading"
             :is-error="gmProHealthIsError"
+            :health-score="graphHealthScore"
+            :health-score-loading="graphHealthScoreLoading"
+            :health-score-is-error="graphHealthScoreIsError"
           />
         </NGi>
       </NGrid>

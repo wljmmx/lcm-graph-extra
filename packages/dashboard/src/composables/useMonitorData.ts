@@ -18,10 +18,12 @@ import {
   fetchHealthHistory,
   fetchAgentStatus,
   fetchGraphHealth,
+  fetchGraphHealthScore,
   type HealthSnapshot,
   type DashboardSnapshot,
   type AgentStatus,
   type GraphHealthResponse,
+  type GraphHealthScore,
 } from '../api/health';
 import { fetchMoaPerformance, type MoaPerformanceData } from '../api/moa';
 import { ApiError } from '../api/client';
@@ -112,6 +114,18 @@ export function useMonitorData() {
     staleTime: 15_000,
     retry: monitorRetry,
   });
+
+  // ── 4.5 graph-health-score (60s) —— v2.6.0 图谱健康评分（GraphHealthMetric 快照）──
+  const { data: graphHealthScoreData, isLoading: graphHealthScoreLoading, isError: graphHealthScoreIsError } = useQuery({
+    queryKey: ['graph-health-score'],
+    queryFn: fetchGraphHealthScore,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    retry: monitorRetry,
+  });
+  const graphHealthScore = computed<GraphHealthScore | null>(() =>
+    graphHealthScoreData.value?.available ? (graphHealthScoreData.value ?? null) : null,
+  );
 
   // ── 5. gm-pro-health (30s) ──
   const { data: gmProHealthRes, isLoading: gmProHealthLoading, isError: gmProHealthIsError } = useQuery({
@@ -248,9 +262,10 @@ export function useMonitorData() {
     historyData, historyLoading, historyIsError, historyError, historyN,
     agentData, agentLoading, agentIsError, agentError,
     graphHealthData, graphHealthLoading, graphHealthIsError, graphHealthError,
+    graphHealthScoreData, graphHealthScoreLoading, graphHealthScoreIsError,
     moaPerfData, moaPerfLoading,
     // derived
-    db, memory, agent, graphHealth, moaPerf,
+    db, memory, agent, graphHealth, graphHealthScore, moaPerf,
     // gm-pro
     gmProHealth, gmProHealthLoading, gmProHealthIsError,
     gmProTop10, gmProTop10Loading, gmProTop10IsError,

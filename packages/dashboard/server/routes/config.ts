@@ -981,6 +981,25 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     high: '高压',
   };
 
+  /**
+   * v2.6.0 配置 schema overlay：上游 openclaw.plugin.json 尚未声明
+   * sparseHeal（稀疏图自愈）与 graphHealth.scoring（健康评分）字段，
+   * 由 dashboard 端补充文档，供 GUI 展示与热更新（PATCH 白名单自动生效）。
+   */
+  const GM_PRO_V260_SCHEMA_OVERLAY: SchemaFieldDoc[] = [
+    // ─── sparseHeal：稀疏图自愈（保守、可回滚）───
+    { path: 'sparseHeal.enabled', type: 'boolean', description: 'v2.6.0: 稀疏图自愈总开关。检测到图谱稀疏（健康分低 / 孤立率高）时，在维护周期内执行保守自愈操作。推荐：true', updatable: true, defaultValue: true },
+    { path: 'sparseHeal.autoEdgeRepair', type: 'boolean', description: 'v2.6.0: 自动补边 —— 基于语义相似度候选重建断裂边（保守阈值，避免误连）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'sparseHeal.nodeMerge', type: 'boolean', description: 'v2.6.0: 节点合并 —— 低活跃的语义近似节点合并，降低孤立碎片。推荐：true', updatable: true, defaultValue: true },
+    { path: 'sparseHeal.communityReconnect', type: 'boolean', description: 'v2.6.0: 社区重连 —— 通过桥节点重连孤立社区，恢复图谱连通性。推荐：true', updatable: true, defaultValue: true },
+    { path: 'sparseHeal.maxOperationsPerRun', type: 'number', description: 'v2.6.0: 单次维护最多执行的自愈操作数（防止过激改动）。推荐：20', updatable: true, defaultValue: 20 },
+    { path: 'sparseHeal.rollbackOnError', type: 'boolean', description: 'v2.6.0: 自愈操作出错时自动回滚（保守可回滚设计）。推荐：true', updatable: true, defaultValue: true },
+    // ─── graphHealth.scoring：健康评分（落盘 GraphHealthMetric）───
+    { path: 'graphHealth.scoring.enabled', type: 'boolean', description: 'v2.6.0: 图谱健康评分开关 —— 维护后计算 0-100 健康分并落盘 GraphHealthMetric 节点（dashboard 图谱健康中心展示）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'graphHealth.scoring.sparseScoreThreshold', type: 'number', description: 'v2.6.0: 稀疏判定分数阈值 —— 健康分低于此值标记为稀疏图。推荐：60', updatable: true, defaultValue: 60 },
+    { path: 'graphHealth.scoring.sparseIsolatedRatioThreshold', type: 'number', description: 'v2.6.0: 稀疏判定孤立率阈值 —— 孤立节点占比高于此值标记为稀疏图。推荐：0.3', updatable: true, defaultValue: 0.3 },
+  ];
+
   function buildGmProSchemaDoc(): SchemaFieldDoc[] {
     if (_gmProSchemaDocCache) return _gmProSchemaDocCache;
 
@@ -1004,6 +1023,12 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
         '',
         manifest?.uiHints as Record<string, { label?: string; sensitive?: boolean; help?: string }> | undefined,
       );
+      // v2.6.0 overlay：上游 openclaw.plugin.json 尚未声明 sparseHeal / graphHealth.scoring，
+      // dashboard 端补充 schema 文档，使新配置字段可在 GUI 中查看与热更新。
+      const existingPaths = new Set(docs.map((d) => d.path));
+      for (const doc of GM_PRO_V260_SCHEMA_OVERLAY) {
+        if (!existingPaths.has(doc.path)) docs.push(doc);
+      }
       _gmProSchemaDocCache = docs;
       return docs;
     } catch {
