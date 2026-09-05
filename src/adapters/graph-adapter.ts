@@ -147,6 +147,20 @@ const OPENCLAW_DIR = process.env.OPENCLAW_DIR || join(homedir(), '.openclaw');
 const GM_PRO_PLUGIN_ID = 'graph-memory-pro';
 
 /**
+ * 关联矩阵 M 统一持久化根目录：~/.openclaw/data/association-matrix/。
+ *
+ * 设计（v2.8.x P-EXT）：
+ *   - 位于 extensions 目录之外：M 落盘不会触发 openclaw 对 extensions 目录的 watch 热重载
+ *     （此前默认落在 ~/.openclaw/extensions/graph-memory-pro/association-matrix/，
+ *      写盘 → 触发 reload → 新实例首轮 heartbeat 又写盘 → 无限重启循环）。
+ *   - lcm-graph-extra 与 graph-memory-pro 共用同一文件：M 只存一份，避免两份数据漂移
+ *     （gm-pro 侧需将自身默认目录同步指向此处，见 association-matrix-persist.ts）。
+ */
+export const AM_DATA_DIR = join(OPENCLAW_DIR, 'data', 'association-matrix');
+/** M 默认持久化文件路径（未显式配置 associationMatrix.persistPath 时使用） */
+export const DEFAULT_AM_PERSIST_PATH = join(AM_DATA_DIR, 'association-matrix.json');
+
+/**
  * 解析 graph-memory-pro 模块路径（单一来源，去除 graph-adapter / tools 重复逻辑）。
  *
  * gm-pro 作为 OpenClaw extension 通过 extensions 目录安装管理，
@@ -583,7 +597,9 @@ export class GraphAdapter {
               gmCfg.warmup.warmupFeedbacks = wf;
             }
             const am = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
-              path: lcmAm?.persistPath,
+              // 未显式配置 persistPath 时，统一落盘 ~/.openclaw/data/association-matrix/
+              //（extensions 之外避免 watch 热重载死循环；与 gm-pro 共用单份数据）
+              path: lcmAm?.persistPath ?? DEFAULT_AM_PERSIST_PATH,
             });
             if (am) {
               this._recaller.setAssociationMatrix(am);
@@ -1969,7 +1985,8 @@ export class GraphAdapter {
     if (!mod || typeof mod.saveRecallerAssociationMatrix !== 'function') return null;
     try {
       const saved = await mod.saveRecallerAssociationMatrix(this._recaller, {
-        path: this.config.associationMatrix?.persistPath,
+        // 未显式配置 persistPath 时，落盘统一目录（与 createAssociationMatrixPersisted 对齐）
+        path: this.config.associationMatrix?.persistPath ?? DEFAULT_AM_PERSIST_PATH,
       });
       return saved ? { path: saved.path, bytes: saved.bytes } : null;
     } catch (err) {
