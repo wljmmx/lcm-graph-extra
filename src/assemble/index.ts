@@ -33,7 +33,7 @@ import { resolveContextProfile } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import { resolveSessionCacheKey } from '../utils/session-key.js';
-import { ensureFinalUserMessage } from '../utils/ensure-final-user.js';
+import { ensureFinalUserMessage, appendRecentUser } from '../utils/ensure-final-user.js';
 import { performRetrieval } from './retrieval.js';
 import { injectContext } from './injection.js';
 import { stubLargeToolPayloads, resolveStubConfig } from './tool-payload-stub.js';
@@ -897,7 +897,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               const _testMessages = [..._goalAnchorMsgs, ..._recentMsgs];
               const _testEstimate = estimateTokensFromMessages(_testMessages);
               if (_testEstimate <= _safeThreshold || _keepCount === _cascadeLevels[_cascadeLevels.length - 1]) {
-                finalMessages = _testMessages;
+                // ensure-final-user: 裁剪结果可能无 user（goalAnchor 已停用），源头补最近 user，
+                // 避免交付前 guard 逐轮回退为全量原始转录（超窗 + 每轮 warn）
+                finalMessages = appendRecentUser(_testMessages, messages);
                 _trimmed = true;
                 ctx.logger?.info?.('[assemble] low-tier cascading trim applied', {
                   keepCount: _keepCount,
@@ -925,7 +927,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           if (_msgCountForFallback > 20) {
             const _goalAnchorMsgs = buildGoalAnchorMsg(_sessionKey);
             const _fallbackKeep = Math.min(_msgCountForFallback, 8);
-            finalMessages = [..._goalAnchorMsgs, ...messages.slice(-_fallbackKeep)];
+            finalMessages = appendRecentUser(
+              [..._goalAnchorMsgs, ...messages.slice(-_fallbackKeep)],
+              messages,
+            );
             // BUGFIX: low_tier_no_summary_fallback 是低压力路径的正常行为
             // （summaries 尚未生成时采用消息裁剪兜底），不应计入降级率。
             // 修复前 markDegraded 导致每次无 summary 的 assemble 都被计为降级，
@@ -1465,14 +1470,15 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           buffer.splice(idx, 1);
           msgTokenEst.splice(idx, 1);
           if (runningTokens + additionTokens <= contextWindow * 0.85) {
-            finalMessages = buffer;
+            // ensure-final-user: while 循环按 非system 逐条删除，可能删光 user → 源头补最近 user
+            finalMessages = appendRecentUser(buffer, messages);
             messageTokens = runningTokens; // P0-5: 复用 trimming 后的 token 数
             break;
           }
         }
         // P0-5: 仅在 finalMessages 被替换为 buffer 时才需要重算
         if (finalMessages === buffer && runningTokens + additionTokens > contextWindow * 0.85) {
-          finalMessages = buffer;
+          finalMessages = appendRecentUser(buffer, messages);
           // buffer 未变，messageTokens 已是 runningTokens，无需重算
         }
       }

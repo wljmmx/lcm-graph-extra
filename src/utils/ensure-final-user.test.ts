@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ensureFinalUserMessage } from './ensure-final-user.js';
+import { ensureFinalUserMessage, appendRecentUser } from './ensure-final-user.js';
 
 const u = (c: string) => ({ role: 'user', content: c });
 const a = (c: string) => ({ role: 'assistant', content: c });
@@ -50,5 +50,29 @@ describe('ensureFinalUserMessage', () => {
     const r = ensureFinalUserMessage(blankUser, original);
     // 重建无有效 user → 回退原始（原始有 user）
     expect(r.note).toBe('from_original');
+  });
+});
+describe('appendRecentUser', () => {
+  it('built 已含非空 user 时原样返回（不重复追加）', () => {
+    const built = [sys('s'), u('q'), a('r')];
+    expect(appendRecentUser(built, [u('x')])).toBe(built);
+  });
+
+  it('built 无 user 时从 source 补最近一条真实 user（末尾追加）', () => {
+    const built = [sys('s'), a('回答')];
+    const source = [u('旧问题'), a('旧答'), u('最近问题'), a('最近答')];
+    const out = appendRecentUser(built, source);
+    expect(out.length).toBe(built.length + 1);
+    expect(out[out.length - 1]).toEqual(u('最近问题'));
+  });
+
+  it('source 也无 user 时原样返回（不伪造）', () => {
+    const built = [sys('s'), a('r')];
+    expect(appendRecentUser(built, [sys('o'), a('p')])).toBe(built);
+  });
+
+  it('source 非数组时原样返回', () => {
+    const built = [a('r')];
+    expect(appendRecentUser(built, null as any)).toBe(built);
   });
 });
