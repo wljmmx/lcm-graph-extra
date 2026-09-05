@@ -1013,22 +1013,26 @@ export class LosslessClawAdapter {
 
   async getSummaries(sessionId: string, limit: number = 1): Promise<Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null; latestAt: string | null; entryCount: number; startOrdinal: number | null }>> {
     if (!this._connected || !this.engine) {
+      this.logger?.debug?.('[lossless-claw-adapter] getSummaries empty: adapter not connected', { sessionId, hasEngine: !!this.engine });
       return [];
     }
     try {
       // Step 1: Resolve sessionId → conversationId via ConversationStore
       const convStore = this.engine.getConversationStore?.();
       if (!convStore || typeof convStore.getConversationForSession !== 'function') {
+        this.logger?.debug?.('[lossless-claw-adapter] getSummaries empty: no ConversationStore', { sessionId });
         return [];
       }
       const conversation = await convStore.getConversationForSession({ sessionId });
       if (!conversation) {
+        this.logger?.debug?.('[lossless-claw-adapter] getSummaries empty: conversation not found for sessionId', { sessionId });
         return [];
       }
 
       // Step 2: Get context items from SummaryStore (the correct DAG API)
       const summaryStore = this.engine.getSummaryStore?.();
       if (!summaryStore || typeof summaryStore.getContextItems !== 'function') {
+        this.logger?.debug?.('[lossless-claw-adapter] getSummaries empty: no SummaryStore', { sessionId, conversationId: conversation.conversationId });
         return [];
       }
       const contextItems = await summaryStore.getContextItems(conversation.conversationId);
@@ -1038,6 +1042,14 @@ export class LosslessClawAdapter {
         .filter((item: any) => item.itemType === 'summary' && item.summaryId)
         .slice(-limit)
         .map((item: any) => ({ item, summaryId: item.summaryId }));
+      if (summaryItemPairs.length === 0) {
+        // conversation 存在但 DAG 从未产出 summary（compact 未执行/失败时命中的分支）
+        this.logger?.debug?.('[lossless-claw-adapter] getSummaries empty: conversation has no summary items', {
+          sessionId,
+          conversationId: conversation.conversationId,
+          contextItemCount: (contextItems ?? []).length,
+        });
+      }
 
       // Step 4: Fetch summary content for each summary item
       const result: Array<{ summaryId: string; content: string; tokenCount: number; earliestAt: string | null; latestAt: string | null; entryCount: number; startOrdinal: number | null }> = [];

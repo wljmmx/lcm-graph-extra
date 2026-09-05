@@ -816,7 +816,32 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             sessionKey, sessionFile, force: true,
             tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
             compactionTarget: 'threshold',
-          }).then(() => {}, () => {}));
+          }).then((r: any) => {
+            // 观测增强：此前 then(() => {}, () => {}) 静默吞掉 compact 失败，导致
+            // getSummaries 恒空时无任何线索。现在按结果分级记录：
+            //  - 产出新摘要 → info
+            //  - 返回 error → warn（真实异常）
+            //  - compacted=false 且无 error（DAG 已最新 / 无内容可总结）→ debug
+            if (r && r.error) {
+              ctx.logger?.warn?.('[assemble] low-tier compact failed', {
+                error: r.error,
+                reason: r.reason,
+                exhausted: r.exhausted,
+                summaryId: r.summaryId ?? null,
+              });
+            } else if (r && r.compacted) {
+              ctx.logger?.info?.('[assemble] low-tier compact produced summary', {
+                summaryId: r.summaryId ?? null,
+                reason: r.reason,
+              });
+            } else {
+              ctx.logger?.debug?.('[assemble] low-tier compact skipped / no summary produced', {
+                reason: r?.reason ?? 'unknown',
+              });
+            }
+          }, (err: any) => {
+            ctx.logger?.warn?.('[assemble] low-tier compact threw', { err: err instanceof Error ? err.message : String(err) });
+          }));
         }
       }
     } else if (needsCompact) {
