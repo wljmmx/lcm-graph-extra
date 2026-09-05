@@ -1,0 +1,111 @@
+22:51:58+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:51:58+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:51:58+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:51:58+08:00 info plugins [assemble:low-tier] getSummaries result
+22:51:58+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:51:58+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:51:58+08:00 info plugins [perf-stats] after update
+22:51:58+08:00 info plugins ⚡ assemble=228ms | init=0ms | parallel=203(L2_qmd=0,L3_graph=0,L4_exp=51) | mg=0ms | estimatedTokens=16694/1048576(1.6%) | overhead=0 | effectiveTokenCount=38445 | msgCount=80 | uncomp=0 | tier=low
+22:51:58+08:00 info plugins [assemble] MoA complexity check
+22:51:58+08:00 warn plugins [assemble] delivery guard: no user in rebuilt messages; fell back to raw transcript (non-polluting)
+22:51:58+08:00 warn plugins [assemble] degraded paths triggered
+22:51:58+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:51:59+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:51:59+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:51:59+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:51:59+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:51:59+08:00 info plugins [assemble:low-tier] getSummaries result
+22:51:59+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:51:59+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:51:59+08:00 info plugins [perf-stats] after update
+22:51:59+08:00 info plugins ⚡ assemble=199ms | init=0ms | parallel=182(L2_qmd=0,L3_graph=0,L4_exp=46) | mg=0ms | estimatedTokens=16275/1048576(1.6%) | overhead=689 | effectiveTokenCount=39410 | msgCount=82 | uncomp=0 | tier=low
+22:51:59+08:00 info plugins [assemble] MoA complexity check
+22:51:59+08:00 info provider-transport-fetch [model-fetch] start provider=deepseek api=openai-completions model=deepseek-v4-flash method=POST url=https://api.deepseek.com/chat/completions timeoutMs=3600000 proxy=none policy=custom
+22:51:59+08:00 info provider-transport-fetch [model-fetch] response provider=deepseek api=openai-completions model=deepseek-v4-flash status=200 elapsedMs=431 dispatcher=reused contentType=text/event-stream; charset=utf-8
+22:52:01+08:00 info gateway/ws ⇄ res ✓ logs.tail 80ms conn=63efd230…65c7 id=2:de3342eb-c…70ac
+22:52:02+08:00 info gateway/ws ⇄ res ✓ logs.tail 83ms conn=17e88f6e…b176 id=2:0c502f25-9…3655
+22:52:04+08:00 warn sqlite/transaction slow SQLite transaction lock wait
+22:52:04+08:00 info gateway/ws ⇄ res ✓ logs.tail 76ms conn=29e7d6f8…8b8a id=2:15074c6d-2…8da6
+22:52:11+08:00 info plugin llm completion
+22:52:23+08:00 warn sqlite/transaction slow SQLite transaction lock wait
+22:52:23+08:00 info exec elevated command python3 /tmp/ctyun_probe.py 2>&1
+22:52:24+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:52:25+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:52:25+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:52:25+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:52:25+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:52:25+08:00 info plugins [assemble:low-tier] getSummaries result
+22:52:25+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:52:25+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:52:25+08:00 info plugins [perf-stats] after update
+22:52:25+08:00 info plugins ⚡ assemble=326ms | init=0ms | parallel=304(L2_qmd=0,L3_graph=0,L4_exp=211) | mg=0ms | estimatedTokens=16347/1048576(1.6%) | overhead=757 | effectiveTokenCount=39682 | msgCount=84 | uncomp=0 | tier=low
+22:52:25+08:00 info plugins [assemble] MoA complexity check
+22:52:25+08:00 info provider-transport-fetch [model-fetch] start provider=deepseek api=openai-completions model=deepseek-v4-flash method=POST url=https://api.deepseek.com/chat/completions timeoutMs=3600000 proxy=none policy=custom
+22:52:25+08:00 info provider-transport-fetch [model-fetch] response provider=deepseek api=openai-completions model=deepseek-v4-flash status=200 elapsedMs=262 dispatcher=reused contentType=text/event-stream; charset=utf-8
+22:52:26+08:00 info plugin llm completion
+22:52:27+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:52:27+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:52:27+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:52:27+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:52:27+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:52:27+08:00 info plugins [assemble:low-tier] getSummaries result
+22:52:27+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:52:28+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:52:28+08:00 info plugins [perf-stats] after update
+22:52:28+08:00 info plugins ⚡ assemble=132ms | init=0ms | parallel=118(L2_qmd=0,L3_graph=0,L4_exp=73) | mg=0ms | estimatedTokens=16234/1048576(1.5%) | overhead=633 | effectiveTokenCount=39572 | msgCount=86 | uncomp=0 | tier=low
+22:52:28+08:00 info plugins [assemble] MoA complexity check
+22:52:28+08:00 info provider-transport-fetch [model-fetch] start provider=deepseek api=openai-completions model=deepseek-v4-flash method=POST url=https://api.deepseek.com/chat/completions timeoutMs=3600000 proxy=none policy=custom
+22:52:28+08:00 info provider-transport-fetch [model-fetch] response provider=deepseek api=openai-completions model=deepseek-v4-flash status=200 elapsedMs=208 dispatcher=reused contentType=text/event-stream; charset=utf-8
+22:52:29+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:52:30+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:52:30+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:52:30+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:52:30+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:52:30+08:00 info plugins [assemble:low-tier] getSummaries result
+22:52:30+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:52:32+08:00 warn sqlite/transaction slow SQLite transaction lock wait
+22:52:32+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:52:32+08:00 info plugins [perf-stats] after update
+22:52:32+08:00 info plugins ⚡ assemble=1547ms | init=0ms | parallel=1522(L2_qmd=0,L3_graph=0,L4_exp=1476) | mg=0ms | estimatedTokens=16078/1048576(1.5%) | overhead=664 | effectiveTokenCount=39625 | msgCount=88 | uncomp=0 | tier=low
+22:52:32+08:00 info plugins [assemble] MoA complexity check
+22:52:32+08:00 info provider-transport-fetch [model-fetch] start provider=deepseek api=openai-completions model=deepseek-v4-flash method=POST url=https://api.deepseek.com/chat/completions timeoutMs=3600000 proxy=none policy=custom
+22:52:32+08:00 info provider-transport-fetch [model-fetch] response provider=deepseek api=openai-completions model=deepseek-v4-flash status=200 elapsedMs=199 dispatcher=reused contentType=text/event-stream; charset=utf-8
+22:52:40+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:52:41+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:52:41+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:52:41+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:52:41+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:52:41+08:00 info plugins [assemble:low-tier] getSummaries result
+22:52:41+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:52:41+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:52:41+08:00 info plugins [perf-stats] after update
+22:52:41+08:00 info plugins ⚡ assemble=170ms | init=0ms | parallel=161(L2_qmd=0,L3_graph=0,L4_exp=68) | mg=0ms | estimatedTokens=17016/1048576(1.6%) | overhead=442 | effectiveTokenCount=41376 | msgCount=90 | uncomp=0 | tier=low
+22:52:41+08:00 info plugins [assemble] MoA complexity check
+22:52:41+08:00 info provider-transport-fetch [model-fetch] start provider=deepseek api=openai-completions model=deepseek-v4-flash method=POST url=https://api.deepseek.com/chat/completions timeoutMs=3600000 proxy=none policy=custom
+22:52:41+08:00 info provider-transport-fetch [model-fetch] response provider=deepseek api=openai-completions model=deepseek-v4-flash status=200 elapsedMs=236 dispatcher=reused contentType=text/event-stream; charset=utf-8
+22:52:44+08:00 info gateway remote model catalog updated; restart the Gateway to apply it
+22:52:45+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:52:46+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:52:46+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:52:46+08:00 info plugins [assemble] applied compressed tool results
+22:52:46+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:52:46+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:52:46+08:00 info plugins [assemble:low-tier] getSummaries result
+22:52:46+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+22:52:46+08:00 info plugins [perf-stats] performRetrieval stats update check
+22:52:46+08:00 info plugins [perf-stats] after update
+22:52:46+08:00 info plugins ⚡ assemble=214ms | init=0ms | parallel=196(L2_qmd=0,L3_graph=0,L4_exp=131) | mg=0ms | estimatedTokens=16733/1048576(1.6%) | overhead=871 | effectiveTokenCount=41827 | msgCount=92 | uncomp=0 | tier=low
+22:52:46+08:00 info plugins [assemble] MoA complexity check
+22:52:46+08:00 info provider-transport-fetch [model-fetch] start provider=deepseek api=openai-completions model=deepseek-v4-flash method=POST url=https://api.deepseek.com/chat/completions timeoutMs=3600000 proxy=none policy=custom
+22:52:46+08:00 info provider-transport-fetch [model-fetch] response provider=deepseek api=openai-completions model=deepseek-v4-flash status=200 elapsedMs=248 dispatcher=reused contentType=text/event-stream; charset=utf-8
+22:52:46+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: 5fdde26c89f60347745ea709b718031a
+22:52:48+08:00 warn sqlite/transaction slow SQLite transaction lock wait
+22:52:48+08:00 info plugin llm completion
+22:52:48+08:00 info gateway/ws ⇄ res ✓ logs.tail 75ms conn=53aaaa60…6291 id=2:61c1f538-0…7520
+22:52:49+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+22:52:50+08:00 info plugins [stubLargeToolPayloads] stubbed
+22:52:50+08:00 info plugins [assemble] stubLargeToolPayloads done
+22:52:50+08:00 info plugins [assemble] applied compressed tool results
+22:52:50+08:00 info plugins [DEBUG] wmConfig keys: enabled,contextWindow,dedupRounds,highPressureThreshold,mediumPressureThreshold,proactiveThreshold,systemPromptOverheadTokens,compactTimeout,maxSummaryTokenRatio,maxContextChars,compactTokenBudget
+22:52:50+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+22:52:50+08:00 info plugins [assemble:low-tier] getSummaries result

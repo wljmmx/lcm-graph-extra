@@ -175,12 +175,17 @@ function buildChronologicalContext(
   }
 
   // ── 按时序输出最终上下文 ──
+  // BUGFIX: summary 段 content 为空时跳过注入——空字符串 role:'user' 会被
+  // ensureFinalUserMessage 判为非 user，但又占据摘要槽位，导致「有摘要仍无 user」
+  // 的误判（引发交付前 guard 回退全量转录）。跳过由调用方 appendRecentUser 补真实 user。
   const result: any[] = [];
   for (const seg of kept) {
     if (seg.type === 'summary') {
+      const _summaryContent = typeof seg.summary.content === 'string' ? seg.summary.content : '';
+      if (_summaryContent.trim().length === 0) continue;
       result.push({
         role: 'user',
-        content: seg.summary.content,
+        content: _summaryContent,
         token_count: seg.summary.tokenCount,
       });
     } else {
@@ -220,6 +225,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   ctx.logger?.debug?.("[lcm-graph-extra] assemble called");
   const assembleStart = Date.now();
   let systemPromptAddition = "";
+
+  // 消息数组提至函数顶层：低压力/中/高分支与 final return 的 P0-5 trimming 均需引用，
+  // 原声明位于首个 try 块内，final return 块（独立 try）不可见 → tsc 报 Cannot find name 'messages'，
+  // 且运行时该分支一旦触发会 ReferenceError。此处统一声明，消除作用域依赖。
+  const messages = params.messages ?? [];
 
   let estimatedTokens = 0;
   // O2: 缓存 finalMessages token 估算，避免在同一 assemble 内重复计算（节省 2 次 O(n) 遍历）
@@ -318,9 +328,9 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // 1. Window Monitor — pressure check + tier determination
     // ==================================================================
     const wmConfig = ctx.api.pluginConfig?.lcmMonitor;
-    ctx.logger?.info?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
+    // 噪音治理: 该调试输出每轮 repeat，无信息量，降为 debug（原为 info 导致每轮一行）
+    ctx.logger?.debug?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
     const wm = wmConfig?.enabled !== false ? wmConfig : null;
-    const messages = params.messages ?? [];
     const tokenBudget = params.tokenBudget;
     const msgCount = messages.length;
     estimatedTokens = estimateTokensFromMessages(messages);
@@ -550,7 +560,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             );
             // Goal Anchoring
             const goalAnchorMsgs = buildGoalAnchorMsg(sessionKey);
-            finalMessages = [...goalAnchorMsgs, ...chronologicalMsgs];
+            // BUGFIX: 与 low-tier 分支对齐，确保压缩重建窗口内仍含真实 user
+            finalMessages = appendRecentUser([...goalAnchorMsgs, ...chronologicalMsgs], messages);
             ctx.logger?.info?.('[assemble:medium] messages replaced with chronological context', {
               originalMsgCount: messages.length,
               keptMsgCount: chronologicalMsgs.length,
@@ -719,7 +730,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 // Goal Anchoring: 压缩时保留原始用户目标，防止任务丢失
                 const goalAnchorMsgs = buildGoalAnchorMsg(sessionKey);
 
-                finalMessages = [...goalAnchorMsgs, ...chronologicalMsgs];
+                // BUGFIX: 与 low-tier 分支对齐，确保压缩重建窗口内仍含真实 user
+                finalMessages = appendRecentUser([...goalAnchorMsgs, ...chronologicalMsgs], messages);
                 ctx.logger?.info?.('[assemble:high] messages replaced with chronological context', {
                   originalMsgCount: messages.length,
                   keptMsgCount: chronologicalMsgs.length,
@@ -873,11 +885,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         const _lcSid2 = params.sessionId != null ? String(params.sessionId)
           : (params.session_id != null ? String(params.session_id) : String(_convId));
         const _existingSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid2, 10);
-        ctx.logger?.info?.('[assemble:low-tier] getSummaries result', {
+        // 观测: summaryCount/convId 嵌入 message（fields 在部分 logger 实现下不落盘，无法定位）
+        ctx.logger?.info?.(`[assemble:low-tier] getSummaries (count=${_existingSummaries.length}, has=${_existingSummaries.length > 0})`, {
           lcSid2: _lcSid2,
           convId: _convId,
           summaryCount: _existingSummaries.length,
           hasSummaries: _existingSummaries.length > 0,
+          emptyContentCount: _existingSummaries.filter((s) => !s.content || s.content.trim().length === 0).length,
         });
         if (_existingSummaries.length > 0) {
           const _dedupRounds = (wm as any)?.dedupRounds ?? 24;
@@ -887,7 +901,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           );
           // Goal Anchoring: 摘要注入时也保留原始目标
           const _goalAnchorMsgs = buildGoalAnchorMsg(_sessionKey);
-          finalMessages = [..._goalAnchorMsgs, ..._chronologicalMsgs];
+          // BUGFIX: chronological 分支此前缺少 appendRecentUser 兜底（对比 fallback/cascading
+          // 分支）。当 dedup 窗口内 raw 段无真实 user、且 summary 段 content 为空时，重建结果
+          // 无「非空 user」，交付前 guard 会逐轮回退为全量原始转录——丢压缩收益 + 上下文超窗。
+          // 在源头补最近真实 user，保持压缩窗口，不再依赖 guard 兜底。
+          finalMessages = appendRecentUser(
+            [..._goalAnchorMsgs, ..._chronologicalMsgs],
+            messages,
+          );
           ctx.logger?.info?.('[assemble:low-tier] messages replaced with chronological context', {
             originalMsgCount: messages.length,
             keptMsgCount: _chronologicalMsgs.length,

@@ -1057,6 +1057,22 @@ export class LosslessClawAdapter {
         if (typeof summaryStore.getSummary !== 'function') continue;
         const summary = await summaryStore.getSummary(summaryId);
         if (summary) {
+          // BUGFIX: DAG summary 对象字段不确定（content/text/summary 等），
+          // 唯一依赖 summary.content 时可能拿到空串 → buildChronologicalContext 注入
+          // 空 user 消息 → 交付 guard 误判回退全量转录。这里做多字段兜底并告警。
+          const summaryContent = (typeof summary.content === 'string' && summary.content.trim().length > 0) ? summary.content
+            : (typeof summary.text === 'string' && summary.text.trim().length > 0) ? summary.text
+            : (typeof summary.summary === 'string' && summary.summary.trim().length > 0) ? summary.summary
+            : (typeof summary.value === 'string' && summary.value.trim().length > 0) ? summary.value
+            : '';
+          if (!summaryContent) {
+            this.logger?.warn?.('[lossless-claw-adapter] summary exists but content empty', {
+              summaryId,
+              itemKeys: typeof item === 'object' && item ? Object.keys(item).slice(0, 30) : [],
+              summaryKeys: typeof summary === 'object' && summary ? Object.keys(summary).slice(0, 30) : [],
+              itemType: item?.itemType,
+            });
+          }
           const earliestAtVal = summary.earliestAt instanceof Date
             ? summary.earliestAt.toISOString()
             : (summary.earliestAt ?? null);
@@ -1074,7 +1090,7 @@ export class LosslessClawAdapter {
             : null;
           result.push({
             summaryId: summary.summaryId ?? '',
-            content: summary.content ?? '',
+            content: summaryContent,
             tokenCount: summary.tokenCount ?? 0,
             earliestAt: earliestAtVal,
             latestAt: latestAtVal,
