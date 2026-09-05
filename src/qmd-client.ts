@@ -134,7 +134,18 @@ export interface SubSearch {
 }
 
 export interface SearchParams {
-  searches: SubSearch[];
+  /**
+   * 推荐入口（对齐 tobi/qmd 官方推荐）：纯文本 query，服务端 SDK 自动扩写为
+   * lex/vec/hyde 变体并做 RRF + rerank。比手动构造 typed `searches` 更稳健。
+   * 与 `searches` 二选一。
+   */
+  query?: string;
+  /**
+   * 显式 typed 子查询（lex/vec/hyde），用于精确控制检索策略。
+   * 仅用于向后兼容/测试/需要精确控制的场景；一般检索应使用 `query`。
+   * 与 `query` 二选一。
+   */
+  searches?: SubSearch[];
   limit?: number;
   minScore?: number;
   collections?: string[];
@@ -280,6 +291,16 @@ export class QmdClient {
     let mcpStatus: 'ok' | 'fail' | 'skip' = 'skip';
     let restStatus: 'ok' | 'fail' | 'skip' = 'skip';
     let cliStatus: 'ok' | 'fail' = 'ok';
+    // 推荐入口：纯文本 `query`。做与 typed 子查询一致的基础清洗（换行折叠），
+    // 交由服务端 SDK 自动扩写为 lex/vec/hyde。typed 引号/否定/分片预处理只作用于
+    // `searches` 路径，plain query 由服务端自动扩写，无需（也不应）在此处手动处理。
+    if (typeof params.query === 'string') {
+      params = {
+        ...params,
+        query: params.query.replace(/\r\n|\n|\r/g, ' ').replace(/\s+/g, ' ').trim(),
+      };
+    }
+
     const finalizeBreakdown = (finalTotalMs: number) => {
       // 总耗时 > 5s 时输出 breakdown，与 mcpCall 内部 >3s 的 slow 日志配合定位瓶颈。
       // 解决问题：日志曾出现 assemble L2_qmd=44711ms 但 mcpCall slow 仅 5598ms 的差距，
@@ -812,14 +833,26 @@ export class QmdClient {
    */
   private async queryViaRest(params: SearchParams, avoidVec = false): Promise<QmdSearchResult[]> {
     const t0 = Date.now();
-    // MCP embed 错误时降级为 lex-only（纯 BM25），避免再次触发 vec embed 错误
+    // REST /query 端点只接受 typed `searches`（缺少会 400）。MCP 走推荐的纯文本 `query`，
+    // 但 REST 降级时无法利用服务端自动扩写，这里把纯文本 query 退化为 vec+lex typed 子查询，
+    // 与历史最佳召回形态一致。
     let searches = params.searches;
+    if (typeof params.query === 'string' && params.query.trim().length > 0 && (!searches || searches.length === 0)) {
+      searches = [
+        { type: 'vec', query: params.query },
+        { type: 'lex', query: params.query },
+      ];
+    }
     if (avoidVec) {
-      const lexOnly = params.searches.filter((s) => s.type === "lex");
+      const lexOnly = (searches ?? []).filter((s) => s.type === "lex");
       if (lexOnly.length > 0) {
         searches = lexOnly;
       }
       // 若无 lex 子查询，保留原样（rest 端点会尝试 vec，可能再次失败 → 降级 CLI）
+    }
+    // 兜底：若连 typed searches 都未提供（理论上不应发生），显式抛错避免发送缺字段 body。
+    if (!searches || searches.length === 0) {
+      throw new Error("REST /query requires typed 'searches' (plain query could not be expanded)");
     }
 
     const body: Record<string, unknown> = {
@@ -938,17 +971,26 @@ export class QmdClient {
 
   private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
     const t0 = Date.now();
+    // 推荐入口：纯文本 `query`（服务端自动扩写为 lex/vec/hyde + RRF + rerank）。
+    // 仅当调用方显式提供 typed `searches`（精确控制/向后兼容）时才走 typed 路径。
+    const usePlainQuery = typeof params.query === 'string' && params.query.trim().length > 0;
     const args: Record<string, unknown> = {
-      searches: params.searches,
       limit: params.limit ?? 10,
       minScore: params.minScore ?? 0,
       rerank: params.rerank ?? true,
     };
+    if (usePlainQuery) {
+      args.query = params.query;
+    } else {
+      args.searches = params.searches;
+    }
     if (params.collections) args.collections = params.collections;
     if (params.intent) args.intent = params.intent;
 
-    const searchTypes = params.searches.map((s) => s.type).join(',');
-    this.logger?.debug?.(`[qmd-client] queryViaMcp: searches=${params.searches.length} (${searchTypes}), limit=${args.limit}, minScore=${args.minScore}, rerank=${args.rerank}`);
+    const searchTypes = usePlainQuery
+      ? 'plain' // 推荐入口：服务端自动扩写
+      : (params.searches?.map((s) => s.type).join(',') ?? '');
+    this.logger?.debug?.(`[qmd-client] queryViaMcp: ${usePlainQuery ? 'plain query (auto-expand)' : `searches=${params.searches?.length} (${searchTypes})`}, limit=${args.limit}, minScore=${args.minScore}, rerank=${args.rerank}`);
     let data: McpToolsCallResponse;
     try {
       data = await this.mcpCall("query", args) as McpToolsCallResponse;
@@ -963,7 +1005,7 @@ export class QmdClient {
           url: `${this.mcpBaseUrl}/mcp`,
           searchTypes,
           rerank: args.rerank,
-          searchesCount: params.searches.length,
+          searchesCount: Array.isArray(params.searches) ? params.searches.length : (usePlainQuery ? 1 : 0),
           limit: args.limit,
         });
       }
@@ -1045,8 +1087,9 @@ export class QmdClient {
     params: SearchParams,
     originalErr: string,
   ): Promise<QmdSearchResult[] | null> {
-    const hasLex = params.searches.some((s) => s.type === "lex");
-    const hasVecOrHyde = params.searches.some((s) => s.type === "vec" || s.type === "hyde");
+    const typed = params.searches ?? [];
+    const hasLex = typed.some((s) => s.type === "lex");
+    const hasVecOrHyde = typed.some((s) => s.type === "vec" || s.type === "hyde");
 
     // Step 1: 重试 rerank=false（仅当有 vec/hyde 查询且原请求开启了 rerank 时才有意义）
     if (hasVecOrHyde && params.rerank !== false) {
@@ -1081,7 +1124,7 @@ export class QmdClient {
     if (hasLex) {
       this.logger.warn("[qmd-client] MCP retrying lex-only (BM25, no embedding)");
       try {
-        const lexOnly = params.searches.filter((s) => s.type === "lex");
+        const lexOnly = typed.filter((s) => s.type === "lex");
         const lexParams: SearchParams = {
           ...params,
           searches: lexOnly,
@@ -1128,16 +1171,24 @@ export class QmdClient {
   /** Build the appropriate CLI command based on search params. */
   private buildCliCommand(params: SearchParams): { cmd: string; args: string[] } {
     const n = String(params.limit ?? 10);
-    const hasLex = params.searches.some((s) => s.type === "lex");
-    const hasVec = params.searches.some((s) => s.type === "vec");
-    const hasHyde = params.searches.some((s) => s.type === "hyde");
+    const typed = params.searches ?? [];
+    const hasLex = typed.some((s) => s.type === "lex");
+    const hasVec = typed.some((s) => s.type === "vec");
+    const hasHyde = typed.some((s) => s.type === "hyde");
     const withRerank = params.rerank ?? true;
+
+    // 推荐入口：纯文本 query。CLI `qmd query` 同样接受普通文本，直接传原文。
+    if (typed.length === 0 && typeof params.query === 'string' && params.query.trim().length > 0) {
+      const args = ["query", params.query.trim(), "-n", n, "--format", "json"];
+      if (!withRerank) args.push("--no-rerank");
+      return { cmd: "qmd", args };
+    }
 
     // Pure lex -> qmd search
     // qmd search 是纯 BM25 检索，无 LLM rerank 步骤，--no-rerank 参数无效
     if (hasLex && !hasVec && !hasHyde) {
       // SEC-L: 修复前 `find(...).query!` 非空断言。虽然 hasLex 已确认存在，但显式检查更稳健。
-      const lexEntry = params.searches.find((s) => s.type === "lex");
+      const lexEntry = typed.find((s) => s.type === "lex");
       const query = lexEntry?.query ?? "";
       const args = ["search", query, "-n", n, "--format", "json"];
       return { cmd: "qmd", args };
@@ -1145,7 +1196,7 @@ export class QmdClient {
 
     // Pure vec -> qmd vsearch
     if (hasVec && !hasLex && !hasHyde) {
-      const vecEntry = params.searches.find((s) => s.type === "vec");
+      const vecEntry = typed.find((s) => s.type === "vec");
       const query = vecEntry?.query ?? "";
       return { cmd: "qmd", args: ["vsearch", query, "-n", n, "--format", "json"] };
     }
@@ -1153,7 +1204,7 @@ export class QmdClient {
     // Mixed -> use search (lightweight) if cliFallbackSearchType is "search"
     // qmd search 纯 BM25，--no-rerank 无效，不添加
     if (this.cliFallbackSearchType === 'search') {
-      const lexQuery = params.searches.find((s) => s.type === "lex")?.query ?? "";
+      const lexQuery = typed.find((s) => s.type === "lex")?.query ?? "";
       const args = ["search", lexQuery, "-n", n, "--format", "json"];
       return { cmd: "qmd", args };
     }
@@ -1163,7 +1214,7 @@ export class QmdClient {
     if (params.intent) {
       lines.push(`intent: ${params.intent}`);
     }
-    for (const s of params.searches) {
+    for (const s of typed) {
       lines.push(`${s.type}: ${s.query}`);
     }
 

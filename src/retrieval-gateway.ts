@@ -131,10 +131,7 @@ export class RetrievalGateway {
     const [qmdResults, graphResults] = await Promise.all([
       this.timedSearch('qmd', () =>
         this.qmdClient.query({
-          searches: [
-            { type: 'vec', query },
-            { type: 'lex', query },
-          ],
+          query,
           limit: 5,
           rerank: true,
         }).then((r) => this.toRetrievalResult(r)),
@@ -165,10 +162,7 @@ export class RetrievalGateway {
     const [qmdResults, graphResults, distilledExpResults, eventExpResults] = await Promise.all([
       this.timedSearch('qmd', () =>
         this.qmdClient.query({
-          searches: [
-            { type: 'vec', query },
-            { type: 'lex', query },
-          ],
+          query,
           limit: 5,
           rerank: true,
         }).then((r) => this.toRetrievalResult(r)),

@@ -380,38 +380,21 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           (async () => {
             const results: { qmd: any[]; graph: any[]; exp: any[]; openclaw: any[] } = { qmd: [], graph: [], exp: [], openclaw: [] };
 
-            // L2: qmd lex+vec 并行检索
+            // L2: qmd 检索（推荐入口：纯文本 query，服务端自动扩写 lex/vec/hyde + RRF + rerank）
+            // 原本拆成 lex/vec 两次独立 MCP 调用（不同 rerank）再由客户端合并去重——
+            // 既非 qmd 推荐、又成倍放大 MCP 调用压力与超时风险，改为单次调用。
             try {
               if (ctx.qmdClient) {
-                const [lexRes, vecRes] = await Promise.allSettled([
-                  ctx.qmdClient.query({
-                    searches: [{ type: 'lex', query }],
-                    limit: retrievalLimits.qmd,
-                    rerank: true,
-                  }),
-                  ctx.qmdClient.query({
-                    searches: [{ type: 'vec', query }],
-                    limit: retrievalLimits.qmd,
-                    rerank: false,
-                  }),
-                ]);
-                if (lexRes.status === 'fulfilled' && Array.isArray(lexRes.value)) results.qmd.push(...lexRes.value);
-                if (vecRes.status === 'fulfilled' && Array.isArray(vecRes.value)) {
-                  // 按 docid 去重合并
-                  const seenIds = new Set(results.qmd.map((r: any) => r?.docid ?? r?.file ?? ''));
-                  for (const r of vecRes.value) {
-                    const id = r?.docid ?? r?.file ?? '';
-                    if (id && !seenIds.has(id)) {
-                      seenIds.add(id);
-                      results.qmd.push(r);
-                    }
-                  }
-                }
-                ctx.logger?.info?.('[afterTurn] O7: L2 qmd prefetched', {
+                const qmdRes = await ctx.qmdClient.query({
+                  query,
+                  limit: retrievalLimits.qmd,
+                  rerank: true,
+                });
+                if (Array.isArray(qmdRes)) results.qmd.push(...qmdRes);
+                ctx.logger?.info?.('[afterTurn] L2 qmd prefetched', {
                   sessionKey: sessionKey.slice(0, 16),
-                  lexOk: lexRes.status === 'fulfilled',
-                  vecOk: vecRes.status === 'fulfilled',
-                  mergedCount: results.qmd.length,
+                  ok: Array.isArray(qmdRes),
+                  count: Array.isArray(qmdRes) ? qmdRes.length : 0,
                 });
               } else {
                 ctx.logger?.info?.('[afterTurn] O7: L2 skipped (qmdClient not present)', { sessionKey: sessionKey.slice(0, 16) });

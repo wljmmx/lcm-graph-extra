@@ -195,6 +195,58 @@ describe("QmdClient", () => {
       );
     });
 
+    // 推荐入口：纯文本 query（服务端自动扩写），而非手动 typed searches
+    it("prefers plain query (recommended) when `query` is provided", async () => {
+      mockMcpOk({
+        results: [
+          {
+            docid: "#q",
+            file: "q.md",
+            title: "Q",
+            score: 0.9,
+            snippet: "plain",
+            line: 1,
+            context: null,
+          },
+        ],
+      });
+
+      const results = await client.query({ query: "  hello   world\nnext line  " });
+
+      expect(results).toHaveLength(1);
+      // 找到 tools/call (MCP /mcp) 请求的 body
+      const mcpCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
+      );
+      expect(mcpCall).toBeDefined();
+      const mcpBody = JSON.parse((mcpCall![1] as any).body);
+      if (mcpBody.method === "tools/call") {
+        const args = mcpBody.params.arguments;
+        // 推荐入口：发送纯文本 query（已折叠换行），不发送 typed searches
+        expect(args.query).toBe("hello world next line");
+        expect(args.searches).toBeUndefined();
+      } else {
+        throw new Error("expected tools/call");
+      }
+    });
+
+    // REST /query 只接受 typed searches：纯文本 query 需退化为 vec+lex
+    it("derives typed searches from plain query on REST fallback", async () => {
+      mockMcpFail(500);
+      mockRestOk({ results: [{ docid: "#r", file: "r.md", title: "R", score: 0.6, snippet: "", line: 1, context: null }] });
+
+      const results = await client.query({ query: "hello" });
+
+      expect(results).toHaveLength(1);
+      const restCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && c[0].includes("/query"),
+      );
+      expect(restCall).toBeDefined();
+      const restBody = JSON.parse((restCall![1] as any).body);
+      expect(Array.isArray(restBody.searches)).toBe(true);
+      expect(restBody.searches.map((s: any) => s.type).sort()).toEqual(["lex", "vec"]);
+    });
+
     it("falls back to REST when MCP fails with HTTP error", async () => {
       mockMcpFail(503);
       mockRestOk({

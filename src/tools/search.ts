@@ -65,10 +65,7 @@ export function registerSearchTool(api: any): void {
             return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
           }
           const qmdResults = await qmd.query({
-            searches: [
-              { type: "lex", query },
-              { type: "vec", query },
-            ],
+            query,
             limit,
             rerank: true,
           });
