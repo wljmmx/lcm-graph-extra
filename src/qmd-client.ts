@@ -42,6 +42,26 @@ function stripVecNegation(q: string): string {
 }
 
 /**
+ * lex 模式引号容错：剥离"未配对"的英文双引号。
+ *
+ * qmd structured search (lex 模式) 把 `"` 当作短语语法，若查询文本中双引号
+ * 数量为奇数（未闭合），后端直接报错并连带 REST 一起失败（同一查询串）：
+ *   "Structured search (lex): Lex query has an unmatched double quote ("). ..."
+ *
+ * 触发来源：LLM 重写后的查询与用户消息经常包含引号文本，几乎每轮都会命中，
+ * 导致 L2 QMD 检索整条链路降级失败。
+ *
+ * 处理：双引号数量为奇数时直接移除全部双引号（未闭合无法安全补全，剥离后
+ * 退化为普通词项检索，仍可命中）；偶数为合法短语语法（如 "exact phrase"），
+ * 保持原样。
+ */
+export function stripUnmatchedLexQuotes(q: string): string {
+  const n = (q.match(/"/g) ?? []).length;
+  if (n % 2 === 0) return q;
+  return q.replace(/"/g, '');
+}
+
+/**
  * 将文本按 maxChars 拆分为多个分片，尽量在句子边界处断开。
  * 分片之间无重叠（检索后端通过 RRF 合并多子查询结果，无需客户端去重）。
  *
@@ -296,6 +316,11 @@ export class QmdClient {
         searches: params.searches.map((s) => {
           if (typeof s.query !== 'string') return s;
           let q = s.query.replace(/\r\n|\n|\r/g, ' ').replace(/\s+/g, ' ').trim();
+          // lex 不支持未配对的英文双引号（unmatched double quote 报错，几乎每轮命中）：
+          // 奇数个引号 → 剥离全部引号（退化为普通词项检索）；偶数（合法短语语法）→ 保留。
+          if (s.type === 'lex') {
+            q = stripUnmatchedLexQuotes(q);
+          }
           // vec/hyde 不支持 lex 的 -term 否定语法，qmd server 会报错：
           //   "Structured search (vec): Negation (-term) is not supported in vec/hyde queries. Use lex for exclusions."
           // 仅 lex 保留否定（lex 支持排除语义）。vec/hyde 剥离 -term 形式的否定词。

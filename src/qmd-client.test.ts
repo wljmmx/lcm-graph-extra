@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { QmdClient, QmdSearchResult } from "./qmd-client";
+import { QmdClient, QmdSearchResult, stripUnmatchedLexQuotes } from "./qmd-client";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -888,3 +888,62 @@ function mockMcpToolsCall(resultBody: unknown): void {
     json: async () => resultBody,
   } as Response);
 }
+
+
+// ---------------------------------------------------------------------------
+// lex 未配对双引号清洗（几乎每轮触发的线上问题）
+//   qmd structured search (lex) 把 " 当作短语语法，查询含奇数个双引号时后端报
+//   "Lex query has an unmatched double quote"，并连带 REST/CLI 一起失败。
+// ---------------------------------------------------------------------------
+
+describe("stripUnmatchedLexQuotes", () => {
+  it("奇数个双引号（未闭合）时剥离全部双引号", () => {
+    expect(stripUnmatchedLexQuotes('他说"对 然后怎么走')).toBe("他说对 然后怎么走");
+    expect(stripUnmatchedLexQuotes('a"b')).toBe("ab");
+    expect(stripUnmatchedLexQuotes('"未闭合')).toBe("未闭合");
+    expect(stripUnmatchedLexQuotes('"')).toBe("");
+  });
+
+  it("偶数个双引号（合法短语语法）保留", () => {
+    expect(stripUnmatchedLexQuotes('"exact phrase"')).toBe('"exact phrase"');
+    expect(stripUnmatchedLexQuotes('a "b" c')).toBe('a "b" c');
+    expect(stripUnmatchedLexQuotes('""')).toBe('""');
+  });
+
+  it("无引号时原样返回", () => {
+    expect(stripUnmatchedLexQuotes("普通查询")).toBe("普通查询");
+  });
+});
+
+describe("QmdClient.query lex 引号清洗（入口）", () => {
+  it("发送给 MCP 的 lex query 已剥离未配对引号，vec 查询保持原样", async () => {
+    const client = new QmdClient({ mcpBaseUrl: "http://test", enableCliFallback: true, qmdQueryMaxChars: 2000 });
+    const mcpCall = vi.fn(async () => ({
+      result: {
+        content: [{ text: "ok" }],
+        structuredContent: { results: [{ docid: "d1", title: "t", score: 1 }] },
+        isError: false,
+      },
+    }));
+    (client as any).mcpCall = mcpCall;
+
+    const res = await client.query({
+      searches: [
+        { type: "lex" as const, query: '他说"对 怎么处理' },
+        { type: "vec" as const, query: '他说"对 怎么处理' },
+      ],
+      limit: 5,
+      minScore: 0,
+      rerank: false,
+    });
+
+    expect(mcpCall).toHaveBeenCalledTimes(1);
+    const args = mcpCall.mock.calls[0][1] as { searches: Array<{ type: string; query: string }> };
+    const lex = args.searches.find((x) => x.type === "lex");
+    const vec = args.searches.find((x) => x.type === "vec");
+    expect(lex?.query).toBe("他说对 怎么处理");
+    expect(vec?.query).toBe('他说"对 怎么处理');
+    expect(res.length).toBe(1);
+    expect(res[0].docid).toBe("d1");
+  });
+});
