@@ -656,6 +656,11 @@ export class QmdClient {
     // 0 表示该环节未开始/未完成（失败时据此推断失败环节）。
     let fetchMs = 0;
     let parseMs = 0;
+    // P2-B2: fetch 起始时刻与超时标志需在 try 外可见——失败分支（timeout) 时 try 内
+    // 的 fetchMs 赋值不执行（恒 0），造成 "fetchMs=0ms" 误导：真实耗时应 ≈ totalMs，
+    // 否则 failedPhase='fetch' 无法区分「请求未发出」与「服务端处理挂起」两种场景。
+    let fetchStartRef = 0;
+    let fetchTimedOutRef = false;
 
     const mcpProtocol = "2026-07-28";
     const mcpMeta = {
@@ -675,11 +680,19 @@ export class QmdClient {
       // 服务端处理包含: lex(BM25) + vec(embedding+ANN) + RRF + rerank(LLM)
       // 超时多发生在此环节（rerank LLM 调用慢 或 embedding 冷启动）
       const fetchStart = Date.now();
-      // H1: 替换 AbortSignal.timeout() 为显式 setTimeout + clearTimeout，
-      // 避免 AbortSignal.timeout() 创建的定时器在 Promise settle 后无法及时释放。
+      fetchStartRef = fetchStart;
+      // P2-B2: AbortController 必须与超时联动——仅用 setTimeout reject 而不 abort fetch，
+      // Promise.race 抛错后底层连接仍悬空（socket 泄漏 + 占住服务端 handler 槽位），
+      // 逐轮堆积会自恶化：后续查询越来越慢直至几乎每轮超时（与"几乎每轮 mcpCall 超时"现象吻合）。
+      const mcpFetchAc = new AbortController();
       let mcpFetchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      fetchTimedOutRef = false;
       const mcpFetchTimeoutPromise = new Promise<never>((_, reject) => {
-        mcpFetchTimeoutHandle = setTimeout(() => reject(new Error(`MCP fetch timeout (${this.mcpQueryTimeout}ms)`)), this.mcpQueryTimeout);
+        mcpFetchTimeoutHandle = setTimeout(() => {
+          fetchTimedOutRef = true;
+          mcpFetchAc.abort();
+          reject(new Error(`MCP fetch timeout (${this.mcpQueryTimeout}ms)`));
+        }, this.mcpQueryTimeout);
       });
       // 确保 timeout promise 的 rejection 被消费（避免 unhandled rejection）
       mcpFetchTimeoutPromise.catch(() => {});
@@ -694,6 +707,7 @@ export class QmdClient {
             "Mcp-Name": toolName,
           },
           body: JSON.stringify(body),
+          signal: mcpFetchAc.signal,
         }),
         mcpFetchTimeoutPromise,
       ]) as Response;
@@ -755,6 +769,11 @@ export class QmdClient {
       const totalMs = Date.now() - t0;
       const errMsg = err instanceof Error ? err.message : String(err);
       const isTimeout = /timeout|aborted/i.test(errMsg);
+      // P2-B2: 超时分支中 try 内的 fetchMs 赋值未执行（恒 0），这里回填真实经过时间，
+      // 消除 "fetchMs=0ms" 误导——0ms 无法区分「请求未发出」与「服务端处理挂起」。
+      if (isTimeout && fetchMs === 0 && fetchStartRef > 0) {
+        fetchMs = Date.now() - fetchStartRef;
+      }
       let failedPhase: 'fetch' | 'parse' | 'post-parse';
       if (fetchMs === 0) failedPhase = 'fetch';
       else if (parseMs === 0) failedPhase = 'parse';
@@ -763,7 +782,7 @@ export class QmdClient {
       // 超时，或总耗时 >2s 的失败，都输出环节分解日志
       if (isTimeout || totalMs > 2000) {
         this.logger?.warn?.(
-          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, url=${this.mcpBaseUrl}/mcp`,
+          `[qmd-client] mcpCall 失败环节诊断: tool=${toolName}, failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, url=${this.mcpBaseUrl}/mcp${fetchTimedOutRef ? ' (timer-aborted)' : ''}`,
           {
             failedPhase,
             isTimeout,
@@ -774,6 +793,7 @@ export class QmdClient {
             mcpQueryTimeout: this.mcpQueryTimeout,
             url: `${this.mcpBaseUrl}/mcp`,
             err: errMsg,
+            timerAborted: fetchTimedOutRef,
           },
         );
       }
@@ -818,13 +838,23 @@ export class QmdClient {
     // 环节计时变量：catch 中用于定位超时环节
     let fetchMs = 0;
     let parseMs = 0;
+    // P2-B2: 与 mcpCall 同——超时分支下 try 内 fetchMs 未赋值恒 0，需回填真实耗时
+    let fetchStartRef = 0;
+    let fetchTimedOutRef = false;
     try {
       // === 环节 1: fetch (REST /query, 服务端处理) ===
       const fetchStart = Date.now();
-      // H1: 替换 AbortSignal.timeout() 为显式 setTimeout + clearTimeout
+      fetchStartRef = fetchStart;
+      // P2-B2: 超时联动 abort，释放悬空连接与服务器 handler 槽位（防止逐轮堆积自恶化）
+      const restFetchAc = new AbortController();
       let restFetchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      fetchTimedOutRef = false;
       const restFetchTimeoutPromise = new Promise<never>((_, reject) => {
-        restFetchTimeoutHandle = setTimeout(() => reject(new Error(`REST fetch timeout (${this.mcpQueryTimeout}ms)`)), this.mcpQueryTimeout);
+        restFetchTimeoutHandle = setTimeout(() => {
+          fetchTimedOutRef = true;
+          restFetchAc.abort();
+          reject(new Error(`REST fetch timeout (${this.mcpQueryTimeout}ms)`));
+        }, this.mcpQueryTimeout);
       });
       restFetchTimeoutPromise.catch(() => {});
       const resp = await Promise.race([
@@ -835,6 +865,7 @@ export class QmdClient {
             Accept: "application/json",
           },
           body: JSON.stringify(body),
+          signal: restFetchAc.signal,
         }),
         restFetchTimeoutPromise,
       ]) as Response;
@@ -872,6 +903,10 @@ export class QmdClient {
       const totalMs = Date.now() - t0;
       const errMsg = err instanceof Error ? err.message : String(err);
       const isTimeout = /timeout|aborted/i.test(errMsg);
+      // P2-B2: 超时分支回填真实 fetch 耗时，消除 fetchMs=0ms 误导
+      if (isTimeout && fetchMs === 0 && fetchStartRef > 0) {
+        fetchMs = Date.now() - fetchStartRef;
+      }
       // REST 仅有 fetch + parse 两个环节
       let failedPhase: 'fetch' | 'parse' | 'post-parse';
       if (fetchMs === 0) failedPhase = 'fetch';
@@ -880,7 +915,7 @@ export class QmdClient {
 
       if (isTimeout || totalMs > 2000) {
         this.logger?.warn?.(
-          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, url=${this.mcpBaseUrl}/query`,
+          `[qmd-client] queryViaRest 失败环节诊断: failedPhase=${failedPhase}, isTimeout=${isTimeout}, fetchMs=${fetchMs}ms, parseMs=${parseMs}ms, totalMs=${totalMs}ms, url=${this.mcpBaseUrl}/query${fetchTimedOutRef ? ' (timer-aborted)' : ''}`,
           {
             failedPhase,
             isTimeout,
@@ -893,6 +928,7 @@ export class QmdClient {
             rerank: body.rerank,
             avoidVec,
             err: errMsg,
+            timerAborted: fetchTimedOutRef,
           },
         );
       }
