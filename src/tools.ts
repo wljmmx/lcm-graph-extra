@@ -1568,7 +1568,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_get_document",
     label: "文档获取",
-    description: "Fetch a document from QMD index by file path or docid. Returns full content with fuzzy matching.",
+    description: "Fetch a document from QMD index by file path or docid. Returns full content with fuzzy matching. Use for a SINGLE document. If multiple documents are needed (e.g. several search hits), prefer lcmg_batch_get for one batch call instead of repeated get_document calls.",
     parameters: Type.Object({
       file: Type.String({ description: "File path or docid to retrieve" }),
     }),
@@ -1602,7 +1602,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_batch_get",
     label: "批量获取",
-    description: "Batch fetch documents from QMD index by glob pattern, comma-separated paths, or docid list. Max 50 docs.",
+    description: "Batch fetch documents from QMD index by glob pattern, comma-separated paths, or docid list. Max 50 docs. PREFER this over repeated lcmg_get_document when fetching several search hits or gathering context across multiple pages — one multi-get call instead of N single calls.",
     parameters: Type.Object({
       pattern: Type.String({ description: "Glob pattern, comma-separated paths, or docid list" }),
     }),
