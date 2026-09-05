@@ -147,6 +147,8 @@ export interface SearchParams {
   query?: string;
   limit?: number;
   minScore?: number;
+  /** 对齐官方 query 工具参数：参与 rerank 的最大候选数（默认 40）。控制 rerank 开销。 */
+  candidateLimit?: number;
   collections?: string[];
   intent?: string;
   rerank?: boolean;
@@ -860,6 +862,7 @@ export class QmdClient {
       // embed 错误场景下应禁用 rerank（rerank 可能依赖 vec 结果）
       rerank: avoidVec ? false : (params.rerank ?? true),
     };
+    if (params.candidateLimit) body.candidateLimit = params.candidateLimit;
     if (params.collections) body.collections = params.collections;
     if (params.intent) body.intent = params.intent;
 
@@ -981,6 +984,7 @@ export class QmdClient {
       minScore: params.minScore ?? 0,
       rerank: params.rerank ?? true,
     };
+    if (params.candidateLimit) args.candidateLimit = params.candidateLimit;
     if (useSearches) {
       args.searches = params.searches;
     } else {

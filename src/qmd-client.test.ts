@@ -239,6 +239,40 @@ describe("QmdClient", () => {
       }
     });
 
+    // 官方 query 参数表：candidateLimit 应被转发（默认 40）。仅在提供时附加。
+    it("forwards candidateLimit to MCP when provided", async () => {
+      mockMcpOk({
+        results: [
+          {
+            docid: "#c",
+            file: "c.md",
+            title: "C",
+            score: 0.8,
+            snippet: "candidate",
+            line: 1,
+            context: null,
+          },
+        ],
+      });
+
+      await client.query({
+        searches: [{ type: "lex", query: "candidate limit test" }],
+        candidateLimit: 20,
+      });
+
+      const mcpCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
+      );
+      expect(mcpCall).toBeDefined();
+      const mcpBody = JSON.parse((mcpCall![1] as any).body);
+      if (mcpBody.method === "tools/call") {
+        const args = mcpBody.params.arguments;
+        expect(args.candidateLimit).toBe(20);
+      } else {
+        throw new Error("expected tools/call");
+      }
+    });
+
     // 纯文本 query 仅作兜底（官方 skill 建议优先 structured searches）
     it("falls back to plain query when only `query` is provided", async () => {
       mockMcpOk({
