@@ -1505,12 +1505,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       const totalEst = messageTokens + additionTokens;
       if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
         const buffer: any[] = [...finalMessages];
-        const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+        // Qwen3.x 语义: developer-instructions 与 system 同为"前置指令"，必须整体保留
+        // （由 renderer/chat template 合并到头部），裁剪时一律保护，不得按普通消息删除。
+        const systemCount = buffer.filter((m: any) => m.role === 'system' || m.role === 'developer').length;
         // P0-5: per-message token 估算只算一次，trimming 循环中减去即可
         const msgTokenEst: number[] = buffer.map((m: any) => estimateTokensFromMessages([m]));
         let runningTokens = messageTokens;
         while (buffer.length > systemCount + 1) {
-          const idx = buffer.findIndex((m: any) => m.role !== 'system');
+          const idx = buffer.findIndex((m: any) => m.role !== 'system' && m.role !== 'developer');
           if (idx < 0) break;
           runningTokens -= msgTokenEst[idx];
           buffer.splice(idx, 1);
@@ -1604,10 +1606,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       const totalEst = estimateTokensFromMessages(finalMessages);
       if (contextWindow > 0 && totalEst > contextWindow * 0.85) {
         const buffer: any[] = [...finalMessages];
-        const systemCount = buffer.filter((m: any) => m.role === 'system').length;
+        // Qwen3.x 语义: developer-instructions 与 system 同为前置指令，整体保护，不参与裁剪
+        const systemCount = buffer.filter((m: any) => m.role === 'system' || m.role === 'developer').length;
         let currentEst = totalEst;
         while (buffer.length > systemCount + 1) {
-          const idx = buffer.findIndex((m: any) => m.role !== 'system');
+          const idx = buffer.findIndex((m: any) => m.role !== 'system' && m.role !== 'developer');
           if (idx < 0) break;
           const removedMsg = buffer[idx];
           const removedTokens = estimateTokensFromMessages([removedMsg]);
