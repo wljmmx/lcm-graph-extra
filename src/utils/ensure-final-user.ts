@@ -60,3 +60,22 @@ export function ensureFinalUserMessage(msgs: any[], originalMsgs: any[]): Ensure
   // 总 wedge：转录本身无 user。fail-closed——不伪造，如实保留，交由上层降级处理
   return { messages: msgs, note: 'none' };
 }
+
+/**
+ * 给重建后的消息数组补充一条最近的真实 user 消息（若缺失）。
+ *
+ * 动机：上游裁剪/重建路径（low-tier fallback、cascading trim、P0-5 trimming）可能产出
+ * 仅含 system/assistant/tool 的消息数组。若交给 ensureFinalUserMessage 处理，会逐轮
+ * 回退为「全量原始转录」——丢失裁剪效果、token 超窗，并每轮产生 from_original warn。
+ * 这里在源头保证：从 source 中取最近一条非空 user 消息补到末尾——真实内容、不伪造。
+ */
+export function appendRecentUser(built: any[], source: any[]): any[] {
+  if (hasNonEmptyUser(built)) return built;
+  if (!Array.isArray(source)) return built;
+  for (let i = source.length - 1; i >= 0; i--) {
+    if (isNonEmptyUser(source[i])) {
+      return [...built, source[i]];
+    }
+  }
+  return built;
+}
