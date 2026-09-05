@@ -195,8 +195,52 @@ describe("QmdClient", () => {
       );
     });
 
-    // 推荐入口：纯文本 query（服务端自动扩写），而非手动 typed searches
-    it("prefers plain query (recommended) when `query` is provided", async () => {
+    // 官方 skill 推荐：structured searches 优先（prefer structured searches + intent）
+    it("sends structured searches (recommended) when provided, with intent", async () => {
+      mockMcpOk({
+        results: [
+          {
+            docid: "#q",
+            file: "q.md",
+            title: "Q",
+            score: 0.9,
+            snippet: "structured",
+            line: 1,
+            context: null,
+          },
+        ],
+      });
+
+      const results = await client.query({
+        searches: [
+          { type: "lex", query: "connection pool timeout" },
+          { type: "vec", query: "why connections time out under load" },
+        ],
+        intent: "database connection pool performance issues",
+        limit: 5,
+      });
+
+      expect(results).toHaveLength(1);
+      const mcpCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
+      );
+      expect(mcpCall).toBeDefined();
+      const mcpBody = JSON.parse((mcpCall![1] as any).body);
+      if (mcpBody.method === "tools/call") {
+        const args = mcpBody.params.arguments;
+        // 推荐入口：发送 typed searches + intent，不发送裸 query
+        expect(args.searches).toHaveLength(2);
+        expect(args.searches![0].type).toBe("lex");
+        expect(args.intent).toBe("database connection pool performance issues");
+        expect(args.query).toBeUndefined();
+        expect(args.limit).toBe(5);
+      } else {
+        throw new Error("expected tools/call");
+      }
+    });
+
+    // 纯文本 query 仅作兜底（官方 skill 建议优先 structured searches）
+    it("falls back to plain query when only `query` is provided", async () => {
       mockMcpOk({
         results: [
           {
@@ -214,7 +258,6 @@ describe("QmdClient", () => {
       const results = await client.query({ query: "  hello   world\nnext line  " });
 
       expect(results).toHaveLength(1);
-      // 找到 tools/call (MCP /mcp) 请求的 body
       const mcpCall = mockFetch.mock.calls.find(
         (c) => typeof c[0] === "string" && (c[0] as string).includes("/mcp") && (c[1] as any)?.method === "POST",
       );
@@ -222,7 +265,7 @@ describe("QmdClient", () => {
       const mcpBody = JSON.parse((mcpCall![1] as any).body);
       if (mcpBody.method === "tools/call") {
         const args = mcpBody.params.arguments;
-        // 推荐入口：发送纯文本 query（已折叠换行），不发送 typed searches
+        // 仅当没有 typed searches 时才回退到纯文本 query（已折叠换行）
         expect(args.query).toBe("hello world next line");
         expect(args.searches).toBeUndefined();
       } else {

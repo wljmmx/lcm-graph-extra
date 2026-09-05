@@ -380,13 +380,16 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           (async () => {
             const results: { qmd: any[]; graph: any[]; exp: any[]; openclaw: any[] } = { qmd: [], graph: [], exp: [], openclaw: [] };
 
-            // L2: qmd 检索（推荐入口：纯文本 query，服务端自动扩写 lex/vec/hyde + RRF + rerank）
+            // L2: qmd 检索（官方 skill 推荐：structured searches + rerank，一次调用取 lex+vec best recall）
             // 原本拆成 lex/vec 两次独立 MCP 调用（不同 rerank）再由客户端合并去重——
-            // 既非 qmd 推荐、又成倍放大 MCP 调用压力与超时风险，改为单次调用。
+            // 既非官方推荐、又成倍放大 MCP 调用压力与超时风险，改为单次结构化调用。
             try {
               if (ctx.qmdClient) {
                 const qmdRes = await ctx.qmdClient.query({
-                  query,
+                  searches: [
+                    { type: 'lex', query },
+                    { type: 'vec', query },
+                  ],
                   limit: retrievalLimits.qmd,
                   rerank: true,
                 });

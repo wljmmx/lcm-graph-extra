@@ -135,17 +135,16 @@ export interface SubSearch {
 
 export interface SearchParams {
   /**
-   * 推荐入口（对齐 tobi/qmd 官方推荐）：纯文本 query，服务端 SDK 自动扩写为
-   * lex/vec/hyde 变体并做 RRF + rerank。比手动构造 typed `searches` 更稳健。
-   * 与 `searches` 二选一。
-   */
-  query?: string;
-  /**
-   * 显式 typed 子查询（lex/vec/hyde），用于精确控制检索策略。
-   * 仅用于向后兼容/测试/需要精确控制的场景；一般检索应使用 `query`。
+   * 推荐入口（对齐官方 skills/qmd/SKILL.md）：typed `searches`（lex/vec/hyde）——结构化检索，
+   * 可在受限场景下配合 `intent` 精确控制召回。官方明确"prefer structured searches"。
    * 与 `query` 二选一。
    */
   searches?: SubSearch[];
+  /**
+   * 兜底纯文本 query：服务端 SDK 自动扩写为 lex/vec/hyde。仅当调用方无可贡献的
+   * 结构化信息（无 searches）时使用。与 `searches` 二选一。
+   */
+  query?: string;
   limit?: number;
   minScore?: number;
   collections?: string[];
@@ -291,9 +290,9 @@ export class QmdClient {
     let mcpStatus: 'ok' | 'fail' | 'skip' = 'skip';
     let restStatus: 'ok' | 'fail' | 'skip' = 'skip';
     let cliStatus: 'ok' | 'fail' = 'ok';
-    // 推荐入口：纯文本 `query`。做与 typed 子查询一致的基础清洗（换行折叠），
-    // 交由服务端 SDK 自动扩写为 lex/vec/hyde。typed 引号/否定/分片预处理只作用于
-    // `searches` 路径，plain query 由服务端自动扩写，无需（也不应）在此处手动处理。
+    // 兜底入口：纯文本 `query`。做与 typed 子查询一致的基础清洗（换行折叠）。
+    // 结构化 `searches` 路径的引号/否定/分片预处理只作用于 typed 子查询；
+    // plain query 由服务端自动扩写（skill 建议优先 structured searches，此处仅兜底）。
     if (typeof params.query === 'string') {
       params = {
         ...params,
@@ -833,9 +832,8 @@ export class QmdClient {
    */
   private async queryViaRest(params: SearchParams, avoidVec = false): Promise<QmdSearchResult[]> {
     const t0 = Date.now();
-    // REST /query 端点只接受 typed `searches`（缺少会 400）。MCP 走推荐的纯文本 `query`，
-    // 但 REST 降级时无法利用服务端自动扩写，这里把纯文本 query 退化为 vec+lex typed 子查询，
-    // 与历史最佳召回形态一致。
+    // REST /query 端点只接受 typed `searches`（缺少会 400）。MCP 按官方 skill 优先结构化
+    // searches，此处调用方即便只给纯文本 `query`，也退化为 vec+lex typed 子查询，兼容 REST。
     let searches = params.searches;
     if (typeof params.query === 'string' && params.query.trim().length > 0 && (!searches || searches.length === 0)) {
       searches = [
@@ -971,26 +969,30 @@ export class QmdClient {
 
   private async queryViaMcp(params: SearchParams): Promise<QmdSearchResult[]> {
     const t0 = Date.now();
-    // 推荐入口：纯文本 `query`（服务端自动扩写为 lex/vec/hyde + RRF + rerank）。
-    // 仅当调用方显式提供 typed `searches`（精确控制/向后兼容）时才走 typed 路径。
-    const usePlainQuery = typeof params.query === 'string' && params.query.trim().length > 0;
+    // 官方 skill 推荐（skills/qmd/SKILL.md）：MCP query 工具"prefer structured searches"，并
+    // 主动提供 intent，不要依赖裸纯文本 query 的服务端自动扩写。因此 typed `searches` 是
+    // 主路径；仅当调用方没有结构化信息可贡献（无 searches）时才回退到纯文本 `query` 自动扩写。
+    const useSearches = Array.isArray(params.searches) && params.searches.length > 0;
+    if (!useSearches && !(typeof params.query === 'string' && params.query.trim().length > 0)) {
+      throw new Error("SearchParams requires either structured 'searches' or plain-text 'query'");
+    }
     const args: Record<string, unknown> = {
       limit: params.limit ?? 10,
       minScore: params.minScore ?? 0,
       rerank: params.rerank ?? true,
     };
-    if (usePlainQuery) {
-      args.query = params.query;
-    } else {
+    if (useSearches) {
       args.searches = params.searches;
+    } else {
+      args.query = params.query;
     }
     if (params.collections) args.collections = params.collections;
     if (params.intent) args.intent = params.intent;
 
-    const searchTypes = usePlainQuery
-      ? 'plain' // 推荐入口：服务端自动扩写
-      : (params.searches?.map((s) => s.type).join(',') ?? '');
-    this.logger?.debug?.(`[qmd-client] queryViaMcp: ${usePlainQuery ? 'plain query (auto-expand)' : `searches=${params.searches?.length} (${searchTypes})`}, limit=${args.limit}, minScore=${args.minScore}, rerank=${args.rerank}`);
+    const searchTypes = useSearches
+      ? (params.searches!.map((s) => s.type).join(',') ?? '')
+      : 'plain';
+    this.logger?.debug?.(`[qmd-client] queryViaMcp: ${useSearches ? `searches=${params.searches!.length} (${searchTypes})` : 'plain query (auto-expand fallback)'}, limit=${args.limit}, minScore=${args.minScore}, rerank=${args.rerank}`);
     let data: McpToolsCallResponse;
     try {
       data = await this.mcpCall("query", args) as McpToolsCallResponse;
@@ -1005,7 +1007,7 @@ export class QmdClient {
           url: `${this.mcpBaseUrl}/mcp`,
           searchTypes,
           rerank: args.rerank,
-          searchesCount: Array.isArray(params.searches) ? params.searches.length : (usePlainQuery ? 1 : 0),
+          searchesCount: Array.isArray(params.searches) ? params.searches.length : (useSearches ? 1 : 0),
           limit: args.limit,
         });
       }
