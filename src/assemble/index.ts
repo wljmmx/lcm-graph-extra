@@ -214,6 +214,24 @@ function buildGoalAnchorMsg(sessionKey: string): Array<{ role: string; content: 
   return [];
 }
 
+/**
+ * SD-DEF-1: 新会话残留转录前缀检测（纯函数，便于单测）。
+ *
+ * 触发条件（同时满足）：
+ *   1. 引擎侧（lossless-claw）未压缩消息数 ≤ 3 —— 新会话存储干净；
+ *   2. SDK 转录前缀快照条数 > 30 —— 输入侧携带大量旧消息；
+ *   3. 两者差距 > 10 —— 旧前缀明显多于新会话真实消息。
+ *
+ * 满足时说明 host 在 /new 后未正确轮换转录前缀（openclaw#57020/#72604/#73784），
+ * 应把输入按新会话看待，丢弃旧前缀仅保留最近消息。
+ */
+export function detectStaleTranscriptPrefix(uncompressedMsgs: number, msgCount: number): boolean {
+  return (
+    uncompressedMsgs >= 0 && uncompressedMsgs <= 3 &&
+    msgCount > 30 && msgCount - uncompressedMsgs > 10
+  );
+}
+
 export async function assemble(ctx: AssembleContext, params: any): Promise<AssembleResult> {
   // AbortSignal support - early exit if cancelled
   const signal = (params as any).abortSignal || (params as any).signal;
@@ -229,7 +247,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   // 消息数组提至函数顶层：低压力/中/高分支与 final return 的 P0-5 trimming 均需引用，
   // 原声明位于首个 try 块内，final return 块（独立 try）不可见 → tsc 报 Cannot find name 'messages'，
   // 且运行时该分支一旦触发会 ReferenceError。此处统一声明，消除作用域依赖。
-  const messages = params.messages ?? [];
+  // SD-DEF-1: 新会话残留转录前缀防御需要替换消息源（裁剪旧前缀），因此用 let。
+  let messages = Array.isArray(params.messages) ? [...params.messages] : [];
 
   let estimatedTokens = 0;
   // O2: 缓存 finalMessages token 估算，避免在同一 assemble 内重复计算（节省 2 次 O(n) 遍历）
@@ -332,7 +351,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     ctx.logger?.debug?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
     const wm = wmConfig?.enabled !== false ? wmConfig : null;
     const tokenBudget = params.tokenBudget;
-    const msgCount = messages.length;
+    // SD-DEF-1: msgCount 需在残留前缀防御裁剪后同步更新，故用 let。
+    let msgCount = messages.length;
     estimatedTokens = estimateTokensFromMessages(messages);
     const modelFullId = typeof params.model === "string" ? params.model : "";
     let providerModelCtx = ctx.modelRegistry ? ctx.modelRegistry[modelFullId] : undefined;
@@ -370,7 +390,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // BUG-AUDIT: overhead 预算同样按 sessionId 隔离，避免 /new 后沿用上会话的注入开销统计
     _overheadCacheKey = resolveSessionCacheKey(params) || ((params as any).conversationId ?? "default");
     const overheadTokens = getOverhead(_overheadCacheKey);
-    const effectiveTokenCount = estimatedTokens + overheadTokens;
+    // SD-DEF-1: 残留前缀防御裁剪后需重算 effectiveTokenCount，故用 let。
+    let effectiveTokenCount = estimatedTokens + overheadTokens;
     let tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
 
     tier = 'low';
@@ -406,6 +427,36 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             });
           }
         }
+      }
+
+      // SD-DEF-1: 新会话残留转录前缀防御。
+      // 现象（/new 后）：sessionId 已换新、引擎存储干净（uncomp≤3），但 SDK 转录前缀
+      // 快照仍含旧会话大量消息（msgCount 远大于 uncomp）——OpenClaw host 已知问题：
+      // sessionFile 残留不轮换 / 历史 replay 跨 /new 边界（openclaw#57020 / #72604 / #73784）。
+      // 若让 209 条旧消息直接参与下方 tier 判定与窗口监控，会误判高压、把残留旧上下文
+      // 喂给模型。处置：按新会话看待输入，丢弃旧前缀仅保留最近 _SD_KEEP 条
+      // （与 low-tier 无摘要 fallback 的 keep=8 对齐），并同步重算该轮压力指标。
+      if (detectStaleTranscriptPrefix(uncompressedMsgs, msgCount)) {
+        const _sdSessionId = typeof params.sessionId === 'string' ? params.sessionId
+          : (typeof params.session_id === 'string' ? params.session_id : String(_wmConvId ?? ''));
+        const _sdKeep = 8;
+        const _sdTrimmed = messages.slice(-_sdKeep);
+        ctx.logger?.warn?.('[assemble] stale transcript prefix on fresh session detected — trimming old messages', {
+          sessionId: _sdSessionId,
+          convId: _wmConvId,
+          originalMsgCount: msgCount,
+          uncompressedMsgs,
+          keptMsgCount: _sdTrimmed.length,
+          droppedMsgCount: msgCount - _sdTrimmed.length,
+        });
+        messages = _sdTrimmed;
+        msgCount = messages.length;
+        // delegate 后续所有消费 messages / msgCount / estimatedTokens 的路径
+        // （tier 判定、检索 query 构建、压缩决策）一律基于裁剪后的新会话输入。
+        estimatedTokens = estimateTokensFromMessages(messages);
+        effectiveTokenCount = estimatedTokens + overheadTokens;
+        tokenRatio = contextWindow > 0 ? effectiveTokenCount / contextWindow : 0;
+        markDegraded('stale_transcript_prefix_new_session');
       }
 
       const activeMsgCount = uncompressedMsgs >= 0 ? uncompressedMsgs : msgCount;
