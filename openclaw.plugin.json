@@ -193,9 +193,9 @@
       },
       "qmdMcpQueryTimeout": {
         "type": "integer",
-        "default": 15000,
+        "default": 30000,
         "minimum": 1000,
-        "description": "QMD MCP/REST query timeout (ms). First query needs embedding model cold-start (4-5s), later queries ~300-400ms. Default 15s covers cold-start and queuing scenarios."
+        "description": "QMD MCP/REST query timeout (ms). First query needs embedding model cold-start (4-5s), later queries ~300-400ms. Remote LAN qmd with local LLM rerank can take 10s+ per query. Default 30s (SD-DEF-3; was 15s)."
       },
       "distillationIntervalMs": {
         "type": "integer",

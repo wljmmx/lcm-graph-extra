@@ -160,9 +160,11 @@ export interface QmdClientOptions {
   mcpTimeout?: number;
   /**
    * MCP 工具调用（查询）超时（ms）。
-   * 首次查询需要 embedding 模型冷启动（4-5s），后续查询仅 300-400ms。
+   * 首次查询需要 embedding 模型冷启动（4-5s），后续查询仅 300-400ms，
+   * 局域网远程 qmd + 本地 LLM rerank 场景单次可达 10s+。
    * 修复前：mcpTimeout 同时用于 init 和 query，3s 太短导致首次查询永远超时 → 降级 REST。
-   * 修复后：分离两个超时，query 默认 8000ms 覆盖冷启动，用户可通过 qmdMcpQueryTimeout 覆盖。
+   * 修复后：分离两个超时，query 默认 30000ms 覆盖冷启动 + 远程排队（SD-DEF-3），
+   * 用户可通过 qmdMcpQueryTimeout 覆盖。
    */
   mcpQueryTimeout?: number;
   cliTimeout?: number;
@@ -207,8 +209,9 @@ export const QMD_CLIENT_DEFAULTS = {
   mcpTimeout: 3000,
   // MCP 工具调用（查询）超时。
   // 首次查询需要 embedding 模型冷启动（4-5s），后续查询仅 300-400ms。
-  // 设为 15000ms 覆盖冷启动 + 排队场景。用户可通过 qmdMcpQueryTimeout 配置覆盖。
-  mcpQueryTimeout: 15000,
+  // 设为 30000ms 覆盖冷启动 + 排队场景 + 局域网远程服务（本地 LLM rerank 单次可 10s+）。
+  // 用户可通过 qmdMcpQueryTimeout 配置覆盖。（SD-DEF-3: 原 15000ms 对远程 rerank 偏紧）
+  mcpQueryTimeout: 30000,
   cliTimeout: 30_000,
   // P2-B1: 混合搜索（lex+vec）降级时，默认走完整 hybrid 路径（qmd query 多行 typed query），
   // 而非 'search'（纯文本，丢失向量部分）。仅在显式配置 'search' 时才用轻量降级。
@@ -246,6 +249,9 @@ export class QmdClient {
   private mcpAvailable: boolean | null = null;
   /** 最近一次 MCP 失败是否为 embed 维度错误（用于决定 REST 降级是否避开 vec） */
   private lastMcpErrorIsEmbed = false;
+  /** SD-DEF-3: 最近一次 MCP 失败是否超时（局域网远程 + 本地 LLM rerank 场景 MCP 常 15s+）。
+   *  超时后 REST 降级自动 RRF-only：避免同价重查询重跑两遍，也减少对服务端的双倍挤压。 */
+  private lastMcpTimeout = false;
   /**
    * v2.5.0: 连续 context size 错误计数器。
    * 当 MCP 连续返回 context size 错误 ≥ 阈值时，自动禁用 vec/hyde 搜索（仅用 lex），
@@ -471,6 +477,8 @@ export class QmdClient {
         this.mcpAvailable = false;
         this.scheduleRecovery();
         this.lastMcpErrorIsEmbed = isEmbedError;
+        // SD-DEF-3: 超时标记 → REST 降级改为 RRF-only（rerank=false）
+        this.lastMcpTimeout = /timeout|aborted/i.test(_mcpErr);
         if (isEmbedError) {
           const reason = isContextSizeError ? "context size exceeded" : "model dim mismatch";
           this.logger.warn(`[qmd-client] MCP embed error (${reason}), falling back to REST lex-only`, { err: _mcpErr });
@@ -492,10 +500,12 @@ export class QmdClient {
 
     // 2. REST /query 备选 — 仅在 MCP 失败后启用。
     //    若 MCP 失败是 embed 维度错误，REST 降级为 lex-only 避免再次触发 vec embed 错误。
+    //    SD-DEF-3: MCP 超时的查询重试自动 RRF-only（rerank=false），避免同价重查询
+    //    重跑两遍（服务端还在处理被 abort 的 MCP 查询时，REST 再压一记完整 load）。
     if (this.restAvailable !== false) {
       const restStart = Date.now();
       try {
-        const results = await this.queryViaRest(params, this.lastMcpErrorIsEmbed);
+        const results = await this.queryViaRest(params, this.lastMcpErrorIsEmbed, this.lastMcpTimeout);
         this.restAvailable = true;
         this.clearRecovery();
         restMs = Date.now() - restStart;
@@ -831,8 +841,10 @@ export class QmdClient {
    * @param avoidVec 为 true 时只保留 lex 子查询，避开 vec embed 路径。
    *   用于 MCP 失败原因是 embed 维度错误时，避免 REST 再次触发同样的错误。
    *   若过滤后无 lex 子查询，退化为使用原始所有子查询（保证不返回 0 结果的空操作）。
+   * @param skipRerank 为 true 时关闭 LLM rerank（RRF-only），用于 MCP 超时后的重试：
+   *   服务端已因 rerank LLM 慢而超时，重试降级 RRF-only 可显著降低服务端负载与等待。
    */
-  private async queryViaRest(params: SearchParams, avoidVec = false): Promise<QmdSearchResult[]> {
+  private async queryViaRest(params: SearchParams, avoidVec = false, skipRerank = false): Promise<QmdSearchResult[]> {
     const t0 = Date.now();
     // REST /query 端点只接受 typed `searches`（缺少会 400）。MCP 按官方 skill 优先结构化
     // searches，此处调用方即便只给纯文本 `query`，也退化为 vec+lex typed 子查询，兼容 REST。
@@ -860,7 +872,9 @@ export class QmdClient {
       limit: params.limit ?? 10,
       minScore: params.minScore ?? 0,
       // embed 错误场景下应禁用 rerank（rerank 可能依赖 vec 结果）
-      rerank: avoidVec ? false : (params.rerank ?? true),
+      // SD-DEF-3: MCP 超时后 REST 重试同样关闭 rerank（RRF-only）——服务端已因
+      // 耗时的 rerank LLM 调用而超时，保留 rerank 只会再等一轮且双倍挤压服务端。
+      rerank: (avoidVec || skipRerank) ? false : (params.rerank ?? true),
     };
     if (params.candidateLimit) body.candidateLimit = params.candidateLimit;
     if (params.collections) body.collections = params.collections;
@@ -1245,6 +1259,7 @@ export class QmdClient {
           // REST 仅作 MCP 失败的备选，保持 undetermined (null)，下次 query 时按需探测。
           this.mcpAvailable = true;
           this.lastMcpErrorIsEmbed = false; // 恢复 MCP 时清除 embed 错误标记
+          this.lastMcpTimeout = false;      // SD-DEF-3: 恢复 MCP 时清除超时标记
           this._vecContextErrorCount = 0;   // v2.5.0: 恢复时重置 context size 计数器
           this._vecAutoDisabled = false;    // v2.5.0: 恢复时重新启用 vec 搜索
           this._emptyResultCount = 0;       // O6: 恢复时重置空结果计数器

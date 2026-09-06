@@ -966,6 +966,31 @@ describe("QmdClient", () => {
       expect(results[0].docid).toBe("#after-timeout");
     });
 
+    // SD-DEF-3: MCP 超时后 REST 重试应自动 RRF-only（rerank=false），
+    // 避免同价重查询重跑两遍、双倍挤压局域网远程 qmd 服务端。
+    it("MCP 超时后 REST 降级请求带 rerank=false（RRF-only）", async () => {
+      mockMcpTimeout();
+      mockRestOk({
+        results: [{ docid: "#rrf", file: "rrf.md", title: "RRF", score: 0.6, snippet: "", line: 1, context: null }],
+      });
+
+      const results = await client.query({
+        searches: [{ type: "lex", query: "kw" }, { type: "vec", query: "kw" }],
+        rerank: true, // 调用方请求 rerank，但 MCP 已超时 → REST 必须降级为 false
+      });
+      expect(results).toHaveLength(1);
+      expect(results[0].docid).toBe("#rrf");
+
+      const restCall = mockFetch.mock.calls.find(
+        (c) => typeof c[0] === "string" && (c[0] as string).includes("/query") && (c[1] as any)?.method === "POST",
+      );
+      expect(restCall).toBeDefined();
+      const restBody = JSON.parse((restCall![1] as any).body);
+      expect(restBody.rerank).toBe(false);
+      // 保留两个 typed 子查询（RRF-only 仅关 rerank，不丢 vec 语义）
+      expect(restBody.searches).toHaveLength(2);
+    });
+
     it("REST 超时后定时器被正确释放，继续走 CLI 降级", async () => {
       mockMcpFail(500);
       mockRestTimeout();

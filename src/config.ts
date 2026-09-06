@@ -131,7 +131,7 @@ export const PluginConfigSchema = Type.Object({
 
   // QMD MCP 超时配置（index.ts 中读取并传入 QmdClient 构造函数）
   qmdMcpTimeout: Type.Number({ default: 3_000, minimum: 500 }),
-  qmdMcpQueryTimeout: Type.Number({ default: 15_000, minimum: 1_000, description: 'QMD MCP/REST 查询超时（ms）。原默认 8s 在本地模型冷启动/排队场景下不足，提升至 15s 以覆盖更多场景' }),
+  qmdMcpQueryTimeout: Type.Number({ default: 30_000, minimum: 1_000, description: 'QMD MCP/REST 查询超时（ms）。局域网远程 qmd + 本地 LLM rerank 单次可达 10s+，默认 30s（SD-DEF-3；原 15s 偏紧）' }),
 
   distillationIntervalMs: Type.Number({ default: 2 * 60 * 60 * 1000 }),
 
@@ -520,7 +520,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   cliFallbackSearchType: 'hybrid',
   enableCliFallback: true,
   qmdMcpTimeout: 3_000,
-  qmdMcpQueryTimeout: 15_000,
+  qmdMcpQueryTimeout: 30_000,
   distillationIntervalMs: 2 * 60 * 60 * 1000,
   tripletTimeoutMs: 60_000,
   experienceTtlIntervalMs: 24 * 60 * 60 * 1000,

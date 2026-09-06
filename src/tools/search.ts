@@ -70,7 +70,9 @@ export function registerSearchTool(api: any): void {
               { type: "vec", query },
             ],
             limit,
-            rerank: true,
+            // SD-DEF-3: 工具拉取检索为尽力而为的辅助查询，RRF-only 免付 LLM rerank
+            // 延迟，降低局域网远程 qmd 的压力（rerank 单次 10s+ 常见）。
+            rerank: false,
           });
           if (qmdResults.length > 0) {
             results.push(`## 📄 qmd memory (${qmdResults.length} hits)`);
