@@ -5,6 +5,9 @@
  */
 
 import { backgroundTasks } from '../async/task-registry.js';
+// O7+: 跨轮预取队列 + 共享拉取/覆盖合并/时间衰减辅助
+import { retrievalPrefetchQueue } from '../async/retrieval-prefetch-queue.js';
+import { runRetrievalPrefetch, writePrefetchCache } from '../assemble/retrieval-prefetch.js';
 import { extractTopKeywords } from '../plugin/keywords.js';
 import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
@@ -356,8 +359,12 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     }
 
     // ==================================================================
-    // v2.8.0 O7: 全量异步预取 — L2(qmd lex+vec) + L3(graph) + L4(experience)
-    // 当前轮永远只使用上一轮预取的结果，检索耗时完全从用户感知路径移除
+    // v2.8.0 O7 + O7+: 全量检索预取 — L2/L3/L4 + 官方记忆
+    // O7 原设计：当前轮永远只使用上一轮预取的结果。
+    // O7+ 升级：改为跨轮预取队列——按 sessionKey+查询相似度合并去重，有界并发执行，
+    //      结果覆盖式合并（保留 TTL + 时间衰减 TOP-K）写回缓存，跨轮复用。
+    //      不再"每次 afterTurn 盲跑整套 L2/L3"；查询未变的轮直接命中队列，减少重复检索、
+    //      避免占满 Ollama 槽位、消除异步期间的时序卡点。
     // ==================================================================
     if (ctx.prefetchCache && userContent) {
       try {
@@ -369,179 +376,56 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           const query = userContent.slice(0, 500); // 截断查询，避免过长
           const retrievalLimits = { qmd: 5, graph: 5, exp: 3 };
 
-          ctx.logger?.info?.('[afterTurn] O7: full prefetch starting', {
+          ctx.logger?.info?.('[afterTurn] O7: full prefetch enqueue', {
             sessionKey: sessionKey.slice(0, 16),
             queryLen: query.length,
             limits: retrievalLimits,
           });
 
-          // 异步预取 L2+L3+L4，不阻塞 afterTurn 返回
-          // 不使用 backgroundTasks（避免 dispose 时被 5s 超时截断）
-          (async () => {
-            const results: { qmd: any[]; graph: any[]; exp: any[]; openclaw: any[] } = { qmd: [], graph: [], exp: [], openclaw: [] };
+          const deps = {
+            logger: ctx.logger,
+            qmdClient: ctx.qmdClient,
+            graphAdapter: ctx.graphAdapter,
+            expStore: ctx.expStore,
+          } as const;
 
-            // L2: qmd 检索（structured searches，一次调用取 lex+vec best recall）
-            // 原本拆成 lex/vec 两次独立 MCP 调用（不同 rerank）再由客户端合并去重——
-            // 既非官方推荐、又成倍放大 MCP 调用压力与超时风险，改为单次结构化调用。
-            // SD-DEF-3: afterTurn 预取是非关键路径（乐观加速，不阻塞管线）——
-            // rerank=false (RRF-only) 免去每次预取都付一次 LLM rerank 延迟，
-            // 对局域网远程 qmd（单次 rerank 10s+）显著减压。
+          // v2.3.6 链路 2 采集端：L3 召回节点录入 SessionRecallCache，供下一轮
+          // processFeedback 自动判定（仅真实用户对话采集，避免污染 M 矩阵）。
+          const onGraph = (nodeIds: string[], sk: string, q: string): void => {
             try {
-              if (ctx.qmdClient) {
-                const qmdRes = await ctx.qmdClient.query({
-                  searches: [
-                    { type: 'lex', query },
-                    { type: 'vec', query },
-                  ],
-                  limit: retrievalLimits.qmd,
-                  rerank: false,
-                });
-                if (Array.isArray(qmdRes)) results.qmd.push(...qmdRes);
-                ctx.logger?.info?.('[afterTurn] L2 qmd prefetched', {
-                  sessionKey: sessionKey.slice(0, 16),
-                  ok: Array.isArray(qmdRes),
-                  count: Array.isArray(qmdRes) ? qmdRes.length : 0,
-                });
-              } else {
-                ctx.logger?.info?.('[afterTurn] O7: L2 skipped (qmdClient not present)', { sessionKey: sessionKey.slice(0, 16) });
+              if (ctx.graphAdapter?.recordRecallToSessionCache && isLearningEligibleSession(sk)) {
+                ctx.graphAdapter.recordRecallToSessionCache(sk, q, nodeIds);
               }
-            } catch (l2Err) {
-              ctx.logger?.warn?.('[afterTurn] O7: L2 prefetch failed (non-fatal)', {
-                err: (l2Err as Error).message,
+            } catch (rrErr) {
+              ctx.logger?.debug?.('[afterTurn] O7: recordRecallToSessionCache failed (non-fatal)', {
+                err: rrErr instanceof Error ? rrErr.message : String(rrErr),
               });
             }
+          };
 
-            // L3: Neo4j knowledge graph
-            try {
-              if (ctx.graphAdapter) {
-                const graphRes = await ctx.graphAdapter.searchWithCache(query, retrievalLimits.graph);
-                if (Array.isArray(graphRes)) results.graph = graphRes;
-                ctx.logger?.info?.('[afterTurn] O7: L3 graph prefetched', {
-                  sessionKey: sessionKey.slice(0, 16),
-                  count: results.graph.length,
-                });
-                // v2.3.6 链路 2 采集端：把本次 L3 召回节点录入 SessionRecallCache，
-                // 供下一轮 agent_end consume() 后 processFeedback 自动判定（Tier 1 零 LLM 成本）。
-                // 仅真实用户对话采集（cron/心跳/系统会话跳过，避免污染 M 矩阵）。
-                if (graphRes?.length && ctx.graphAdapter.recordRecallToSessionCache && isLearningEligibleSession(sessionKey)) {
-                  const nodeIds = graphRes
-                    .map((r: any) => r?.metadata?.nodeId)
-                    .filter(Boolean) as string[];
-                  // [DEBUG-CLOSED-LOOP 采集端] 记录 L3 结果结构与 nodeId 提取结果，定位断点
-                  const firstKeys = graphRes[0] ? Object.keys(graphRes[0] as Record<string, unknown>) : [];
-                  const firstMetaKeys =
-                    graphRes[0] && typeof (graphRes[0] as any)?.metadata === 'object'
-                      ? Object.keys((graphRes[0] as any).metadata as Record<string, unknown>)
-                      : [];
-                  
-                  if (nodeIds.length) {
-                    try {
-                      ctx.graphAdapter.recordRecallToSessionCache(sessionKey, query, nodeIds);
-                    } catch (rrErr) {
-                      ctx.logger?.debug?.('[afterTurn] O7: recordRecallToSessionCache failed (non-fatal)', { err: rrErr instanceof Error ? rrErr.message : String(rrErr) });
-                    }
-                  }
-                } else {
-                  
-                }
-              } else {
-                ctx.logger?.info?.('[afterTurn] O7: L3 skipped (graphAdapter not present)', { sessionKey: sessionKey.slice(0, 16) });
-              }
-            } catch (l3Err) {
-              ctx.logger?.warn?.('[afterTurn] O7: L3 prefetch failed (non-fatal)', {
-                err: (l3Err as Error).message,
-              });
-            }
-
-            // L4: Experience search
-            try {
-              if (ctx.expStore) {
-                const expRes = await ctx.expStore.searchByQuery({
-                  query,
-                  limit: retrievalLimits.exp,
-                  minScore: 0.3,
-                });
-                if (Array.isArray(expRes)) results.exp = expRes;
-                ctx.logger?.info?.('[afterTurn] O7: L4 experience prefetched', {
-                  sessionKey: sessionKey.slice(0, 16),
-                  count: results.exp.length,
-                });
-              } else {
-                ctx.logger?.info?.('[afterTurn] O7: L4 skipped (expStore not present)', { sessionKey: sessionKey.slice(0, 16) });
-              }
-            } catch (l4Err) {
-              ctx.logger?.warn?.('[afterTurn] O7: L4 prefetch failed (non-fatal)', {
-                err: (l4Err as Error).message,
-              });
-            }
-
-            // L1.5: OpenClaw 官方记忆（本地 per-agent SQLite，同步快查，几 ms 级）
-            // 复用 dashboard 同款官方记忆读取器；无 openclaw 2.0 布局 / 表缺失 → 空结果，非致命
-            try {
-              if (query.trim().length > 0) {
-                const { searchAgentMemory } = await import('../adapters/openclaw-agent-db.js');
-                const memRes = searchAgentMemory(query.slice(0, 300), { maxChunksPerAgent: 3 });
-                if (Array.isArray(memRes)) results.openclaw = memRes;
-                ctx.logger?.info?.('[afterTurn] O7: openclaw memory prefetched', {
-                  sessionKey: sessionKey.slice(0, 16),
-                  count: results.openclaw.length,
-                  agents: [...new Set(memRes.map((m: any) => m.agentId))],
+          const status = retrievalPrefetchQueue.enqueue({
+            sessionKey,
+            query,
+            run: (async () => {
+              try {
+                const now = Date.now();
+                const results = await runRetrievalPrefetch(deps, sessionKey, query, retrievalLimits, { onGraph });
+                // 覆盖式写缓存（last-known-good + LRU + 时间衰减 overlay 合并）
+                writePrefetchCache(ctx.prefetchCache, sessionKey, results, query, now, ctx.logger);
+              } catch (e) {
+                ctx.logger?.debug?.('[afterTurn] O7: prefetch run failed (non-fatal)', {
+                  err: (e as Error).message,
                 });
               }
-            } catch (memErr) {
-              ctx.logger?.debug?.('[afterTurn] O7: openclaw memory prefetch failed (non-fatal)', {
-                err: (memErr as Error)?.message ?? String(memErr),
-              });
-            }
-
-            // 写入预取缓存（LRU 上限保护）
-            // v2.8.1 非MoA 修复: 仅当至少一层有数据才覆盖缓存; 若各层全空(检索失败),
-            // 保留上一份非空条目(last-known-good), 避免用空结果"毒化"缓存导致下一轮
-            // 伪命中空数据 → 模型反复"我再查"。
-            const hasAnyData = results.qmd.length > 0 || results.graph.length > 0 || results.exp.length > 0 || results.openclaw.length > 0;
-            if (ctx.prefetchCache) {
-              if (hasAnyData) {
-                if (ctx.prefetchCache.size >= 200) {
-                  const oldest = ctx.prefetchCache.keys().next().value;
-                  if (oldest !== undefined) ctx.prefetchCache.delete(oldest);
-                }
-                ctx.prefetchCache.set(sessionKey, {
-                  qmdResults: results.qmd,
-                  graphResults: results.graph,
-                  expResults: results.exp,
-                  openclawResults: results.openclaw,
-                  query,
-                  ts: Date.now(),
-                });
-                ctx.logger?.info?.('[afterTurn] O7: prefetch cache written', {
-                  sessionKey: sessionKey.slice(0, 16),
-                  qmdCount: results.qmd.length,
-                  graphCount: results.graph.length,
-                  expCount: results.exp.length,
-                  openclawCount: results.openclaw.length,
-                });
-              } else {
-                const existing = ctx.prefetchCache.get(sessionKey);
-                if (existing && (Date.now() - existing.ts < 10 * 60 * 1000)) {
-                  ctx.logger?.warn?.('[afterTurn] O7: prefetch empty, retaining last-known-good cache', {
-                    sessionKey: sessionKey.slice(0, 16),
-                    qmdCount: existing.qmdResults?.length,
-                    graphCount: existing.graphResults?.length,
-                    expCount: existing.expResults?.length,
-                    openclawCount: existing.openclawResults?.length ?? 0,
-                  });
-                } else {
-                  ctx.logger?.warn?.('[afterTurn] O7: prefetch empty (all layers failed), no cache written', {
-                    sessionKey: sessionKey.slice(0, 16),
-                  });
-                }
-              }
-            }
-          })().catch((err) => {
-            ctx.logger?.debug?.('[afterTurn] O7: prefetch task failed (non-fatal)', {
-              err: (err as Error).message,
-            });
+            })(),
           });
+
+          if (status === 'merged') {
+            ctx.logger?.info?.('[afterTurn] O7: prefetch merged into in-flight job (query similar, no duplicate ran)', {
+              sessionKey: sessionKey.slice(0, 16),
+              query: query.slice(0, 60),
+            });
+          }
         }
       } catch (prefetchErr) {
         ctx.logger?.debug?.('[afterTurn] O7: prefetch setup failed (non-fatal)', {

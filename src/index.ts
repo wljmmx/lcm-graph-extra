@@ -2000,6 +2000,17 @@ const pluginEntry: any = definePluginEntry({
           logger?.debug?.("background tasks awaitAll failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
         }
 
+        try {
+          // O7+: 等待跨轮检索预取队列在途任务（不阻塞整体关闭）
+          const { retrievalPrefetchQueue } = await import('./async/retrieval-prefetch-queue.js');
+          if (retrievalPrefetchQueue.pendingCount > 0) {
+            logger?.info?.(`dispose: waiting for ${retrievalPrefetchQueue.pendingCount} prefetch jobs`, { names: retrievalPrefetchQueue.pendingNames });
+          }
+          await retrievalPrefetchQueue.dispose(5000);
+        } catch (e) {
+          logger?.debug?.("prefetch queue dispose failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
+        }
+
         // 3. 停止 debt scheduler（等待活跃任务完成）
         try { const { stopScheduler } = await import('./core/debt-manager.js'); await stopScheduler(); } catch {}
 

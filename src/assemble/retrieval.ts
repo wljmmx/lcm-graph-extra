@@ -26,35 +26,18 @@ import { extractEntities, matchEntityScore } from '../entity-extract.js';
 import { needsQueryRewrite, rewriteQuery } from './query-rewrite.js';
 // P0-7: 话题切换检测（防止跨话题复用旧缓存/旧压测统计/旧场景分类）
 import { detectTopicSwitch } from '../topic-switch.js';
+// O7+: 跨轮预取辅助（相似度/时间衰减 TOP-K/统一拉取/覆盖式写缓存）
+import {
+  prefetchQuerySimilarity,
+  decayTopK,
+  PREFETCH_TTL_MS,
+  runRetrievalPrefetch,
+  writePrefetchCache,
+} from './retrieval-prefetch.js';
+// O7+: 跨轮预取队列 —— cache miss 时入队后台补水，避免话题切换当轮裸奔
+import { retrievalPrefetchQueue } from '../async/retrieval-prefetch-queue.js';
 
-/**
- * v2.8.1 非MoA 修复: 查询主题相似度。
- * O7 预取结果按 sessionKey 缓存, 但消费时若不校验生成查询, 会把"上一问的预取"喂给"本问",
- * 导致检索错位、模型反复"我再查"。用归一化 token / CJK 二元组重叠判定是否可复用。
- */
-function querySimilarity(a: string, b: string): number {
-  if (!a || !b) return 0;
-  const norm = (s: string) => s.toLowerCase().trim();
-  const x = norm(a);
-  const y = norm(b);
-  if (x === y) return 1;
-  // 拉丁/空格分词
-  const split = (s: string) => s.split(/[\s\p{P}\p{S}]+/u).filter(Boolean);
-  const tokensA = split(x);
-  if (tokensA.length > 0 && split(y).length > 0) {
-    const setB = new Set(split(y));
-    let inter = 0;
-    for (const t of tokensA) if (setB.has(t)) inter++;
-    return inter / Math.max(Math.max(tokensA.length, split(y).length), 1);
-  }
-  // 纯 CJK 等无空格文本: 用字符二元组重叠
-  const big = (s: string) => { const out = new Set<string>(); for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2)); return out; };
-  const ba = big(x), bb = big(y);
-  if (ba.size === 0 || bb.size === 0) return 0;
-  let bi = 0;
-  for (const c of ba) if (bb.has(c)) bi++;
-  return bi / Math.max(ba.size, bb.size);
-}
+/** querySimilarity / 时间衰减 TOP-K 已迁至 ./retrieval-prefetch.ts（供跨轮队列复用，避免循环引用） */
 
 /** 将 QMD 原始结果 (QmdSearchResult) 转换为 RetrievalResult，供 Merger 使用 */
 function toRetrievalResult(r: any): RetrievalResult {
@@ -178,14 +161,14 @@ export async function performRetrieval(
   // （含 embedding Ollama 调用），加剧主生成与检索的本地 LLM 串行排队。
   const sessionKey = resolveSessionCacheKey(params);
 
-  const PREFETCH_CACHE_TTL = 10 * 60 * 1000; // 10min
+  const PREFETCH_CACHE_TTL = PREFETCH_TTL_MS; // 10min
   const cached = sessionKey ? ctx.prefetchCache?.get(sessionKey) : undefined;
   // v2.8.1 非MoA 修复: 查询一致性校验 —— 预取结果仅当生成查询与本轮 qmdQuery 主题相关时
   // 才可消费(相似度 >= 0.3), 否则视为 miss。修复前按 sessionKey 无条件消费, 会把
   // "上一问的预取"喂给"本问", 导致检索错位、模型反复"我再查"。
   const cacheUsable = !!cached
     && (Date.now() - cached.ts < PREFETCH_CACHE_TTL)
-    && querySimilarity(cached.query, qmdQuery) >= 0.3;
+    && prefetchQuerySimilarity(cached.query, qmdQuery) >= 0.3;
 
   // P0-7: 话题切换检测 —— 上一轮查询与当前查询重叠度极低时，即使 querySimilarity
   // 通过（如两问都含公共词"问题"），也判定为话题切换：不消费预取缓存，并记录
@@ -195,14 +178,17 @@ export async function performRetrieval(
 
   let rawQmd: any[] = [];
   let rawGraph: any[] = [];
+  // O7+: 标记本轮是否消费缓存层。仅缓存来源的结果应用时间衰减 TOP-K（新鲜度排序），
+  // 新鲜同步检索结果不受影响。
+  let fromCache = false;
 
   if (cacheUsable && !topicSwitched && cached) {
-    // 使用上一轮 afterTurn 预取的全量结果
+    // 使用上一轮 afterTurn 预取的全量结果（跨轮复用：不删除，时间衰减 TOP-K 控制注入，新查询自然覆盖）
     rawQmd = cached.qmdResults || [];
     rawGraph = cached.graphResults || [];
     expResults = cached.expResults || [];
     openclawResults = cached.openclawResults || [];
-    ctx.prefetchCache?.delete(sessionKey); // 消费后清除，避免重复使用
+    fromCache = true;
 
     ctx.logger?.info?.('[assemble] O7: using prefetch cache', {
       sessionKey: sessionKey.slice(0, 16),
@@ -219,18 +205,47 @@ export async function performRetrieval(
         sessionKey: sessionKey.slice(0, 16),
         cachedQuery: cached.query?.slice(0, 60),
         currentQuery: qmdQuery.slice(0, 60),
-        sim: querySimilarity(cached.query, qmdQuery).toFixed(2),
+        sim: prefetchQuerySimilarity(cached.query, qmdQuery).toFixed(2),
         overlap: topicSwitch.overlap.toFixed(2),
         topicSwitched,
         cacheAgeMs: Date.now() - cached.ts,
       });
     } else {
-      // 首轮或缓存过期：返回空结果，afterTurn 预取后下一轮才有数据
-      ctx.logger?.debug?.('[assemble] O7: prefetch cache miss, next turn will have data', {
+      // 首轮或缓存过期：返回空结果，后台队列补水，避免话题切换当轮裸奔
+      ctx.logger?.debug?.('[assemble] O7: prefetch cache miss, background fill queued', {
         sessionKey: sessionKey.slice(0, 16),
         hasCache: !!cached,
         cacheAgeMs: cached ? Date.now() - cached.ts : -1,
       });
+    }
+
+    // O7+: 后台补水 —— 立即入队一次全量预取（走跨轮队列 + Ollama 槽位），不阻塞主轮。
+    // 结果写回 prefetchCache，供紧随其后/后续轮消费；比"等本轮 afterTurn 预取、下一轮才
+    // 用"的旧行为更快注入，消除话题切换当轮的 L2/L3 空窗。
+    try {
+      if (sessionKey && qmdQuery.trim().length > 0) {
+        const deps = { logger: ctx.logger, qmdClient: ctx.qmdClient, graphAdapter: ctx.graphAdapter, expStore: ctx.expStore };
+        const enqStatus = retrievalPrefetchQueue.enqueue({
+          sessionKey,
+          query: qmdQuery,
+          run: (async () => {
+            try {
+              const now = Date.now();
+              const res = await runRetrievalPrefetch(deps, sessionKey, qmdQuery, retrievalLimits);
+              writePrefetchCache(ctx.prefetchCache, sessionKey, res, qmdQuery, now, ctx.logger);
+            } catch (e) {
+              ctx.logger?.debug?.('[assemble] O7: background prefetch run failed (non-fatal)', { err: (e as Error).message });
+            }
+          })(),
+        });
+        ctx.logger?.info?.('[assemble] O7: background prefetch enqueued', {
+          sessionKey: sessionKey.slice(0, 16),
+          status: enqStatus,
+          query: qmdQuery.slice(0, 60),
+        });
+      }
+    } catch (bgErr) {
+      ctx.logger?.debug?.('[assemble] O7: background prefetch setup failed (non-fatal)', { err: String(bgErr) });
     }
 
     // v2.8.1 非MoA 修复: 保持异步(慢速 L2/L3 仍由 afterTurn 预取), 但保证不空结果 ——
@@ -631,6 +646,25 @@ export async function performRetrieval(
     fullDocs = [];
   }
   const mgMs = Date.now() - mgStart;
+
+  // O7+: 时间衰减 TOP-K —— 仅对缓存来源的结果应用（带 _retrAt，跨轮复用）。
+  // 新鲜度加成让"新召回/刚更新"的结果在 TOP-K 竞争中胜过同分的陈旧历史条目，
+  // 并把衰减分回写 score 供注入层（injection）感知，防止旧数据长期占高位。
+  if (fromCache) {
+    const decayNow = Date.now();
+    const before = { qmd: qmdResults.length, graph: graphResults.length, exp: expResults.length, mem: openclawResults.length };
+    qmdResults = decayTopK(qmdResults, retrievalLimits.qmd, decayNow, PREFETCH_TTL_MS);
+    graphResults = decayTopK(graphResults, retrievalLimits.graph, decayNow, PREFETCH_TTL_MS);
+    expResults = decayTopK(expResults, retrievalLimits.exp, decayNow, PREFETCH_TTL_MS);
+    openclawResults = decayTopK(openclawResults, 3, decayNow, PREFETCH_TTL_MS);
+    ctx.logger?.info?.('[assemble] O7: time-decay TOP-K applied (cache layer)', {
+      sessionKey: sessionKey.slice(0, 16),
+      before,
+      after: {
+        qmd: qmdResults.length, graph: graphResults.length, exp: expResults.length, mem: openclawResults.length,
+      },
+    });
+  }
 
   return {
     qmdResults,
