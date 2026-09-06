@@ -6,7 +6,7 @@
 
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance, extractLatestUserQuery } from '../plugin/tool-guidance.js';
 import { detectScenario, SCENARIO_LABELS, detectToolSearchMode, buildModeAwareGuidance } from '../tools/tool-catalog.js';
-import { getOverhead, setOverhead, getSdkOverhead, updateSdkOverhead } from '../plugin/overhead-cache.js';
+import { getOverhead, setOverhead, getSdkOverhead, updateSdkOverhead, clearOverheadCache } from '../plugin/overhead-cache.js';
 import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
@@ -29,7 +29,7 @@ import {
 // v2.7.3 债务闭环：直接压缩成功后清偿债务，避免债务调度器 60s 后
 // 重复 force compact（no-op）+ 无谓的 memory 文件备份
 import { clearDebt } from '../core/debt-manager.js';
-import { resolveContextProfile } from '../config.js';
+import { resolveContextProfile, SDK_OVERHEAD_TOKENS } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { serializeError } from '../utils/logger.js';
 import { resolveSessionCacheKey } from '../utils/session-key.js';
@@ -451,6 +451,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         });
         messages = _sdTrimmed;
         msgCount = messages.length;
+        // SD-DEF-2: 残留前缀说明 SDK 侧 contextUsage 及其既往 overhead 学习皆不可信。
+        // /new 的 before_reset 清不到这里（SDK transcript 未轮换），且本次运行尚未
+        // 执行 updateSdkOverhead —— 主动清缓存，让后续从默认 55K 基线重新学习，
+        // 避免残留污染的 ~200K overhead 继续击穿下一轮 safeThreshold。
+        clearOverheadCache(_overheadCacheKey);
         // delegate 后续所有消费 messages / msgCount / estimatedTokens 的路径
         // （tier 判定、检索 query 构建、压缩决策）一律基于裁剪后的新会话输入。
         estimatedTokens = estimateTokensFromMessages(messages);
@@ -676,7 +681,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // ── 级联降级校验：裁剪后估算 token，若仍超安全阈值则逐级升级 ──
           // 安全阈值 = contextWindow - SDK overhead（动态获取，SDK 注入但 assemble 不可见的开销）
           // 预留 20% 给下轮增量 + reserveTokens（原为 30%，过于保守导致频繁降级）
-          const safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.80);
+          // SD-DEF-2: 同 low-tier —— sdkOverhead 超窗时回退默认值 + 下界 0，
+          // 防止 SDK contextUsage 残留污染把阈值打成负值、级联降级恒触发。
+          const _sdkOverheadHigh = getSdkOverhead(_overheadCacheKey);
+          const _sdkOverheadEligibleHigh = _sdkOverheadHigh < contextWindow ? _sdkOverheadHigh : SDK_OVERHEAD_TOKENS;
+          const safeThreshold = Math.floor(Math.max(0, contextWindow - _sdkOverheadEligibleHigh) * 0.80);
           const applyCascadingDegradation = (baseReason: string): any[] => {
             let result = buildDegradedContext(baseReason, 0);
             for (let level = 0; level < 4; level++) {
@@ -976,7 +985,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // 原阈值 0.25 过于保守：system prompt + tools + overhead 通常只占 15-25%，
           // 消息应该能占到 50-60%。提高到 0.50 以充分利用上下文窗口。
           const _fullEstimate = estimateTokensFromMessages(finalMessages);
-          const _safeThreshold = Math.floor((contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.50);
+          // SD-DEF-2: safeThreshold 下界保护 —— 若上一轮 SDK contextUsage 被残留转录
+          // 前缀污染（contextUsage ≥ contextWindow 时被 updateSdkOverhead 学到 ~200K），
+          // 此处 as-is 会得到负阈值 → 级联 trim 每轮恒触发（keep=8/4 仍"过大"→ 最终 keep=2）。
+          // 保护：sdkOverhead 超窗时回退默认值，并对结果取下界 0，保证阈值恒 ≥ 0。
+          const _sdkOverheadLow = getSdkOverhead(_overheadCacheKey);
+          const _sdkOverheadEligibleLow = _sdkOverheadLow < contextWindow ? _sdkOverheadLow : SDK_OVERHEAD_TOKENS;
+          const _safeThreshold = Math.floor(Math.max(0, contextWindow - _sdkOverheadEligibleLow) * 0.50);
           if (_fullEstimate > _safeThreshold || msgCount > 100) {
             ctx.logger?.warn?.('[assemble] low-tier context exceeds safe threshold, applying cascading trim', {
               fullEstimate: _fullEstimate,
@@ -1472,8 +1487,11 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // Smart Tool Guidance: 仅当上下文有足够余量时才注入
     // SDK 的 compact prompt surface 已占用 ~55K tok，额外注入会加剧溢出风险
     // O2: 复用 cachedMsgTokens（cleanup 仅移除 reasoning 字段，token 差异 <1%）
+    // SD-DEF-2: 同 low/high tier —— sdkOverhead 超窗时回退默认值，防污染把预算打成负值
     const _msgTokens = cachedMsgTokens;
-    const _hasBudgetForGuidance = _msgTokens < (contextWindow - getSdkOverhead(_overheadCacheKey)) * 0.50;
+    const _sdkOverheadGuidance = getSdkOverhead(_overheadCacheKey);
+    const _sdkOverheadEligibleGuidance = _sdkOverheadGuidance < contextWindow ? _sdkOverheadGuidance : SDK_OVERHEAD_TOKENS;
+    const _hasBudgetForGuidance = _msgTokens < Math.max(0, contextWindow - _sdkOverheadEligibleGuidance) * 0.50;
 
     // L5 任务分解：提取最新用户消息，传入 buildSmartToolGuidance 用于场景+关键词分解
     const _latestUserQuery = extractLatestUserQuery(finalMessages);
@@ -1542,7 +1560,22 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       ?? (params as any).promptTokens
       ?? (params as any).estimatedPromptTokens;
     if (_contextUsage != null && typeof _contextUsage === 'number' && _contextUsage > 0) {
-      updateSdkOverhead(_overheadCacheKey, _contextUsage, messageTokens, additionTokens);
+      // SD-DEF-2（治本）：拒绝学习污染样本。
+      // 当 SDK 报告 contextUsage ≥ 模型窗口时，多半来自残留转录前缀（/new 后 SDK
+      // transcript 未轮换，209 条旧消息被计入总数），而非真正的"SDK 固有 overhead"。
+      // 若照单全收：observed ≈ 200K 被 EMA 学入缓存 → 下一轮 safeThreshold 为负 →
+      // low-tier 级联 trim 每轮恒触发（keep=8/4 仍被判"过大"→ 最终 keep=2）。
+      // 此处直接丢弃该样本（保留默认 55K），从源头防止污染。
+      if (contextWindow > 0 && _contextUsage >= contextWindow) {
+        ctx.logger?.warn?.('[assemble] SDK contextUsage >= contextWindow — rejecting overhead update (transcript residual suspected)', {
+          contextUsage: _contextUsage,
+          contextWindow,
+          messageTokens,
+          additionTokens,
+        });
+      } else {
+        updateSdkOverhead(_overheadCacheKey, _contextUsage, messageTokens, additionTokens);
+      }
     } else if (contextWindow > 0) {
       // 备用方案：SDK 未传 contextUsage 时，用 contextWindow 减去 reserveTokens
       // 反推 SDK 可用预算 = contextWindow - reserveTokens，
