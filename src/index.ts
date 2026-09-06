@@ -1207,7 +1207,7 @@ const pluginEntry: any = definePluginEntry({
             // 场景：SDK 后台维护 / 手动触发恰逢其他会话主轮在跑（本地 Ollama 正被
             // 主生成占用），此时再同步跑 300s LLM 摘要只会加剧排队与 503。
             try {
-              const { isMainTurnActive } = await import('../async/main-turn-gate.js');
+              const { isMainTurnActive } = await import('./async/main-turn-gate.js');
               if (isMainTurnActive()) {
                 logger?.debug?.('[compact] deferred: main turn active', { sessionKey: _compactSessionKey });
                 if (_compactConvId != null) {
