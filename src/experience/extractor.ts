@@ -11,6 +11,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isToolResultMessage } from '../plugin/goal-cache.js';
 import type { ExperienceSource, RawExperience } from './types';
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,13 @@ export function detectExperienceTrigger(
   const text = typeof message.content === 'string'
     ? message.content
     : JSON.stringify(message.content || '');
+
+  // v2.9 FIX: 工具结果（Anthropic 协议下常以 role='user' 存储）不参与经验触发分类。
+  // 否则工具输出里命中"纠正/保存"关键词会被误判为 correction/explicit_save，
+  // 写入垃圾 PENDING 经验，强化经验回声室。
+  if (isToolResultMessage(message)) {
+    return role === 'toolResult' && isToolResultError(message) ? 'failure' : null;
+  }
 
   // 1. 工具调用失败
   if (role === 'toolResult' && isToolResultError(message)) {

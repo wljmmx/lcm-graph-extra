@@ -13,7 +13,7 @@ import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { compressToolResultsAsync } from './tool-result-compressor.js';
 import { serializeError } from '../utils/logger.js';
-import { shouldUpdateGoal, getGoal } from '../plugin/goal-cache.js';
+import { shouldUpdateGoal, getGoal, isToolResultMessage, extractUserMessageText } from '../plugin/goal-cache.js';
 import { resolveSessionCacheKey } from '../utils/session-key.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
@@ -101,8 +101,11 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
       const role = m.role ?? '';
-      if (!userContent && role === 'user') {
-        userContent = extractText(m.content);
+      // v2.9 FIX: 过滤工具结果（含 role='user' 的 tool_result 块/存根）。
+      // 否则 CE/Agent 循环中工具输出会被当作 userContent → 污染目标缓存
+      // （shouldUpdateGoal 覆盖 goal）、用户画像、质量评估与预取查询（回声室）。
+      if (!userContent && role === 'user' && !isToolResultMessage(m)) {
+        userContent = extractUserMessageText(m);
       } else if (!assistantContent && role === 'assistant') {
         assistantContent = extractText(m.content);
       }

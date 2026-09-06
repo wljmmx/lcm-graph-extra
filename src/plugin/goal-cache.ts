@@ -34,6 +34,51 @@ const GOAL_TTL_MS = 4 * 60 * 60 * 1000; // 4h
 const GOAL_MAX_LENGTH = 300; // 截断到 300 字符，防止注入过长
 
 /**
+ * v2.9 FIX: 判断消息是否为工具结果（tool_result）。
+ *
+ * 背景（CE 引擎目标偏移根因）：Agent/CE 循环中工具结果常以 role='user' 出现
+ * （Anthropic 协议 content 块 type='tool_result'，或 OpenClaw 的 role='tool_result'），
+ * 若不加区分，会把"工具输出/存根"误当成用户目标或检索查询，导致：
+ *   - 目标锚点（goal-cache）被工具输出覆盖
+ *   - 检索查询（retrieval.ts）取到模型自己的上一轮输出 → 经验回声室
+ *   - afterTurn 预取/质量评估把工具结果当 user 内容
+ */
+export function isToolResultMessage(msg: any): boolean {
+  if (!msg || typeof msg !== 'object') return false;
+  // OpenClaw / 原生协议：直接以 role='tool_result' 存储
+  if (msg.role === 'tool_result' || msg.role === 'toolResult') return true;
+  const c = msg.content;
+  if (Array.isArray(c)) {
+    return c.some((p: any) =>
+      p && typeof p === 'object' &&
+      (p.type === 'tool_result' || p.type === 'toolResult' || p.tool_use_id || p.toolUseId || p.tool_call_id || p.toolCallId)
+    );
+  }
+  if (typeof c === 'string') {
+    // 本项目外部化存根（tool-payload-stub.ts / tool-result-compressor.ts）与常见协议标记
+    return /^\[?LCM (Tool Output|Compressed Tool Result)|^\[?tool_?(result|output)\b|^Tool Result:|^<tool_result>/i.test(c.trim());
+  }
+  return false;
+}
+
+/**
+ * v2.9 FIX: 提取消息中的纯文本内容（仅 text 块）。
+ * 工具结果/非文本块（image、tool_use 等）一律排除。
+ */
+export function extractUserMessageText(msg: any): string {
+  if (!msg || typeof msg !== 'object' || isToolResultMessage(msg)) return '';
+  const c = msg.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    return c
+      .filter((p: any) => p && typeof p === 'object' && p.type === 'text' && typeof p.text === 'string')
+      .map((p: any) => p.text)
+      .join(' ');
+  }
+  return '';
+}
+
+/**
  * 从消息列表中提取首轮用户消息。
  * 返回截断后的文本，空字符串表示未找到。
  */
@@ -41,11 +86,9 @@ export function extractFirstUserGoal(messages: any[]): string {
   if (!Array.isArray(messages) || messages.length === 0) return '';
 
   for (const msg of messages) {
-    if (msg?.role !== 'user') continue;
-    const content = typeof msg.content === 'string' ? msg.content
-      : Array.isArray(msg.content)
-        ? msg.content.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join(' ')
-        : '';
+    // v2.9 FIX: 仅取真实用户消息，跳过工具结果（含 role='user' 的 Anthropic 工具结果块）
+    if (msg?.role !== 'user' || isToolResultMessage(msg)) continue;
+    const content = extractUserMessageText(msg);
     if (content.trim()) {
       return content.length > GOAL_MAX_LENGTH
         ? content.slice(0, GOAL_MAX_LENGTH) + '…'
@@ -65,11 +108,9 @@ export function extractLatestUserGoal(messages: any[]): string {
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (msg?.role !== 'user') continue;
-    const content = typeof msg.content === 'string' ? msg.content
-      : Array.isArray(msg.content)
-        ? msg.content.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join(' ')
-        : '';
+    // v2.9 FIX: 仅取真实用户消息，跳过工具结果（含 role='user' 的 Anthropic 工具结果块）
+    if (msg?.role !== 'user' || isToolResultMessage(msg)) continue;
+    const content = extractUserMessageText(msg);
     if (content.trim()) {
       return content.length > GOAL_MAX_LENGTH
         ? content.slice(0, GOAL_MAX_LENGTH) + '…'

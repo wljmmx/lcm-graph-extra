@@ -24,6 +24,7 @@ import type { RetrievalResult } from '../types.js';
 import { randomUUID } from 'node:crypto';
 import { extractEntities, matchEntityScore } from '../entity-extract.js';
 import { needsQueryRewrite, rewriteQuery } from './query-rewrite.js';
+import { extractLatestUserGoal, getGoal } from '../plugin/goal-cache.js';
 // P0-7: 话题切换检测（防止跨话题复用旧缓存/旧压测统计/旧场景分类）
 import { detectTopicSwitch } from '../topic-switch.js';
 // O7+: 跨轮预取辅助（相似度/时间衰减 TOP-K/统一拉取/覆盖式写缓存）
@@ -73,21 +74,31 @@ export async function performRetrieval(
     if (!degradedReasons.includes(reason)) degradedReasons.push(reason);
   };
 
-  // Extract query text from params.prompt (SDK field for retrieval queries), fallback to last message content
-  const lastMsg = params.messages?.at(-1);
-  let qmdQuery = typeof params.prompt === 'string' && params.prompt
-    ? params.prompt
+  // FIX-SK1: 与写入侧（after-turn O7 用 resolveSessionCacheKey，sessionId 优先）统一。
+  // 修复前：此处取 raw sessionKey（稳定路由桶），写入侧取 sessionId → /new 后
+  // 两个 key 永不相等 → O7 预取缓存永远 miss，每轮 assemble 都走全量检索
+  // （含 embedding Ollama 调用），加剧主生成与检索的本地 LLM 串行排队。
+  const sessionKey = resolveSessionCacheKey(params);
+
+  // ---- v2.9 FIX: 检索查询源加固 ----
+  // 原逻辑：params.prompt 为空时直接取 params.messages.at(-1)（不校验 role）。
+  // CE/Agent 循环中最后一条消息常为模型自己的输出（role='assistant'）或工具结果
+  // （role='user' 的 tool_result 块/存根），会把"模型上一轮的话/工具输出"当作检索查询
+  // → 拉回同主题旧经验 → 注入 → 模型继续 → 经验回声室自增强（目标偏移根因之一）。
+  // 新优先级：params.prompt（SDK 显式检索查询）> 目标缓存（getGoal）> 最后一条真实
+  // user 消息（extractLatestUserGoal，已过滤 assistant / tool_result）。
+  const goalText = sessionKey ? getGoal(sessionKey) : '';
+  let qmdQuery = typeof params.prompt === 'string' && params.prompt.trim()
+    ? params.prompt.trim()
     : "";
-  if (!qmdQuery && lastMsg?.content) {
-    const c = lastMsg.content;
-    if (typeof c === 'string') {
-      qmdQuery = c;
-    } else if (Array.isArray(c)) {
-      const textPart = c.find((p: any) => p.type === "text");
-      qmdQuery = textPart?.text ?? "";
-    }
+  if (!qmdQuery) {
+    qmdQuery = goalText || extractLatestUserGoal(params.messages ?? []);
   }
   ctx.setLastRetrievalQuery(qmdQuery);
+  ctx.logger?.debug?.('[assemble] retrieval query source', {
+    source: typeof params.prompt === 'string' && params.prompt.trim() ? 'params.prompt' : (goalText ? 'goal' : 'last-user'),
+    len: qmdQuery.length,
+  });
 
   // ---- Phase 1: 实体提取（三层主题锚定） ----
   // 从查询中提取关键实体，用于后续检索结果的主题一致性过滤
@@ -154,12 +165,7 @@ export async function performRetrieval(
     });
   }
 
-  // Session key for prefetch cache lookup
-  // FIX-SK1: 与写入侧（after-turn O7 用 resolveSessionCacheKey，sessionId 优先）统一。
-  // 修复前：此处取 raw sessionKey（稳定路由桶），写入侧取 sessionId → /new 后
-  // 两个 key 永不相等 → O7 预取缓存永远 miss，每轮 assemble 都走全量检索
-  // （含 embedding Ollama 调用），加剧主生成与检索的本地 LLM 串行排队。
-  const sessionKey = resolveSessionCacheKey(params);
+  // Session key for prefetch cache lookup（声明已上移至查询源提取处，避免重复声明）
 
   const PREFETCH_CACHE_TTL = PREFETCH_TTL_MS; // 10min
   const cached = sessionKey ? ctx.prefetchCache?.get(sessionKey) : undefined;
