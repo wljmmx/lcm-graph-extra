@@ -45,6 +45,7 @@ import {
   fetchOperationLogs,
   type OperationLogRecord,
 } from '../api/maintain';
+import type { GmProReembedTaskSnapshot } from '../api/gm-pro';
 import { formatDateTime } from '../utils/format';
 import type { McpInvokeResponse } from '../api/experience';
 import { extractDetails, extractText } from '../api/experience';
@@ -204,6 +205,8 @@ const bootstrapLimit = ref<number>(100);
 
 // 卡片 11：重新向量化（gm-pro，clear 开关）
 const reembedClear = ref<boolean>(false);
+// gm_reembed 异步化：轮询期间的最新任务快照（进度条/批次/失败数显示）
+const reembedProgress = ref<GmProReembedTaskSnapshot | null>(null);
 
 // ===== 路径安全校验（前端轻量校验，后端 POST /api/mcp/invoke 有硬墙兜底） =====
 
@@ -594,11 +597,17 @@ function executeBootstrap(): void {
 }
 
 function executeReembed(): void {
+  reembedProgress.value = null;
   runMutation({
     cardKey: 'reembed',
     tool: 'gm_reembed',
     params: { clear: reembedClear.value },
-    invokeFn: () => invokeReembed({ clear: reembedClear.value }),
+    invokeFn: () => invokeReembed({
+      clear: reembedClear.value,
+      onProgress: (snap) => {
+        reembedProgress.value = snap;
+      },
+    }),
   });
 }
 </script>
@@ -1191,6 +1200,32 @@ function executeReembed(): void {
               </NFormItem>
             </template>
             <template #extra>
+              <!-- gm_reembed 异步化：后台任务进度（轮询 status 快照驱动） -->
+              <div v-if="!!loadingMap.reembed || reembedProgress" class="reembed-progress">
+                <template v-if="reembedProgress?.progressPercent != null">
+                  <NProgress
+                    type="line"
+                    :percentage="Math.min(100, Math.max(0, Math.round(reembedProgress.progressPercent)))"
+                    :indicator-placement="'inside'"
+                    :height="14"
+                    processing
+                    style="max-width: 320px"
+                  />
+                  <div class="muted" style="font-size: var(--fs-caption); margin-top: 4px; line-height: 1.5">
+                    批次 {{ reembedProgress.currentBatch ?? 0 }}/{{ reembedProgress.totalBatches ?? '-' }} ·
+                    进度 {{ reembedProgress.processedNodes ?? 0 }}/{{ reembedProgress.totalNodes ?? '-' }} 节点 ·
+                    成功 {{ reembedProgress.reEmbedded ?? 0 }} ·
+                    <span v-if="(reembedProgress.failed ?? 0) > 0" style="color: #d03050">失败 {{ reembedProgress.failed }}</span>
+                    <span v-else>失败 0</span>
+                    <template v-if="reembedProgress.etaMs != null">
+                      · 剩余约 {{ Math.ceil(reembedProgress.etaMs / 1000) }}s
+                    </template>
+                  </div>
+                </template>
+                <div v-else-if="!!loadingMap.reembed" class="muted" style="font-size: var(--fs-caption)">
+                  正在启动后台重向量化任务…
+                </div>
+              </div>
               <OperationRecentHistory :logs="historyOf('gm_reembed')" />
             </template>
           </OperationCard>

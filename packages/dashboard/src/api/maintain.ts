@@ -9,6 +9,10 @@
  */
 import { invokeMcpTool, type McpInvokeResponse } from './experience';
 import { apiGet, apiPost, ApiError } from './client';
+import {
+  startAndPollGmProReembed,
+  type GmProReembedTaskSnapshot,
+} from './gm-pro';
 
 /** 图谱维护（dedup / PageRank / community + 债务表对账）。可选 params 如 { source: 'ttl_cleanup' } 用于 TTL 清理变体。 */
 export function invokeMaintain(params: Record<string, unknown> = {}): Promise<McpInvokeResponse> {
@@ -339,17 +343,36 @@ export async function invokeBootstrap(limit: number = 100): Promise<McpInvokeRes
 }
 
 /**
- * 触发 gm-pro 全节点重新向量化 / 清库重导。
- * ⚠️ 走 gm-pro HTTP 代理（POST /api/gm-pro/proxy/reembed），非 MCP invoke。
+ * 触发 gm-pro 全节点重新向量化（异步任务模式）。
+ * ⚠️ 走 gm-pro HTTP 代理（POST /api/gm-pro/proxy/reembed/start），非 MCP invoke。
+ *
+ * 上游 gm_reembed 已异步化：start 返回 202 + taskId，后台按批次执行，
+ * 不再同步阻塞（消除 stalled-session）。
+ *
  * clear=true 时先清库再重导（推荐流程：clear → 导入数据 → 埋点）。
  * v2.8.0 新增，与维护面板 dirty-nodes 卡内按钮对齐。
+ *
+ * @param onProgress 轮询期间回调最新进度快照（供 UI 展示进度条/百分比）
  */
-export async function invokeReembed(opts: { clear?: boolean } = {}): Promise<McpInvokeResponse> {
+export async function invokeReembed(
+  opts: {
+    clear?: boolean;
+    batchSize?: number;
+    batchIntervalMs?: number;
+    pollMs?: number;
+    maxWaitMs?: number;
+    onProgress?: (snap: GmProReembedTaskSnapshot, taskId: string) => void;
+  } = {},
+): Promise<McpInvokeResponse> {
   try {
-    const resp = await apiPost<{ ok: boolean; data?: any; error?: string }>(
-      '/api/gm-pro/proxy/reembed',
-      opts,
-    );
+    const resp = await startAndPollGmProReembed({
+      clear: opts.clear,
+      batchSize: opts.batchSize,
+      batchIntervalMs: opts.batchIntervalMs,
+      pollMs: opts.pollMs,
+      maxWaitMs: opts.maxWaitMs,
+      onProgress: opts.onProgress,
+    });
     if (resp.ok) {
       return { ok: true, result: resp.data };
     }

@@ -27,10 +27,10 @@ import {
   postGmProMaintainIncremental,
   postGmProMaintain,
   postGmProStalenessRefresh,
-  postGmProReembed,
+  startAndPollGmProReembed,
   type GmProDirtyNodesResult,
   type GmProStalenessRefreshResult,
-  type GmProReembedResult,
+  type GmProReembedTaskSnapshot,
 } from '../../api/gm-pro';
 
 const props = defineProps<{
@@ -129,14 +129,24 @@ function handleRefreshStaleness(): Promise<void> {
 }
 
 function handleReembed(): Promise<void> {
-  return runAction<GmProReembedResult>(
+  return runAction<GmProReembedTaskSnapshot>(
     reembedding,
-    () => postGmProReembed(),
+    () => startAndPollGmProReembed(),
     (d) => {
-      const count = d?.count ?? d?.total ?? d?.submitted;
-      return typeof count === 'number'
-        ? `重新向量化已启动（预计处理 ${count} 个节点，异步执行）`
-        : '重新向量化已启动（异步执行）';
+      // 异步任务：最终快照或超时快照（后台任务仍在跑）
+      const pct = d?.progressPercent;
+      const re = d?.reEmbedded;
+      const failed = d?.failed;
+      if (typeof re === 'number' && typeof failed === 'number') {
+        return `重新向量化完成：成功 ${re} / 失败 ${failed}（进度 ${Math.round(pct ?? 100)}%）`;
+      }
+      if (typeof re === 'number') {
+        return `重新向量化完成：成功 ${re}（进度 ${Math.round(pct ?? 100)}%）`;
+      }
+      if (typeof pct === 'number') {
+        return `重新向量化进行中：进度 ${Math.round(pct)}%，taskId=${d.taskId ?? '未知'}，后台继续执行`;
+      }
+      return '重新向量化任务已启动（异步执行，见维护面板进度）';
     },
     [['gm-pro-health']],
   );
@@ -144,12 +154,19 @@ function handleReembed(): Promise<void> {
 
 /** 清库重导：先清库再重导（clear=true），推荐流程：clear → 导入数据 → 埋点 */
 function handleReembedClear(): Promise<void> {
-  return runAction<GmProReembedResult>(
+  return runAction<GmProReembedTaskSnapshot>(
     reembedClearing,
-    () => postGmProReembed({ clear: true }),
+    () => startAndPollGmProReembed({ clear: true }),
     (d) => {
+      const pct = d?.progressPercent;
+      const re = d?.reEmbedded;
       const msg = d?.message ?? '';
-      return msg ? `清库重导: ${msg}` : '清库重导已触发，完成后请导入数据再执行一次重新向量化（埋点）';
+      if (typeof re === 'number') {
+        return `清库重导完成：成功重新向量化 ${re} 个节点`;
+      }
+      if (msg) return `清库重导: ${msg}`;
+      if (typeof pct === 'number') return `清库重导进行中：进度 ${Math.round(pct)}%，后台继续执行`;
+      return '清库重导已触发，完成后请导入数据再执行一次重新向量化（埋点）';
     },
     [['gm-pro-health']],
   );

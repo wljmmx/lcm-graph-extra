@@ -644,10 +644,131 @@ export interface GmProReembedResult {
 }
 
 /**
- * 触发全节点重新向量化（高成本，消耗 embedding 配额）。
- * @param opts.clear 为 true 时先清库再重导（gm-pro 集成到 reembed 工具，不新建工具）。
- *   推荐流程：gm_reembed clear=true → 导入数据 → gm_reembed（埋点）。
+ * gm_reembed 异步化任务快照（POST /api/reembed/start → 202 + taskId 后台任务）。
+ * 字段与 graph-memory-pro reembed-task.ts 的进度快照对齐。
+ */
+export interface GmProReembedTaskSnapshot {
+  taskId?: string;
+  /** running | done | completed | failed | cancelled */
+  status?: string;
+  message?: string;
+  progressPercent?: number;
+  currentBatch?: number;
+  totalBatches?: number;
+  processedNodes?: number;
+  totalNodes?: number;
+  reEmbedded?: number;
+  failed?: number;
+  skipped?: number;
+  etaMs?: number;
+  averageBatchMs?: number;
+  [key: string]: unknown;
+}
+
+/** start 启动结果（202 快返回，含 taskId） */
+export interface GmProReembedStartResult extends GmProReembedTaskSnapshot {
+  taskId?: string;
+  ok?: boolean;
+  error?: string;
+}
+
+/** GET /api/reembed/list 任务列表 */
+export interface GmProReembedTaskList {
+  tasks?: GmProReembedTaskSnapshot[];
+  [key: string]: unknown;
+}
+
+const REEMBED_TERMINAL = new Set(['done', 'completed', 'success', 'failed', 'cancelled', 'error']);
+
+function reembedTaskId(snap: GmProReembedTaskSnapshot | undefined): string | undefined {
+  return snap?.taskId ?? (snap as any)?.task?.taskId ?? undefined;
+}
+
+/**
+ * 触发全节点重新向量化（异步任务模式）。
+ * 上游 gm_reembed 已异步化：POST /api/reembed/start 立即返回 202 + taskId，
+ * 后台按批次执行；此处启动后轮询 /api/reembed/status 直至终态。
+ *
+ * @param opts.batchSize     每批节点数（默认交给 gm-pro，建议 300-500）
+ * @param opts.batchIntervalMs 批间隔 ms
+ * @param opts.pollMs        轮询间隔 ms（默认 2000）
+ * @param opts.maxWaitMs     轮询上限（默认 20min，超时返回 start 结果、任务后台继续）
+ * @param opts.onProgress    进度回调（每轮快照）
+ * @param opts.clear         为 true 时先清库再重导（兼容旧行为，gm-pro 处理）
+ */
+export async function startAndPollGmProReembed(opts: {
+  clear?: boolean;
+  batchSize?: number;
+  batchIntervalMs?: number;
+  pollMs?: number;
+  maxWaitMs?: number;
+  onProgress?: (snap: GmProReembedTaskSnapshot, taskId: string) => void;
+} = {}): Promise<GmProProxyResponse<GmProReembedTaskSnapshot>> {
+  const pollMs = Math.max(500, opts.pollMs ?? 2000);
+  const maxWaitMs = opts.maxWaitMs ?? 20 * 60_000;
+  const startBody: Record<string, unknown> = { clear: opts.clear };
+  if (typeof opts.batchSize === 'number') startBody.batchSize = opts.batchSize;
+  if (typeof opts.batchIntervalMs === 'number') startBody.batchIntervalMs = opts.batchIntervalMs;
+
+  const start: GmProReembedStartResult = (await apiPost<any>('/api/gm-pro/proxy/reembed/start', startBody))?.data;
+  if (!start || !reembedTaskId(start)) {
+    // 无 taskId（如 clear 分支上游直接返回）→ 原样返回启动结果，由调用方判定
+    return { ok: true, data: start };
+  }
+  const taskId = reembedTaskId(start)!;
+
+  const deadline = Date.now() + maxWaitMs;
+  let last: GmProReembedTaskSnapshot = start;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    if (Date.now() > deadline) break;
+    try {
+      const st = await apiGet<GmProProxyResponse<GmProReembedTaskSnapshot>>(
+        `/api/gm-pro/proxy/reembed/status?taskId=${encodeURIComponent(taskId)}`,
+      );
+      const snap: GmProReembedTaskSnapshot | undefined = st?.data;
+      if (!snap) continue;
+      last = snap;
+      opts.onProgress?.(snap, taskId);
+      const status = String(snap.status ?? '').toLowerCase();
+      if (['done', 'completed', 'success'].includes(status)) return { ok: true, data: { ...snap, taskId } };
+      if (['failed', 'cancelled', 'error'].includes(status)) {
+        return { ok: false, data: { ...snap, taskId }, error: snap.message ?? `重新向量化任务 ${status}` };
+      }
+    } catch (err) {
+      // 单次轮询失败不致命，下一轮重试；网络层由 client.ts 自带退避
+    }
+  }
+  // 超过 maxWait 仍未终态：后台任务仍在跑，返回最近快照（调用方展示进度）
+  return { ok: true, data: { ...last, taskId } };
+}
+
+/** GET /api/reembed/status — 查询单任务进度快照 */
+export function fetchGmProReembedStatus(taskId: string): Promise<GmProProxyResponse<GmProReembedTaskSnapshot>> {
+  return apiGet<GmProProxyResponse<GmProReembedTaskSnapshot>>(
+    `/api/gm-pro/proxy/reembed/status?taskId=${encodeURIComponent(taskId)}`,
+  );
+}
+
+/** GET /api/reembed/list — 全部 reembed 任务 */
+export function listGmProReembedTasks(): Promise<GmProProxyResponse<GmProReembedTaskList>> {
+  return apiGet<GmProProxyResponse<GmProReembedTaskList>>('/api/gm-pro/proxy/reembed/list');
+}
+
+/** POST /api/reembed/cancel — 取消后台任务（批次间生效） */
+export function cancelGmProReembed(taskId: string): Promise<GmProProxyResponse<GmProReembedTaskSnapshot>> {
+  return apiPost<GmProProxyResponse<GmProReembedTaskSnapshot>>('/api/gm-pro/proxy/reembed/cancel', { taskId });
+}
+
+/**
+ * 触发全节点重新向量化（旧同步端点 POST /api/reembed，上游 maxNodes 兼容模式）。
+ * 新代码请优先使用 startAndPollGmProReembed（异步任务，不阻塞会话）。
  */
 export function postGmProReembed(opts: { clear?: boolean } = {}): Promise<GmProProxyResponse<GmProReembedResult>> {
   return apiPost<GmProProxyResponse<GmProReembedResult>>('/api/gm-pro/proxy/reembed', opts);
+}
+
+/** 判断快照是否为终态（done/failed/cancelled） */
+export function isReembedTerminal(snap: GmProReembedTaskSnapshot | undefined): boolean {
+  return !!snap && REEMBED_TERMINAL.has(String(snap.status ?? '').toLowerCase());
 }
