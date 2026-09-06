@@ -12,6 +12,8 @@ import { apiGet, apiPost, ApiError } from './client';
 import {
   startAndPollGmProReembed,
   type GmProReembedTaskSnapshot,
+  startAndPollGmProMaintain,
+  type GmProMaintainTaskSnapshot,
 } from './gm-pro';
 
 /** 图谱维护（dedup / PageRank / community + 债务表对账）。可选 params 如 { source: 'ttl_cleanup' } 用于 TTL 清理变体。 */
@@ -380,6 +382,39 @@ export async function invokeReembed(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `重新向量化请求失败: ${msg}` };
+  }
+}
+
+/**
+ * 触发 gm-pro 全图维护（异步任务模式，与 reembed 对称）。
+ * ⚠️ 走 gm-pro HTTP 代理（POST /api/gm-pro/proxy/maintain/start），非 MCP invoke。
+ *
+ * 上游 gm_maintain 已异步化：start 返回 202 + taskId，后台按 14 个 phase 顺序执行，
+ * 不再同步阻塞（消除 stalled-session 与 MCP 120s 超时截断）。
+ * 维护互斥锁被占用时快照标记 lockSkipped=true（本次未真正调度）。
+ *
+ * @param onProgress 轮询期间回调最新进度快照（供 UI 展示进度条/当前 phase 名）
+ */
+export async function invokeMaintainAsync(
+  opts: {
+    pollMs?: number;
+    maxWaitMs?: number;
+    onProgress?: (snap: GmProMaintainTaskSnapshot, taskId: string) => void;
+  } = {},
+): Promise<McpInvokeResponse> {
+  try {
+    const resp = await startAndPollGmProMaintain({
+      pollMs: opts.pollMs,
+      maxWaitMs: opts.maxWaitMs,
+      onProgress: opts.onProgress,
+    });
+    if (resp.ok) {
+      return { ok: true, result: resp.data };
+    }
+    return { ok: false, error: resp.error ?? '图谱维护失败' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `图谱维护请求失败: ${msg}` };
   }
 }
 

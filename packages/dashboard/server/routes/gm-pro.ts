@@ -32,7 +32,7 @@
  *   若 openclaw.json 未配置 apiServer.authToken 而 graph-memory-pro 配置了 authToken，
  *   这些路径将返回 401 Unauthorized。请确保两端配置一致。
  */
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { readGmProRawConfig } from './config';
 
 /** graph-memory-pro 独立 API 服务器地址（默认 http://127.0.0.1:7850） */
@@ -95,6 +95,10 @@ const ALLOWED_GM_PRO_PATHS = new Set([
   '/api/reembed/status',
   '/api/reembed/list',
   '/api/reembed/stream',
+  // v2.x: gm_maintain 异步化 —— 与 reembed 对称（任务状态轮询 / 任务列表 / SSE 实时流）
+  '/api/maintain/status',
+  '/api/maintain/list',
+  '/api/maintain/stream',
 ]);
 
 /**
@@ -129,6 +133,9 @@ const ALLOWED_GM_PRO_POST_PATHS = new Set([
   // v2.x: gm_reembed 异步化 —— 启动后台任务（202 + taskId）/ 取消
   '/api/reembed/start',
   '/api/reembed/cancel',
+  // v2.x: gm_maintain 异步化 —— 启动后台任务（202 + taskId）/ 取消
+  '/api/maintain/start',
+  '/api/maintain/cancel',
 ]);
 
 /**
@@ -231,16 +238,16 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
   }
 
   /**
-   * GET /api/gm-pro/proxy/reembed/stream — SSE 实时进度流透传（gm_reembed 异步化）。
+   * SSE 实时进度流透传（gm_reembed / gm_maintain 异步任务共用）。
    *
-   * 与普通 JSON 代理不同：graph-memory-pro 以 text/event-stream 持续推送 snapshot 事件
-   * （+15s 心跳，终态自动关闭）。这里原样透传上游流，客户端断线不影响后台任务。
+   * graph-memory-pro 以 text/event-stream 持续推送 snapshot 事件（+15s 心跳，终态自动关闭），
+   * 这里原样透传上游流，客户端断线不影响后台任务。
    * 必须注册在 GET /api/gm-pro/proxy/* 通配之前（Fastify 静态路由优先）。
+   *
+   * 仅限制"建连阶段"超时（15s）；连接建立后不设整体超时，
+   * 否则 AbortSignal.timeout 会在 30s 后掐断整个 SSE 长连流。
    */
-  app.get('/api/gm-pro/proxy/reembed/stream', async (req, reply) => {
-    const { proxyPath, query } = extractProxyPath(req.url);
-    const targetUrl = `${GM_PRO_HTTP_URL}${proxyPath}${query}`;
-
+  async function streamGmProSse(reply: FastifyReply, targetUrl: string): Promise<boolean> {
     const headers: Record<string, string> = {
       'Accept': 'text/event-stream',
       'Connection': 'keep-alive',
@@ -248,22 +255,20 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
     const authToken = resolveGmProAuthToken();
     if (authToken) headers['x-auth-token'] = authToken;
 
-    // 仅限制"建连阶段"超时（15s）；连接建立后不设整体超时，
-    // 否则 AbortSignal.timeout 会在 30s 后掐断整个 SSE 长连流。
     const controller = new AbortController();
     const connectTimer = setTimeout(() => controller.abort(), 15_000);
     let upstream: Response;
     try {
       upstream = await fetch(targetUrl, { method: 'GET', headers, signal: controller.signal });
-    } catch (err) {
+    } catch {
       clearTimeout(connectTimer);
       reply.code(502);
-      return { ok: false, error: `graph-memory-pro SSE 不可达: ${err instanceof Error ? err.message : String(err)}` };
+      return false;
     }
     clearTimeout(connectTimer);
     if (!upstream.ok || !upstream.body) {
       reply.code(502);
-      return { ok: false, error: `graph-memory-pro SSE 返回 ${upstream.status}` };
+      return false;
     }
 
     // 接管原始响应，逐块透传 SSE 帧
@@ -289,6 +294,21 @@ export async function registerGmProRoutes(app: FastifyInstance): Promise<void> {
         try { raw.end(); } catch { /* noop */ }
       }
     })();
+    return true;
+  }
+
+  /** GET /api/gm-pro/proxy/reembed/stream — gm_reembed 异步化 SSE 实时流 */
+  app.get('/api/gm-pro/proxy/reembed/stream', async (req, reply) => {
+    const { proxyPath, query } = extractProxyPath(req.url);
+    const ok = await streamGmProSse(reply, `${GM_PRO_HTTP_URL}${proxyPath}${query}`);
+    if (!ok) return { ok: false, error: 'graph-memory-pro SSE 不可达（gm_reembed）' };
+  });
+
+  /** GET /api/gm-pro/proxy/maintain/stream — gm_maintain 异步化 SSE 实时流 */
+  app.get('/api/gm-pro/proxy/maintain/stream', async (req, reply) => {
+    const { proxyPath, query } = extractProxyPath(req.url);
+    const ok = await streamGmProSse(reply, `${GM_PRO_HTTP_URL}${proxyPath}${query}`);
+    if (!ok) return { ok: false, error: 'graph-memory-pro SSE 不可达（gm_maintain）' };
   });
 
   /**

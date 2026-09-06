@@ -42,10 +42,11 @@ import {
   type ExtractRebuildProgress,
   invokeBootstrap,
   invokeReembed,
+  invokeMaintainAsync,
   fetchOperationLogs,
   type OperationLogRecord,
 } from '../api/maintain';
-import type { GmProReembedTaskSnapshot } from '../api/gm-pro';
+import type { GmProReembedTaskSnapshot, GmProMaintainTaskSnapshot } from '../api/gm-pro';
 import { formatDateTime } from '../utils/format';
 import type { McpInvokeResponse } from '../api/experience';
 import { extractDetails, extractText } from '../api/experience';
@@ -207,6 +208,8 @@ const bootstrapLimit = ref<number>(100);
 const reembedClear = ref<boolean>(false);
 // gm_reembed 异步化：轮询期间的最新任务快照（进度条/批次/失败数显示）
 const reembedProgress = ref<GmProReembedTaskSnapshot | null>(null);
+// 卡片 1：图谱维护（gm-maintain 异步化，与 reembed 对称）
+const maintainProgress = ref<GmProMaintainTaskSnapshot | null>(null);
 
 // ===== 路径安全校验（前端轻量校验，后端 POST /api/mcp/invoke 有硬墙兜底） =====
 
@@ -424,11 +427,16 @@ onMounted(() => {
 // ===== 各卡片执行入口（封装 runMutation） =====
 
 function executeMaintain(): void {
+  maintainProgress.value = null;
   runMutation({
     cardKey: 'maintain',
     tool: 'lcmg_maintain',
     params: {},
-    invokeFn: () => invokeMaintain({}),
+    invokeFn: () => invokeMaintainAsync({
+      onProgress: (snap) => {
+        maintainProgress.value = snap;
+      },
+    }),
   });
 }
 
@@ -637,6 +645,29 @@ function executeReembed(): void {
             @execute="executeMaintain"
           >
             <template #extra>
+              <!-- gm_maintain 异步化：后台任务进度（轮询 status 快照驱动） -->
+              <div v-if="!!loadingMap.maintain || maintainProgress" class="reembed-progress">
+                <template v-if="maintainProgress?.progressPercent != null">
+                  <NProgress
+                    type="line"
+                    :percentage="Math.min(100, Math.max(0, Math.round(maintainProgress.progressPercent)))"
+                    :indicator-placement="'inside'"
+                    :height="14"
+                    processing
+                    style="max-width: 320px"
+                  />
+                  <div class="muted" style="font-size: var(--fs-caption); margin-top: 4px; line-height: 1.5">
+                    Phase {{ maintainProgress.currentPhase ?? 0 }}/{{ maintainProgress.totalPhases ?? '-' }}
+                    <template v-if="maintainProgress.phaseName">· {{ maintainProgress.phaseName }}</template>
+                    <span v-if="maintainProgress.lockSkipped" style="color: #d03050">
+                      · 维护锁被占用，本次未真正调度
+                    </span>
+                  </div>
+                </template>
+                <div v-else-if="!!loadingMap.maintain" class="muted" style="font-size: var(--fs-caption)">
+                  正在启动后台维护任务…
+                </div>
+              </div>
               <OperationRecentHistory :logs="maintainHistory" />
             </template>
           </OperationCard>

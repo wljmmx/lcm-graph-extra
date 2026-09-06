@@ -772,3 +772,121 @@ export function postGmProReembed(opts: { clear?: boolean } = {}): Promise<GmProP
 export function isReembedTerminal(snap: GmProReembedTaskSnapshot | undefined): boolean {
   return !!snap && REEMBED_TERMINAL.has(String(snap.status ?? '').toLowerCase());
 }
+
+// ─── gm_maintain 异步化（与 gm_reembed 对称）────────────────────────────────
+
+/**
+ * gm_maintain 异步化任务快照（POST /api/maintain/start → 202 + taskId 后台任务）。
+ * 字段与 graph-memory-pro maintenance-task.ts 的进度快照对齐：
+ * 14 个 phase 顺序执行，进度按当前 phase 上报。
+ */
+export interface GmProMaintainTaskSnapshot {
+  taskId?: string;
+  /** running | done | completed | failed | cancelled */
+  status?: string;
+  message?: string;
+  progressPercent?: number;
+  /** 当前 1-based phase 序号（1..14） */
+  currentPhase?: number;
+  /** 总 phase 数（上游固定 14） */
+  totalPhases?: number;
+  /** 当前 phase 名称（如 dedup / pagerank / community 等） */
+  phaseName?: string;
+  /** 维护互斥锁被占用时为 true（runMaintenance 已在跑，本次请求未真正调度） */
+  lockSkipped?: boolean;
+  /** 已执行耗时 ms */
+  elapsedMs?: number;
+  [key: string]: unknown;
+}
+
+/** start 启动结果（202 快返回，含 taskId） */
+export interface GmProMaintainStartResult extends GmProMaintainTaskSnapshot {
+  taskId?: string;
+  ok?: boolean;
+  error?: string;
+}
+
+/** GET /api/maintain/list 任务列表 */
+export interface GmProMaintainTaskList {
+  tasks?: GmProMaintainTaskSnapshot[];
+  [key: string]: unknown;
+}
+
+const MAINTAIN_TERMINAL = new Set(['done', 'completed', 'success', 'failed', 'cancelled', 'error']);
+
+function maintainTaskId(snap: GmProMaintainTaskSnapshot | undefined): string | undefined {
+  return snap?.taskId ?? (snap as any)?.task?.taskId ?? undefined;
+}
+
+/**
+ * 触发全量/增量维护（异步任务模式，与 reembed 对称）。
+ * 上游 gm_maintain 已异步化：POST /api/maintain/start 立即返回 202 + taskId，
+ * 后台按 14 个 phase 顺序执行（互斥锁占用时快照标记 lockSkipped=true）；
+ * 此处启动后轮询 /api/maintain/status 直至终态，不阻塞会话。
+ *
+ * @param opts.pollMs        轮询间隔 ms（默认 2000）
+ * @param opts.maxWaitMs     轮询上限（默认 60min，超时返回当前快照、任务后台继续）
+ * @param opts.onProgress    进度回调（每轮快照）
+ */
+export async function startAndPollGmProMaintain(opts: {
+  pollMs?: number;
+  maxWaitMs?: number;
+  onProgress?: (snap: GmProMaintainTaskSnapshot, taskId: string) => void;
+} = {}): Promise<GmProProxyResponse<GmProMaintainTaskSnapshot>> {
+  const pollMs = Math.max(500, opts.pollMs ?? 2000);
+  const maxWaitMs = opts.maxWaitMs ?? 60 * 60_000;
+
+  const start: GmProMaintainStartResult = (await apiPost<any>('/api/gm-pro/proxy/maintain/start', {}))?.data;
+  if (!start || !maintainTaskId(start)) {
+    // 无 taskId（如互斥锁占用直接返回，或上游异常）→ 原样返回启动结果
+    return { ok: true, data: start };
+  }
+  const taskId = maintainTaskId(start)!;
+
+  const deadline = Date.now() + maxWaitMs;
+  let last: GmProMaintainTaskSnapshot = start;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    if (Date.now() > deadline) break;
+    try {
+      const st = await apiGet<GmProProxyResponse<GmProMaintainTaskSnapshot>>(
+        `/api/gm-pro/proxy/maintain/status?taskId=${encodeURIComponent(taskId)}`,
+      );
+      const snap: GmProMaintainTaskSnapshot | undefined = st?.data;
+      if (!snap) continue;
+      last = snap;
+      opts.onProgress?.(snap, taskId);
+      const status = String(snap.status ?? '').toLowerCase();
+      if (['done', 'completed', 'success'].includes(status)) return { ok: true, data: { ...snap, taskId } };
+      if (['failed', 'cancelled', 'error'].includes(status)) {
+        return { ok: false, data: { ...snap, taskId }, error: snap.message ?? `维护任务 ${status}` };
+      }
+    } catch {
+      // 单次轮询失败不致命，下一轮重试；网络层由 client.ts 自带退避
+    }
+  }
+  // 超过 maxWait 仍未终态：后台任务仍在跑，返回最近快照
+  return { ok: true, data: { ...last, taskId } };
+}
+
+/** GET /api/maintain/status — 查询单任务进度快照 */
+export function fetchGmProMaintainStatus(taskId: string): Promise<GmProProxyResponse<GmProMaintainTaskSnapshot>> {
+  return apiGet<GmProProxyResponse<GmProMaintainTaskSnapshot>>(
+    `/api/gm-pro/proxy/maintain/status?taskId=${encodeURIComponent(taskId)}`,
+  );
+}
+
+/** GET /api/maintain/list — 全部 gm_maintain 任务 */
+export function listGmProMaintainTasks(): Promise<GmProProxyResponse<GmProMaintainTaskList>> {
+  return apiGet<GmProProxyResponse<GmProMaintainTaskList>>('/api/gm-pro/proxy/maintain/list');
+}
+
+/** POST /api/maintain/cancel — 取消后台任务（phase 间生效，抛 MaintenanceCancelledError 中断剩余 phase） */
+export function cancelGmProMaintain(taskId: string): Promise<GmProProxyResponse<GmProMaintainTaskSnapshot>> {
+  return apiPost<GmProProxyResponse<GmProMaintainTaskSnapshot>>('/api/gm-pro/proxy/maintain/cancel', { taskId });
+}
+
+/** 判断维护快照是否为终态（done/failed/cancelled） */
+export function isMaintainTerminal(snap: GmProMaintainTaskSnapshot | undefined): boolean {
+  return !!snap && MAINTAIN_TERMINAL.has(String(snap.status ?? '').toLowerCase());
+}
