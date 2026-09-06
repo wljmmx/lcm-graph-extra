@@ -40,14 +40,20 @@ type SessionCompressedMap = Map<number, CompressedToolResult>;
 // 常量
 // ---------------------------------------------------------------------------
 
-/** 触发压缩的最小字节数（低于此值不值得压缩） */
-const COMPRESSION_THRESHOLD_BYTES = 512;
+/** 触发压缩的最小字节数（低于此值不值得压缩）。v2.9.0: 512→256，
+ * 扩大覆盖面 —— 常见检索结果/工具 JSON 输出集中在 256B~4KB 区间。 */
+const COMPRESSION_THRESHOLD_BYTES = 256;
 
-/** 压缩后保留的最大字符数 */
-const MAX_COMPRESSED_CHARS = 600;
+/** 压缩后保留的最大字符数（v2.9.0: 600→800，降低过度截断损失） */
+const MAX_COMPRESSED_CHARS = 800;
 
 /** 压缩后保留的最大行数 */
 const MAX_COMPRESSED_LINES = 15;
+
+/** 压缩有效的最低要求：压缩后 ≤ 原文的该比例（v2.9.0: 0.70→0.85，
+ * 摘要格式开销约 200 字符，小结果在 70% 下常被判"不划算"而跳过，
+ * 放宽后中等结果可真实进入压缩路径） */
+const COMPRESS_RATIO_THRESHOLD = 0.85;
 
 /** 压缩结果前缀标记（用于 assemble 检测） */
 const COMPRESSION_MARKER = '[LCM Compressed Tool Result]';
@@ -291,6 +297,11 @@ export function compressToolResultsAsync(params: {
     ? messages.slice(prePromptMessageCount)
     : [];
 
+  // v2.9.0: 判定统计 —— 用于核实"压缩是否真实调度"（用户可据日志判断
+  // 是内容过小、压缩率不足，还是根本没进入路径）。
+  let scannedCount = 0;
+  let underThresholdCount = 0;
+  let rateRejectedCount = 0;
   let compressedCount = 0;
   let bytesSaved = 0;
 
@@ -305,8 +316,12 @@ export function compressToolResultsAsync(params: {
     const textContent = extractMessageText(msg);
     if (!textContent) continue;
 
+    scannedCount++;
     const size = byteLength(textContent);
-    if (size < COMPRESSION_THRESHOLD_BYTES) continue;
+    if (size < COMPRESSION_THRESHOLD_BYTES) {
+      underThresholdCount++;
+      continue;
+    }
 
     // 已外部化的（stub）跳过
     if (textContent.includes('[LCM Tool Output:')) continue;
@@ -322,8 +337,11 @@ export function compressToolResultsAsync(params: {
     const compressed = compressToolResult(textContent, toolName);
     const compressedBytes = byteLength(compressed);
 
-    // 仅当压缩确实有效（压缩率 < 70%）才缓存
-    if (compressedBytes >= size * 0.7) continue;
+    // 仅当压缩确实有效（压缩率阈值内）才缓存
+    if (compressedBytes >= size * COMPRESS_RATIO_THRESHOLD) {
+      rateRejectedCount++;
+      continue;
+    }
 
     sessionMap.set(msgIndex, {
       compressed,
@@ -344,13 +362,25 @@ export function compressToolResultsAsync(params: {
     sessionMap.delete(firstKey);
   }
 
-  if (compressedCount > 0 && logger) {
-    logger.debug?.('[tool-result-compressor] compressed tool results', {
+  if (logger) {
+    logger.debug?.('[tool-result-compressor] scan summary', {
       sessionKey,
+      scannedCount,
+      underThresholdCount,
+      rateRejectedCount,
       compressedCount,
-      bytesSaved,
       totalCompressed: sessionMap.size,
+      thresholdBytes: COMPRESSION_THRESHOLD_BYTES,
+      ratioThreshold: COMPRESS_RATIO_THRESHOLD,
     });
+    if (compressedCount > 0) {
+      logger.debug?.('[tool-result-compressor] compressed tool results', {
+        sessionKey,
+        compressedCount,
+        bytesSaved,
+        totalCompressed: sessionMap.size,
+      });
+    }
   }
 }
 

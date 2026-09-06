@@ -23,6 +23,7 @@
 
 import type { EmbeddingConfig } from '../types.js';
 import { cleanBaseURL, isOllamaEndpoint } from '../utils/url.js';
+import { withOllamaSlot } from '../async/ollama-slot.js';
 // P2-9: 接入集中化 LLM 超时常量
 import { llmTimeout } from '../config/defaults.js';
 
@@ -145,12 +146,14 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
         }
       }
 
-      const resp = await fetch(ep, {
+      // 本地 Ollama 全局并发闸门（与 LLM 请求共用，OLLAMA_MAX_CONCURRENCY 默认 2）：
+      // embedding 与 LLM 摘要/主生成共用同一 Ollama 队列，不加闸会叠加打爆服务端。
+      const resp = await withOllamaSlot(baseURL, () => fetch(ep, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(llmTimeout('embedTimeoutMs')),
-      });
+      }));
 
       // 新版端点不存在（旧版 Ollama）→ 切换旧版并重试
       if (resp.status === 404 && !isOpenAiCompatible && !useLegacyOllama) {

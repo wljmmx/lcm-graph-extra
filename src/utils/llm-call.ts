@@ -1,4 +1,5 @@
 import { cleanBaseURL, detectApiFormat, isOllamaEndpoint } from './url.js';
+import { withOllamaSlot } from '../async/ollama-slot.js';
 
 export interface LlmCallParams {
   baseURL: string;
@@ -151,12 +152,15 @@ export async function callLlm(params: LlmCallParams): Promise<LlmCallResult> {
   // 时完全尊重调用方，行为不变。
   const signal = params.signal ?? AbortSignal.timeout(DEFAULT_CALL_TIMEOUT_MS);
 
-  const resp = await fetch(endpoint, {
+  // 本地 Ollama 全局并发闸门（OLLAMA_MAX_CONCURRENCY，默认 2）：
+  // 插件内所有 LLM 调用（rerank/judge/validate/distill/compact 摘要）与 embedding
+  // 共用同一 Ollama 队列，不加闸会瞬时打爆服务端 503。远程 API 不受限。
+  const resp = await withOllamaSlot(params.baseURL, () => fetch(endpoint, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
     signal,
-  });
+  }));
 
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => '<unreadable>');

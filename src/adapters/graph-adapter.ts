@@ -1186,7 +1186,9 @@ export class GraphAdapter {
         const embedFn = this._embedFn;
         const embedDim = await this._probeEmbedDimension();
         if (embedFn && embedDim > 0) {
-          const CONCURRENCY = 8;
+          // v2.9.0: 并发 8→4 —— 与全局 Ollama 并发闸门（OLLAMA_MAX_CONCURRENCY 默认 2）
+          // 协同，避免实体向量批量生成打进本地 Ollama 造成 503。
+          const CONCURRENCY = 4;
           let idx = 0;
           const worker = async () => {
             while (idx < nodeData.length) {

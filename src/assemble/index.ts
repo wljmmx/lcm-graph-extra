@@ -31,6 +31,7 @@ import {
 import { clearDebt } from '../core/debt-manager.js';
 import { resolveContextProfile, SDK_OVERHEAD_TOKENS } from '../config.js';
 import { backgroundTasks } from '../async/task-registry.js';
+import { isMainTurnActive } from '../async/main-turn-gate.js';
 import { serializeError } from '../utils/logger.js';
 import { resolveSessionCacheKey } from '../utils/session-key.js';
 import { ensureFinalUserMessage, appendRecentUser } from '../utils/ensure-final-user.js';
@@ -542,17 +543,25 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           if (preCompactConversationId != null) {
             const _lcSid = params.sessionId != null ? String(params.sessionId)
               : (params.session_id != null ? String(params.session_id) : String(preCompactConversationId));
-            backgroundTasks.register('compact:pre-emptive', ctx.losslessClawAdapter.compact({
-              sessionId: _lcSid,
-              sessionKey: preCompactSessionKey,
-              sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
-              // 预压缩是"预防性"动作，不应强制压缩：force:false 让 lossless-claw 自行判断
-              // DAG 是否真的达到压缩阈值（达到才压），避免低压区间（tokenRatio 刚过 0.55）
-              // 每次 assemble 都强制压缩一遍，打满本地 LLM pending 队列。
-              force: false,
-              currentTokenCount: effectiveTokenCount,
-              compactionTarget: 'threshold',
-            }).then(() => {}, () => {}));
+            // v2.9.0: 预防性预压缩让路 —— 主轮持门期间不发起（马上要与主生成抢本地
+            // Ollama），跳过即安全：下一轮 tokenRatio 仍高时下轮再评估。
+            if (!isMainTurnActive()) {
+              backgroundTasks.register('compact:pre-emptive', ctx.losslessClawAdapter.compact({
+                sessionId: _lcSid,
+                sessionKey: preCompactSessionKey,
+                sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                // 预压缩是"预防性"动作，不应强制压缩：force:false 让 lossless-claw 自行判断
+                // DAG 是否真的达到压缩阈值（达到才压），避免低压区间（tokenRatio 刚过 0.55）
+                // 每次 assemble 都强制压缩一遍，打满本地 LLM pending 队列。
+                force: false,
+                currentTokenCount: effectiveTokenCount,
+                compactionTarget: 'threshold',
+              }).then(() => {}, () => {}));
+            } else {
+              ctx.logger?.debug?.('[assemble] pre-emptive compact deferred (main turn active)', {
+                sessionKey: preCompactSessionKey,
+              });
+            }
           }
         }
       }
@@ -569,7 +578,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         : '';
       const conversationId = getConversationId(sessionKey);
       if (conversationId != null) {
-        const compactTimeout = (parseInt(process.env.LCM_GRAPH_EXTRA_COMPACT_TIMEOUT_MS || '0') || ((wm as any)?.compactTimeout as number)) ?? 60_000;
+        // v2.9.0: high-tier 同步 compact 已改异步（不再阻塞主轮），compactTimeout 不再使用。
         const maxSummaryRatio = (wm as any)?.maxSummaryTokenRatio ?? 0.45;
         const sessionFile = typeof params.sessionFile === 'string' ? params.sessionFile : '';
 
@@ -589,16 +598,25 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         if (tier === 'medium') {
           const _lcSid = params.sessionId != null ? String(params.sessionId)
             : (params.session_id != null ? String(params.session_id) : String(conversationId));
-          backgroundTasks.register('compact:medium-tier', ctx.losslessClawAdapter.compact({
-            sessionId: _lcSid, sessionKey, sessionFile, force: true,
-            tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
-            compactionTarget: 'threshold',
-          }).then((_r: any) => {
-            // v2.7.3 债务闭环：直接压缩成功即清偿，防止调度器 60s 后重复 no-op force compact
-            if (_r?.compacted && conversationId != null) {
-              try { clearDebt(conversationId, 'cleared_by_direct_compact_medium'); } catch { /* non-fatal */ }
-            }
-          }, () => {}));
+          // v2.9.0: 主轮门控 → medium 预防性压缩 defer 给债务调度器（轮间执行），
+          // 避免与主生成在本地 Ollama 排队争抢。债务已在下文写入，调度器会处理。
+          if (!isMainTurnActive()) {
+            backgroundTasks.register('compact:medium-tier', ctx.losslessClawAdapter.compact({
+              sessionId: _lcSid, sessionKey, sessionFile, force: true,
+              tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
+              compactionTarget: 'threshold',
+            }).then((_r: any) => {
+              // v2.7.3 债务闭环：直接压缩成功即清偿，防止调度器 60s 后重复 no-op force compact
+              if (_r?.compacted && conversationId != null) {
+                try { clearDebt(conversationId, 'cleared_by_direct_compact_medium'); } catch { /* non-fatal */ }
+              }
+            }, () => {}));
+          } else {
+            ctx.logger?.debug?.('[assemble] medium-tier async compact deferred (main turn active); debt recorded', {
+              sessionKey,
+              conversationId,
+            });
+          }
 
           if (hasExistingSummary) {
             // SECONDARY: token 预算裁剪 — 先裁剪 summary 的 token 总量
@@ -753,33 +771,44 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               ctx.logger?.warn?.('[assemble] overflow retry: all budgets exhausted');
             })().then(() => {}, () => {}));
           } else {
+            // v2.9.0: high-tier 同步 compact（原 Promise.race 60s 阻塞主轮）改为异步。
+            // 不再阻塞主对话：写入债务 + 注册后台压缩（受 adapter 在途去重与 Ollama
+            // 并发闸门约束），本轮直接用现有摘要/最近消息构建注入上下文。真正压缩
+            // 由后台任务 / debt-manager 在轮次间隙完成，多轮消息由 lossless-claw DAG
+            // 一次合并压缩，避免"每个都压缩"。
             try {
-              let compactTimer: ReturnType<typeof setTimeout> | undefined;
-              const compactTimeoutPromise = new Promise<never>((_, reject) => {
-                compactTimer = setTimeout(() => reject(new Error('Compact timeout')), compactTimeout);
-              });
-              compactTimeoutPromise.catch(() => {});
-              const _syncCompactResult = await Promise.race([
-                ctx.losslessClawAdapter.compact({
-                  sessionId: _lcSid, sessionKey, sessionFile, force: true,
-                  tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
-                  compactionTarget: 'threshold',
-                }),
-                compactTimeoutPromise,
-              ]);
-              if (compactTimer) clearTimeout(compactTimer);
-              // v2.7.3 债务闭环：同步压缩成功即清偿高压债务
-              if ((_syncCompactResult as any)?.compacted && conversationId != null) {
-                try { clearDebt(conversationId, 'cleared_by_direct_compact_sync'); } catch { /* non-fatal */ }
-              }
-              const freshSummaries = await ctx.losslessClawAdapter.getSummaries(_lcSid, 10);
-              if (freshSummaries.length > 0) {
+              writeCompactionDebt(
+                conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
+                'high_pressure_deferred_async_' + effectiveTokenCount,
+              );
+
+              // 异步压缩（fire-and-forget；成功即清偿债务，避免调度器 60s 后重复 no-op）
+              backgroundTasks.register('compact:high-tier-async', ctx.losslessClawAdapter.compact({
+                sessionId: _lcSid, sessionKey, sessionFile, force: true,
+                tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
+                compactionTarget: 'threshold',
+              }).then((_r: any) => {
+                if (_r?.compacted && conversationId != null) {
+                  try { clearDebt(conversationId, 'cleared_by_direct_compact_high_async'); } catch { /* non-fatal */ }
+                } else if (_r?.ok === false) {
+                  ctx.logger?.warn?.('[assemble:high] async compact failed (will retry via debt scheduler)', {
+                    error: _r?.error ?? _r?.reason,
+                    exhausted: _r?.exhausted,
+                  });
+                }
+              }, (err: any) => {
+                ctx.logger?.warn?.('[assemble:high] async compact threw (will retry via debt scheduler)', {
+                  err: err instanceof Error ? err.message : String(err),
+                });
+              }));
+
+              if (hasExistingSummary) {
                 // SECONDARY: token 预算裁剪
                 const budgetTrimmed = trimSummariesToBudget(
-                  freshSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
+                  convSummaries.map((s) => ({ summaryId: s.summaryId, content: s.content, tokenCount: s.tokenCount })),
                   resolvedCtx.compactTokenBudget * maxSummaryRatio,
                 );
-                const budgetSummaries = freshSummaries.filter((s) =>
+                const budgetSummaries = convSummaries.filter((s) =>
                   budgetTrimmed.some((t) => t.summaryId === s.summaryId),
                 );
                 // PRIMARY: dedupRounds 控制 — 构建时序上下文
@@ -792,87 +821,25 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
                 // BUGFIX: 与 low-tier 分支对齐，确保压缩重建窗口内仍含真实 user
                 finalMessages = appendRecentUser([...goalAnchorMsgs, ...chronologicalMsgs], messages);
-                ctx.logger?.info?.('[assemble:high] messages replaced with chronological context', {
+                ctx.logger?.info?.('[assemble:high] messages replaced with chronological context (async compact deferred)', {
                   originalMsgCount: messages.length,
                   keptMsgCount: chronologicalMsgs.length,
-                  summaryCountBeforeDedup: freshSummaries.length,
+                  summaryCountBeforeDedup: convSummaries.length,
                   summaryCountAfterBudget: budgetSummaries.length,
                   dedupRounds: dedupLimit,
                 });
-
-                // Re-evaluate pressure tier after successful compaction
-                if (wm) {
-                  const postCompactTokens = estimateTokensFromMessages(finalMessages);
-                  const postCompactTokenRatio = contextWindow > 0 ? postCompactTokens / contextWindow : 0;
-                  const postCompactUncompressed = getUncompressedMessageCount(conversationId);
-                  const postCompactActive = postCompactUncompressed >= 0 ? postCompactUncompressed : finalMessages.length;
-
-                  const newTier = determinePressureTier(postCompactActive, postCompactTokenRatio, {
-                    dedupRounds: wm.dedupRounds ?? 24,
-                    highPressureThreshold: wm.highPressureThreshold ?? 0.85,
-                    mediumPressureThreshold: wm.mediumPressureThreshold ?? 0.70,
-                  });
-
-                  if (newTier !== tier) {
-                    ctx.logger?.info?.('[assemble] tier re-evaluated after compaction', {
-                      oldTier: tier,
-                      newTier,
-                      oldTokenRatio: Number(tokenRatio.toFixed(3)),
-                      newTokenRatio: Number(postCompactTokenRatio.toFixed(3)),
-                    });
-                    tier = newTier;
-                    estimatedTokens = postCompactTokens;
-                    tokenRatio = postCompactTokenRatio;
-                    // 复用 resolveContextProfile 的中/高压默认（已包含 capability profile tier limits 的回退）
-                    retrievalLimits = getRetrievalLimitsForTier(tier, {
-                      low: (resolvedCtx as any)._tierLowDefaults ?? resolvedCtx.retrievalLimits,
-                      medium: (resolvedCtx as any)._tierMediumDefaultsFromLow ?? {
-                        qmd: Math.max(1, Math.round(resolvedCtx.retrievalLimits.qmd * 0.6)),
-                        graph: Math.max(1, Math.round(resolvedCtx.retrievalLimits.graph * 0.6)),
-                        exp: Math.max(0, Math.round(resolvedCtx.retrievalLimits.exp * 0.3)),
-                      },
-                      high: (resolvedCtx as any)._tierHighDefaultsFromLow ?? { qmd: 1, graph: 1, exp: 0 },
-                    });
-                    maxContextChars = getMaxContextCharsForTier(tier, {
-                      low: resolvedCtx.maxContextChars.low,
-                      medium: resolvedCtx.maxContextChars.medium,
-                      high: wm?.maxContextChars?.high ?? 1_600,
-                    });
-                  }
-
-                  // ── P1: 迭代压缩 —— 一次 compact 不够时，异步触发二次压缩 ──
-                  // 当 compact 后 tier 仍为 high 或 medium，说明还有大量未压缩内容
-                  if (newTier === 'high' || newTier === 'medium') {
-                    ctx.logger?.info?.('[assemble] iterative compaction triggered', {
-                      tier: newTier,
-                      tokenRatio: Number(postCompactTokenRatio.toFixed(3)),
-                      uncompressedCount: postCompactUncompressed,
-                    });
-                    const _iterSid = params.sessionId != null ? String(params.sessionId)
-                      : (params.session_id != null ? String(params.session_id) : String(conversationId));
-                    backgroundTasks.register('compact:iterative-' + newTier, ctx.losslessClawAdapter.compact({
-                      sessionId: _iterSid, sessionKey, sessionFile, force: true,
-                      tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: postCompactTokens,
-                      compactionTarget: 'threshold',
-                    }).then(() => {}, () => {}));
-                  }
-                }
               } else {
-                writeCompactionDebt(
-                  conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
-                  'high_pressure_no_summary_after_compact',
-                );
-                // 无摘要产出 → 降级注入
-                finalMessages = applyCascadingDegradation('no_summary');
+                // 无摘要产出 → 降级注入（仅最近消息），债务已写，轮间补压缩
+                finalMessages = applyCascadingDegradation('high_pressure_no_summary_async_deferred');
                 markDegraded('high_pressure_no_summary');
               }
             } catch (err) {
-              ctx.logger?.warn?.('High pressure compact failed, using degraded context', { err: serializeError(err) });
+              ctx.logger?.warn?.('High pressure async compact setup failed, using degraded context', { err: serializeError(err) });
               writeCompactionDebt(
                 conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
                 'high_pressure_compact_failed',
               );
-              // ── P0: 压缩失败降级 —— 用已有摘要 + 最近消息，而非全量继续 ──
+              // ── 压缩失败降级 ── 用已有摘要 + 最近消息，而非全量继续 ──
               finalMessages = applyCascadingDegradation('compact_failed');
               markDegraded('high_pressure_compact_failed');
             }
@@ -882,6 +849,14 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             conversationId, resolvedCtx.compactTokenBudget, effectiveTokenCount,
             'proactive_' + tier + '_pressure',
           );
+          // v2.9.0: 主轮门控 → low-tier 预防性压缩 defer 给债务调度器（轮间执行），
+          // 债务已在上方写入；合并压缩 + 不阻塞主对话。
+          if (isMainTurnActive()) {
+            ctx.logger?.debug?.('[assemble] low-tier async compact deferred (main turn active); debt recorded', {
+              sessionKey,
+              conversationId,
+            });
+          } else {
           backgroundTasks.register('compact:low-tier', ctx.losslessClawAdapter.compact({
             sessionId: params.sessionId != null ? String(params.sessionId)
               : (params.session_id != null ? String(params.session_id) : String(conversationId)),
@@ -914,6 +889,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           }, (err: any) => {
             ctx.logger?.warn?.('[assemble] low-tier compact threw', { err: err instanceof Error ? err.message : String(err) });
           }));
+          }
         }
       }
     } else if (needsCompact) {

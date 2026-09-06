@@ -830,11 +830,13 @@ export async function runDistillation(
     // BUGFIX(P2-2/3): 原为串行 for-await，每条 distillOne 是一次 LLM 调用（含 15s 超时），
     // 5 条串行最坏 75s。改为分批并发处理，每批 concurrency 条用 Promise.allSettled 并发执行。
     // 每条蒸馏按 raw.id 隔离、无跨条数据依赖，并发安全；单条失败不影响其他条。
-    // 默认并发上限 3，可通过环境变量 LCMG_DISTILL_CONCURRENCY 覆盖（上限 10，防止瞬时压力过大）。
+    // v2.9.0: 默认并发 3→2、上限 10→4 —— 本地 Ollama 串行排队 + 与主生成/embedding
+    // 共享全局并发闸门（OLLAMA_MAX_CONCURRENCY 默认 2），大批并发只会加剧服务端 503。
+    // 可通过环境变量 LCMG_DISTILL_CONCURRENCY 覆盖（1~4）。
     const concurrency = (() => {
       const raw = process.env.LCMG_DISTILL_CONCURRENCY;
-      if (raw) { const n = Number(raw); if (Number.isFinite(n) && n > 0) return Math.min(n, 10); }
-      return 3;
+      if (raw) { const n = Number(raw); if (Number.isFinite(n) && n > 0) return Math.min(n, 4); }
+      return 2;
     })();
     // 收集 distillOne 的错误详情，取第一条供结果展示（避免用户只看到 "see logs"）
     const distillErrors: string[] = [];

@@ -1202,6 +1202,23 @@ const pluginEntry: any = definePluginEntry({
           // pending 队列。仅在"无显式 force / 无真实溢出 / 无积压"时应用同会话冷却；
           // 显式强制压缩与真实压力（输入溢出 / DB 积压超 dedupRounds）不受影响。
           if (params.force !== true && !_isInputOverflow && !_forceCompact) {
+            // v2.9.0: 主轮门控让路 —— 主对话轮进行中时，非紧急压缩避让，
+            // 写入债务由 debt-manager 在轮次间隙统一处理（合并压缩，不阻塞主对话）。
+            // 场景：SDK 后台维护 / 手动触发恰逢其他会话主轮在跑（本地 Ollama 正被
+            // 主生成占用），此时再同步跑 300s LLM 摘要只会加剧排队与 503。
+            try {
+              const { isMainTurnActive } = await import('../async/main-turn-gate.js');
+              if (isMainTurnActive()) {
+                logger?.debug?.('[compact] deferred: main turn active', { sessionKey: _compactSessionKey });
+                if (_compactConvId != null) {
+                  writeCompactionDebt(
+                    _compactConvId, _compactBudget, _currentTokens,
+                    'compact_deferred_main_turn',
+                  );
+                }
+                return { ok: false, compacted: false, reason: 'main_turn_active' };
+              }
+            } catch { /* gate 不可用，维持原行为 */ }
             const _lcmCompactKey = _compactSessionKey || _compactSessionId || '';
             if (_lcmCompactKey) {
               const _lcmCooldownMs = (_lcmMonitor as any)?.compactCooldownMs ?? _lcmCompactCooldownDefaultMs;

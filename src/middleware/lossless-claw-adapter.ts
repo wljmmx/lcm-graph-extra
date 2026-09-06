@@ -723,21 +723,25 @@ export class LosslessClawAdapter {
     // fire-and-forget backgroundTasks，连续多轮触发会对同一 session 叠加多个
     // compact。每个 compact 内部要跑 LLM 摘要，本地 Ollama 串行排队时这些任务
     // 互相挤压 + 与主模型生成争抢 → 主生成 stall（"stopped making progress"）。
-    // 去重后同 session 最多一个在途 compact；跳过是安全的——已在跑的那个会
-    // 完成本轮需要的压缩（force 压缩除外，见下方 force 直通）。
+    // v2.9.0: force 也纳入去重（此前仅非 force 去重）——assemble 的 medium/low/
+    // iterative/overflow-retry 均为 force:true 且会在同轮内叠加注册多个，单会话
+    // 并发多份 force compact 会在 Ollama 上雪崩式排队。在途那份本就会完成所需的
+    // DAG 压缩；跳过是安全的。multi-budget 的 overflow-retry 在同任务内串行执行，
+    // 不受影响（上一份完成释放后自然轮到下一份）。
     const _dedupSk = (typeof params.sessionKey === 'string' && params.sessionKey.trim())
       || (typeof params.sessionId === 'string' && params.sessionId.trim())
       || '';
-    if (_dedupSk && !params.force) {
+    if (_dedupSk) {
       if (LosslessClawAdapter._inFlightCompactions.has(_dedupSk)) {
         this.logger?.info?.('[lossless-claw-adapter] compact skipped: another compaction already in flight for session', {
           sessionKey: _dedupSk,
+          force: params.force,
         });
         return { ok: true, compacted: false, reason: 'already_in_flight' };
       }
       LosslessClawAdapter._inFlightCompactions.add(_dedupSk);
     }
-    const _dedupHeld = _dedupSk && !params.force;
+    const _dedupHeld = _dedupSk.length > 0;
 
     // ── G-MODEL-SYNC: 按会话主模型决定 lossless-claw 压缩使用的 LLM ──
     // 统一在此注入，覆盖所有 compact 调用方（/compact 主路径、assemble 预压缩、
