@@ -1740,10 +1740,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_distill",
     label: "经验蒸馏",
-    description: "手动触发经验蒸馏。从 PENDING 经验中批量蒸馏为 DISTILLED，调用 LLM 提取结构化经验。limit 控制单次处理数量。",
+    description: "手动触发经验蒸馏。从 PENDING 经验中批量蒸馏为 DISTILLED，调用 LLM 提取结构化经验。limit 控制单次处理数量（工具执行期间主模型会等待结果，建议小批量多次调用，默认 10）。",
     parameters: Type.Object({
       limit: Type.Optional(Type.Number({
-        description: "最大蒸馏数量，默认 50",
+        description: "最大蒸馏数量，默认 10（并发限制下本地 LLM 约 1-3 分钟，避免主模型长时间等待）。最多 200",
         minimum: 1,
         maximum: 200,
       })),
@@ -1759,7 +1759,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           isError: true,
         };
       }
-      const limit = params.limit ?? 50;
+      const limit = params.limit ?? 10;
       try {
         if (signal?.aborted) {
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
@@ -1871,6 +1871,16 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             lines.push('');
             lines.push(`[NOTE] ${skippedFailed} experience(s) have exhausted all ${maxRetries} auto-retries.`);
             lines.push('Run lcmg_distill_retry to reset them for another attempt.');
+          }
+          // SD-DEF-4: 蒸馏为同步工具，主模型会等待结果。若仍有未处理经验，
+          // 提示分批继续，避免用户误以为一次 50/200 条全量处理。
+          const _pendingTotal = neo4jByStatus && typeof neo4jByStatus.PENDING === 'number'
+            ? neo4jByStatus.PENDING
+            : undefined;
+          if (_pendingTotal !== undefined && _pendingTotal > pending) {
+            lines.push('');
+            lines.push(`[INFO] 仍有约 ${_pendingTotal - pending} 条 PENDING 经验未处理（本次仅处理 ${limit} 条）。`);
+            lines.push('可再次调用 lcmg_distill（保持小批量），或调整 limit 参数按需加大。');
           }
         }
 
@@ -2128,11 +2138,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         const target = params.conversationId != null
           ? `conversation ${params.conversationId}`
           : 'most urgent debt';
+        // SD-DEF-4: 语义修正 —— 前台工具调用时主轮门控必然持住，债务调度器会
+        // defer（下一轮有余量再后台压缩）。原文案"✅ completed"是假象，误导用户。
+        // 检测主轮状态给出诚实反馈：主轮内 → "已排队后台执行"；否则沿用完成语义。
+        let _compactDeferred = false;
+        try {
+          const { isMainTurnActive } = await import('./async/main-turn-gate.js');
+          _compactDeferred = isMainTurnActive();
+        } catch { /* gate 不可用时维持原行为 */ }
         return {
           content: [{
             type: "text" as const,
             text: ok
-              ? `✅ Compact completed for ${target}.`
+              ? (_compactDeferred
+                ? `✅ Compact 已排队（后台执行）：当前对话轮进行中，调度器将在轮次间隙完成 ${target} 的压缩。`
+                : `✅ Compact completed for ${target}.`)
               : `⚠️ Compact triggered for ${target} but did not produce a summary (may retry).`,
           }],
           details: {
@@ -2140,6 +2160,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             metrics: {
               target,
               summaryProduced: ok,
+              deferred: _compactDeferred,
               conversationId: params.conversationId ?? null,
             },
           },
