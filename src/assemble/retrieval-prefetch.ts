@@ -98,7 +98,7 @@ export function prefetchEntryId(r: any): string {
  *  超期淘汰；仅按 base score 截断防无界堆积。新鲜度加成只在读取（assemble 消费）时应用。 */
 export function mergePrefetchLayer(existing: any[] | undefined, incoming: any[], now: number): any[] {
   const out = new Map<string, any>();
-  const prune = (arr: any[]) =>
+  const prune = (arr: any[] | undefined) =>
     (Array.isArray(arr) ? arr : []).filter(
       (r) => r && (typeof r._retrAt !== 'number' || now - r._retrAt < PREFETCH_TTL_MS),
     );

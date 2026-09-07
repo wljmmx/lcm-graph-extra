@@ -234,7 +234,7 @@ export async function performRetrieval(
         const enqStatus = retrievalPrefetchQueue.enqueue({
           sessionKey,
           query: qmdQuery,
-          run: (async () => {
+          run: async () => {
             try {
               const now = Date.now();
               const res = await runRetrievalPrefetch(deps, sessionKey, qmdQuery, retrievalLimits);
@@ -242,7 +242,7 @@ export async function performRetrieval(
             } catch (e) {
               ctx.logger?.debug?.('[assemble] O7: background prefetch run failed (non-fatal)', { err: (e as Error).message });
             }
-          })(),
+          },
         });
         ctx.logger?.info?.('[assemble] O7: background prefetch enqueued', {
           sessionKey: sessionKey.slice(0, 16),

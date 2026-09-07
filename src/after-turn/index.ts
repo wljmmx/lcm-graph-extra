@@ -409,7 +409,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
           const status = retrievalPrefetchQueue.enqueue({
             sessionKey,
             query,
-            run: (async () => {
+            run: async () => {
               try {
                 const now = Date.now();
                 const results = await runRetrievalPrefetch(deps, sessionKey, query, retrievalLimits, { onGraph });
@@ -420,7 +420,7 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
                   err: (e as Error).message,
                 });
               }
-            })(),
+            },
           });
 
           if (status === 'merged') {
