@@ -1,0 +1,218 @@
+20:43:05+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+20:43:05+08:00 info plugins [session-trace] assemble window
+20:43:05+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+20:43:05+08:00 info plugins [assemble:low-tier] getSummaries (count=3, has=true)
+20:43:05+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+20:43:05+08:00 info plugins [assemble] O7: using prefetch cache
+20:43:05+08:00 info plugins [perf-stats] performRetrieval stats update check
+20:43:05+08:00 info plugins [perf-stats] after update
+20:43:05+08:00 info plugins [assemble] O7: time-decay TOP-K applied (cache layer)
+20:43:05+08:00 info plugins ⚡ assemble=8ms | init=0ms | parallel=5(L2_qmd=0,L3_graph=0,L4_exp=0) | mg=0ms | estimatedTokens=8196/131072(6.3%) | overhead=825 | effectiveTokenCount=7785 | msgCount=11 | uncomp=2 | tier=low
+20:43:05+08:00 info plugins [assemble] MoA complexity check
+20:43:06+08:00 info plugins [prefetch] L2 qmd fetched
+20:43:06+08:00 info [gm-timing] ensure_projection +36.0ms cache=hit
+20:43:08+08:00 info [gm-timing] vec_embed +2170.0ms dims=1024 context=recall_entry
+20:43:08+08:00 info [gm-timing] community_vec_reps +183.0ms communities=3 reps=3215
+20:43:08+08:00 info [gm-timing] ppr_seed_lookup +55.0ms seeds=3215
+20:43:08+08:00 info [gm-timing] ensure_projection +19.0ms cache=hit
+20:43:08+08:00 info [gm-timing] multi_stage_fts +522.0ms seeds=0
+20:43:09+08:00 info [gm-timing] ppr_compute +463.0ms gds_scores=3215
+20:43:09+08:00 info [gm-timing] ppr_total +465.0ms scores=3215
+20:43:09+08:00 info [gm-timing] ppr_compute +541.0ms scores=3215 context=generalized
+20:43:09+08:00 info [gm-timing] recall_generalized +727.0ms finalNodes=8
+20:43:09+08:00 info [gm-timing] merge_results +0.0ms nodes=8 edges=0
+20:43:09+08:00 info [gm-timing] recall_cache_similar_hit +0.0ms similarity=0.953
+20:43:09+08:00 info [gm-timing] recall_total +2900.0ms nodes=8 edges=0
+20:43:09+08:00 info [gm-timing] ppr_seed_lookup +23.0ms seeds=8
+20:43:09+08:00 info [gm-timing] ensure_projection +21.0ms cache=hit
+20:43:09+08:00 info [gm-timing] ppr_compute +488.0ms gds_scores=8
+20:43:09+08:00 info [gm-timing] ppr_total +488.0ms scores=8
+20:43:09+08:00 info plugins [prefetch] L3 graph fetched
+20:43:09+08:00 info plugins [prefetch] L4 experience fetched
+20:43:09+08:00 info plugins [prefetch] openclaw memory fetched
+20:43:09+08:00 info plugins [prefetch] cache written (overlay merge)
+20:43:15+08:00 info qqbot/core [proactive] Recorded user: default:c2c:E6D32E82A88D881F14B068ADDE121063
+20:43:15+08:00 warn agent/embedded [model-fallback] configured fallbacks disabled by user model override run=ROBOT1.0_0SOqByBr6Rvaln6KSjMS4rNwu7H4VOGIhtcJd2mCYzPU9J9M1heELK5a3WFiaN7G0Pq1vUwW8zZPvDsSr7qZgOK7Br75oLJKNBLRbO3f23g! session=sha256:36037ec1543d
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 909db17e-230f-4668-9b7e-40e786179df9: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 474a9415-8eb3-4e8c-a31e-6022b788d86b: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 9951e719-6f91-454c-8b2e-44afae9cb1a5: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 954f090e-ef8b-48c1-8c6f-16fedf98201e: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: d3460997-cb94-4253-8b91-e8fc24946bb0: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: d802590e-21ba-412f-8bce-2441a87f522f: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 9fdc4924-a175-4572-b191-a89395a5a50c: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: da95f9de-8def-4124-a02f-34919fc32c90: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 4cb001ef-56e0-4eb7-86cb-9da51e10591c: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 68948570-02e5-4dee-8756-cbb0b88c1057: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 0f92114a-d2aa-4721-a31a-8acb1db79817: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 4bb3761e-b766-4048-9eec-487623a2137c: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: cfe66afb-0135-4949-9f2c-09355556f636: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 1c6b548a-bc8e-43bb-b104-a0ba80be4952: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: c9e7e721-17f7-4b6c-a8d5-a6442c58d9ec: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: c65cf7ab-5a54-46e3-b6a2-dc524492d77d: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: dee2a83c-66e7-4a4e-83ce-c6df93a9b16e: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 604303ee-d9a6-4ff8-950e-ea1b10cc78ed: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 37c6e327-4a0b-43be-8d0a-c8156a0ec688: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: c8f3af1e-f4b5-4f07-8026-43fd95991093: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 98e562c3-1abe-4ca3-a827-4e4751ebed05: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: ab617006-93d0-41ba-ac84-878b0bca67e7: transcript range is stale
+20:43:15+08:00 warn [context-engine] durable turn advancement is blocked: 8151c466-293f-4e98-b847-c33a84bcdfa2: transcript range is stale
+20:43:15+08:00 warn env-overrides Blocked skill env overrides for gh-issues: GH_TOKEN
+20:43:15+08:00 info gateway/ws ⇄ res ✓ sessions.branches.list 126ms conn=9c2d2f8d…1535 id=55:fe905a89-…c66d
+20:43:16+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: 4ca726a0a633c680d885ce0fc96544fb
+20:43:16+08:00 info agent/embedded tool-search: cataloged 167 tools behind compact prompt surface
+20:43:17+08:00 info plugins [bootstrap] lossless-claw bootstrap result
+20:43:17+08:00 info plugins [lcm-graph-extra] session state invalidated for reset
+20:43:17+08:00 info plugins [session-trace] assemble window
+20:43:17+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+20:43:17+08:00 info plugins [assemble:low-tier] getSummaries (count=0, has=false)
+20:43:17+08:00 info plugins [assemble] O7: background prefetch enqueued
+20:43:17+08:00 info plugins [perf-stats] performRetrieval stats update check
+20:43:17+08:00 info plugins [perf-stats] after update
+20:43:17+08:00 info plugins ⚡ assemble=266ms | init=0ms | parallel=263(L2_qmd=0,L3_graph=0,L4_exp=146) | mg=1ms | estimatedTokens=0/131072(0.0%) | overhead=0 | effectiveTokenCount=0 | msgCount=0 | uncomp=23 | tier=low
+20:43:17+08:00 info plugins [assemble] MoA complexity check
+20:43:17+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+20:43:21+08:00 info plugins [session-trace] assemble window
+20:43:21+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+20:43:21+08:00 info plugins [assemble:low-tier] getSummaries (count=0, has=false)
+20:43:21+08:00 info plugins [assemble] O7: background prefetch enqueued
+20:43:21+08:00 warn plugins [qmd-client] mcpCall slow: tool=query, total=4209ms (fetch=4209ms, parse=0ms)
+20:43:21+08:00 info plugins [prefetch] L2 qmd fetched
+20:43:21+08:00 info [gm-timing] ensure_projection +27.0ms cache=hit
+20:43:21+08:00 info plugins [perf-stats] performRetrieval stats update check
+20:43:21+08:00 info plugins [perf-stats] after update
+20:43:21+08:00 info plugins ⚡ assemble=374ms | init=0ms | parallel=372(L2_qmd=0,L3_graph=0,L4_exp=247) | mg=0ms | estimatedTokens=234/131072(0.2%) | overhead=537 | effectiveTokenCount=771 | msgCount=2 | uncomp=23 | tier=low
+20:43:21+08:00 info plugins [assemble] MoA complexity check
+20:43:21+08:00 info gateway/ws ⇄ res ✓ logs.tail 146ms conn=554de04c…9ba8 id=2:a8053ff1-e…bfc7
+20:43:21+08:00 info gateway/ws ⇄ res ✓ logs.tail 151ms conn=8d48ee7a…c373 id=2:cc27fd69-c…37c3
+20:43:21+08:00 info plugins [prefetch] L2 qmd fetched
+20:43:21+08:00 info [gm-timing] ensure_projection +12.0ms cache=hit
+20:43:22+08:00 info [gm-timing] vec_embed +712.0ms dims=1024 context=recall_entry
+20:43:22+08:00 info [gm-timing] vec_embed +272.0ms dims=1024 context=recall_entry
+20:43:22+08:00 info [gm-timing] community_vec_reps +9.0ms communities=3 reps=27
+20:43:22+08:00 info [gm-timing] community_vec_reps +13.0ms communities=3 reps=27
+20:43:24+08:00 warn sqlite/transaction slow SQLite transaction lock wait
+20:43:24+08:00 warn diagnostic liveness heartbeat delayed: overdue=1597ms elapsed=31597ms; deferring recovery decisions
+20:43:24+08:00 info [gm-timing] multi_stage_fts +1926.0ms seeds=0
+20:43:24+08:00 info [gm-timing] multi_stage_fts +1927.0ms seeds=0
+20:43:24+08:00 info [gm-timing] ppr_seed_lookup +1937.0ms seeds=27
+20:43:24+08:00 info [gm-timing] ppr_seed_lookup +1934.0ms seeds=27
+20:43:24+08:00 info [gm-timing] ensure_projection +16.0ms cache=hit
+20:43:24+08:00 info [gm-timing] ensure_projection +23.0ms cache=hit
+20:43:24+08:00 info [gm-timing] ppr_compute +143.0ms gds_scores=27
+20:43:24+08:00 info [gm-timing] ppr_total +144.0ms scores=27
+20:43:24+08:00 info [gm-timing] ppr_compute +2102.0ms scores=27 context=generalized
+20:43:24+08:00 info [gm-timing] recall_generalized +2115.0ms finalNodes=8
+20:43:24+08:00 info [gm-timing] merge_results +0.0ms nodes=8 edges=0
+20:43:24+08:00 info [gm-timing] recall_total +2389.0ms nodes=8 edges=0
+20:43:24+08:00 info [gm-timing] ppr_seed_lookup +2.0ms seeds=8
+20:43:24+08:00 info [gm-timing] ppr_compute +164.0ms gds_scores=27
+20:43:24+08:00 info [gm-timing] ppr_total +164.0ms scores=27
+20:43:24+08:00 info [gm-timing] ppr_compute +2119.0ms scores=27 context=generalized
+20:43:24+08:00 info [gm-timing] recall_generalized +2129.0ms finalNodes=8
+20:43:24+08:00 info [gm-timing] merge_results +0.0ms nodes=8 edges=0
+20:43:24+08:00 info [gm-timing] recall_cache_similar_hit +0.0ms similarity=1.000
+20:43:24+08:00 info [gm-timing] recall_total +2844.0ms nodes=8 edges=0
+20:43:24+08:00 info [gm-timing] ppr_seed_lookup +1.0ms seeds=8
+20:43:24+08:00 info [gm-timing] ensure_projection +18.0ms cache=hit
+20:43:24+08:00 info [gm-timing] ensure_projection +12.0ms cache=hit
+20:43:24+08:00 info [gm-timing] ppr_compute +174.0ms gds_scores=8
+20:43:24+08:00 info [gm-timing] ppr_total +175.0ms scores=8
+20:43:24+08:00 info plugins [prefetch] L3 graph fetched
+20:43:24+08:00 info [gm-timing] ppr_compute +216.0ms gds_scores=8
+20:43:24+08:00 info [gm-timing] ppr_total +217.0ms scores=8
+20:43:24+08:00 info plugins [prefetch] L3 graph fetched
+20:43:24+08:00 info plugins [prefetch] L4 experience fetched
+20:43:24+08:00 info plugins [prefetch] openclaw memory fetched
+20:43:24+08:00 info plugins [prefetch] cache written (overlay merge)
+20:43:24+08:00 info plugins [prefetch] L4 experience fetched
+20:43:24+08:00 info plugins [prefetch] openclaw memory fetched
+20:43:24+08:00 info plugins [prefetch] cache written (overlay merge)
+20:44:05+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: ddd5df770ed3a6af303b2608be9492b6
+20:44:26+08:00 info plugins heartbeat: cycle completed in 11ms
+20:44:29+08:00 info plugins heartbeat: cycle completed in 7ms
+20:44:32+08:00 info plugins heartbeat: cycle completed in 10ms
+20:44:33+08:00 info plugins heartbeat: cycle completed in 7ms
+20:44:55+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: 883edfc1cf4e0d4e683d986cd15b063d
+20:45:45+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: de1dffa33615d21d545b3e36c5270d60
+20:46:20+08:00 info auto-reply/agent-turn-timing agent turn milestone runId=12ca8bc4-63c9-4ee8-bdd5-3a91f7f508ed sessionId=022f0d27-da8a-40fe-a230-dee6443a8e10 sessionKey=agent:main:main milestone=tool_execution_started totalMs=196121 stages=fallback_prepare_harness:1ms@8ms,fallback_prepare_harness:0ms@8ms,fallback_prepare_harness:0ms@8ms,fallback_prepare_harness:0ms@9ms,fallback_prepare_harness:0ms@9ms,fallback_prepare_harness:0ms@9ms,fallback_prepare_harness:0ms@9ms,fallback_resolve_runtime:0ms@11ms
+20:46:20+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+20:46:20+08:00 warn [lcm] afterTurn: runtime batch does not align with the covered transcript frontier and partially overlaps persisted history (1/2); ingesting full batch to preserve potentially new messages conversation=2445
+20:46:20+08:00 info plugins [session-trace] assemble window
+20:46:20+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+20:46:20+08:00 info plugins [assemble:low-tier] getSummaries (count=3, has=true)
+20:46:20+08:00 info plugins [assemble:low-tier] messages replaced with chronological context
+20:46:20+08:00 info plugins [assemble] O7: background prefetch enqueued
+20:46:20+08:00 info plugins [perf-stats] performRetrieval stats update check
+20:46:20+08:00 info plugins [perf-stats] after update
+20:46:20+08:00 info plugins ⚡ assemble=291ms | init=0ms | parallel=288(L2_qmd=0,L3_graph=0,L4_exp=217) | mg=0ms | estimatedTokens=8211/131072(6.3%) | overhead=1184 | effectiveTokenCount=8159 | msgCount=13 | uncomp=2 | tier=low
+20:46:20+08:00 info plugins [assemble] MoA complexity check
+20:46:21+08:00 info plugins [prefetch] L2 qmd fetched
+20:46:21+08:00 info [gm-timing] recall_cache_hit +0.0ms query=[Queued user message from a previous active turn; 
+20:46:21+08:00 info [gm-timing] ppr_seed_lookup +23.0ms seeds=8
+20:46:21+08:00 info [gm-timing] ensure_projection +50.0ms cache=hit
+20:46:21+08:00 info [gm-timing] ppr_compute +123.0ms gds_scores=8
+20:46:21+08:00 info [gm-timing] ppr_total +124.0ms scores=8
+20:46:21+08:00 info plugins [prefetch] L3 graph fetched
+20:46:21+08:00 info plugins [prefetch] L4 experience fetched
+20:46:21+08:00 info plugins [prefetch] openclaw memory fetched
+20:46:21+08:00 info plugins [prefetch] cache written (overlay merge)
+20:46:35+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: e263d8ff733e7a69f922ede209899722
+20:47:25+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: 245be345485db769c305d82b2250be82
+20:47:53+08:00 warn cron cron: job run returned error status
+20:47:53+08:00 info cron cron: scheduling recurring retry after transient error
+20:47:53+08:00 warn cron cron: job run returned error status
+20:47:53+08:00 info cron cron: scheduling recurring retry after transient error
+20:48:04+08:00 info auto-reply/agent-turn-timing agent turn milestone runId=ROBOT1.0_0SOqByBr6Rvaln6KSjMS4rNwu7H4VOGIhtcJd2mCYzPU9J9M1heELK5a3WFiaN7G0Pq1vUwW8zZPvDsSr7qZgOK7Br75oLJKNBLRbO3f23g! sessionId=c7fb38d9-745f-41d3-8b1c-f60c5cad6814 sessionKey=agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063 milestone=tool_execution_started totalMs=288535 stages=fallback_prepare_harness:0ms@6ms,fallback_resolve_runtime:0ms@7ms
+20:48:04+08:00 info plugins [lossless-claw-adapter] afterTurn llm injection
+20:48:08+08:00 warn agent/embedded embedded run timeout: runId=12ca8bc4-63c9-4ee8-bdd5-3a91f7f508ed sessionId=022f0d27-da8a-40fe-a230-dee6443a8e10 timeoutMs=300000
+20:48:08+08:00 info plugins [dispose] called, resetting graphAdapter and stopping servers
+20:48:08+08:00 info plugins [afterTurn] O7: full prefetch enqueue
+20:48:08+08:00 info plugins [session-trace] assemble window
+20:48:08+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+20:48:08+08:00 info plugins [assemble:low-tier] getSummaries (count=0, has=false)
+20:48:08+08:00 info plugins [assemble] O7: using prefetch cache
+20:48:08+08:00 info plugins [perf-stats] performRetrieval stats update check
+20:48:08+08:00 info plugins [perf-stats] after update
+20:48:08+08:00 info plugins [assemble] O7: time-decay TOP-K applied (cache layer)
+20:48:08+08:00 info plugins ⚡ assemble=4ms | init=0ms | parallel=2(L2_qmd=0,L3_graph=0,L4_exp=0) | mg=0ms | estimatedTokens=2001/131072(1.5%) | overhead=566 | effectiveTokenCount=2567 | msgCount=4 | uncomp=25 | tier=medium
+20:48:08+08:00 info plugins [assemble] MoA complexity check
+20:48:08+08:00 warn gateway/heartbeat heartbeat: failure notice delivery failed
+20:48:09+08:00 info gateway/delivery-recovery Outbound delivery retry: entry 78a9c137-3107-47d6-9dd2-0bf946f917ad not ready for retry yet — backoff 4725ms remaining
+20:48:09+08:00 info plugins [prefetch] L2 qmd fetched
+20:48:09+08:00 info plugins [prefetch] L3 graph fetched
+20:48:09+08:00 warn plugins [prefetch] L4 failed (non-fatal)
+20:48:09+08:00 info plugins [prefetch] openclaw memory fetched
+20:48:09+08:00 info plugins [prefetch] cache written (overlay merge)
+20:48:14+08:00 warn gateway/delivery-recovery Delivery entry 78a9c137-3107-47d6-9dd2-0bf946f917ad delivery state is send_attempt_started; refusing blind replay without adapter reconciliation
+20:48:14+08:00 warn gateway/delivery-recovery Outbound delivery retry: retry failed for entry 78a9c137-3107-47d6-9dd2-0bf946f917ad: delivery state is send_attempt_started; refusing blind replay without adapter reconciliation
+20:48:15+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: 48f4e3cbed46c4369eb88026841e320b
+20:48:45+08:00 info plugins [afterTurn] O7: full prefetch enqueue
+20:48:45+08:00 info plugins [prefetch] L2 skipped (qmdClient not present)
+20:48:45+08:00 info plugins [prefetch] L3 skipped (graphAdapter not present)
+20:48:45+08:00 info plugins [prefetch] L4 skipped (expStore not present)
+20:48:45+08:00 info plugins [lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, cached engine)
+20:48:45+08:00 info plugins [prefetch] openclaw memory fetched
+20:48:45+08:00 info plugins [lcm] lossless-claw adapter connected successfully
+20:48:45+08:00 info plugins [prefetch] cache written (overlay merge)
+20:48:45+08:00 info plugins [usage-tracker] DB fallback: JSON file storage
+20:48:45+08:00 info plugins [graph-adapter] loading graph-memory-pro
+20:48:45+08:00 info plugins [graph-adapter] reusing gm-pro module-level Recaller (single source of truth)
+20:48:45+08:00 info plugins [graph-adapter] reusing graph-memory-pro embedFn (batch-capable); local embedding kept only for lcm proxy reads, not injected into shared Recaller
+20:48:45+08:00 info plugins [graph-adapter] reusing existing JudgeManager from gm-pro (feedback loop enabled)
+20:48:45+08:00 info plugins [graph-adapter] reusing existing AssociationMatrix from gm-pro (online learning on)
+20:48:45+08:00 info plugins [graph-adapter] Recaller ready (dual-path recall enabled)
+20:48:45+08:00 info plugins [session-trace] assemble window
+20:48:45+08:00 info plugins [assemble:low-tier] entering low-tier summary path
+20:48:45+08:00 info plugins [assemble:low-tier] getSummaries (count=0, has=false)
+20:48:45+08:00 info plugins [assemble] O7: using prefetch cache
+20:48:45+08:00 info plugins [perf-stats] performRetrieval stats update check
+20:48:45+08:00 info plugins [perf-stats] after update
+20:48:45+08:00 info plugins [assemble] O7: time-decay TOP-K applied (cache layer)
+20:48:45+08:00 info plugins ⚡ assemble=5ms | init=0ms | parallel=1(L2_qmd=0,L3_graph=0,L4_exp=0) | mg=0ms | estimatedTokens=2382/131072(1.8%) | overhead=842 | effectiveTokenCount=3224 | msgCount=6 | uncomp=25 | tier=medium
+20:48:45+08:00 info plugins [assemble] MoA complexity check
+20:49:05+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: e5f4f7e2eae7e845c7c2f0047325dd62
+20:49:26+08:00 info plugins heartbeat: cycle completed in 33ms
+20:49:29+08:00 info plugins heartbeat: cycle completed in 6ms
+20:49:32+08:00 info plugins heartbeat: cycle completed in 10ms
+20:49:33+08:00 info plugins heartbeat: cycle completed in 9ms
+20:49:56+08:00 info channels/qqbot [default] [qqbot:api] <<< Status: 200 OK | TraceId: e8677efe796973209332a61d837b45c6
