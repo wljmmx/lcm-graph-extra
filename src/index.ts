@@ -3397,7 +3397,8 @@ const pluginEntry: any = definePluginEntry({
         (api as any).on('before_reset', async (_event: unknown, ctx: any) => {
           const prevSid = ctx?.sessionId != null ? String(ctx.sessionId) : '';
           const sk = typeof ctx?.sessionKey === 'string' ? ctx.sessionKey : '';
-          await invalidateSessionStateForReset(sk, prevSid, logger, committedTurnKeys);
+          // /new 主路径：开启旧会话债务交接（旧会话未压缩记录交后台异步压缩）。
+          await invalidateSessionStateForReset(sk, prevSid, logger, committedTurnKeys, { delegateOldDebt: true });
         });
         logger?.debug?.("[lcm-graph-extra] before_reset hook registered (session reset closure)");
       } catch (hookErr) {
