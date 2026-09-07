@@ -28,6 +28,7 @@ import { homedir } from 'node:os';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, serializeError } from '../utils/logger.js';
 import { getSessionLlmSnapshot, getActiveLocalLlmSnapshot, buildLocalLlmComplete, resolveLocalSnapshotForModel, isSessionRemoteModel, resolveConfiguredDistillationLlm, buildConfiguredLlmComplete, isOllamaModel } from '../plugin/distillation.js';
+import { DEFAULTS } from '../config/defaults.js';
 
 // ---------------------------------------------------------------------------
 // 常量
@@ -957,6 +958,21 @@ export class LosslessClawAdapter {
     try {
       const normalizedMessages = (params.messages ?? []).map(normalizeMessageContent);
       const normalizedParams = coerceSessionId({ ...params, messages: normalizedMessages });
+      // commitTurn 落底的 evaluatePostTurnCompaction 从 runtimeSettings.limits.promptTokenBudget
+      // 取 tokenBudget（engine.ts resolveTokenBudget）。host 未注入该字段时引擎会打
+      // "[lcm] commitTurn: tokenBudget not provided; using default 128000" 并跳过精确预算判定。
+      // 此处注入与 assemble/债务侧一致的默认预算（DEFAULTS.heartbeat.pressure.tokenBudget≈112K），
+      // 消除告警噪音并让 post-turn 压缩预算判定与常规路径对齐。
+      const _rt = normalizedParams.runtimeSettings
+        && typeof normalizedParams.runtimeSettings === 'object'
+        ? normalizedParams.runtimeSettings as Record<string, any>
+        : undefined;
+      const _limits = _rt?.limits && typeof _rt.limits === 'object'
+        ? _rt.limits as Record<string, any>
+        : undefined;
+      if (_rt && _limits && typeof _limits.promptTokenBudget !== 'number') {
+        _limits.promptTokenBudget = DEFAULTS.heartbeat.pressure.tokenBudget;
+      }
       const result: any = await this.engine.commitTurn(normalizedParams);
       // lossless-claw 1.0.0 兼容：内层 commitTurn resolve 即持久化成功，但可能
       // 不按契约返回 status 字段（返回 void / 其他形状）。此处规范化为
