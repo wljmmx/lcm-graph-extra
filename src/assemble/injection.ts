@@ -23,6 +23,44 @@ import { getConfidenceLevel, confidenceLabel } from '../entity-extract.js';
 import { getGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 import type { AssembleContext, InjectionOutput } from './types.js';
 
+/**
+ * BREAKPOINT-4: incrementMatchCount 去重节流器。
+ *
+ * 审计: 经验被同会话反复召回，matchCount 每轮 SQL 高频写放大 → L4 耗时 51ms→1476ms
+ * （伴随 SQLite 锁等待）。时间衰减已在 storage 排序层按 lastRecalledAt 降权过热经验，
+ * 故命中计数无需逐轮精确累加。这里窗口内同一 (session, expId) 只放行一次写，
+ * 削掉锁竞争压力；窗口用 row-level + 全局上限双保险。
+ */
+const INCREMENT_THROTTLE_WINDOW_MS = 30 * 1000; // 30s 窗口
+const incrementThrottleMap = new Map<string, number>(); // key = `${session}|${expId}` -> lastWriteTs
+const INCREMENT_THROTTLE_MAX = 2000; // 上限防泄漏
+
+/** 检查是否应放行本次递增；放行则记录时间戳（写入前判定，写入成功后确认） */
+function maybeThrottleIncrement(sessionKey: string, expId: string): 'ok' | null {
+  const key = `${sessionKey}|${expId}`;
+  const now = Date.now();
+  const last = incrementThrottleMap.get(key);
+  if (last !== undefined && now - last < INCREMENT_THROTTLE_WINDOW_MS) {
+    return null; // 窗口内重复召回，跳过写
+  }
+  // 先占位，防止并发同 key 重复放行
+  incrementThrottleMap.set(key, now);
+  if (incrementThrottleMap.size > INCREMENT_THROTTLE_MAX) {
+    // 简单清最旧：随机驱逐不优雅，直接清一半保留最新
+    const sorted = [...incrementThrottleMap.entries()].sort((a, b) => a[1] - b[1]);
+    for (const [k] of sorted.slice(0, INCREMENT_THROTTLE_MAX / 2)) {
+      incrementThrottleMap.delete(k);
+    }
+  }
+  return 'ok';
+}
+
+/** 写入成功后确认时间戳（若写入因异步竞态被跳过，这里无需额外处理；仅用于语义完整性） */
+function afterIncrement(sessionKey: string, expId: string): void {
+  const key = `${sessionKey}|${expId}`;
+  incrementThrottleMap.set(key, Date.now());
+}
+
 /** v2.7.0 P3: SDK guidance 缓存 —— 同 tools + citations 组合短期复用，避免每次重新构建（50-100ms） */
 const sdkGuidanceCache = new Map<string, { guidance: string; ts: number }>();
 const SDK_GUIDANCE_CACHE_TTL_MS = 900 * 1000; // 15min
@@ -195,8 +233,15 @@ export async function injectContext(
     addSection('## 💡 经验总结（历史经验参考）', expBody, 5);
     for (const e of personalizedResults) {
       // P1-1: 已改为静态导入，直接使用 backgroundTasks
+      // BREAKPOINT-4 加固: incrementMatchCount 节流 —— 审计中 L4 51ms→1476ms 伴随 SQLite
+      // 锁等待，根因是同批经验被多轮/本会话反复召回导致 matchCount 高频写放大。
+      // 时间衰减已在 storage 排序层生效（matchCount 仅降权过热经验），故命中计数无需逐轮精确累加；
+      // 这里按 session+expId 做去重节流，窗口内同一经验只写一次，削掉锁竞争压力。
       if (e.experience?.id) {
-        backgroundTasks.register('exp:increment-match', ctx.expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}));
+        const _reason = maybeThrottleIncrement(sessionKey, e.experience.id);
+        if (_reason !== null) {
+          backgroundTasks.register('exp:increment-match', ctx.expStore.incrementMatchCount(e.experience.id).then(() => {}, () => {}).then(() => afterIncrement(sessionKey, e.experience.id)));
+        }
       }
     }
 

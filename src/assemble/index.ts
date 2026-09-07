@@ -341,6 +341,16 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       if (latestGoal && shouldUpdateGoal(latestGoal, _toolSessionKey)) {
         cacheGoal(_toolSessionKey, latestGoal);
         ctx.logger?.debug?.('[assemble] goal updated', { goal: latestGoal.slice(0, 80) });
+      } else {
+        // BREAKPOINT-3 可观测性: CE/Agent 循环内 messages 末尾常为 assistant/tool_result，
+        // extractLatestUserGoal 跨回上一条真实 user —— 若无新 user 切入，latestGoal == 当前锚点，
+        // shouldUpdateGoal=false 属预期（续问保持锚点）。此打点暴露"锚点保持 vs 未取到新目标"，
+        // 便于区分"用户没发新消息"与"新消息被误判为续问"两种情景。
+        ctx.logger?.debug?.('[assemble] goal anchor kept (no update)', {
+          extracted: latestGoal ? latestGoal.slice(0, 60) : '',
+          reason: latestGoal ? 'shouldUpdateGoal=false' : 'no-user-message',
+          currentGoal: getGoal(_toolSessionKey).slice(0, 80),
+        });
       }
     }
 
