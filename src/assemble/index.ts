@@ -424,17 +424,31 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
       // 安全检查：如果 DB 报告的 uncompressed 远大于当前消息数，
       // 可能是 _convIdCache 返回了旧会话的 conversation_id。
       // 失效缓存后重查，确保新会话不被误判为高压。
-      if (uncompressedMsgs > msgCount + 10 && msgCount <= 3) {
+      //
+      // P1-13 BREAKPOINT-3 放宽：原条件为 `uncompressedMsgs > msgCount + 10 && msgCount <= 3`，
+      // 仅在 /new 后头几轮生效。实测 /new 已多轮时（msgCount>3）uncomp 仍沿用旧会话
+      // conversation_id（host 未轮换 active / convIdCache 未失效），导致该防护形同虚设，
+      // 旧会话 uncomp=63 持续驱动 _forceCompact 与 tier=high。
+      // 放宽维度：uncomp 显著高于本会话消息数（绝对门限 10 之上），叠加"uncomp 本身非小值"
+      // —— 正常会话内多次 compact 后 uncomp 会回落，而 uncomp 显著 > msgCount 几乎总是指向
+      // 了别的 conversation（旧会话残留）。保留 msgCount<=3 快速路径以兼容短会话。
+      // 安全性：仅当重查确实返回「不同且更新」的 convId 时才替换 uncompressedMsgs，
+      // 且带日志；不盲信绝对 uncond 值。
+      const _uncompHigh = uncompressedMsgs > 10;
+      const _uncompExceedsMsgs = uncompressedMsgs > Math.max(msgCount, 8) + 10;
+      if ((_uncompHigh && _uncompExceedsMsgs) || (uncompressedMsgs > msgCount + 10 && msgCount <= 3)) {
         const _sk = typeof params.sessionKey === "string" ? params.sessionKey : "";
         const _sid = typeof params.session_id === "string" ? params.session_id : "";
         if (_sk || _sid) {
           invalidateConvIdCache(_sk, _sid);
           const _freshConvId = getConversationId(_sk, _sid);
           if (_freshConvId != null && _freshConvId !== _wmConvId) {
-            uncompressedMsgs = getUncompressedMessageCount(_freshConvId);
+            const _oldUncomp = uncompressedMsgs;
+            const _freshUncomp = getUncompressedMessageCount(_freshConvId);
+            uncompressedMsgs = _freshUncomp;
             ctx.logger?.warn?.('[assemble] detected stale convId cache, invalidated and re-queried', {
               oldConvId: _wmConvId, newConvId: _freshConvId,
-              oldUncomp: uncompressedMsgs, msgCount,
+              oldUncomp: _oldUncomp, newUncomp: _freshUncomp, msgCount,
             });
           }
         }
