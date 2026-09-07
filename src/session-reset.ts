@@ -19,6 +19,7 @@ import {
   getUncompressedMessageCount,
   getMessageStats,
   writeCompactionDebt,
+  rotateActiveConversationForNewSession,
 } from './lcm-bridge.js';
 
 /** /new 债务交接：旧会话未压缩消息 >= 该值才判定有剩余工作量，落地异步压缩债务 */
@@ -120,6 +121,18 @@ export async function invalidateSessionStateForReset(
       await delegateOldConversationDebt(prevSessionId, log);
     }
 
+    // 债务交接后轮换 active conversation：把旧会话 active 行置为 0，并在必要时补建
+    // fresh active 行，保证 /new 后下一次 getConversationId 命中空会话（uncomp 归零、
+    // 新消息计数新会话）。幂等、非破坏性；失败仅告警不致命。
+    let rotated: { oldConvId: number | null; newConvId: number | null; oldUncomp: number; newUncomp: number; rotated: boolean } | undefined;
+    if (opts?.delegateOldDebt) {
+      try {
+        rotated = rotateActiveConversationForNewSession(sessionKey, prevSessionId, log);
+      } catch (e) {
+        log?.warn?.('[session-reset] rotateActiveConversationForNewSession threw (non-fatal)', { sessionKey, prevSessionId, err: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
     // 1. 失效 conversation_id 缓存（10min TTL，不主动清除会导致 uncomp 统计错误）
     for (const k of sks) invalidateConvIdCache(k, prevSessionId);
     // FIX-SK3 遗留清理：旧版把 sessionId 值当 sessionKey 传入，convIdCache 可能
@@ -192,6 +205,7 @@ export async function invalidateSessionStateForReset(
       // assemble/index.ts 的 [session-trace] 观测并落入日志（二者配对即可确认轮换）。
       newSessionId: null,
       delegateOldDebt: opts?.delegateOldDebt === true,
+      conversationRotation: rotated,
     });
   } catch (e) { log?.warn?.('[session-reset] session state invalidation failed (non-fatal)', { sessionKeys: sks, prevSessionId, err: e instanceof Error ? e.message : String(e) }); }
 }

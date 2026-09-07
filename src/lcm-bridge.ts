@@ -334,6 +334,83 @@ export function writeCompactionDebt(
 }
 
 /**
+ * 会话重置（/new）时把插件侧的 active conversation 轮换到新会话。
+ *
+ * 背景：SDK 在 /new 后复用 sessionId（session-reset 的 nextSessionId = 旧值），且
+ * sessionKey 恒定不变；若旧 conversation 仍 active=1，assemble 经 getConversationId()
+ * 按 session_key 命中旧行，uncomp 沿用旧会话未压缩数并随新消息继续增长——即"new 之后
+ * 未按新数据处理"。本函数保证 reset 后下一次解析落到一条 fresh active conversation。
+ *
+ * 策略（幂等、非破坏性，不删除 messages/summaries）：
+ *  1. 失效 convId 缓存（可能缓存在旧行或 null）；
+ *  2. 关闭旧会话的 active 行（仅针对已解析到的具体 conversation_id，不误伤其它会话）；
+ *  3. 若关闭后该会话已无 active 行，则兜底补建一条 fresh active 行（session_key 账本），
+ *     使 getConversationId 命中空会话（uncomp 归零）。若 SDK 已创建新行，DESC 取最大 id，
+ *     本函数补建的空行不会抢占。
+ *  4. 再次失效缓存后重查，返回旧/新 conversation_id 与各自的未压缩计数。
+ *
+ * @param sessionKey 稳定身份键（/new 后不变）
+ * @param prevSessionId 旧会话 sessionId（/new 时 SDK 复用该值）
+ */
+export interface ConversationRotationResult {
+  oldConvId: number | null;
+  newConvId: number | null;
+  oldUncomp: number;
+  newUncomp: number;
+  rotated: boolean;
+}
+
+export function rotateActiveConversationForNewSession(
+  sessionKey?: string,
+  prevSessionId?: string,
+  log?: { info?: (m: string, x?: unknown) => void; warn?: (m: string, x?: unknown) => void },
+): ConversationRotationResult {
+  const oldConvId = getConversationId(sessionKey, prevSessionId);
+  const oldUncomp = oldConvId != null ? getUncompressedMessageCount(oldConvId) : -1;
+  let newUncomp = oldUncomp;
+  try {
+    // 1. 失效缓存，避免后续解析命中旧行缓存
+    invalidateConvIdCache(sessionKey ?? '', prevSessionId ?? '');
+    // 2. 关闭旧会话的 active 行
+    if (oldConvId != null) {
+      const deact = getStmt('deactivateConversationForSidReset',
+        'UPDATE conversations SET active = 0 WHERE conversation_id = ? AND active = 1');
+      if (deact) {
+        try { deact.run(oldConvId); } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          log?.warn?.('[session-reset] deactivate old conversation failed (non-fatal)', { oldConvId, err });
+        }
+      }
+    }
+    // 3. 确保存在一条 fresh active 行
+    let newConvId = getConversationId(sessionKey, prevSessionId);
+    if (newConvId == null && sessionKey) {
+      const ins = getStmt('insertFreshConversationForSidReset',
+        "INSERT INTO conversations (session_id, session_key, active, created_at) VALUES (?, ?, 1, datetime('now'))");
+      if (ins) {
+        try { ins.run(prevSessionId ?? '', sessionKey); } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          log?.warn?.('[session-reset] insert fresh conversation failed (non-fatal)', { sessionKey, err });
+        }
+      }
+    }
+    // 4. 失效（清掉上面解析可能写入的 null 缓存）后重查
+    invalidateConvIdCache(sessionKey ?? '', prevSessionId ?? '');
+    newConvId = getConversationId(sessionKey, prevSessionId);
+    newUncomp = newConvId != null ? getUncompressedMessageCount(newConvId) : -1;
+    const rotated = oldConvId !== newConvId;
+    log?.info?.('[lcm-graph-extra] session reset conversation rotated', {
+      oldConvId, newConvId, oldUncomp, newUncomp, rotated,
+    });
+    return { oldConvId, newConvId, oldUncomp, newUncomp, rotated };
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    log?.warn?.('[session-reset] rotateActiveConversationForNewSession failed (non-fatal)', { sessionKey, prevSessionId, err });
+    return { oldConvId, newConvId: oldConvId, newUncomp: oldUncomp, oldUncomp, rotated: false };
+  }
+}
+
+/**
  * 从消息列表估计 token 用量（快速估算，不查 DB）
  */
 /**

@@ -43,4 +43,14 @@ describe('session reset closure (before_reset / bootstrap finally 共享清理)'
     await invalidateSessionStateForReset('', '');
     expect(getOverhead(other)).toBe(42);
   });
+
+  it('delegateOldDebt 路径触发 conversation 轮换，无 DB 时安全降级不抛错', async () => {
+    // 轮换逻辑仅在 delegateOldDebt=true（/new 主路径）时运行；测试环境通常无
+    // ~/.openclaw/lcm.db，getStmt 返回空 → 轮换函数内部各自 try/catch 降级为告警。
+    await expect(
+      invalidateSessionStateForReset(
+        'sk-rot-test', 'sid-prev-rot', undefined, undefined, { delegateOldDebt: true },
+      ),
+    ).resolves.toBeUndefined();
+  });
 });
