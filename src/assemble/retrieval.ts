@@ -10,7 +10,7 @@
  */
 
 import { detectScenarioAndAdjustLimits } from '../lcm-bridge.js';
-import { llmTimeout } from '../config/defaults.js';
+import { llmTimeout, DEFAULTS } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { CascadeManager } from '../cascade-manager.js';
 import { backgroundTasks } from '../async/task-registry.js';
@@ -260,8 +260,12 @@ export async function performRetrieval(
     if (ctx.expStore) {
       try {
         const expStart = Date.now();
+        // C-1: matchCount 时间衰减半衰期 —— 读用户配置（retrieval.expHalfLifeDays），
+        // 未配置时用 DEFAULTS.retrieval.expHalfLifeDays，与 storage.ts searchByQuery 默认对齐。
+        const expHalfLifeDays = ((ctx.api?.pluginConfig?.retrieval) as any)?.expHalfLifeDays
+          ?? DEFAULTS.retrieval.expHalfLifeDays;
         const expRes = await Promise.race([
-          ctx.expStore.searchByQuery({ query: qmdQuery, limit: retrievalLimits.exp, minScore: 0.3 }),
+          ctx.expStore.searchByQuery({ query: qmdQuery, limit: retrievalLimits.exp, minScore: 0.3, halfLifeDays: expHalfLifeDays }),
           new Promise<null>((resolve) => setTimeout(() => resolve(null), 800)),
         ]);
         l4_ms = Date.now() - expStart;

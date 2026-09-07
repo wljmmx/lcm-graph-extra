@@ -162,7 +162,13 @@ export async function injectContext(
   let finalExpResults = expResults;
   if (expResults.length > 0) {
     // S2: 经验不再按词法实体硬删——以 S-7 用户画像 boost 为主排序，实体分数弱化。
-    // 相关度已在 performRetrieval 统一打上 _entityScore，此处不再重复 matchEntityScore。
+    // S2.5 (C-1): 经验同样消费 Phase 1 实体 _entityScore 做主题一致性软加权：
+    //   高实体命中 → 权重 1.0，中 → 0.7，低 → 0.5，与 qmd 一致；低实体主题不符经验被降权。
+    const expEsOf = (e: any): number => (typeof e?._entityScore === 'number' ? e._entityScore : 1.0);
+    const expEntityWeight = (es: number): number => {
+      const level = getConfidenceLevel(es);
+      return level === 'high' ? 1.0 : level === 'medium' ? 0.7 : 0.5;
+    };
 
     let personalizedResults = expResults;
     try {
@@ -172,7 +178,7 @@ export async function injectContext(
         personalizedResults = [...expResults]
           .map((e: any) => {
             const boost = ctx.userProfile.computeBoost(e.experience?.tags);
-            return { ...e, score: (e.score ?? 0.5) * boost, _personalizedBoost: boost };
+            return { ...e, score: (e.score ?? 0.5) * boost * expEntityWeight(expEsOf(e)), _personalizedBoost: boost };
           })
           .sort((a: any, b: any) => b.score - a.score);
         const boostedCount = personalizedResults.filter((r: any) => (r._personalizedBoost ?? 1) > 1.0).length;

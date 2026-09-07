@@ -183,6 +183,8 @@ export class RetrievalGateway {
           techStackTags: filters.techStackTags,
           // BUGFIX(P0-1): 统一使用 DEFAULTS.retrieval.expMinScore，与 assemble 一致
           minScore: DEFAULTS.retrieval.expMinScore,
+          // C-1: matchCount 时间衰减半衰期（配置在 defaults 集中管理）
+          halfLifeDays: DEFAULTS.retrieval.expHalfLifeDays,
           limit: 3,
         });
         return this.toExpRetrievalResult(expResults);
