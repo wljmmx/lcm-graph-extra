@@ -184,6 +184,14 @@ export async function invalidateSessionStateForReset(
       clearEach('clearSessionWarmupCache', (k) => mod.clearSessionWarmupCache?.(k));
     }
 
-    log?.info?.('[lcm-graph-extra] session state invalidated for reset', { sessionKeys: sks, prevSessionId });
+    log?.info?.('[lcm-graph-extra] session state invalidated for reset', {
+      sessionKeys: sks,
+      prevSessionId,
+      // 注意：/new 时 host 仅下发旧 sessionId 与不变的 sessionKey；此时新 sessionId 尚未生成，
+      // 故此处无 newSessionId。新会话身份要到下一轮 assemble 才出现，由
+      // assemble/index.ts 的 [session-trace] 观测并落入日志（二者配对即可确认轮换）。
+      newSessionId: null,
+      delegateOldDebt: opts?.delegateOldDebt === true,
+    });
   } catch (e) { log?.warn?.('[session-reset] session state invalidation failed (non-fatal)', { sessionKeys: sks, prevSessionId, err: e instanceof Error ? e.message : String(e) }); }
 }

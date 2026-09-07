@@ -454,6 +454,19 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
         }
       }
 
+      // SESSION-TRACE: 会话身份可观测（/new 后在此落入新 sessionId，与 before_reset 记录
+      // 的 prevSessionId 配对，即可确认 "new 已轮换 sessionId"；同时暴露 uncomp/msgCount 与
+      // 当前 conversation_id，用于追查 /new 后 uncomp 未回落的会话归属）。
+      ctx.logger?.info?.('[session-trace] assemble window', {
+        sessionId: typeof params.sessionId === 'string' ? params.sessionId
+          : (typeof params.session_id === 'string' ? params.session_id : ''),
+        sessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : '',
+        session_id: typeof params.session_id === 'string' ? params.session_id : '',
+        convId: _wmConvId,
+        uncomp: uncompressedMsgs,
+        msgCount,
+      });
+
       // SD-DEF-1: 新会话残留转录前缀防御。
       // 现象（/new 后）：sessionId 已换新、引擎存储干净（uncomp≤3），但 SDK 转录前缀
       // 快照仍含旧会话大量消息（msgCount 远大于 uncomp）——OpenClaw host 已知问题：
