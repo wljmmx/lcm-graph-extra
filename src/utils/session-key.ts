@@ -36,3 +36,25 @@ export function resolveSessionCacheKey(params: SessionCacheKeyParams): string {
   }
   return '';
 }
+
+/**
+ * 判断某个会话是否应参与在线学习（关联矩阵 M 的 processFeedback）。
+ * 定时任务（cron）、心跳、系统级会话不应喂入反馈闭环，否则会用无真实用户意图的
+ * 批量召回污染 M 矩阵（学到垃圾关联）。仅真实用户对话参与学习。
+ *
+ * 迁移自 after-turn/index.ts（原为局部导出），供采集端（afterTurn O7 onGraph）
+ * 与消费端（afterTurn feedback loop）及 assemble 后台补水共用，避免循环依赖。
+ */
+export function isLearningEligibleSession(sessionKey: string): boolean {
+  if (!sessionKey) return false;
+  if (
+    sessionKey.includes(':cron:') ||
+    sessionKey.includes('agent:main:cron') ||
+    /heartbeat/i.test(sessionKey) ||
+    /(^|:)system($|:)/i.test(sessionKey) ||
+    /(^|:)auto($|:)/i.test(sessionKey)
+  ) {
+    return false;
+  }
+  return true;
+}

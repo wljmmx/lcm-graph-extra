@@ -14,29 +14,10 @@ import { callLlm } from '../utils/llm-call.js';
 import { compressToolResultsAsync } from './tool-result-compressor.js';
 import { serializeError } from '../utils/logger.js';
 import { shouldUpdateGoal, getGoal, isToolResultMessage, extractUserMessageText } from '../plugin/goal-cache.js';
-import { resolveSessionCacheKey } from '../utils/session-key.js';
+import { resolveSessionCacheKey, isLearningEligibleSession } from '../utils/session-key.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
 import type { AfterTurnContext } from './types.js';
-
-/**
- * 判断某个会话是否应参与在线学习（关联矩阵 M 的 processFeedback）。
- * 定时任务（cron）、心跳、系统级会话不应喂入反馈闭环，否则会用无真实用户意图的
- * 批量召回污染 M 矩阵（学到垃圾关联）。仅真实用户对话参与学习。
- */
-export function isLearningEligibleSession(sessionKey: string): boolean {
-  if (!sessionKey) return false;
-  if (
-    sessionKey.includes(':cron:') ||
-    sessionKey.includes('agent:main:cron') ||
-    /heartbeat/i.test(sessionKey) ||
-    /(^|:)system($|:)/i.test(sessionKey) ||
-    /(^|:)auto($|:)/i.test(sessionKey)
-  ) {
-    return false;
-  }
-  return true;
-}
 
 export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<void> {
   const afterTurnStart = Date.now();
@@ -168,11 +149,11 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
     // 全程 fire-and-forget，不阻塞会话；无召回/无回复则跳过。
     // ==================================================================
     if (ctx.graphAdapter?.consumeAndProcessFeedback && ctx.graphAdapter?.mod?.getSessionRecallCache) {
-      const fbSessionKey = typeof params.sessionKey === 'string'
-        ? params.sessionKey
-        : typeof params.session_id === 'string'
-          ? params.session_id
-          : '';
+      // FIX-SK4: 消费端 key 与采集端（下方 O7 预取 onGraph 用 resolveSessionCacheKey，sessionId 优先）对齐。
+      // 修复前：此处取 raw sessionKey（稳定路由桶），采集端取 sessionId → /new 后两者不等
+      // → consume(key) miss → 反馈闭环静默空转（JudgeManager/M 永不更新）。
+      // 统一后：写入/读取同 key（sessionId 优先），consume 即删保证单次处理。
+      const fbSessionKey = resolveSessionCacheKey(params);
       const fbSessionId = typeof params.sessionId === 'string' ? params.sessionId : fbSessionKey;
       // 仅真实用户对话参与在线学习，定时任务(cron)/心跳/系统会话不喂入 processFeedback，
       // 避免无真实意图的批量召回污染关联矩阵 M。

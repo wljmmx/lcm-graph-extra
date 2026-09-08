@@ -14,7 +14,7 @@ import { llmTimeout, DEFAULTS } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { CascadeManager } from '../cascade-manager.js';
 import { backgroundTasks } from '../async/task-registry.js';
-import { resolveSessionCacheKey } from '../utils/session-key.js';
+import { resolveSessionCacheKey, isLearningEligibleSession } from '../utils/session-key.js';
 import { serializeError } from '../utils/logger.js';
 // P0-6: 热路径 healthMetrics 静态导入
 import { healthMetrics } from '../health-metrics.js';
@@ -231,13 +231,24 @@ export async function performRetrieval(
     try {
       if (sessionKey && qmdQuery.trim().length > 0) {
         const deps = { logger: ctx.logger, qmdClient: ctx.qmdClient, graphAdapter: ctx.graphAdapter, expStore: ctx.expStore };
+        // FIX-SK4b: 与 afterTurn O7 采集端对齐 —— 补水路径的 L3 召回同样录入
+        // SessionRecallCache，供下一轮 afterTurn consume → processFeedback（M 更新）。
+        // 修复前：cache miss 走补水时未传 onGraph → 该轮 L3 召回不进缓存 → 反馈闭环
+        // 空转（仅 afterTurn 预取路径能采集，话题切换当轮采集缺失）。
+        const onGraph = (nodeIds: string[], sk: string, q: string): void => {
+          try {
+            if (ctx.graphAdapter?.recordRecallToSessionCache && isLearningEligibleSession(sk)) {
+              ctx.graphAdapter.recordRecallToSessionCache(sk, q, nodeIds);
+            }
+          } catch { /* non-fatal */ }
+        };
         const enqStatus = retrievalPrefetchQueue.enqueue({
           sessionKey,
           query: qmdQuery,
           run: async () => {
             try {
               const now = Date.now();
-              const res = await runRetrievalPrefetch(deps, sessionKey, qmdQuery, retrievalLimits);
+              const res = await runRetrievalPrefetch(deps, sessionKey, qmdQuery, retrievalLimits, { onGraph });
               writePrefetchCache(ctx.prefetchCache, sessionKey, res, qmdQuery, now, ctx.logger);
             } catch (e) {
               ctx.logger?.debug?.('[assemble] O7: background prefetch run failed (non-fatal)', { err: (e as Error).message });
