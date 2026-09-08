@@ -141,7 +141,10 @@ export async function registerGraphHealthRoutes(app: FastifyInstance): Promise<v
       if (!record) {
         return reply.send({ available: false, error: '尚无 GraphHealthMetric 快照（graph-memory-pro v2.6.0+ 维护后会落盘）' } satisfies GraphHealthScoreResponse);
       }
-      const m = record.get('m') as Record<string, unknown>;
+      const node = record.get('m') as { properties?: Record<string, unknown> } | null;
+      // FIX: neo4j-driver 的 Node 属性在 node.properties 下，直接 node.score 为 undefined
+      // （旧代码 record.get('m') as Record 后 m.score 读不到 → toNumber ?? 0 → 全 0）。
+      const m = node?.properties ?? (node as Record<string, unknown> | null) ?? {};
       const num = (v: unknown): number => toNumber(v) ?? 0;
       const metrics = {
         activeNodes: num(m.activeNodes),

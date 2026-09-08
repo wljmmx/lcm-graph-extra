@@ -19,6 +19,37 @@ vi.mock('../../server/lib/auth', () => ({
 
 import { registerGraphHealthRoutes } from '../../server/routes/graph-health';
 import { getOutboundAuthHeader } from '../../server/lib/auth';
+import { runReadQuery } from '../../server/lib/neo4j';
+
+// mock neo4j lib（health-score 路由直读 Neo4j GraphHealthMetric 快照）
+vi.mock('../../server/lib/neo4j', () => ({
+  runReadQuery: vi.fn(),
+  toNumber: (v: unknown): number | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return v;
+    const i = v as { toNumber?: () => number; low?: number; high?: number };
+    if (typeof i.toNumber === 'function') return i.toNumber();
+    if (typeof i.low === 'number') return i.low;
+    return null;
+  },
+  runWriteQuery: vi.fn(),
+  getNeo4jSession: vi.fn(),
+  getNeo4jDriver: vi.fn(),
+  closeNeo4jDriver: vi.fn(),
+  closeNeo4j: vi.fn(),
+}));
+
+const mockRunReadQuery = vi.mocked(runReadQuery);
+
+/** 模拟 neo4j-driver 的 Node 对象：属性在 .properties 下（直接 .score 为 undefined） */
+function makeNode(properties: Record<string, unknown>) {
+  return { properties, identity: { toString: () => '0' }, labels: ['GraphHealthMetric'] };
+}
+
+/** 模拟 QueryResult：record.get('m') 返回 Node */
+function makeNodeResult(records: Array<{ get: (k: string) => unknown }>) {
+  return { records };
+}
 
 // stub fetch（graph-health 路由内部调用 fetch 转发到 :7423）
 const mockFetch = vi.fn();
@@ -152,6 +183,60 @@ describe('graph-health 路由', () => {
 
       const [, opts] = mockFetch.mock.calls[0];
       expect(opts.headers).toEqual({ Authorization: 'Basic dXNlcjpwYXNz' });
+    });
+  });
+
+  describe('GET /api/graph/health-score', () => {
+    it('应从 GraphHealthMetric Node 的 .properties 读取评分（修复全 0 问题）', async () => {
+      mockRunReadQuery.mockResolvedValueOnce(makeNodeResult([
+        {
+          get: (k: string) => (k === 'm' ? makeNode({
+            timestamp: 1720000000000,
+            score: 87,
+            connectivity: 0.9,
+            density: 0.6,
+            influence: 0.8,
+            freshness: 0.5,
+            conflictFree: 1,
+            activeNodes: 120,
+            totalEdges: 300,
+            isolatedNodes: 5,
+            isolatedRatio: 0.04,
+            avgDegree: 2.5,
+            avgPageRank: 0.012,
+            highStaleRatio: 0.1,
+            transitionalRatio: 0,
+            sparse: false,
+          }) : undefined),
+        },
+      ]));
+
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health-score' });
+      expect(resp.statusCode).toBe(200);
+      const body = resp.json();
+      expect(body.available).toBe(true);
+      expect(body.score).toBe(87);
+      expect(body.dims?.connectivity).toBe(0.9);
+      expect(body.metrics?.activeNodes).toBe(120);
+      expect(body.metrics?.isolatedRatio).toBe(0.04);
+      expect(body.sparse).toBe(false);
+      expect(body.timestamp).toBe(1720000000000);
+    });
+
+    it('无 GraphHealthMetric 快照时返回 available=false', async () => {
+      mockRunReadQuery.mockResolvedValueOnce({ records: [] });
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health-score' });
+      const body = resp.json();
+      expect(body.available).toBe(false);
+      expect(body.error).toContain('尚无 GraphHealthMetric');
+    });
+
+    it('Neo4j 查询失败时降级返回 available=false 与错误信息', async () => {
+      mockRunReadQuery.mockRejectedValueOnce(new Error('connection refused'));
+      const resp = await app.inject({ method: 'GET', url: '/api/graph/health-score' });
+      const body = resp.json();
+      expect(body.available).toBe(false);
+      expect(body.error).toContain('Neo4j 查询失败');
     });
   });
 });
