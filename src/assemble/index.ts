@@ -7,7 +7,7 @@
 import { extractAvailableTools, hasToolCategory, beginToolGuidanceRound, buildSmartToolGuidance, extractLatestUserQuery } from '../plugin/tool-guidance.js';
 import { detectScenario, SCENARIO_LABELS, detectToolSearchMode, buildModeAwareGuidance } from '../tools/tool-catalog.js';
 import { getOverhead, setOverhead, getSdkOverhead, updateSdkOverhead, clearOverheadCache } from '../plugin/overhead-cache.js';
-import { extractLatestUserGoal, cacheGoal, getGoal, shouldUpdateGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
+import { extractLatestUserGoal, extractPreviousAssistantContent, cacheGoal, getGoal, shouldUpdateGoal, buildGoalAnchor, getGoalSwitchCount, getPreviousGoal } from '../plugin/goal-cache.js';
 // P0-6: 热路径 healthMetrics 静态导入，消除主路径反复 await import 开销
 import { healthMetrics } from '../health-metrics.js';
 import {
@@ -338,7 +338,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // 评分模型判定：仅明确新问题时更新缓存，续问不覆盖目标
     if (_toolSessionKey) {
       const latestGoal = extractLatestUserGoal(params.messages ?? []);
-      if (latestGoal && shouldUpdateGoal(latestGoal, _toolSessionKey)) {
+      // v2.9-B: 传入上一轮 assistant 内容，启用承接抑制（对"肯定/补充上轮答复"的
+      // 消息保持锚点不切换，避免疑问词+零重叠被误判为新任务）
+      const prevAssistant = extractPreviousAssistantContent(params.messages ?? []);
+      if (latestGoal && shouldUpdateGoal(latestGoal, _toolSessionKey, prevAssistant)) {
         cacheGoal(_toolSessionKey, latestGoal);
         ctx.logger?.debug?.('[assemble] goal updated', { goal: latestGoal.slice(0, 80) });
       } else {

@@ -121,6 +121,43 @@ export function extractLatestUserGoal(messages: any[]): string {
 }
 
 /**
+ * v2.9-B: 提取"最新用户消息之前"的最近一条非空 assistant 输出纯文本。
+ *
+ * 用于 shouldUpdateGoal 的承接抑制：判断用户对上一轮 LLM 答复的补充/追问是否属于
+ * 同一话题。从消息数组尾部向前扫描，遇到第一条已存在 AI 答复即返回（截断到 2000 字，
+ * 足够提取 freeTag 与目标实体）；若此前先遇到 user（无 AI 答复）则返回空串。
+ *
+ * @param messages 消息数组（按时间顺序）
+ */
+export function extractPreviousAssistantContent(messages: any[]): string {
+  if (!Array.isArray(messages) || messages.length === 0) return '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== 'object') continue;
+    // 工具结果 / 系统 / 系统提示一律跳过，不算"AI 答复"
+    if (isToolResultMessage(msg)) continue;
+    if (msg.role === 'user') continue;
+    if (msg.role === 'assistant' || msg.role === 'system' && typeof msg.content === 'string') {
+      // 仅提取纯文本块
+      const c = msg.content;
+      let text = '';
+      if (typeof c === 'string') text = c;
+      else if (Array.isArray(c)) {
+        text = c
+          .filter((p: any) => p && typeof p === 'object' && p.type === 'text' && typeof p.text === 'string')
+          .map((p: any) => p.text)
+          .join(' ');
+      }
+      const cleaned = text.trim();
+      if (cleaned) return cleaned.slice(0, 2000);
+    }
+    // 更早的 user 说明该条 assistant 不在"最新 user 之前"的承接窗口内
+    if (msg.role === 'user') break;
+  }
+  return '';
+}
+
+/**
  * 缓存会话目标。
  * 调用时机：首轮 assemble 时（round 1）。
  */
@@ -196,6 +233,60 @@ function splitHybrid(text: string): string[] {
 }
 
 /**
+ * v2.9-B: 判断两段文本是否共享可辨识内容（用于"承接上轮答复"判定）。
+ *
+ * 混合分词策略，两个互补通道：
+ *   1. Latin/结构化 token 精确匹配（splitHybrid 拆出）：覆盖 maxtokens、openclaw.json、
+ *      pagerankIterations 等命名。命中即视为承接。
+ *   2. 中文 2-字片段（2-gram）共现（排除高频虚词）：覆盖纯中文追问（"输出多少了"
+ *      对上轮"输出"）。因为是短句片段对比，无空格中文也能捕捉共享，但用虚词表
+ *      剔除高频噪音词，避免过度抑制。
+ *
+ * 相比 extractFreeTags：不因"整句中文字粘连为单个 token"而丢失共享词。
+ */
+const CN_VOID_2GRAM = new Set<string>([
+  '这个', '那个', '这些', '那些', '什么', '怎么', '如何', '哪个', '哪些',
+  '为什', '多么', '是否', '多少', '几个', '怎样', '现在', '一下', '一个',
+  '那个', '好的', '可以', '呀吗', '的吧', '的呢', '的话', '我们', '你们',
+  '他们', '就是', '但是', '因为', '所以', '如果', '然后', '接着', '或者',
+  '还有', '这个', '那样', '而已', '哦哦', '嗯嗯', '然后', '吗吗', '一什',
+]);
+
+function cn2grams(s: string): Set<string> {
+  const out = new Set<string>();
+  const runs = s.match(/[\u4e00-\u9fff]{2,}/g);
+  if (!runs) return out;
+  for (const run of runs) {
+    for (let i = 0; i + 2 <= run.length; i++) {
+      out.add(run.slice(i, i + 2));
+    }
+  }
+  return out;
+}
+
+function overlapTokens(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const la = a.toLowerCase();
+  const lb = b.toLowerCase();
+
+  // 通道 1: Latin/结构化 token 精确匹配
+  const tokA = splitHybrid(la).map((t) => t.trim()).filter((t) => t.length >= 2);
+  const setB = new Set(splitHybrid(lb).map((t) => t.trim()).filter((t) => t.length >= 2));
+  for (const t of tokA) {
+    if (/[a-z0-9]/.test(t) && setB.has(t)) return true;
+  }
+
+  // 通道 2: 中文 2-gram 共现（排除虚词）
+  const gramsB = cn2grams(lb);
+  for (const g of cn2grams(la)) {
+    if (CN_VOID_2GRAM.has(g)) continue;
+    if (gramsB.has(g)) return true;
+  }
+
+  return false;
+}
+
+/**
  * v2.7.1 T-S: 提取目标实体（任务的强语义载体）。
  *
  * 目标实体 = 结构化命名 token（含 `-`/`.`/`_`/`/`，或纯字母数字长度>=4 且非纯数字），
@@ -262,12 +353,20 @@ export function hasTaskTargetSwitch(oldGoal: string, newGoal: string): boolean {
  *   - 长消息(>50字)          → +1
  *   - 消息≥12字             → +1
  *
+ * v2.9-B 承接上轮答复抑制（可选第三参）：
+ *   用户消息常见形态是对"上一条 LLM 答复"的肯定/补充/追问（如"好的，那 maxtokens
+ *   输出多少了"）。此类消息文本自带疑问词+零重叠，会触发正面信号误被判为"新任务"
+ *   而切换锚点、写入压缩债务。本抑制依据"与上一轮 assistant 是否有共同词"判定承接，
+ *   命中则保持锚点不切换，避免跑偏。
+ *   第三参省略时完全走旧逻辑（向后兼容，零回归）。
+ *
  * 判定: 分 > 0 → 更新，分 ≤ 0 → 不更新
  *
  * @param newGoal 最新用户消息
  * @param sessionKey 会话标识，用于获取缓存的 freeTags
+ * @param prevAssistantContent 上一轮 LLM 答复的纯文本（可选；提供时启用承接抑制）
  */
-export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
+export function shouldUpdateGoal(newGoal: string, sessionKey: string, prevAssistantContent?: string): boolean {
   if (!newGoal) return false;
 
   const entry = goalCache.get(sessionKey);
@@ -281,6 +380,33 @@ export function shouldUpdateGoal(newGoal: string, sessionKey: string): boolean {
   }
 
   const trimmed = newGoal.trim();
+
+  // v2.9-B 承接上轮答复 → 保持锚点（在疑问词/零重叠正面信号打分前拦截）
+  if (prevAssistantContent) {
+    // 用 splitHybrid（中英边界分词）拆词：extractFreeTags 对无空格中文整句只产出
+    // 单个 token，无法捕捉 "maxtokens" 这类共享项；splitHybrid 能拆出
+    // 中英边界 token，是"承接上轮答复"更可靠的词袋来源。
+    const shared = overlapTokens(prevAssistantContent, trimmed);
+    // 排除"明确目标实体替换"（真实新任务仍可切换；这里判断相对上轮答复）
+    const domainSwitch = hasTaskTargetSwitch(prevAssistantContent, trimmed);
+    if (shared && !domainSwitch) {
+      return false;
+    }
+    // v2.9-B2 附和式承接：确认词开头 + 指示代词回指上轮答复（如"好的，那这样合理吗"），
+    // 即便无显式关键词共现，也判定为同一话题的追问，保持锚点。
+    // 用 deicticRef 严格限定"回指上轮答复"，避免误伤真正的新任务（如"好的，帮我写一首诗"
+    // 虽以"好的"开头，但无指示回指 → 仍走评分切换）。
+    if (!domainSwitch) {
+      const ackPrefix =
+        /^(好的?|可以|行|嗯+|哦|对|是[的]?|没错|正确|了解了?|明白了?|那就|那|然后|接着|继续)[,，\s!！。、]/.test(trimmed) ||
+        /^(好的?|可以|行|嗯+|哦|对|那)$/.test(trimmed);
+      const deicticRef = /(这样|那个|这个|这么|那|它(们)?|刚才|上面|之前)/.test(trimmed);
+      if (ackPrefix && deicticRef) {
+        return false;
+      }
+    }
+  }
+
   // v2.7.2 G-U-FIX: 完全相同的目标文本 -> 直接判定为同一话题，不切换。
   // 修复误报风暴：同一长任务消息被重复判为 goal switch（93 次/会话），
   // 导致 compaction debt 反复写入、上下文被无谓压缩。

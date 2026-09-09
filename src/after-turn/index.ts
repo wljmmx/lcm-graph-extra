@@ -13,7 +13,7 @@ import { llmTimeout } from '../config/defaults.js';
 import { callLlm } from '../utils/llm-call.js';
 import { compressToolResultsAsync } from './tool-result-compressor.js';
 import { serializeError } from '../utils/logger.js';
-import { shouldUpdateGoal, getGoal, isToolResultMessage, extractUserMessageText } from '../plugin/goal-cache.js';
+import { shouldUpdateGoal, getGoal, isToolResultMessage, extractUserMessageText, extractPreviousAssistantContent } from '../plugin/goal-cache.js';
 import { resolveSessionCacheKey, isLearningEligibleSession } from '../utils/session-key.js';
 import { evaluateOutputQuality } from './quality.js';
 import { extractTriplets, extractExperiences } from './experience.js';
@@ -425,7 +425,10 @@ export async function afterTurn(ctx: AfterTurnContext, params: any): Promise<voi
       const sessionKey = resolveSessionCacheKey(params);
       if (sessionKey && userContent) {
         const oldGoal = getGoal(sessionKey);
-        const switched = shouldUpdateGoal(userContent, sessionKey);
+        // v2.9-B: 传入上一轮 assistant 内容，与 assemble 判定对齐 —— 对"肯定/补充上轮
+        // 答复"的消息同样保持锚点，避免 side-effect 地写 goal-switch 压缩债务
+        const prevAssistant = extractPreviousAssistantContent(params.messages ?? []);
+        const switched = shouldUpdateGoal(userContent, sessionKey, prevAssistant);
         if (switched && oldGoal) {
           ctx.logger?.info?.('[afterTurn] G-U: goal switch detected, writing high-priority compaction debt', {
             oldGoal: oldGoal.slice(0, 80),

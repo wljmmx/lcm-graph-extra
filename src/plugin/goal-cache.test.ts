@@ -21,6 +21,7 @@ import {
   clearGoalCache,
   extractTaskEntities,
   hasTaskTargetSwitch,
+  extractPreviousAssistantContent,
 } from './goal-cache.js';
 
 const TEST_SESSION = 'test-session-goal-cache';
@@ -487,3 +488,92 @@ describe('evictStaleGoalCache / clearGoalCache', () => {
     expect(() => evictStaleGoalCache()).not.toThrow();
   });
 });
+
+// ============================================================================
+// v2.9-B 承接上轮答复抑制 + extractPreviousAssistantContent
+// ============================================================================
+describe('承接上轮答复抑制（v2.9-B）', () => {
+  const SESSION_B = 'session-v29-b';
+
+  beforeEach(() => {
+    clearGoalCache(SESSION_B);
+  });
+
+  // —— extractPreviousAssistantContent ——
+  it('提取最新 user 之前最近一条非空 assistant 纯文本', () => {
+    const msgs = [
+      { role: 'user', content: '查一下截图在哪' },
+      { role: 'assistant', content: '我找到了，压缩包在 /tmp 下' },
+      { role: 'assistant', content: '需要我继续核实吗？' },
+      { role: 'user', content: '好的' },
+    ];
+    expect(extractPreviousAssistantContent(msgs)).toContain('继续核实');
+  });
+
+  it('跳过 tool_result 取真实 assistant', () => {
+    const msgs = [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: [{ type: 'text', text: '处理完成' }] },
+      { role: 'user', content: [{ type: 'tool_result', content: '{"x":1}' }] },
+      { role: 'user', content: '继续' },
+    ];
+    expect(extractPreviousAssistantContent(msgs)).toContain('处理完成');
+  });
+
+  it('无 assistant（最新消息即首条 user）→ 空串', () => {
+    const msgs = [{ role: 'user', content: '你好' }];
+    expect(extractPreviousAssistantContent(msgs)).toBe('');
+  });
+
+  // —— shouldUpdateGoal 承接抑制 ——
+  it('补充追问提到上轮答复的关键词 → 保持锚点不切换（防误切）', () => {
+    seedCacheFor(SESSION_B, '核查日志中的模型截断警告原因');
+    const prevAssistant = '当前模型Qwen的maxtokens限制了输出，需要调大这个maxtokens配置';
+    // 旧逻辑：疑问词"现在是多少"+零重叠 → 分数>0 判为切换 → 锚点被刷新 + 写压缩债务
+    // v2.9-B：与上轮答复共享 "maxtokens" → 判定承接 → 保持锚点
+    expect(shouldUpdateGoal('请核实一下现在是多少，输出多少了', SESSION_B, prevAssistant)).toBe(false);
+  });
+
+  it('纯肯定反馈（好的/可以）+ 上轮关键词 → 保持锚点', () => {
+    seedCacheFor(SESSION_B, '核查日志中的模型截断警告原因');
+    const prevAssistant = 'maxtokens配置需要调大';
+    expect(shouldUpdateGoal('好的，那这样合理吗', SESSION_B, prevAssistant)).toBe(false);
+  });
+
+  it('真实换需求（新实体非承接）→ 仍判定切换', () => {
+    seedCacheFor(SESSION_B, '核查日志中的模型截断警告原因');
+    const prevAssistant = 'maxtokens配置需要调大';
+    // "deployment.yaml" 未在上轮答复出现，且与原锚点实体不同 → 承接抑制不命中，正常切换
+    expect(shouldUpdateGoal('好的，另外帮我看下deployment.yaml', SESSION_B, prevAssistant)).toBe(true);
+  });
+
+  it('未提供第三参 → 行为与旧逻辑一致（回归护栏）', () => {
+    seedCacheFor(SESSION_B, '写一个排序算法');
+    // 旧断言：无空格的纯中文、零重叠 + >=12 字 → true
+    expect(shouldUpdateGoal('排序算法的时间复杂度是多少', SESSION_B, undefined)).toBe(true);
+  });
+
+  it('无上轮 assistant（空串）→ 不触发承接抑制，走评分', () => {
+    seedCacheFor(SESSION_B, '写一个排序算法');
+    expect(shouldUpdateGoal('如何部署到生产环境', SESSION_B, '')).toBe(true);
+  });
+
+  // —— v2.9-B2 附和式承接（确认词开头 + 指示回指）——
+  it('确认词开头 + 指示代词回指上轮答复 → 保持锚点', () => {
+    seedCacheFor(SESSION_B, '核查日志中的模型截断警告原因');
+    const prevAssistant = 'maxtokens配置需要调大';
+    // "那这样"回指上轮提出的方案 → 承接追问，不切换
+    expect(shouldUpdateGoal('好的，那这样合理吗', SESSION_B, prevAssistant)).toBe(false);
+  });
+
+  it('确认词开头但无指示回指（真正新任务）→ 仍切换', () => {
+    seedCacheFor(SESSION_B, '核查日志中的模型截断警告原因');
+    const prevAssistant = 'maxtokens配置需要调大';
+    // "写一首诗"无回指词 → 不是对上轮答复的追问，走评分切换
+    expect(shouldUpdateGoal('好的，请帮我写一首诗', SESSION_B, prevAssistant)).toBe(true);
+  });
+});
+
+function seedCacheFor(sk: string, goal: string): void {
+  cacheGoal(sk, goal);
+}
