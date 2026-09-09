@@ -266,7 +266,10 @@ export async function getNeo4jDriver(): Promise<any> {
       const neo4j = await import("neo4j-driver").then((m) => m.default);
       const config = resolveNeo4jConfig(getPluginNeo4jConfig());
       if (!config || !config.uri) throw new Error("Neo4j not configured");
-      _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password));
+      _neo4jDriver = neo4j.driver(config.uri, neo4j.auth.basic(config.user, config.password), {
+        maxConnectionPoolSize: 50,
+        connectionAcquisitionTimeout: 10_000,
+      });
       _neo4jDriverReady = null;
       return _neo4jDriver;
     } catch (e) {
