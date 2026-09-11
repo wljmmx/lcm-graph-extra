@@ -133,6 +133,22 @@ vi.mock('../../src/api/experience', async (importOriginal) => {
   };
 });
 
+// ===== mock startAndPollGmProMaintain：图谱维护卡片已改走 gm-pro 异步 proxy 路径（v2.x）=====
+// executeMaintain → invokeMaintainAsync → startAndPollGmProMaintain（不再直接 invokeMcpTool）
+const startAndPollGmProMaintainMock = vi.hoisted(() =>
+  vi.fn(async (_opts?: Record<string, unknown>) => ({
+    ok: true,
+    data: { status: 'done', taskId: 'task-test', mergedCount: 5, durationMs: 1200 },
+  })),
+);
+vi.mock('../../src/api/gm-pro', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/api/gm-pro')>();
+  return {
+    ...actual,
+    startAndPollGmProMaintain: startAndPollGmProMaintainMock,
+  };
+});
+
 import MaintainView from '../../src/views/MaintainView.vue';
 
 /**
@@ -222,7 +238,8 @@ describe('MaintainView', () => {
     expect(maintainCard).toBeTruthy();
     maintainCard!.vm.$emit('execute');
     await flushPromises();
-    expect(invokeMcpToolMock).toHaveBeenCalledWith('lcmg_maintain', {});
+    // v2.x：图谱维护卡片改走 gm-pro 异步 proxy 路径（invokeMaintainAsync → startAndPollGmProMaintain）
+    expect(startAndPollGmProMaintainMock).toHaveBeenCalled();
   });
 
   it('点击 ttl_cleanup 卡片也调用 lcmg_maintain（复用工具，传 source 区分）', async () => {

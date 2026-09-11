@@ -206,6 +206,11 @@ function seedOpenClawMemory(chunks: Array<{ id: string; path: string; text: stri
 
 describe('GET /api/memory/search', () => {
   it('engines=all 返回三引擎结果（lcm + qmd + neo4j）', async () => {
+    // openclaw 引擎隔离：指向空临时目录，避免开发者机器真实 ~/.openclaw/agents 数据混入结果
+    // （本机复现：q=test 命中 10 条真实记忆 → total=15；干净 CI runner 无此问题）
+    const emptyAgentsDir = mkdtempSync(join(tmpdir(), 'openclaw-agents-empty-'));
+    process.env.OPENCLAW_AGENTS_DIR = emptyAgentsDir;
+    clearAgentDbDiscoveryCache();
     // lcm 引擎：db 返回 messages + conversations + summaries 行
     mockGetDb.mockReturnValue(
       makeMockDb({
@@ -241,7 +246,8 @@ describe('GET /api/memory/search', () => {
     expect(body.results.lcm).toHaveLength(3); // messages + conversations + summaries
     expect(body.results.qmd).toHaveLength(1);
     expect(body.results.neo4j).toHaveLength(1);
-    // total = 三引擎之和
+    expect(body.results.openclaw).toHaveLength(0); // 隔离后的空 agents 目录
+    // total = 各引擎之和
     expect(body.total).toBe(5);
     // lcm 结果字段
     const lcmMsg = body.results.lcm.find((r: { content: string }) => r.content.includes('hello test world'));
