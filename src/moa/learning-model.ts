@@ -16,7 +16,7 @@
  * 持久化：~/.openclaw/moa-learning.json，异步节流写入，失败静默不影响主流程。
  */
 
-import { mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, rmSync } from 'node:fs';
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -186,7 +186,9 @@ export function getLearningSummary(): {
 // 持久化
 // ============================================================================
 
-const LEARNING_FILE = join(homedir(), '.openclaw', 'moa-learning.json');
+const LEARNING_FILE = process.env.LCM_MOA_LEARNING_FILE?.trim()
+  ? process.env.LCM_MOA_LEARNING_FILE.trim()
+  : join(homedir(), '.openclaw', 'moa-learning.json');
 const FILE_VERSION = 1;
 
 let lastPersistTime = 0;
@@ -247,5 +249,18 @@ async function loadFromDisk(): Promise<void> {
 
 // 模块加载时异步还原（不阻塞导入）
 void loadFromDisk();
+
+/**
+ * 重置内存统计（测试/诊断用）。
+ * deleteFile=true 时同时删除当前学习状态文件——测试请先把 LCM_MOA_LEARNING_FILE 指向临时路径再调用。
+ */
+export function resetLearningModel(opts: { deleteFile?: boolean } = {}): void {
+  capabilityStats.clear();
+  tokenStats.clear();
+  lastPersistTime = 0;
+  if (opts.deleteFile) {
+    try { rmSync(LEARNING_FILE, { force: true }); } catch { /* 静默 */ }
+  }
+}
 
 export { LEARNING_FILE, loadFromDisk };

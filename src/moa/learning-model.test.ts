@@ -5,18 +5,25 @@
  * - 能力校准（优化点 1）：持续成功 → 能力上调；常失败 → 能力下调；样本少时 ≈ 启发式
  * - Token 成本学习（优化点 3）：实测均值随记录收敛
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// 隔离：把学习状态文件指向临时路径，避免读写用户真实状态、也避免跨文件/跨运行污染
+vi.hoisted(() => {
+  process.env.LCM_MOA_LEARNING_FILE = `/tmp/lcm-moa-learning-test-${process.pid}.json`;
+});
+
 import {
   recordModelOutcome,
   recordTokenUsage,
   getCalibratedStrength,
   getExpectedTokens,
+  resetLearningModel,
 } from './learning-model.js';
 
 describe('learning-model: 能力校准', () => {
   beforeEach(() => {
-    // 避免跨用例污染：直接重置内存统计（模块内部非导出，这里通过在每次用例前清文件不可行，
-    // 因此用不同模型名隔离用例，确保互不影响）
+    // 重置内存统计；状态文件已由 vi.hoisted 指向临时路径，不触碰用户真实数据
+    resetLearningModel({ deleteFile: true });
   });
 
   it('无样本时返回启发式基线', () => {
@@ -53,6 +60,10 @@ describe('learning-model: 能力校准', () => {
 });
 
 describe('learning-model: token 成本学习', () => {
+  beforeEach(() => {
+    resetLearningModel({ deleteFile: true });
+  });
+
   it('实测均值随记录收敛', () => {
     recordTokenUsage('gpt-4o', 1000, 500);
     recordTokenUsage('gpt-4o', 2000, 1500);

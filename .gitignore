@@ -10,3 +10,8 @@ test/perf/REPORT-latest.md
 test/perf/CE-report.md
 src/index.ts.bak.*
 *.bak.*
+
+# local secrets / generated indexes (2026-09-11)
+.env
+.env.local
+.codegraph/
