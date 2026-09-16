@@ -62,6 +62,13 @@ ENV PLUGIN_SNAPSHOT_URL=http://127.0.0.1:7423
 COPY scripts/docker-security-check.sh /usr/local/bin/docker-security-check.sh
 RUN chmod +x /usr/local/bin/docker-security-check.sh
 
+# security: 最小权限原则 —— 以非 root 用户 node 运行（降低容器逃逸/提权的影响面）。
+# node 官方镜像内置 uid=1000 的 node 用户；运行时写路径（~/.openclaw、npm 缓存）需预授权。
+RUN mkdir -p /home/node/.openclaw /home/node/.cache/npm \
+    && chown -R node:node /app /home/node/.openclaw /home/node/.cache/npm
+ENV HOME=/home/node
+USER node
+
 # 健康检查（dashboard 后端 ping）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O- http://127.0.0.1:7421/api/ping || exit 1

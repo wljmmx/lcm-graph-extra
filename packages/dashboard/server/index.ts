@@ -86,11 +86,28 @@ async function main(): Promise<void> {
 
   // P1-4 安全：安全响应头（替代 @fastify/helmet，避免新增依赖）
   // X-Frame-Options 防点击劫持；X-Content-Type-Options 防 MIME 嗅探；
-  // Referrer-Policy 控制 Referer 泄露
+  // Referrer-Policy 控制 Referer 泄露；CSP 限制脚本/数据来源（Vue 安全规范 VUE-HEADERS-001）。
+  // CSP 只放开 style 的 'unsafe-inline'（ECharts/naive-ui 依赖内联样式），script 全量 'self' 且不开 eval。
+  // 默认启用；极端兼容场景可显式设置 DASHBOARD_CSP=off 关闭（不推荐）。
+  const cspEnabled = (process.env.DASHBOARD_CSP ?? 'on').toLowerCase() !== 'off';
+  const cspValue =
+    "default-src 'self'; " +
+    "script-src 'self'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: blob:; " +
+    "font-src 'self' data:; " +
+    "connect-src 'self'; " +
+    "object-src 'none'; " +
+    "base-uri 'self'; " +
+    "form-action 'self'; " +
+    "frame-ancestors 'none'";
   app.addHook('onSend', async (_req, reply) => {
     reply.header('X-Frame-Options', 'DENY');
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (cspEnabled) {
+      reply.header('Content-Security-Policy', cspValue);
+    }
   });
 
   // 注册 CORS（仅本机）
