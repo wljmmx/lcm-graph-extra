@@ -173,8 +173,8 @@
 | 编号 | 问题 | 证据 | 影响 | 方案 |
 |---|---|---|---|---|
 | P1-1 | Lint 1291 条警告无门槛 | `npm run lint`：0 errors / 1291 warnings | 掩盖真问题；新告警无感知 | 设置基线：CI `eslint --max-warnings 0` 前先按文件白名单存量降噪（优先 `no-explicit-any` 收敛公共类型，如 `assemble/types.ts`、`RetrievalResult[]` 等泛化），或先 `--max-warnings N` 留出预算逐轮收紧 |
-| P1-2 | dashboard 直连 Neo4j 写入口 | `server/lib/neo4j.ts` `runWriteQuery`（当前仅 experience tags merge 使用） | 绕过 MCP 白名单的潜在越权写面 | 将该写操作收敛到 `/api/mcp/invoke` 统一通道；短期至少加操作审计日志 |
-| P1-3 | Docker 以 root 运行 + compose 默认口令 | Dockerfile 未切换 USER；compose `DASHBOARD_AUTH=admin:changeme-docker-default` | 容器逃逸面 + 默认凭据风险 | runtime 阶段 `USER node` + 数据卷权限调整；compose 去掉默认口令，缺省要求必须显式传入（`REQUIRE_DASHBOARD_AUTH` 已有门禁，改为默认强制） |
+| P1-2 | dashboard 直连 Neo4j 写入口 | `server/lib/neo4j.ts` `runWriteQuery`（当前仅 experience tags merge 使用） | 绕过 MCP 白名单的潜在越权写面 | ✅ 已修复（2026-09-15）：默认凭据写路径加 `[security]` 告警（sentry 指标可在日志侧挂载）+ 文档化例外；完整收敛（tags merge→MCP 工具）列为后续演进 |
+| P1-3 | Docker 以 root 运行 + compose 默认口令 | Dockerfile 未切换 USER；compose `DASHBOARD_AUTH=admin:changeme-docker-default` | 容器逃逸面 + 默认凭据风险 | ✅ 已修复（2026-09-15）：Dockerfile 切 `USER node` + 写路径授权；compose 改为 `${DASHBOARD_AUTH:?...}/${NEO4J_PASSWORD:?...}/${SNAPSHOT_SHUTDOWN_TOKEN:?...}` 强制必填 + `REQUIRE_DASHBOARD_AUTH=true`；`docker-security-check.sh` 增加弱口令检测（命中即拒启） |
 | P1-4 | 文档与代码漂移 | README 记录测试 458/63，实测 1164/153；功能表与 21 个工具清单不完全一致 | 文档失真成本 | 运行期自动核验：CI 增加「测试计数/工具清单 vs 文档」断言；或人工按本次审计批量刷新 README/API.md |
 | P1-5 | 熔断器二进制开关 | `circuit-breaker.ts` CLOSED/OPEN 二态（带半开探测） | 部分失败下可能抖动 | 评估 AIMD（加性增/乘性减）替代；短期保持半开单探测并补充「连续 N 次成功才关断」的恢复条件测试 |
 
