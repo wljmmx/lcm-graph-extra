@@ -290,6 +290,89 @@ describe('callLlm', () => {
   });
 });
 
+describe('Ollama native /api/chat (方向 1)', () => {
+    it('路由到原生 /api/chat：body 用 options 嵌套、keep_alive/think 顶层', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        message: { role: 'assistant', content: 'ok' },
+      }));
+      const result = await callLlm({
+        baseURL: 'http://127.0.0.1:11434/v1',
+        model: 'qwen3.6:27b',
+        prompt: 'hi',
+        temperature: 0.8,
+        maxTokens: 512,
+        keepAlive: '1h',
+        think: false,
+      });
+      expect(result.text).toBe('ok');
+      expect(mockFetch.mock.calls[0][0]).toBe('http://127.0.0.1:11434/api/chat');
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.model).toBe('qwen3.6:27b');
+      expect(body.stream).toBe(false);
+      expect(body.options.temperature).toBe(0.8);
+      expect(body.options.num_predict).toBe(512);
+      expect(body.keep_alive).toBe('1h');
+      expect(body.think).toBe(false);
+      expect(body.messages).toEqual([{ role: 'user', content: 'hi' }]);
+    });
+
+    it('原生响应：提取 message.content，reasoning 取自 message.thinking', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        message: { role: 'assistant', content: 'final', thinking: 'inner' },
+      }));
+      const result = await callLlm({
+        baseURL: 'http://192.168.50.5:11434',
+        model: 'qwen3.6:27b',
+        prompt: 'hi',
+      });
+      expect(result.text).toBe('final');
+      expect(result.reasoning).toBe('inner');
+    });
+
+    it('内容为空时回退 thinking 作为 text', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        message: { role: 'assistant', content: '', thinking: 'reflection' },
+      }));
+      const result = await callLlm({
+        baseURL: 'http://127.0.0.1:11434',
+        model: 'qwen3.6:27b',
+        prompt: 'hi',
+      });
+      expect(result.text).toBe('reflection');
+    });
+
+    it('非 Ollama 默认端口（vLLM/LM Studio/网关 18789）仍走 /v1/chat/completions', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        choices: [{ message: { content: 'remote ok' } }],
+      }));
+      const result = await callLlm({
+        baseURL: 'http://127.0.0.1:18789/v1',
+        model: 'qwen3.6:27b',
+        prompt: 'hi',
+        keepAlive: '1h',
+      });
+      expect(result.text).toBe('remote ok');
+      expect(mockFetch.mock.calls[0][0]).toBe('http://127.0.0.1:18789/v1/chat/completions');
+      // 网关走 OpenAI 兼容，keep_alive 仅对 isOllamaEndpoint(18789) 注入
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.keep_alive).toBe('1h');
+      expect(body.options).toBeUndefined();
+    });
+
+    it('未传 keepAlive 时不注入 keep_alive 字段', async () => {
+      mockFetch.mockResolvedValueOnce(mockJsonResponse({
+        message: { role: 'assistant', content: 'ok' },
+      }));
+      await callLlm({
+        baseURL: 'http://127.0.0.1:11434',
+        model: 'qwen3.6:27b',
+        prompt: 'hi',
+      });
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.keep_alive).toBeUndefined();
+    });
+  });
+
 describe('isLocalLlm', () => {
   it('127.0.0.1 is local', () => {
     expect(isLocalLlm('http://127.0.0.1:8000/v1')).toBe(true);

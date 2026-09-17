@@ -148,7 +148,7 @@ export function createLocalEmbedFn(ecfg: EmbeddingConfig): (text: string) => Pro
 
       // 本地 Ollama 全局并发闸门（与 LLM 请求共用，OLLAMA_MAX_CONCURRENCY 默认 2）：
       // embedding 与 LLM 摘要/主生成共用同一 Ollama 队列，不加闸会叠加打爆服务端。
-      const resp = await withOllamaSlot(baseURL, () => fetch(ep, {
+      const resp = await withOllamaSlot(baseURL, model, () => fetch(ep, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),

@@ -54,6 +54,44 @@ function buildOpenAiBody(params: LlmCallParams): Record<string, unknown> {
   return body;
 }
 
+/**
+ * 构建 Ollama 原生 /api/chat 请求体。
+ *
+ * 与 /v1/chat/completions 的区别（关键）：Ollama 的 OpenAI 兼容层 (/v1/*) 是
+ * 实验性支持，`keep_alive`（模型驻留内存时长）与 `think` 等 Ollama 扩展字段会
+ * 被静默忽略。embedding 已因此改走原生 /api/embed（见 embed-fn.ts），这里把
+ * LLM chat 也统一走原生 /api/chat，确保 keep_alive=1h 生效，避免模型空转 5m
+ * 后卸载、每次调用重新加载（"模型加载调用反复出现、首次延迟飙高"）。
+ *
+ * Ollama 原生约定：
+ *  - 运行时参数（temperature / num_predict）嵌套在 options 子对象内才生效
+ *  - keep_alive / think 在 body 顶层
+ */
+function buildOllamaNativeBody(params: LlmCallParams): Record<string, unknown> {
+  const messages: { role: string; content: string }[] = [];
+  if (params.system) {
+    messages.push({ role: 'system', content: params.system });
+  }
+  messages.push({ role: 'user', content: params.prompt });
+  const body: Record<string, unknown> = {
+    model: params.model,
+    messages,
+    stream: false,
+    options: {
+      temperature: params.temperature ?? 0.3,
+      num_predict: params.maxTokens ?? 2048,
+    },
+  };
+  if (params.keepAlive) {
+    body.keep_alive = params.keepAlive;
+  }
+  // 思考模式开关：Ollama 原生 /api/chat 支持 think（/v1 不支持）
+  if (params.think !== undefined) {
+    body.think = params.think;
+  }
+  return body;
+}
+
 function buildAnthropicBody(params: LlmCallParams): Record<string, unknown> {
   const messages: { role: string; content: string }[] = [
     { role: 'user', content: params.prompt },
@@ -80,6 +118,33 @@ function getEndpoint(baseURL: string, format: 'openai' | 'anthropic'): string {
   if (clean.endsWith('/v1/chat/completions')) return clean;
   if (clean.endsWith('/v1')) return clean + '/chat/completions';
   return clean + '/v1/chat/completions';
+}
+
+/**
+ * 是否应走 Ollama 原生 /api/chat（而非 OpenAI 兼容 /v1/chat/completions）。
+ *
+ * 仅对 Ollama 官方默认端口 11434 生效；OpenClaw 网关（18789）与远程 vLLM /
+ * LM Studio 等仍是 OpenAI 兼容端点，保持走 /v1。
+ */
+function isNativeOllamaChatEndpoint(baseURL: string): boolean {
+  const clean = cleanBaseURL(baseURL);
+  if (!clean) return false;
+  try {
+    const u = new URL(clean);
+    if (u.port === '11434') return true;
+    if (/^\/api\//.test(u.pathname)) return true;
+  } catch {
+    /* invalid URL → 交给字符串判断 */
+  }
+  const lower = clean.toLowerCase();
+  return /:11434(\/|$)/.test(lower) || /\/api\//.test(lower);
+}
+
+/** 构造 Ollama 原生 /api/chat 端点（剥离 /v1 或已有 /api/*，再拼 /api/chat） */
+function nativeOllamaChatEndpoint(baseURL: string): string {
+  return cleanBaseURL(baseURL)
+    .replace(/\/v\d+$/, '')
+    .replace(/\/api\/[^/]+$/, '') + '/api/chat';
 }
 
 function parseOpenAiResponse(data: any): LlmCallResult {
@@ -113,6 +178,23 @@ function parseAnthropicResponse(data: any): LlmCallResult {
 }
 
 /**
+ * 解析 Ollama 原生 /api/chat 响应。
+ * 结构：{ message: { role, content, thinking? }, done, ... }
+ */
+function parseOllamaNativeResponse(data: any): LlmCallResult {
+  const msg = data?.message ?? {};
+  let text = msg?.content ?? '';
+  let reasoning = msg?.thinking ?? msg?.reasoning_content;
+  if (!text && reasoning) {
+    text = reasoning;
+  }
+  if (text) {
+    text = stripThinkTags(text);
+  }
+  return { text, reasoning, raw: data };
+}
+
+/**
  * 默认调用超时：调用方未传 signal 时的兜底期限。
  *
  * 背景：callLlm 原先完全依赖调用方传 signal，而注入给 lossless-claw 的
@@ -131,7 +213,11 @@ const DEFAULT_CALL_TIMEOUT_MS = Math.max(
 
 export async function callLlm(params: LlmCallParams): Promise<LlmCallResult> {
   const format = detectApiFormat(params.baseURL, params.model);
-  const endpoint = getEndpoint(params.baseURL, format);
+  // Ollama 官方端点 → 原生 /api/chat（keep_alive / think 生效，避免模型反复卸载加载）
+  const nativeOllama = format === 'openai' && isNativeOllamaChatEndpoint(params.baseURL);
+  const endpoint = nativeOllama
+    ? nativeOllamaChatEndpoint(params.baseURL)
+    : getEndpoint(params.baseURL, format);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (params.apiKey) {
     if (format === 'anthropic') {
@@ -144,18 +230,21 @@ export async function callLlm(params: LlmCallParams): Promise<LlmCallResult> {
   if (params.extraHeaders) {
     Object.assign(headers, params.extraHeaders);
   }
-  const body = format === 'anthropic'
-    ? buildAnthropicBody(params)
-    : buildOpenAiBody(params);
+  const body = nativeOllama
+    ? buildOllamaNativeBody(params)
+    : format === 'anthropic'
+      ? buildAnthropicBody(params)
+      : buildOpenAiBody(params);
 
   // 超时兜底：无 signal 时挂全局默认期限；调用方自带 signal（含 AbortSignal.timeout）
   // 时完全尊重调用方，行为不变。
   const signal = params.signal ?? AbortSignal.timeout(DEFAULT_CALL_TIMEOUT_MS);
 
-  // 本地 Ollama 全局并发闸门（OLLAMA_MAX_CONCURRENCY，默认 2）：
+  // 本地 Ollama 全局调度闸门（OLLAMA_MAX_CONCURRENCY，默认 2）：
   // 插件内所有 LLM 调用（rerank/judge/validate/distill/compact 摘要）与 embedding
-  // 共用同一 Ollama 队列，不加闸会瞬时打爆服务端 503。远程 API 不受限。
-  const resp = await withOllamaSlot(params.baseURL, () => fetch(endpoint, {
+  // 共用同一 Ollama 队列，不加闸会瞬时打爆服务端 503；并按模型粒度互斥（不同模型
+  // 严格串行，避免显存互踢导致处理中数据中断）。远程 API 不受限。
+  const resp = await withOllamaSlot(params.baseURL, params.model, () => fetch(endpoint, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
@@ -171,6 +260,7 @@ export async function callLlm(params: LlmCallParams): Promise<LlmCallResult> {
   }
 
   const data = await resp.json();
+  if (nativeOllama) return parseOllamaNativeResponse(data);
   return format === 'anthropic'
     ? parseAnthropicResponse(data)
     : parseOpenAiResponse(data);
