@@ -1195,13 +1195,17 @@ const pluginEntry: any = definePluginEntry({
           // 但传给 lossless-claw 的 force 参数固定为 true（见下），因为我们的 compact hook
           // 是 /compact 的入口，必须确保 lossless-claw 执行压缩而非因 threshold 没超而跳过。
           const _forceCompact = _uncompressedCount > _dedupRounds;
+          // P-CB-9: DB 积压触发的强制压缩同样纳入同会话冷却（死锁期间积压长期 > dedupRounds，
+          // 原逻辑每轮绕过冷却硬闯，在 300s 压缩窗口内反复提交压缩、打满本地 LLM 队列）。
+          // 仅当积压严重（> dedupRounds*3）时视为紧急，豁免冷却，避免压缩需求被饿死。
+          const _forceCompactUrgent = _uncompressedCount > _dedupRounds * 3;
 
           // ── compact() 入口同会话冷却 ──
           // SDK 后台维护（turnMaintenanceMode:'background'）每轮 turn 结束都会调用本 compact()。
           // 若每次都真的执行 DAG 压缩，会在活跃对话中反复调用 lossless-claw 压缩、打满本地 LLM
           // pending 队列。仅在"无显式 force / 无真实溢出 / 无积压"时应用同会话冷却；
           // 显式强制压缩与真实压力（输入溢出 / DB 积压超 dedupRounds）不受影响。
-          if (params.force !== true && !_isInputOverflow && !_forceCompact) {
+          if (params.force !== true && !_isInputOverflow && !_forceCompactUrgent) {
             // v2.9.0: 主轮门控让路 —— 主对话轮进行中时，非紧急压缩避让，
             // 写入债务由 debt-manager 在轮次间隙统一处理（合并压缩，不阻塞主对话）。
             // 场景：SDK 后台维护 / 手动触发恰逢其他会话主轮在跑（本地 Ollama 正被
