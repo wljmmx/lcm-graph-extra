@@ -20,6 +20,9 @@
 import { resolveGmProPath } from './graph-adapter.js';
 import { resolveLogger } from '../utils/logger.js';
 import type { Logger } from '../utils/logger.js';
+// 仅类型引用：markDirty/getDirtyNodeIds/clearDirty/upsertFeedback 采用上游原始导出
+// markDirty(driver, nodeIds) 形态，driver 与 gm-pro 同为 neo4j-driver 的 Driver。
+import type { Driver } from 'neo4j-driver';
 
 /** gm-pro 路径解析来源类型 */
 type GmProSource = 'env' | 'extensions-global' | 'extensions-workspace' | 'extensions-stock' | 'require';
@@ -172,73 +175,207 @@ export async function withGmProFallback<T>(
 }
 
 // ──────────────────────────────────────────────────────────────────
-// 类型定义：扩展 API 的入参/出参契约（lcm-graph-extra 期望形态）
+// 上游类型契约（graph-memory-pro v2.4.x，与 src/types.ts 同源）
+//
+// 对齐目标：wljmmx/graph-memory-pro 顶层导出的真实接口形态。
+// lcm-graph-extra 作为调用方，按此契约构造入参 / 解读返回值。
+// 上游索引（index.ts）顶层导出有：
+//   getNodesByTimeRange(params) / evolveNode(id, updates) / linkNodes(fromId, toId, type)
+//   consolidateBuffer(nodes) / incrementalMaintain() / judgeRecall(query, recalledNodes, assistantReply)
+//   markDirty(driver, nodeIds) / getDirtyNodeIds(driver) / clearDirty(driver, nodeIds?)
+//   upsertFeedback(driver, feedback) / getGraphHealth()
 // ──────────────────────────────────────────────────────────────────
 
-/** judgeRecall 入参：评估召回结果是否有效 */
+/** 上游节点类型枚举（getNodesByTimeRange.type / GmNode.type） */
+export type NodeType = "TASK" | "SKILL" | "EVENT";
+
+/** 上游边类型枚举。注意：语义关联边是 RELATES_TO（无 D），与经验层自有边型 RELATED_TO 不同 */
+export type EdgeType =
+  | "USED_SKILL"
+  | "SOLVED_BY"
+  | "REQUIRES"
+  | "PATCHES"
+  | "CONFLICTS_WITH"
+  | "RELATES_TO"
+  | "CAUSED_BY"
+  | "LEADS_TO"
+  | "MENTIONS"
+  | "NEXT_SESSION"
+  | "CONTAINS";
+
+/** 上游节点生命周期状态（S-13） */
+export type NodeState = "current" | "superseded" | "transitional";
+
+/** 上游节点可用性状态 */
+export type NodeStatus = "active" | "deprecated" | "merged";
+
+/** 上游知识来源（S-3） */
+export type NodeSource = "experience" | "knowledge" | "imported";
+
+/** 上游 GmNode（含 2026.9 前 S-1/S-3/S-13/S-14/G-3/G-4/R-4/S-4 扩展字段） */
+export interface GmNode {
+  id: string;
+  type: NodeType;
+  name: string;
+  description: string;
+  content: string;
+  status: NodeStatus;
+  communityId?: string | null;
+  pagerank: number;
+  validatedCount: number;
+  createdAt: number;
+  updatedAt: number;
+  embedding?: number[];
+  // S-1 Bi-Temporal
+  validFrom?: number;
+  validTo?: number;
+  recordedAt?: number;
+  // S-3 来源标记
+  source?: NodeSource;
+  supersededBy?: string;
+  // S-13 状态追踪
+  state?: NodeState;
+  // S-14 过时检测
+  stalenessScore?: number;
+  // G-3 重要性评分
+  importanceScore?: number;
+  // G-4 / R-4 嵌入模型与可进化嵌入
+  embeddingModel?: string;
+  embeddingHash?: string;
+  embeddingHistory?: Array<{
+    embedding: number[];
+    embeddingModel?: string;
+    embeddingHash?: string;
+    archivedAt: number;
+  }>;
+  // v2.4.0 长文本分段
+  chunkTexts?: string[];
+  chunkEmbeddings?: number[][];
+  // S-4 层次化社区
+  topicId?: string;
+  domainId?: string;
+  [key: string]: any;
+}
+
+/** 上游 GmEdge */
+export interface GmEdge {
+  id: string;
+  type: EdgeType;
+  fromId: string;
+  toId: string;
+  instruction: string;
+  condition?: string;
+  weight: number;
+  createdAt: number;
+  updatedAt: number;
+  [key: string]: any;
+}
+
+// ──────────────────────────────────────────────────────────────────
+// 上游 API 调用契约（顶层导出形态）
+// ──────────────────────────────────────────────────────────────────
+
+/** getNodesByTimeRange：上游签名 getNodesByTimeRange(params) => Promise<GmNode[]> */
+export interface GetNodesByTimeRangeParams {
+  start: number; // 毫秒时间戳（含）
+  end: number; // 毫秒时间戳（含）
+  timeField: "createdAt" | "updatedAt";
+  type?: NodeType; // 缺省查 Task|Skill|Event 全量
+  limit?: number;
+}
+export type GetNodesByTimeRangeResult = GmNode[];
+
+/** evolveNode：上游签名 evolveNode(id, updates: Partial<GmNode>) => Promise<void> */
+export interface EvolveNodeParams {
+  id: string;
+  /** 仅上游 upsertNode 白名单字段生效（超集字段会被静默丢弃） */
+  updates: Partial<GmNode>;
+}
+export type EvolveNodeResult = void;
+
+/** linkNodes：上游签名 linkNodes(fromId, toId, type: EdgeType) => Promise<void> */
+export interface LinkNodesParams {
+  fromId: string;
+  toId: string;
+  type: EdgeType;
+}
+export type LinkNodesResult = void;
+
+/** markDirty：上游签名 markDirty(driver, nodeIds) => Promise<void>（原始导出，无 reason 参数） */
+export interface MarkDirtyParams {
+  driver: Driver; // 项目侧 Neo4j Driver（与 gm-pro 同驱动库）
+  nodeIds: string[];
+}
+export type MarkDirtyResult = void;
+
+/** getDirtyNodeIds：上游签名 getDirtyNodeIds(driver) => Promise<string[]> */
+export interface GetDirtyNodeIdsParams {
+  driver: Driver;
+}
+export type GetDirtyNodeIdsResult = string[];
+
+/** clearDirty：上游签名 clearDirty(driver, nodeIds?) => Promise<void>（缺省清全部） */
+export interface ClearDirtyParams {
+  driver: Driver;
+  nodeIds?: string[];
+}
+export type ClearDirtyResult = void;
+
+/** incrementalMaintain：上游签名 incrementalMaintain() => Promise<IncrementalMaintenanceResult>（无入参） */
+export interface IncrementalMaintainResult {
+  processedNodes: number;
+  dedup: {
+    pairs: Array<{ idA: string; idB: string; nameA: string; nameB: string; similarity: number }>;
+    merged: number;
+  };
+  staleness: { scanned: number; updated: number; highStaleCount: number };
+  importance?: { scanned: number; updated: number; avgScore: number };
+  conflictResolution?: { scanned: number; resolved: number; superseded: number; merged: number };
+  edgeWeights?: { scanned: number; strengthened: number; decayed: number };
+  phasesRun: string[];
+  durationMs: number;
+}
+
+/** consolidateBuffer：上游签名 consolidateBuffer(nodes: GmNode[]) => Promise<string[]>（返回节点名列表） */
+export interface ConsolidateBufferParams {
+  /** 仅取各节点 content 拼接后交给 Extractor 做三元组提取 */
+  nodes: GmNode[];
+}
+export type ConsolidateBufferResult = string[];
+
+/** judgeRecall：上游签名 judgeRecall(query, recalledNodes, assistantReply) => Promise<JudgeResult>。
+ *  上游 JudgeResult 定义于 judge.ts（本次资料未含），项目本地不消费该返回值（G-8 用本地
+ *  evaluateTier1 + fire-and-forget），此处仅标注调用形态，返回值保持宽容。 */
 export interface JudgeRecallParams {
   query: string;
-  recalledNodeIds: string[];
-  scenario?: string;
+  recalledNodes: GmNode[];
+  assistantReply: string;
 }
+export type JudgeRecallResult = unknown;
 
-/** judgeRecall 出参：每个节点的相关性判断 */
-export interface JudgeRecallResult {
-  judgments: Array<{
-    id: string;
-    relevant: boolean;
-    confidence: number;
-    reason?: string;
-  }>;
-  tier1Confidence: number; // 0-1
-}
-
-/** upsertFeedback 入参：写入 LLM 验证回路反馈 */
-export interface UpsertFeedbackParams {
+/** GmFeedback：上游 store.ts 的 GmFeedback（v2.3.2 起 upsertFeedback(driver, GmFeedback)）。
+ *  部分字段未在本次资料中全量核实，保持宽容；matchedBy 联合类型确认含 "custom"。 */
+export interface GmFeedback {
   nodeId: string;
   query: string;
   relevant: boolean;
-  score: number; // 0-1
-  delta?: number; // relevanceScore 调整量
+  matchedBy?: string; // 上游联合类型含 "custom"（Tier 3 匹配）
+  score?: number;
+  delta?: number;
+  [key: string]: unknown;
 }
 
-/** getNodesByTimeRange 入参 */
-export interface GetNodesByTimeRangeParams {
-  from: number; // 毫秒时间戳
-  to: number; // 毫秒时间戳
-  limit?: number;
-  label?: string; // 'EXPERIENCE' | 'EVENT' | undefined
+/** upsertFeedback：上游签名 upsertFeedback(driver, feedback)（store.ts 导出）。
+ *  项目 G-8 已改用本地 store.updateQualityScore（v2.3.2 契约变更后弃用上游 API），类型仅作注解。 */
+export interface UpsertFeedbackParams {
+  driver: Driver;
+  feedback: GmFeedback;
 }
+export type UpsertFeedbackResult = void;
 
-/** getNodesByTimeRange 出参 */
-export interface TimeRangeNode {
-  id: string;
-  type?: string;
-  title?: string;
-  summary?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  pagerank?: number;
-  state?: string;
-}
-
-/** evolveNode 入参：更新节点状态 */
-export interface EvolveNodeParams {
-  nodeId: string;
-  updates: Record<string, unknown>;
-}
-
-/** evolveNode 出参 */
-export interface EvolveNodeResult {
-  evolved: boolean;
-  previousState?: string;
-  newState?: string;
-  reason?: string;
-}
-
-/** getGraphHealth 出参（G-5 图谱健康） */
+/** getGraphHealth：上游返回形态（status 必填，计数类字段上游恒返回，此处可选仅便于本地构造降级快照） */
 export interface GraphHealthSnapshot {
-  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
+  status: "healthy" | "degraded" | "unhealthy" | "unknown";
   nodeCount?: number;
   relationshipCount?: number;
   staleNodeCount?: number;
@@ -248,85 +385,9 @@ export interface GraphHealthSnapshot {
   details?: Record<string, unknown>;
 }
 
-/** consolidateBuffer 入参：将情节缓冲中的节点整合到全局图谱（S-9） */
-export interface ConsolidateBufferParams {
-  nodes: GmNode[];
-  sessionId?: string;
-}
-
-/** consolidateBuffer 出参：成功整合的节点 ID 列表 */
-export interface ConsolidateBufferResult {
-  consolidatedIds: string[];
-  skippedIds?: string[];
-  reason?: string;
-}
-
-/** linkNodes 入参：创建语义链接（S-11 Zettelkasten） */
-export interface LinkNodesParams {
-  fromId: string;
-  toId: string;
-  type: string; // e.g. 'RELATED_TO' | 'DERIVED_FROM' | 'EVOLVED_FROM'
-  instruction?: string;
-}
-
-/** linkNodes 出参 */
-export interface LinkNodesResult {
-  created: boolean;
-  edgeId?: string;
-  reason?: string;
-}
-
-/** markDirty 入参：标记节点脏数据，触发增量维护（gm-pro v2.2.1） */
-export interface MarkDirtyParams {
-  nodeIds: string[];
-  reason?: string;
-}
-
-/** incrementalMaintain 入参：增量维护（gm-pro v2.2.1） */
-export interface IncrementalMaintainParams {
-  nodeIds?: string[]; // 为空则处理所有 dirty 节点
-  maxBatchSize?: number;
-}
-
-/** incrementalMaintain 出参 */
-export interface IncrementalMaintainResult {
-  processedCount: number;
-  remainingCount: number;
-  durationMs?: number;
-}
-
 // ──────────────────────────────────────────────────────────────────
-// 基础 API 类型契约（graph-memory / graph-memory-pro 通用核心能力）
+// 基础返回类型（上游 recall/store 通用）
 // ──────────────────────────────────────────────────────────────────
-
-/** 图谱节点基础类型 */
-export interface GmNode {
-  id: string;
-  type: string;
-  name: string;
-  description: string;
-  content: string;
-  status?: string;
-  validatedCount?: number;
-  communityId?: string | null;
-  pagerank?: number;
-  createdAt?: number;
-  updatedAt?: number;
-  [key: string]: any;
-}
-
-/** 图谱边基础类型 */
-export interface GmEdge {
-  id: string;
-  fromId: string;
-  toId: string;
-  type: string;
-  instruction: string;
-  condition?: string;
-  sessionId?: string;
-  createdAt?: number;
-  [key: string]: any;
-}
 
 /** 召回结果 */
 export interface RecallResult {

@@ -25,14 +25,22 @@ import type {
   LinkNodesParams,
   LinkNodesResult,
   MarkDirtyParams,
-  IncrementalMaintainParams,
+  MarkDirtyResult,
   IncrementalMaintainResult,
+  GetDirtyNodeIdsParams,
+  GetDirtyNodeIdsResult,
+  ClearDirtyParams,
+  ClearDirtyResult,
   GmNode,
-  JudgeRecallParams,
-  JudgeRecallResult,
+  GmEdge,
+  NodeType,
+  EdgeType,
+  NodeState,
+  GmFeedback,
   UpsertFeedbackParams,
+  UpsertFeedbackResult,
   GetNodesByTimeRangeParams,
-  TimeRangeNode,
+  GetNodesByTimeRangeResult,
   EvolveNodeParams,
   EvolveNodeResult,
   GraphHealthSnapshot,
@@ -242,15 +250,15 @@ describe('gm-pro-fallback', () => {
     });
 
     it('gm-pro 可用且 API 存在时走 gm-pro', async () => {
-      mockState.mod.consolidateBuffer = vi.fn().mockResolvedValue({ consolidatedIds: ['n1'] });
+      mockState.mod.consolidateBuffer = vi.fn().mockResolvedValue(['n1']);
       const fallback = vi.fn().mockResolvedValue('fallback-should-not-be-called');
       const result = await withGmProFallback(
         'consolidateBuffer',
-        async (mod) => mod.consolidateBuffer({ nodes: [] }),
+        async (mod) => mod.consolidateBuffer([]),
         fallback,
         { logger: testLogger as any },
       );
-      expect(result).toEqual({ consolidatedIds: ['n1'] });
+      expect(result).toEqual(['n1']);
       expect(fallback).not.toHaveBeenCalled();
     });
 
@@ -259,7 +267,7 @@ describe('gm-pro-fallback', () => {
       const fallback = vi.fn().mockResolvedValue('fallback-result');
       const result = await withGmProFallback(
         'consolidateBuffer',
-        async (mod) => mod.consolidateBuffer({ nodes: [] }),
+        async (mod) => mod.consolidateBuffer([]),
         fallback,
         { logger: testLogger as any },
       );
@@ -277,7 +285,7 @@ describe('gm-pro-fallback', () => {
       mockState.mod.consolidateBuffer = vi.fn().mockRejectedValue(new Error('boom'));
       await withGmProFallback(
         'consolidateBuffer',
-        async (mod) => mod.consolidateBuffer({ nodes: [] }),
+        async (mod) => mod.consolidateBuffer([]),
         async () => 'fallback',
         { logger: testLogger as any, label: 'my-custom-label' },
       );
@@ -286,15 +294,16 @@ describe('gm-pro-fallback', () => {
     });
 
     it('gm-pro 抛异常时 fallback 返回值正确传递', async () => {
+      // 上游 linkNodes(fromId, toId, type) 位置参数；抛出异常 → fallback void 透传
       mockState.mod.linkNodes = vi.fn().mockRejectedValue(new Error('link boom'));
-      const fallback = vi.fn().mockResolvedValue({ created: false, reason: 'fallback' });
+      const fallback = vi.fn().mockResolvedValue(undefined);
       const result = await withGmProFallback(
         'linkNodes',
-        async (mod) => mod.linkNodes({ fromId: 'a', toId: 'b', type: 'RELATED_TO' }),
+        async (mod) => mod.linkNodes('a', 'b', 'RELATES_TO'),
         fallback,
         { logger: testLogger as any },
       );
-      expect(result).toEqual({ created: false, reason: 'fallback' });
+      expect(result).toBeUndefined();
     });
 
     it('gm-pro 不可用时不记录 debug 日志（无异常）', async () => {
@@ -330,7 +339,8 @@ describe('gm-pro-fallback', () => {
 
     it('gmProFn 接收已加载的 mod 作为参数', async () => {
       mockState.mod.judgeRecall = vi.fn().mockResolvedValue('ok');
-      const gmProFn = vi.fn(async (mod: any) => mod.judgeRecall({ query: 'q', recalledNodeIds: [] }));
+      // 上游 judgeRecall(query, recalledNodes, assistantReply) 位置参数
+      const gmProFn = vi.fn(async (mod: any) => mod.judgeRecall('q', [], 'assistant reply'));
       await withGmProFallback('judgeRecall', gmProFn, async () => 'fallback', {
         logger: testLogger as any,
       });
@@ -483,79 +493,36 @@ describe('gm-pro-fallback', () => {
     });
   });
 
-  // ─── 类型定义验证 ────────────────────────────────────────────────────────
+  // ─── 类型定义验证（按上游 graph-memory-pro v2.4.x 真实契约） ────────────
 
   describe('类型定义验证', () => {
-    it('ConsolidateBufferParams: nodes 必填, sessionId 可选', () => {
-      const withSession: ConsolidateBufferParams = {
-        nodes: [{ id: 'n1', type: 'TASK', name: 'task1', description: '', content: '' }],
-        sessionId: 'sess-1',
-      };
-      const withoutSession: ConsolidateBufferParams = { nodes: [] };
-      expect(withSession.nodes).toHaveLength(1);
-      expect(withSession.sessionId).toBe('sess-1');
-      expect(withoutSession.sessionId).toBeUndefined();
+    it('NodeType/NodeStatus: 上游枚举', () => {
+      const nodeTypes: NodeType[] = ['TASK', 'SKILL', 'EVENT'];
+      expect(nodeTypes).toEqual(['TASK', 'SKILL', 'EVENT']);
+      const nt: NodeType = 'SKILL';
+      expect(nt).toBe('SKILL');
     });
 
-    it('ConsolidateBufferResult: consolidatedIds 必填, skippedIds/reason 可选', () => {
-      const full: ConsolidateBufferResult = {
-        consolidatedIds: ['n1', 'n2'],
-        skippedIds: ['n3'],
-        reason: 'already exists',
-      };
-      const minimal: ConsolidateBufferResult = { consolidatedIds: [] };
-      expect(full.consolidatedIds).toHaveLength(2);
-      expect(full.skippedIds).toHaveLength(1);
-      expect(minimal.skippedIds).toBeUndefined();
-      expect(minimal.reason).toBeUndefined();
+    it('EdgeType: 语义关联边是 RELATES_TO（无 D），不自造 RELATED_TO', () => {
+      const edgeTypes: EdgeType[] = [
+        'USED_SKILL', 'SOLVED_BY', 'REQUIRES', 'PATCHES', 'CONFLICTS_WITH',
+        'RELATES_TO', 'CAUSED_BY', 'LEADS_TO', 'MENTIONS', 'NEXT_SESSION', 'CONTAINS',
+      ];
+      expect(edgeTypes).toContain('RELATES_TO');
+      expect((edgeTypes as string[])).not.toContain('RELATED_TO');
+      const link: LinkNodesParams = { fromId: 'a', toId: 'b', type: 'RELATES_TO' };
+      expect(link.type).toBe('RELATES_TO');
     });
 
-    it('LinkNodesParams: fromId/toId/type 必填, instruction 可选', () => {
-      const full: LinkNodesParams = {
-        fromId: 'a',
-        toId: 'b',
-        type: 'RELATED_TO',
-        instruction: 'derived from',
-      };
-      const minimal: LinkNodesParams = { fromId: 'a', toId: 'b', type: 'DERIVED_FROM' };
-      expect(full.type).toBe('RELATED_TO');
-      expect(minimal.instruction).toBeUndefined();
+    it('NodeState: current/superseded/transitional（S-13）', () => {
+      const states: NodeState[] = ['current', 'superseded', 'transitional'];
+      for (const s of states) {
+        const node: GmNode = { id: 'n', type: 'TASK', name: '', description: '', content: '', status: 'active', pagerank: 0, validatedCount: 0, createdAt: 0, updatedAt: 0, state: s };
+        expect(node.state).toBe(s);
+      }
     });
 
-    it('LinkNodesResult: created 必填, edgeId/reason 可选', () => {
-      const full: LinkNodesResult = { created: true, edgeId: 'e1', reason: 'new link' };
-      const minimal: LinkNodesResult = { created: false };
-      expect(full.created).toBe(true);
-      expect(minimal.edgeId).toBeUndefined();
-    });
-
-    it('MarkDirtyParams: nodeIds 必填, reason 可选', () => {
-      const full: MarkDirtyParams = { nodeIds: ['n1', 'n2'], reason: 'content updated' };
-      const minimal: MarkDirtyParams = { nodeIds: [] };
-      expect(full.nodeIds).toHaveLength(2);
-      expect(minimal.reason).toBeUndefined();
-    });
-
-    it('IncrementalMaintainParams: 全部字段可选', () => {
-      const full: IncrementalMaintainParams = { nodeIds: ['n1'], maxBatchSize: 100 };
-      const empty: IncrementalMaintainParams = {};
-      expect(full.maxBatchSize).toBe(100);
-      expect(empty.nodeIds).toBeUndefined();
-      expect(empty.maxBatchSize).toBeUndefined();
-    });
-
-    it('IncrementalMaintainResult: processedCount/remainingCount 必填, durationMs 可选', () => {
-      const full: IncrementalMaintainResult = {
-        processedCount: 10,
-        remainingCount: 2,
-        durationMs: 500,
-      };
-      const minimal: IncrementalMaintainResult = { processedCount: 0, remainingCount: 0 };
-      expect(full.processedCount).toBe(10);
-      expect(minimal.durationMs).toBeUndefined();
-    });
-
-    it('GmNode: 必填字段 + 可选字段 + 扩展字段', () => {
+    it('GmNode: 上游必填字段 + S-1/G-3/G-4 扩展字段 + 宽容扩展', () => {
       const node: GmNode = {
         id: 'n1',
         type: 'TASK',
@@ -564,100 +531,170 @@ describe('gm-pro-fallback', () => {
         content: 'content',
         status: 'active',
         pagerank: 0.5,
+        validatedCount: 1,
+        createdAt: 100,
+        updatedAt: 200,
+        validFrom: 100,
+        validTo: 300,
+        state: 'superseded',
+        supersededBy: 'n2',
+        importanceScore: 0.9,
+        embeddingModel: 'text-embed',
       };
-      expect(node.id).toBe('n1');
+      expect(node.type).toBe('TASK');
       expect(node.status).toBe('active');
-      // 允许扩展字段（[key: string]: any）
+      expect(node.state).toBe('superseded');
+      expect(node.importanceScore).toBe(0.9);
+      expect(node.validTo).toBe(300);
+      // 宽容扩展字段（[key: string]: any）
       (node as any).customField = 'custom';
       expect((node as any).customField).toBe('custom');
     });
 
-    it('JudgeRecallParams: query/recalledNodeIds 必填, scenario 可选', () => {
-      const full: JudgeRecallParams = {
-        query: 'q',
-        recalledNodeIds: ['n1', 'n2'],
-        scenario: 'bug-fix',
+    it('GmEdge: 上游必填字段（weight/createdAt/updatedAt）', () => {
+      const edge: GmEdge = {
+        id: 'e1',
+        type: 'RELATES_TO',
+        fromId: 'n1',
+        toId: 'n2',
+        instruction: 'derived from',
+        condition: 'when confirmed',
+        weight: 1,
+        createdAt: 100,
+        updatedAt: 200,
       };
-      const minimal: JudgeRecallParams = { query: 'q', recalledNodeIds: [] };
-      expect(full.recalledNodeIds).toHaveLength(2);
-      expect(minimal.scenario).toBeUndefined();
+      expect(edge.type).toBe('RELATES_TO');
+      expect(edge.weight).toBe(1);
     });
 
-    it('JudgeRecallResult: judgments + tier1Confidence (0-1)', () => {
-      const result: JudgeRecallResult = {
-        judgments: [{ id: 'n1', relevant: true, confidence: 0.9, reason: 'high score' }],
-        tier1Confidence: 0.85,
-      };
-      expect(result.judgments[0].relevant).toBe(true);
-      expect(result.tier1Confidence).toBeGreaterThanOrEqual(0);
-      expect(result.tier1Confidence).toBeLessThanOrEqual(1);
-    });
-
-    it('UpsertFeedbackParams: nodeId/query/relevant/score 必填, delta 可选', () => {
-      const full: UpsertFeedbackParams = {
-        nodeId: 'n1',
-        query: 'q',
-        relevant: true,
-        score: 0.8,
-        delta: 0.1,
-      };
-      const minimal: UpsertFeedbackParams = {
-        nodeId: 'n1',
-        query: 'q',
-        relevant: false,
-        score: 0.2,
-      };
-      expect(full.score).toBeLessThanOrEqual(1);
-      expect(minimal.delta).toBeUndefined();
-    });
-
-    it('GetNodesByTimeRangeParams: from/to 必填, limit/label 可选', () => {
+    it('GetNodesByTimeRangeParams: start/end/timeField 必填, type/limit 可选', () => {
       const full: GetNodesByTimeRangeParams = {
-        from: Date.now() - 86400000,
-        to: Date.now(),
+        start: 0,
+        end: Date.now(),
+        timeField: 'updatedAt',
+        type: 'EVENT',
         limit: 10,
-        label: 'EXPERIENCE',
       };
-      const minimal: GetNodesByTimeRangeParams = { from: 0, to: 1000 };
-      expect(full.from).toBeLessThan(full.to);
+      const minimal: GetNodesByTimeRangeParams = { start: 0, end: Date.now(), timeField: 'createdAt' };
+      expect(full.timeField).toBe('updatedAt');
+      expect(full.type).toBe('EVENT');
       expect(minimal.limit).toBeUndefined();
     });
 
-    it('TimeRangeNode: id 必填, 其他可选', () => {
-      const minimal: TimeRangeNode = { id: 'n1' };
-      const full: TimeRangeNode = {
-        id: 'n2',
-        type: 'EXPERIENCE',
-        title: 't',
-        summary: 's',
-        createdAt: 1,
-        updatedAt: 2,
-        pagerank: 0.5,
-        state: 'active',
-      };
-      expect(minimal.id).toBe('n1');
-      expect(full.title).toBe('t');
+    it('GetNodesByTimeRangeResult = GmNode[]', () => {
+      const nodes: GetNodesByTimeRangeResult = [
+        { id: 'n1', type: 'TASK', name: 't', description: '', content: '', status: 'active', pagerank: 0, validatedCount: 0, createdAt: 0, updatedAt: 0 },
+      ];
+      expect(nodes[0].type).toBe('TASK');
     });
 
-    it('EvolveNodeParams: nodeId + updates', () => {
+    it('EvolveNodeParams: id + updates(Partial<GmNode>)，白名单字段', () => {
       const params: EvolveNodeParams = {
-        nodeId: 'n1',
-        updates: { state: 'validated', validatedCount: 5 },
+        id: 'n1',
+        updates: { state: 'superseded', validTo: Date.now(), importanceScore: 0, pagerank: 0 },
       };
-      expect(params.nodeId).toBe('n1');
-      expect(params.updates.state).toBe('validated');
+      expect(params.id).toBe('n1');
+      expect(params.updates.state).toBe('superseded');
+      expect(params.updates.validTo).toBeGreaterThan(0);
     });
 
-    it('EvolveNodeResult: evolved 必填, 其他可选', () => {
-      const full: EvolveNodeResult = {
-        evolved: true,
-        previousState: 'pending',
-        newState: 'validated',
-        reason: 'feedback positive',
+    it('EvolveNodeResult = void（上游 evolveNode 返回 Promise<void>）', () => {
+      const r: EvolveNodeResult = undefined;
+      expect(r).toBeUndefined();
+    });
+
+    it('LinkNodesParams: fromId/toId/type 必填（上游无 instruction 字段）', () => {
+      const full: LinkNodesParams = { fromId: 'a', toId: 'b', type: 'RELATES_TO' };
+      expect(full.type).toBe('RELATES_TO');
+      expect((full as any).instruction).toBeUndefined();
+    });
+
+    it('LinkNodesResult = void（上游 linkNodes 返回 Promise<void>）', () => {
+      const r: LinkNodesResult = undefined;
+      expect(r).toBeUndefined();
+    });
+
+    it('MarkDirtyParams: driver + nodeIds（上游签名无 reason 参数）', () => {
+      const full: MarkDirtyParams = { driver: {} as any, nodeIds: ['n1', 'n2'] };
+      const minimal: MarkDirtyParams = { driver: {} as any, nodeIds: [] };
+      expect(full.nodeIds).toHaveLength(2);
+      expect(minimal.nodeIds).toHaveLength(0);
+      expect((full as any).reason).toBeUndefined();
+    });
+
+    it('MarkDirtyResult = void', () => {
+      const r: MarkDirtyResult = undefined;
+      expect(r).toBeUndefined();
+    });
+
+    it('GetDirtyNodeIdsParams / GetDirtyNodeIdsResult / ClearDirtyParams', () => {
+      const get: GetDirtyNodeIdsParams = { driver: {} as any };
+      const ids: GetDirtyNodeIdsResult = ['n1'];
+      const clearAll: ClearDirtyParams = { driver: {} as any };
+      const clearSome: ClearDirtyParams = { driver: {} as any, nodeIds: ['n1'] };
+      const clearResult: ClearDirtyResult = undefined;
+      expect(get.driver).toBeDefined();
+      expect(ids).toHaveLength(1);
+      expect(clearAll.nodeIds).toBeUndefined();
+      expect(clearSome.nodeIds).toEqual(['n1']);
+      expect(clearResult).toBeUndefined();
+    });
+
+    it('IncrementalMaintainResult: processedNodes/phasesRun/durationMs + 阶段明细', () => {
+      const full: IncrementalMaintainResult = {
+        processedNodes: 5,
+        dedup: { pairs: [], merged: 0 },
+        staleness: { scanned: 5, updated: 1, highStaleCount: 1 },
+        importance: { scanned: 5, updated: 5, avgScore: 0.4 },
+        conflictResolution: { scanned: 5, resolved: 0, superseded: 0, merged: 0 },
+        edgeWeights: { scanned: 8, strengthened: 2, decayed: 1 },
+        phasesRun: ['dedup', 'staleness', 'importance', 'conflictResolution', 'edgeWeights'],
+        durationMs: 120,
       };
-      const minimal: EvolveNodeResult = { evolved: false };
-      expect(full.evolved).toBe(true);
-      expect(minimal.previousState).toBeUndefined();
+      expect(full.processedNodes).toBe(5);
+      expect(full.phasesRun).toContain('dedup');
+      expect(full.edgeWeights?.decayed).toBe(1);
+      expect(full.durationMs).toBeGreaterThan(0);
+    });
+
+    it('ConsolidateBufferParams: nodes 必填（上游仅取 content 拼接提取）', () => {
+      const params: ConsolidateBufferParams = {
+        nodes: [
+          { id: 'n1', type: 'TASK', name: 'task1', description: '', content: 'fix bug', status: 'active', pagerank: 0, validatedCount: 0, createdAt: 0, updatedAt: 0 },
+        ],
+      };
+      expect(params.nodes[0].content).toBe('fix bug');
+      // 上游无 sessionId 字段
+      expect((params as any).sessionId).toBeUndefined();
+    });
+
+    it('ConsolidateBufferResult = string[]（上游返回节点名列表）', () => {
+      const names: ConsolidateBufferResult = ['task1', 'skillA'];
+      expect(names).toHaveLength(2);
+      expect(typeof names[0]).toBe('string');
+    });
+
+    it('JudgeRecallParams: query/recalledNodes/assistantReply（上游 v2.4.2 签名）', () => {
+      const params = {
+        query: 'q',
+        recalledNodes: [] as GmNode[],
+        assistantReply: 'let me fix that',
+      };
+      expect(params.query).toBe('q');
+      expect(params.assistantReply).toContain('fix');
+    });
+
+    it('UpsertFeedbackParams: driver + GmFeedback（上游 v2.3.2+ 签名）', () => {
+      const feedback: GmFeedback = { nodeId: 'n1', query: 'q', relevant: true, matchedBy: 'custom', score: 0.8 };
+      const params: UpsertFeedbackParams = { driver: {} as any, feedback };
+      expect(params.feedback.nodeId).toBe('n1');
+      expect(params.feedback.matchedBy).toBe('custom');
+      expect(params.feedback.relevant).toBe(true);
+    });
+
+    it('UpsertFeedbackResult = void', () => {
+      const r: UpsertFeedbackResult = undefined;
+      expect(r).toBeUndefined();
     });
 
     it('GraphHealthSnapshot: status 限制为四种值', () => {
@@ -677,61 +714,68 @@ describe('gm-pro-fallback', () => {
   // ─── 集成场景: 真实 API 调用流程 ────────────────────────────────────────
 
   describe('集成场景: 真实 API 调用流程', () => {
-    it('consolidateBuffer 完整流程（gm-pro 可用）', async () => {
-      const expected: ConsolidateBufferResult = {
-        consolidatedIds: ['n1', 'n2'],
-        skippedIds: [],
-      };
+    it('consolidateBuffer 完整流程（gm-pro 可用，返回节点名列表）', async () => {
+      const expected: ConsolidateBufferResult = ['task1', 'skillA'];
       mockState.mod.consolidateBuffer = vi.fn().mockResolvedValue(expected);
       const result = await withGmProFallback(
         'consolidateBuffer',
-        async (mod) => mod.consolidateBuffer({ nodes: [], sessionId: 's1' }),
-        async () => ({ consolidatedIds: [], reason: 'fallback' }),
+        async (mod) => mod.consolidateBuffer([]),
+        async () => [],
         { logger: testLogger as any },
       );
       expect(result).toEqual(expected);
       expect(mockState.mod.consolidateBuffer).toHaveBeenCalledTimes(1);
     });
 
-    it('markDirty 完整流程（gm-pro 可用）', async () => {
+    it('markDirty 完整流程（gm-pro 可用，driver + nodeIds 位置参数）', async () => {
       mockState.mod.markDirty = vi.fn().mockResolvedValue(undefined);
       const result = await withGmProFallback(
         'markDirty',
-        async (mod) => mod.markDirty({ nodeIds: ['n1'], reason: 'updated' }),
+        async (mod) => mod.markDirty({} as any, ['n1']),
         async () => undefined,
         { logger: testLogger as any },
       );
       expect(result).toBeUndefined();
       expect(mockState.mod.markDirty).toHaveBeenCalledTimes(1);
+      expect(mockState.mod.markDirty).toHaveBeenCalledWith({}, ['n1']);
     });
 
-    it('incrementalMaintain 完整流程（gm-pro 可用）', async () => {
+    it('incrementalMaintain 完整流程（gm-pro 可用，无入参）', async () => {
       const expected: IncrementalMaintainResult = {
-        processedCount: 5,
-        remainingCount: 0,
+        processedNodes: 5,
+        dedup: { pairs: [], merged: 0 },
+        staleness: { scanned: 5, updated: 1, highStaleCount: 1 },
+        phasesRun: ['dedup', 'staleness'],
         durationMs: 100,
       };
       mockState.mod.incrementalMaintain = vi.fn().mockResolvedValue(expected);
       const result = await withGmProFallback(
         'incrementalMaintain',
-        async (mod) => mod.incrementalMaintain({ maxBatchSize: 10 }),
-        async () => ({ processedCount: 0, remainingCount: 0 }),
+        async (mod) => mod.incrementalMaintain(),
+        async () => ({
+          processedNodes: 0,
+          dedup: { pairs: [], merged: 0 },
+          staleness: { scanned: 0, updated: 0, highStaleCount: 0 },
+          phasesRun: [],
+          durationMs: 0,
+        }),
         { logger: testLogger as any },
       );
       expect(result).toEqual(expected);
       expect(mockState.mod.incrementalMaintain).toHaveBeenCalledTimes(1);
+      expect(mockState.mod.incrementalMaintain).toHaveBeenCalledWith();
     });
 
-    it('linkNodes 完整流程（gm-pro 不可用走 fallback）', async () => {
+    it('linkNodes 完整流程（gm-pro 不可用走 fallback void）', async () => {
       mockState.path = '/__non_existent_gm_pro_path__';
-      const fallbackResult: LinkNodesResult = { created: false, reason: 'gm-pro unavailable' };
+      const fallbackResult: LinkNodesResult = undefined;
       const result = await withGmProFallback(
         'linkNodes',
-        async (mod) => mod.linkNodes({ fromId: 'a', toId: 'b', type: 'RELATED_TO' }),
+        async (mod) => mod.linkNodes('a', 'b', 'RELATES_TO'),
         async () => fallbackResult,
         { logger: testLogger as any },
       );
-      expect(result).toEqual(fallbackResult);
+      expect(result).toBeUndefined();
     });
 
     it('getGraphHealth 完整流程（gm-pro 抛异常走 fallback）', async () => {

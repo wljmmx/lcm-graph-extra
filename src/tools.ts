@@ -1197,6 +1197,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               if (result !== null) gmProEvolvedSet.add(nodeId);
             }
 
+            // 增量维护协同（上游 markDirty(driver, nodeIds)）：把刚置为 superseded 的节点
+            // 标记为脏，让 heartbeat 的 incrementalMaintain() 下一轮对它们执行陈旧性/边权重衰减。
+            // 非致命：失败时后续 Cypher 兜底已正确置位，仅跳过脏标记。
+            if (gmProEvolvedSet.size > 0) {
+              try {
+                const { withGmProFallback } = await import("./adapters/gm-pro-fallback.js");
+                await withGmProFallback(
+                  'markDirty',
+                  async (mod) => mod.markDirty(driver, [...gmProEvolvedSet]),
+                  async () => undefined, // fallback 不做（脏标记非致命）
+                  { label: 'G-10 markDirty' },
+                );
+              } catch { /* non-fatal */ }
+            }
+
             // Fallback: Cypher 直接 SET（仅处理 gm-pro 未成功的节点，避免双重处理）
             const remainingIds = nodeIds.filter((id: string) => !gmProEvolvedSet.has(id));
             if (remainingIds.length > 0) {
