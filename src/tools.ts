@@ -222,7 +222,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             gmProNodes = await withGmProFallback<any[] | null>(
               'getNodesByTimeRange',
               async (mod) => {
-                // 上游 v2.4.2 签名：getNodesByTimeRange({ start, end, timeField, type?, limit? })
+                // 上游签名：getNodesByTimeRange({ start, end, timeField, type?, limit? })
                 // timeField 取 updatedAt（最近活跃）；experiences 不在上游 NodeType(TASK/SKILL/EVENT) 内，故不传 type
                 const r = await mod.getNodesByTimeRange({
                   start: timeFilter.fromTs ?? 0,
@@ -253,47 +253,29 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           conditions.push("e.type = $expType");
           queryParams.expType = typeFilter;
         }
-        // S-8': 当 gm-pro 已返回非空时间过滤结果时，Cypher 不再叠加时间条件（避免双过滤）。
-        //        gm-pro 空结果（[]）说明未命中，应继续走 Cypher 时间过滤，避免丢失时间范围。
-        if (!gmProNodes || gmProNodes.length === 0) {
-          if (timeFilter.fromTs) {
-            conditions.push("coalesce(e.createdAt, e.updatedAt, 0) >= $fromTs");
-            queryParams.fromTs = neo4jDriver.int(timeFilter.fromTs) as any;
-          }
-          if (timeFilter.toTs) {
-            conditions.push("coalesce(e.createdAt, e.updatedAt, 0) <= $toTs");
-            queryParams.toTs = neo4jDriver.int(timeFilter.toTs) as any;
-          }
+        // S-8': Cypher 始终叠加时间条件（与 gm-pro 同一区间，等价幂等）。
+        //        两侧都限定在同一时间范围内，合并时不会引入越界节点。
+        if (timeFilter.fromTs) {
+          conditions.push("coalesce(e.createdAt, e.updatedAt, 0) >= $fromTs");
+          queryParams.fromTs = neo4jDriver.int(timeFilter.fromTs) as any;
+        }
+        if (timeFilter.toTs) {
+          conditions.push("coalesce(e.createdAt, e.updatedAt, 0) <= $toTs");
+          queryParams.toTs = neo4jDriver.int(timeFilter.toTs) as any;
         }
 
         const whereClause = conditions.length > 0 ? " AND " + conditions.join(" AND ") : "";
 
-        // 优先使用 gm-pro 时间范围结果（已过滤，跳过 Cypher 时间过滤）
+        // S-8': Cypher 结果与 gm-pro 结果【合并】（而非替换）。
+        //        gm-pro getNodesByTimeRange 仅覆盖 Task|Skill|Event 节点，经验层
+        //        EXPERIENCE/ENTITY 不在其节点模型内；若替换会静默丢弃经验层结果。
         let result: any;
         let usedExperienceNodes = false;
 
-        if (gmProNodes && gmProNodes.length > 0) {
-          // gm-pro 返回的节点直接构造 records-like 对象供后续 format 处理
-          usedExperienceNodes = true;
-          result = {
-            records: gmProNodes.map((n: any) => ({
-              get: (key: string) => {
-                if (key === 'e.id') return n.id;
-                if (key === 'e.name') return n.title ?? n.name ?? 'Unknown';
-                if (key === 'e.description') return n.summary ?? n.description ?? '';
-                if (key === 'e.pagerank') return n.pagerank ?? n.relevanceScore ?? 0;
-                if (key === 'e.validatedCount') return n.matchCount ?? 0;
-                if (key === 'e.communityId') return n.type ?? '';
-                if (key === 'createdAt') return n.createdAt;
-                if (key === 'solutions') return [];
-                if (key === 'relatedIds') return n.relatedIds ?? [];
-                return undefined;
-              },
-            })),
-          };
-        } else if (signal?.aborted) {
+        if (signal?.aborted) {
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-        } else {
+        }
+        {
         // 优先查 EXPERIENCE 节点（经验层），无结果时回退到 EVENT 节点
         try {
           const expQuery = `MATCH (e:EXPERIENCE)
@@ -326,6 +308,38 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             ORDER BY e.pagerank DESC, e.validatedCount DESC LIMIT $limit`;
           result = await session.run(query, queryParams);
         }
+        }
+
+        // S-8': 合并 gm-pro 时间范围结果（去重键 e.id；同 id 以 Cypher 形态为准）。
+        //        gm-pro 节点使用 importanceScore/validatedCount（非 relevanceScore/matchCount）。
+        if (Array.isArray(gmProNodes) && gmProNodes.length > 0 && result) {
+          const seenIds = new Set<string>();
+          for (const rec of result.records ?? []) {
+            const id = rec?.get?.('e.id');
+            if (id != null) seenIds.add(String(id));
+          }
+          const gmProRecords = gmProNodes
+            .filter((n: any) => n?.id != null && !seenIds.has(String(n.id)))
+            .map((n: any) => ({
+              get: (key: string) => {
+                if (key === 'e.id') return n.id;
+                if (key === 'e.name') return n.title ?? n.name ?? 'Unknown';
+                if (key === 'e.description') return n.summary ?? n.description ?? '';
+                if (key === 'e.pagerank') return n.pagerank ?? n.importanceScore ?? 0;
+                if (key === 'e.validatedCount') return n.validatedCount ?? n.matchCount ?? 0;
+                if (key === 'e.communityId') return n.type ?? '';
+                if (key === 'createdAt') return n.createdAt;
+                if (key === 'solutions') return [];
+                if (key === 'relatedIds') return n.relatedIds ?? [];
+                return undefined;
+              },
+            }));
+          if (gmProRecords.length > 0) {
+            usedExperienceNodes = true;
+            result = {
+              records: [...(result.records ?? []), ...gmProRecords].slice(0, Math.trunc(limitParam)),
+            };
+          }
         }
 
         if (!result || result.records.length === 0) {
@@ -1166,10 +1180,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               const result = await withGmProFallback<EvolveResult>(
                 'evolveNode',
                 async (mod) => {
+                  // gm-pro GmNode 使用 validTo/importanceScore（无 supersededAt/relevanceScore）；
+                  // 其 upsertNode 为固定属性白名单，未知键会被静默丢弃，故必须用 gm-pro 字段名。
                   const r = await mod.evolveNode(nodeId, {
                     state: 'superseded',
-                    supersededAt: Date.now(),
-                    relevanceScore: 0,
+                    validTo: Date.now(),
+                    importanceScore: 0,
                     pagerank: 0,
                   });
                   return r as EvolveResult;
@@ -1177,7 +1193,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 async () => null, // fallback 不做（由后续 Cypher 处理）
                 { label: 'G-10 evolveNode' },
               );
-              // 上游 v2.4.2 evolveNode 返回 Promise<void>（成功返回 void/undefined，失败或降级返回 null）
+              // 上游 evolveNode 返回 Promise<void>（成功返回 void/undefined，失败或降级返回 null）
               if (result !== null) gmProEvolvedSet.add(nodeId);
             }
 

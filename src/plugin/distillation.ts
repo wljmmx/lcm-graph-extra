@@ -895,13 +895,15 @@ export async function runDistillation(
                       const linkResult = await withGmProFallback<{ created: boolean } | null>(
                         'linkNodes',
                         async (mod) => {
-                          const r = await mod.linkNodes(distilled.id, targetId, 'RELATED_TO');
+                          // gm-pro EdgeType 枚举为 RELATES_TO（无 D）。RELATED_TO 是经验层自有边型，
+                          // 由下游 Cypher linkRelated 创建；此处须传 gm-pro 的合法枚举值。
+                          const r = await mod.linkNodes(distilled.id, targetId, 'RELATES_TO');
                           return r as { created: boolean } | null;
                         },
                         async () => null, // fallback 到后续 Cypher linkRelated
                         { label: 'S-11 linkNodes' },
                       );
-                      // 上游 v2.4.2 linkNodes 返回 Promise<void>（成功返回 void/undefined，失败或降级返回 null）
+                      // 上游 linkNodes 返回 Promise<void>（成功返回 void/undefined，失败或降级返回 null）
                       if (linkResult !== null) gmProLinked++;
                     }
                   }
