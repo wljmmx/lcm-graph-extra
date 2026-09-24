@@ -531,13 +531,15 @@ export function createAuditWrapper(originalRegisterTool: any) {
     }
     const toolName: string = toolDef.name;
     const originalExecute = toolDef.execute;
-    toolDef.execute = async function (toolCallId: string, params: any, signal?: AbortSignal) {
+    toolDef.execute = async function (toolCallId: string, params: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) {
       const startTs = Date.now();
       let result: any;
       let error: string | undefined;
       let status: 'success' | 'failure' = 'success';
       try {
-        result = await originalExecute.call(this, toolCallId, params, signal);
+        // 透传 SDK 全量实参（含 onUpdate 进度回调与 ExtensionContext），
+        // 保持 execute(toolCallId, params, signal, onUpdate, ctx) 契约完整。
+        result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, ctx);
         if (result?.isError === true) status = 'failure';
       } catch (e) {
         status = 'failure';

@@ -623,8 +623,8 @@ const pluginEntry: any = definePluginEntry({
       info: {
         id: "lcm-graph-extra",
         name: "LCM Graph Extra",
-        // 与 openclaw.plugin.json / package.json / definePluginEntry.version 保持一致
-        version: "2.1.12",
+        // 与 openclaw.plugin.json / package.json 保持一致
+        version: "2.1.13",
         ownsCompaction: true,
         turnMaintenanceMode: 'background',
         // OpenClaw 2026.7.2+ durable-turn 契约：声明 currentTurnFence + 幂等提交，
@@ -3428,6 +3428,8 @@ const pluginEntry: any = definePluginEntry({
       const _apiForCompaction = api;
       api.registerCompactionProvider({
         id: 'lcm-graph-extra',
+        // SDK CompactionProvider 契约要求 label（UI/诊断展示用）
+        label: 'LCM Graph Extra',
         async summarize(params: {
           messages: any[];
           signal?: AbortSignal;
@@ -3567,4 +3569,4 @@ export type {
 } from './experience/types.js';
 
 
-export const VERSION = '2.1.12';
+export const VERSION = '2.1.13';
