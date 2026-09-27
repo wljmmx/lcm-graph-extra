@@ -11,6 +11,10 @@
  *   点5 multiStage（多阶段检索）
  *   点6 chunking（长文本分段嵌入：enabled/chunkSize/chunkOverlap）
  *
+ * 点6 参数口径校正（仅展示层告警，不改变 gm-pro 的切分算法）：
+ *   chunkSize 是「字符数」而非 token；chunkOverlap 要看相对占比而非绝对值。
+ *   默认 400/40 分别贴近 512 token 窗口上限、且重叠仅 10%（低于建议 15~20%）。
+ *
  * 卡片内部自取数据（/api/config 与图谱健康等解耦），失败时停止轮询避免刷屏。
  */
 import { computed } from 'vue';
@@ -44,6 +48,21 @@ const DEFAULTS = {
   chunkSize: 400,
   chunkOverlap: 40,
 };
+
+/**
+ * 点6 参数口径校正参数（仅用于展示层告警，不改动 gm-pro 的定长字符切分算法）。
+ *
+ * - Qwen3.5-Embedding-0.6B 有效窗口约 512 token；中文约 1 字符 ≈ 1~1.25 token，
+ *   故 chunkSize=400 字符 ≈ 400~500 token，已贴近窗口上限（建议 ≤ 384 字符 ≈ 480 token，留 ~25% 余量）。
+ * - chunkOverlap 需看相对占比：默认 40/400 = 10%，低于建议的 15~20%（同 400 字符下应约 60~80 字符）。
+ */
+const EMBED_WINDOW_TOKENS = 512;
+/** 中文 token 上限估算：1 字符最多约 1.25 token */
+const CHARS_PER_TOKEN_MAX = 1.25;
+/** 窗口占用告警阈值（超过则提示贴近上限） */
+const WINDOW_USAGE_WARN = 0.75;
+/** 建议的重叠占比区间（相对 chunkSize） */
+const RECOMMENDED_OVERLAP_RATIO: readonly [number, number] = [0.15, 0.2];
 
 const version = computed(() => runtimeConfig.value?.version ?? '—');
 
@@ -80,6 +99,45 @@ const chunking = computed(() => {
     chunkOverlap: c?.chunkOverlap ?? DEFAULTS.chunkOverlap,
     configured: c != null,
   };
+});
+
+/**
+ * 点6 口径提示（纯展示层）：把「字符数」换算成 token 窗口占用、把 overlap 换算成占比，
+ * 对默认 400/40 这类贴近上限/占比偏低的取值给出告警。不改动 gm-pro 的切分行为。
+ */
+const chunkingAdvice = computed<{ text: string; warn: boolean } | null>(() => {
+  const c = chunking.value;
+  if (!c.enabled) return null;
+  const size = c.chunkSize;
+  const overlap = c.chunkOverlap;
+  const parts: string[] = [];
+  let warn = false;
+
+  // 1) 窗口占用：chunkSize 是字符数，需换算为 token 才能与模型窗口比较
+  if (size > 0) {
+    const estTokens = Math.round(size * CHARS_PER_TOKEN_MAX);
+    const usage = estTokens / EMBED_WINDOW_TOKENS;
+    if (usage > WINDOW_USAGE_WARN) {
+      parts.push(
+        `${size} 字符 ≈ ${estTokens} token，已贴近 ${EMBED_WINDOW_TOKENS} token 窗口上限（~${Math.round(usage * 100)}%）`,
+      );
+      warn = true;
+    }
+  }
+
+  // 2) 重叠占比：40/400 = 10%，低于建议的 15~20%
+  if (size > 0) {
+    const ratio = overlap / size;
+    if (ratio < RECOMMENDED_OVERLAP_RATIO[0]) {
+      const [lo, hi] = RECOMMENDED_OVERLAP_RATIO;
+      parts.push(
+        `重叠 ${overlap}/${size} ≈ ${Math.round(ratio * 100)}%，低于建议 ${Math.round(lo * 100)}~${Math.round(hi * 100)}%（≈${Math.round(size * lo)}~${Math.round(size * hi)} 字符）`,
+      );
+      warn = true;
+    }
+  }
+
+  return parts.length ? { text: parts.join('；'), warn } : null;
 });
 
 /** recall 段是否完全未配置（全用内置默认值） */
@@ -176,13 +234,23 @@ function tagType(on: boolean): 'success' | 'default' {
           <span v-if="chunking.enabled" class="muted" style="font-size:var(--fs-caption);margin-left:4px">
             {{ chunking.chunkSize }}/{{ chunking.chunkOverlap }}
           </span>
+          <!-- 口径提示：chunkSize 字符→token 窗口占用、chunkOverlap 相对占比（仅展示层） -->
+          <div
+            v-if="chunkingAdvice"
+            class="advice"
+            :class="chunkingAdvice.warn ? 'advice-warn' : 'muted'"
+          >
+            {{ chunkingAdvice.warn ? '⚠ ' : '' }}{{ chunkingAdvice.text }}
+          </div>
         </NDescriptionsItem>
       </NDescriptions>
 
       <!-- 说明 -->
       <div class="muted" style="font-size:var(--fs-caption);margin-top:6px">
         recall 段控制检索质量与输出增强（v2.4.0 新增）。点1 为内置向量缓存无需配置；
-        点2/4 未配置时使用默认值；点3 默认开启；点5/6 默认关闭，按需在 openclaw.json 开启。
+        点2/4 未配置时使用默认值；点3 默认开启；点5/6 默认关闭，按需在 openclaw.json 开启。<br />
+        点6 口径：chunkSize 为字符数（非 token），默认 400 字符 ≈ 400~500 token，贴近 512 token 窗口；
+        chunkOverlap 看占比，默认 40/400 仅 10%，建议 15~20%（约 60~80 字符）。此处仅作提示，切分仍由 graph-memory-pro 执行。
       </div>
     </CardState>
   </NCard>
@@ -190,4 +258,6 @@ function tagType(on: boolean): 'success' | 'default' {
 
 <style scoped>
 .mono { font-family: var(--font-mono, ui-monospace, monospace); }
+.advice { font-size: var(--fs-caption); margin-top: 2px; line-height: 1.4; }
+.advice-warn { color: var(--n-warning-color, #f0a020); }
 </style>
