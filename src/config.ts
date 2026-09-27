@@ -230,6 +230,7 @@ export const PluginConfigSchema = Type.Object({
     model: Type.Optional(Type.String()),
     dimensions: Type.Optional(Type.Number()),
     keepAlive: Type.Optional(Type.String()),
+    batchSize: Type.Optional(Type.Number()),
   })),
 
   neo4j: Type.Optional(Type.Object({

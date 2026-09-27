@@ -373,6 +373,68 @@ describe('Ollama native /api/chat (方向 1)', () => {
     });
   });
 
+describe('OpenAI-compatible versioned endpoints (OVMS /v3, 方向 2)', () => {
+  it('OVMS /v3 走 /v3/chat/completions，不被改写为 Ollama 原生 /api/chat', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({
+      choices: [{ message: { content: 'ovms ok' } }],
+    }));
+    const result = await callLlm({
+      baseURL: 'http://192.168.1.10:8000/v3',
+      model: 'Qwen2.5-7B-Instruct',
+      prompt: 'hi',
+    });
+    expect(result.text).toBe('ovms ok');
+    // 保留 /v3 版本段，且不出现非法的 /v3/api/chat 或 /v3/v1/chat/completions
+    expect(mockFetch.mock.calls[0][0]).toBe('http://192.168.1.10:8000/v3/chat/completions');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.options).toBeUndefined();
+    expect(body.keep_alive).toBeUndefined();
+    expect(body.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('OVMS /v3 显式传 keepAlive 也不注入 keep_alive（非 Ollama 端点）', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({
+      choices: [{ message: { content: 'ok' } }],
+    }));
+    await callLlm({
+      baseURL: 'http://192.168.1.10:8000/v3',
+      model: 'm',
+      prompt: 'hi',
+      keepAlive: '1h',
+    });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.keep_alive).toBeUndefined();
+  });
+
+  it('已是完整 /vN/chat/completions 路径则不重复拼接', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({
+      choices: [{ message: { content: 'ok' } }],
+    }));
+    await callLlm({
+      baseURL: 'http://192.168.1.10:8000/v3/chat/completions',
+      model: 'm',
+      prompt: 'hi',
+    });
+    expect(mockFetch.mock.calls[0][0]).toBe('http://192.168.1.10:8000/v3/chat/completions');
+  });
+
+  it('Ollama 11434/v1 仍走原生 /api/chat（护栏不误伤 Ollama）', async () => {
+    mockFetch.mockResolvedValueOnce(mockJsonResponse({
+      message: { role: 'assistant', content: 'native ok' },
+    }));
+    const result = await callLlm({
+      baseURL: 'http://127.0.0.1:11434/v1',
+      model: 'qwen3.6:27b',
+      prompt: 'hi',
+      keepAlive: '1h',
+    });
+    expect(result.text).toBe('native ok');
+    expect(mockFetch.mock.calls[0][0]).toBe('http://127.0.0.1:11434/api/chat');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.keep_alive).toBe('1h');
+  });
+});
+
 describe('isLocalLlm', () => {
   it('127.0.0.1 is local', () => {
     expect(isLocalLlm('http://127.0.0.1:8000/v1')).toBe(true);

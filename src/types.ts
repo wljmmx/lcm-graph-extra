@@ -11,6 +11,8 @@ export interface EmbeddingConfig {
   dimensions?: number;
   options?: Record<string, number | boolean | string>;
   keepAlive?: string;
+  /** 单次批量嵌入请求携带的最大文本数（默认 32）；用于 batchUpsert 等批量场景 */
+  batchSize?: number;
 }
 
 export type RetrievalSource = 'qmd' | 'graph';

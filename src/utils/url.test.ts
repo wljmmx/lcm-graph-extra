@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama, isLocalEndpoint, detectApiFormat, ensureAnthropicMessagesPath } from './url.js';
+import { cleanBaseURL, isOllamaEndpoint, withKeepAliveIfOllama, isLocalEndpoint, detectApiFormat, ensureAnthropicMessagesPath, isOpenAiCompatibleEndpoint } from './url.js';
 
 describe('cleanBaseURL', () => {
   it('去掉反引号包裹', () => {
@@ -219,5 +219,36 @@ describe('ensureAnthropicMessagesPath', () => {
     expect(ensureAnthropicMessagesPath('')).toBe('');
     expect(ensureAnthropicMessagesPath(null)).toBe('');
     expect(ensureAnthropicMessagesPath(undefined)).toBe('');
+  });
+});
+
+describe('isOpenAiCompatibleEndpoint', () => {
+  it('OVMS 内网服务 /v3 视为 OpenAI 兼容端点', () => {
+    expect(isOpenAiCompatibleEndpoint('http://192.168.1.10:8000/v3')).toBe(true);
+    expect(isOpenAiCompatibleEndpoint('http://192.168.1.10:8000/v3/')).toBe(true);
+    expect(isOpenAiCompatibleEndpoint('http://10.0.0.5:9000/v3')).toBe(true);
+  });
+
+  it('/vN 版本段端点（OpenAI/vLLM/LM Studio）视为 OpenAI 兼容', () => {
+    expect(isOpenAiCompatibleEndpoint('https://api.openai.com/v1')).toBe(true);
+    expect(isOpenAiCompatibleEndpoint('http://host:8080/v1')).toBe(true);
+    expect(isOpenAiCompatibleEndpoint('http://host:8080/v2')).toBe(true);
+  });
+
+  it('Ollama 端点即使带 /v1 也不视为 OpenAI 兼容（保 keep_alive 生效）', () => {
+    expect(isOpenAiCompatibleEndpoint('http://127.0.0.1:11434/v1')).toBe(false);
+    expect(isOpenAiCompatibleEndpoint('http://localhost:11434')).toBe(false);
+    expect(isOpenAiCompatibleEndpoint('http://localhost:18789/v1')).toBe(false);
+  });
+
+  it('无版本段的裸地址不视为 OpenAI 兼容', () => {
+    expect(isOpenAiCompatibleEndpoint('http://192.168.1.10:8000')).toBe(false);
+    expect(isOpenAiCompatibleEndpoint('http://192.168.1.10:8000/health')).toBe(false);
+  });
+
+  it('空值安全返回 false', () => {
+    expect(isOpenAiCompatibleEndpoint('')).toBe(false);
+    expect(isOpenAiCompatibleEndpoint(null)).toBe(false);
+    expect(isOpenAiCompatibleEndpoint(undefined)).toBe(false);
   });
 });

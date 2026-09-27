@@ -141,11 +141,17 @@ export function resolveEmbeddingConfig(
   const baseURL = cleanBaseURL(rawBaseURL);
   const dimensions = (embeddingSection.dimensions as number) ?? 1024;
   const keepAlive = (embeddingSection.keepAlive as string) || "-1";
+  // 批量嵌入单请求最大文本数：非法/非正值交给 embed-fn.resolveBatchSize 回退默认（32）
+  const rawBatchSize = embeddingSection.batchSize;
+  const batchSize = typeof rawBatchSize === 'number' && Number.isFinite(rawBatchSize) && rawBatchSize >= 1
+    ? Math.floor(rawBatchSize)
+    : undefined;
   // P1-6 BUG-3: 原返回对象丢失 apiKey 与 options，导致需要鉴权的远程 embedding 端点不可用。
   const apiKey = (embeddingSection.apiKey as string) || process.env.GM_EMBED_API_KEY || undefined;
   const options = (embeddingSection.options as Record<string, number | boolean | string>) || undefined;
 
   const result: EmbeddingConfig = { model, baseURL, dimensions, keepAlive };
+  if (batchSize !== undefined) result.batchSize = batchSize;
   if (apiKey) result.apiKey = apiKey;
   if (options) result.options = options;
   return result;

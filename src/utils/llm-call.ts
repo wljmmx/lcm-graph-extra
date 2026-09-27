@@ -1,4 +1,4 @@
-import { cleanBaseURL, detectApiFormat, isOllamaEndpoint } from './url.js';
+import { cleanBaseURL, detectApiFormat, isOllamaEndpoint, isOpenAiCompatibleEndpoint } from './url.js';
 import { withOllamaSlot } from '../async/ollama-slot.js';
 
 export interface LlmCallParams {
@@ -108,15 +108,22 @@ function buildAnthropicBody(params: LlmCallParams): Record<string, unknown> {
   return body;
 }
 
+/**
+ * 拼接 OpenAI 兼容 / Anthropic 端点的完整路径。
+ *
+ * 关键：保留 baseURL 自带的版本段（/v1、OVMS 的 /v3 等），只在其后追加资源路径，
+ * 避免把 `http://host:8000/v3` 拼成非法的 `/v3/v1/chat/completions`。
+ * 仅当 baseURL 不含版本段时才补 `/v1`（OpenAI 官方约定）。
+ */
 function getEndpoint(baseURL: string, format: 'openai' | 'anthropic'): string {
   const clean = cleanBaseURL(baseURL);
   if (format === 'anthropic') {
-    if (clean.endsWith('/v1/messages') || clean.endsWith('/messages')) return clean;
-    if (clean.endsWith('/v1')) return clean + '/messages';
+    if (/\/messages$/.test(clean)) return clean;
+    if (/\/v\d+$/.test(clean)) return clean + '/messages';
     return clean + '/v1/messages';
   }
-  if (clean.endsWith('/v1/chat/completions')) return clean;
-  if (clean.endsWith('/v1')) return clean + '/chat/completions';
+  if (/\/chat\/completions$/.test(clean)) return clean;
+  if (/\/v\d+$/.test(clean)) return clean + '/chat/completions';
   return clean + '/v1/chat/completions';
 }
 
@@ -125,10 +132,15 @@ function getEndpoint(baseURL: string, format: 'openai' | 'anthropic'): string {
  *
  * 仅对 Ollama 官方默认端口 11434 生效；OpenClaw 网关（18789）与远程 vLLM /
  * LM Studio 等仍是 OpenAI 兼容端点，保持走 /v1。
+ *
+ * 护栏：带版本段的 OpenAI 兼容端点（如 OVMS 内网服务 http://host:8000/v3）
+ * 绝不能被判定为 Ollama 原生端点，否则会被改写成非法的 /v3/api/chat。
+ * isOpenAiCompatibleEndpoint 已排除真正的 Ollama（其 /v1 仍按原生处理以保 keep_alive）。
  */
 function isNativeOllamaChatEndpoint(baseURL: string): boolean {
   const clean = cleanBaseURL(baseURL);
   if (!clean) return false;
+  if (isOpenAiCompatibleEndpoint(clean)) return false;
   try {
     const u = new URL(clean);
     if (u.port === '11434') return true;

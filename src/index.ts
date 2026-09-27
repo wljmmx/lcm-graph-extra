@@ -3447,7 +3447,9 @@ const pluginEntry: any = definePluginEntry({
             }
             const apiKey = llmCfg?.apiKey || '';
             const baseURL = llmCfg?.baseURL
-              ? (llmCfg.baseURL.endsWith('/v1') ? llmCfg.baseURL : llmCfg.baseURL.replace(/\/$/, '') + '/v1')
+              ? (/\/v\d+$/.test(llmCfg.baseURL.replace(/\/+$/, ''))
+                ? llmCfg.baseURL.replace(/\/+$/, '')
+                : llmCfg.baseURL.replace(/\/$/, '') + '/v1')
               : 'http://127.0.0.1:18789/v1';
             const keepAlive = llmCfg?.keepAlive || '1h';
 

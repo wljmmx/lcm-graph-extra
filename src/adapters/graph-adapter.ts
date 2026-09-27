@@ -18,7 +18,8 @@ import { ConflictLogger } from '../async/conflict-logger.js';
 
 import type { EmbeddingConfig } from '../types.js';
 import { acquireDriver, releaseDriver } from './connection-pool';
-import { createLocalEmbedFn } from './embed-fn';
+import { createLocalEmbedFns } from './embed-fn';
+import type { BatchEmbedFn } from './embed-fn';
 import type { Logger } from '../utils/logger.js';
 import { resolveLogger, getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL } from '../utils/url.js';
@@ -317,6 +318,12 @@ export class GraphAdapter {
   /** 是否复用 gm-pro 模块级 Recaller 单例(A)；false 表示回退自建(B) */
   private _recallerFromGmPro = false;
   private _embedFn: any = null;
+  /**
+   * 批量嵌入函数（与 _embedFn 共享端点解析/缓存/回退状态）。
+   * 供 batchUpsert 一次性为整批实体生成向量，替代 per-entity 并发单文本请求。
+   * 无批量能力时为 null，此时回退到 _embedFn 逐条并发路径。
+   */
+  private _batchEmbedFn: BatchEmbedFn | null = null;
   private _llm?: (system: string, user: string) => Promise<string>;
   // v2.3.6 在线学习：JudgeManager + AssociationMatrix 注入 Recaller，形成反馈闭环
   private _judgeManager: any = null;
@@ -473,20 +480,26 @@ export class GraphAdapter {
         // （仅自用，不注入共享 Recaller，故不影响 gm-pro 的批量链路）。
         if (hasExplicitEmbed) {
           try {
-            this._embedFn = createLocalEmbedFn(ecfg);
+            const fns = createLocalEmbedFns(ecfg);
+            this._embedFn = fns.embed;
+            this._batchEmbedFn = fns.embedBatch;
           } catch (e) {
             this._embedFn = mod.createEmbedFn ? mod.createEmbedFn({ ...ecfg }) : undefined;
+            this._batchEmbedFn = mod.createBatchEmbedFn ? mod.createBatchEmbedFn({ ...ecfg }) : null;
           }
         }
         this.logger?.info?.('[graph-adapter] reusing graph-memory-pro embedFn (batch-capable); local embedding kept only for lcm proxy reads, not injected into shared Recaller');
       } else if (hasExplicitEmbed) {
         // 自建 B：用 lcm 的 embed（保 keep_alive）
         try {
-          this._embedFn = createLocalEmbedFn(ecfg);
-          this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ')', { model: ecfg.model });
+          const fns = createLocalEmbedFns(ecfg);
+          this._embedFn = fns.embed;
+          this._batchEmbedFn = fns.embedBatch;
+          this.logger?.info?.('[graph-adapter] Embedding initialized (local, keep_alive=' + (ecfg.keepAlive || '-1') + ', batchSize=' + (ecfg.batchSize ?? 'default') + ')', { model: ecfg.model });
         } catch (localErr) {
           if (mod.createEmbedFn) {
             this._embedFn = mod.createEmbedFn({ ...ecfg });
+            this._batchEmbedFn = mod.createBatchEmbedFn ? mod.createBatchEmbedFn({ ...ecfg }) : null;
             this.logger?.warn?.('[graph-adapter] Local embed fn failed, using graph-memory-pro createEmbedFn (keep_alive not guaranteed)', { err: localErr instanceof Error ? localErr.message : String(localErr) });
           } else {
             throw localErr;
@@ -772,6 +785,7 @@ export class GraphAdapter {
       this._driverFromGmPro = false;
       this._recaller = null;
       this._embedFn = null;
+      this._batchEmbedFn = null;
       this.searchCache = new LRUCache(this.config.searchCacheSize ?? DEFAULTS.graph.searchCacheSize, DEFAULTS.graph.searchCacheTtlMs);
 
       if (this.mod && typeof this.mod.getDriver === 'function') {
@@ -1181,31 +1195,52 @@ export class GraphAdapter {
 
         // 原生 VECTOR 写入（可选增强）：当 embedFn 可用时，为每个实体生成 embedding，
         // 以原生 VECTOR 类型写入 n.embedding（配合 entity_embedding_idx 向量索引）。
-        // 记语：embedding 有 HTTP 往返，用受限并发批量生成；任一失败仅降级（该实体无向量），
+        // 记语：embedding 有 HTTP 往返；优先走批量路径（一次请求承载多条文本），
+        // 无批量能力时回退到受限并发单文本生成；任一失败仅降级（该实体无向量），
         // 不阻塞 upsert 主体。embedFn 未配置时整体跳过，保持原行为。
         const embedFn = this._embedFn;
+        const batchEmbedFn = this._batchEmbedFn;
         const embedDim = await this._probeEmbedDimension();
-        if (embedFn && embedDim > 0) {
-          // v2.9.0: 并发 8→4 —— 与全局 Ollama 并发闸门（OLLAMA_MAX_CONCURRENCY 默认 2）
-          // 协同，避免实体向量批量生成打进本地 Ollama 造成 503。
-          const CONCURRENCY = 4;
-          let idx = 0;
-          const worker = async () => {
-            while (idx < nodeData.length) {
-              const cur = idx++;
-              const text = `${nodeData[cur].name} ${nodeData[cur].description}`.trim();
-              if (!text) continue;
-              try {
-                const vec = await embedFn(text);
-                if (Array.isArray(vec) && vec.length === embedDim) {
-                  nodeData[cur].embedding = vec;
+        if ((embedFn || batchEmbedFn) && embedDim > 0) {
+          const texts = nodeData.map((n) => `${n.name} ${n.description}`.trim());
+          if (batchEmbedFn) {
+            // 批量路径：batchEmbedFn 内部按 embedding.batchSize 切分子批并查缓存，
+            // 一次请求即覆盖整批实体，显著减少 HTTP 往返与本地 Ollama 队列压力。
+            try {
+              const vecs = await batchEmbedFn(texts);
+              for (let i = 0; i < nodeData.length; i++) {
+                const v = vecs[i];
+                if (Array.isArray(v) && v.length === embedDim) {
+                  nodeData[i].embedding = v;
+                } else if (!v) {
+                  this.logger?.debug?.('[graph-adapter] batch embedding missing for entity', { name: nodeData[i].name });
                 }
-              } catch (e) {
-                this.logger?.debug?.('[graph-adapter] embedding gen failed for entity', { name: nodeData[cur].name, err: e instanceof Error ? e.message : String(e) });
               }
+            } catch (e) {
+              this.logger?.debug?.('[graph-adapter] batch embedding gen failed', { err: e instanceof Error ? e.message : String(e) });
             }
-          };
-          await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+          } else {
+            // 回退路径（无批量能力）：v2.9.0 并发 8→4 —— 与全局 Ollama 并发闸门
+            // （OLLAMA_MAX_CONCURRENCY 默认 2）协同，避免打进本地 Ollama 造成 503。
+            const CONCURRENCY = 4;
+            let idx = 0;
+            const worker = async () => {
+              while (idx < nodeData.length) {
+                const cur = idx++;
+                const text = texts[cur];
+                if (!text) continue;
+                try {
+                  const vec = await embedFn(text);
+                  if (Array.isArray(vec) && vec.length === embedDim) {
+                    nodeData[cur].embedding = vec;
+                  }
+                } catch (e) {
+                  this.logger?.debug?.('[graph-adapter] embedding gen failed for entity', { name: nodeData[cur].name, err: e instanceof Error ? e.message : String(e) });
+                }
+              }
+            };
+            await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+          }
         }
 
         // writeBatchSize: 合并写入批上限 —— 节点按批拆分提交，避免单条 UNWIND 数据量过大
@@ -1765,6 +1800,7 @@ export class GraphAdapter {
         this._driverFromGmPro = false;
         this._recaller = null;
         this._embedFn = null;
+        this._batchEmbedFn = null;
         if (hadExistingDriver) {
           this._connectRetryCount = 0;
           this._connectFailed = false;
@@ -1833,6 +1869,7 @@ export class GraphAdapter {
     this.mod = null;
     this._recaller = null;
     this._embedFn = null;
+    this._batchEmbedFn = null;
     this._connectFailed = false;
     this._connectRetryCount = 0;
     this._lastFailTime = 0;

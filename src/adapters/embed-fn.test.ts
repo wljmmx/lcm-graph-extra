@@ -10,7 +10,7 @@
  * - 默认值（keepAlive=-1, model, baseURL）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createLocalEmbedFn } from './embed-fn.js';
+import { createLocalEmbedFn, createLocalEmbedFns, createLocalBatchEmbedFn } from './embed-fn.js';
 import type { EmbeddingConfig } from '../types.js';
 
 // Mock global fetch
@@ -369,5 +369,181 @@ describe('createLocalEmbedFn', () => {
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.options).toBeUndefined();
+  });
+});
+
+describe('OVMS /v3 端点', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('单文本走 OpenAI 兼容 /v3/embeddings，且不发送 keep_alive', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [1, 2, 3] }] }),
+    });
+
+    const embed = createLocalEmbedFn({ model: 'bge-m3', baseURL: 'http://192.168.1.10:8000/v3' });
+    const result = await embed('text');
+
+    expect(mockFetch.mock.calls[0][0]).toBe('http://192.168.1.10:8000/v3/embeddings');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.model).toBe('bge-m3');
+    expect(body.input).toEqual(['text']);
+    // OVMS 严格校验未知字段，keep_alive 不得出现
+    expect(body.keep_alive).toBeUndefined();
+    expect(result).toEqual([1, 2, 3]);
+  });
+
+  it('批量走 /v3/embeddings，按 data[].index 对齐（不依赖返回顺序）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: [
+          { index: 1, embedding: [20, 21] },
+          { index: 0, embedding: [10, 11] },
+        ],
+      }),
+    });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'bge-m3', baseURL: 'http://192.168.1.10:8000/v3' });
+    const out = await embedBatch(['a', 'b']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('http://192.168.1.10:8000/v3/embeddings');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input).toEqual(['a', 'b']);
+    expect(out).toEqual([[10, 11], [20, 21]]);
+  });
+
+  it('OVMS 端点 404 不回退 Ollama 旧版（直接抛错）', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404, text: async () => 'Not Found' });
+
+    const embed = createLocalEmbedFn({ model: 'm', baseURL: 'http://192.168.1.10:8000/v3' });
+    await expect(embed('text')).rejects.toThrow('404');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('embedBatch（批量嵌入）', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('OpenAI 兼容端点：一次请求承载多条文本', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [1] }, { index: 1, embedding: [2] }] }),
+    });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1' });
+    const out = await embedBatch(['a', 'b']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('http://h:8080/v1/embeddings');
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).input).toEqual(['a', 'b']);
+    expect(out).toEqual([[1], [2]]);
+  });
+
+  it('Ollama 原生端点：input 数组 + keep_alive 顶层', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ embeddings: [[1], [2], [3]] }),
+    });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:11434' });
+    const out = await embedBatch(['a', 'b', 'c']);
+
+    expect(mockFetch.mock.calls[0][0]).toBe('http://h:11434/api/embed');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input).toEqual(['a', 'b', 'c']);
+    expect(body.keep_alive).toBe(-1);
+    expect(out).toEqual([[1], [2], [3]]);
+  });
+
+  it('按 batchSize 切分子批（串行发送）', async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ index: 0, embedding: [1] }, { index: 1, embedding: [2] }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ index: 0, embedding: [3] }] }) });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1', batchSize: 2 });
+    const out = await embedBatch(['a', 'b', 'c']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).input).toEqual(['a', 'b']);
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).input).toEqual(['c']);
+    expect(out).toEqual([[1], [2], [3]]);
+  });
+
+  it('非法 batchSize 回退默认（不切分死循环）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [1] }] }),
+    });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1', batchSize: 0 });
+    const out = await embedBatch(['a']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(out).toEqual([[1]]);
+  });
+
+  it('批量与单文本共享 LRU 缓存：已缓存文本不发请求', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [9] }] }),
+    });
+
+    const { embed, embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1' });
+    await embed('same');
+    const out = await embedBatch(['same']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(out).toEqual([[9]]);
+  });
+
+  it('空数组不请求', async () => {
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1' });
+    expect(await embedBatch([])).toEqual([]);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('空文本跳过：位置保持 null，不发出空输入请求', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [1] }, { index: 1, embedding: [2] }] }),
+    });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1' });
+    const out = await embedBatch(['a', '', 'b']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).input).toEqual(['a', 'b']);
+    expect(out).toEqual([[1], null, [2]]);
+  });
+
+  it('子批失败 → 逐条降级，失败的条目返回 null（不阻塞整批）', async () => {
+    // 1) 子批请求整体失败（500）
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'boom' });
+    // 2) 逐条降级：a 成功
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{ index: 0, embedding: [1] }] }) });
+    // 3) 逐条降级：b 失败
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 400, text: async () => 'bad input' });
+
+    const { embedBatch } = createLocalEmbedFns({ model: 'm', baseURL: 'http://h:8080/v1', batchSize: 2 });
+    const out = await embedBatch(['a', 'b']);
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(out).toEqual([[1], null]);
+  });
+
+  it('createLocalBatchEmbedFn 返回可用的批量函数', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [7] }] }),
+    });
+
+    const embedBatch = createLocalBatchEmbedFn({ model: 'm', baseURL: 'http://h:8080/v1' } as EmbeddingConfig);
+    expect(await embedBatch(['x'])).toEqual([[7]]);
   });
 });

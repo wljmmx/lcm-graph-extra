@@ -442,6 +442,11 @@
           "keepAlive": {
             "type": "string",
             "description": "Ollama model memory retention time (e.g. '1h' = keep model loaded 1h after last request). This is NOT a request timeout — see llmTimeouts for request timeouts."
+          },
+          "batchSize": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "单次批量 embedding 请求携带的最大文本数（默认 32）。批量 upsert 实体向量生成时，按此值切分子批，减少 HTTP 往返与本地 Ollama 队列压力。"
           }
         }
       },

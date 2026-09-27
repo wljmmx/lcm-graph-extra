@@ -79,6 +79,25 @@ export function isOllamaEndpoint(baseURL: string | undefined | null): boolean {
 }
 
 /**
+ * 判断 baseURL 是否应走 OpenAI 兼容 API（/embeddings、/chat/completions）。
+ *
+ * OpenAI 兼容服务以版本段结尾：
+ *  - /v1：OpenAI 官方、vLLM、LM Studio、llama.cpp 等
+ *  - /v3：OpenVINO Model Server（OVMS）内网服务（embeddings/chat 均在 /v3 下）
+ * Ollama 端点即使带 /v1 也优先按 Ollama 原生处理（keep_alive 生效），故这里先排除 Ollama。
+ *
+ * 用途：决定拼接 `{base}/embeddings`、`{base}/chat/completions`，
+ * 还是回退到 Ollama 原生 `/api/embed`、`/api/chat`。避免把 OVMS 的 /v3
+ * 误判为 Ollama 原生端点，从而拼出非法的 /v3/api/embed。
+ */
+export function isOpenAiCompatibleEndpoint(baseURL: string | undefined | null): boolean {
+  const cleaned = cleanBaseURL(baseURL);
+  if (!cleaned) return false;
+  if (isOllamaEndpoint(cleaned)) return false;
+  return /\/v\d+\/?$/.test(cleaned);
+}
+
+/**
  * 构造 LLM 请求 body 的辅助函数：
  *  - 自动注入 keep_alive（仅 Ollama 端点）
  *  - 保证不污染 OpenAI 等官方端点
