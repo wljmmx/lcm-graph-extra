@@ -48,6 +48,31 @@ export function readRawConfig(): Record<string, unknown> {
   }
 }
 
+/** 判断是否为普通对象（排除数组/null） */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * 深合并 patch 到 target（对象递归合并，数组/标量直接覆盖）。
+ *
+ * 为什么必须深合并：PATCH 的 updates 由 setByPath 构造为嵌套对象
+ * （如 { embedding: { batchSize: 16 } }）。若在插件配置段顶层做 `config[key] = value`
+ * 的浅赋值，会把整个 `embedding` 段替换掉 —— 用户在 GUI 只改 batchSize 就会丢失
+ * 同一段内的 model/apiKey/baseURL/options 等未随请求提交的字段。
+ * 深合并保证「只改被点名的叶子字段」，其余同级字段原样保留。
+ */
+function deepMergeInto(target: Record<string, unknown>, patch: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(patch)) {
+    const cur = target[key];
+    if (isPlainObject(cur) && isPlainObject(value)) {
+      deepMergeInto(cur, value);
+    } else {
+      target[key] = value;
+    }
+  }
+}
+
 /** 确保配置文件目录存在 */
 function ensureConfigDir(): void {
   const dir = dirname(getConfigPath());
@@ -76,10 +101,8 @@ export function writeRawConfig(updates: Record<string, unknown>): void {
   if (!pluginEntry.config) pluginEntry.config = {};
   const config = pluginEntry.config as Record<string, unknown>;
 
-  // 合并更新
-  for (const [key, value] of Object.entries(updates)) {
-    config[key] = value;
-  }
+  // v2.1.13 BUGFIX: 深合并（原浅赋值会整段替换，丢失未提交的同级字段，如 embedding.apiKey/options）
+  deepMergeInto(config, updates);
 
   ensureConfigDir();
   writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
@@ -126,7 +149,7 @@ const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' |
   cliTimeout: [{ type: 'number', description: 'CLI 超时（毫秒）：QMD CLI fallback 命令执行超时。推荐：30000（30s）', path: 'cliTimeout' }],
   cliFallbackSearchType: [{ type: 'string', description: 'CLI 降级搜索类型：search | hybrid。search=轻量词法（无向量）；hybrid=词法+向量（结果更全，推荐）。推荐：hybrid', path: 'cliFallbackSearchType' }],
   qmdMcpTimeout: [{ type: 'number', description: 'QMD MCP 初始化握手超时（ms）。JSON-RPC 握手通常 <500ms。推荐：3000', path: 'qmdMcpTimeout' }],
-  qmdMcpQueryTimeout: [{ type: 'number', description: 'QMD MCP/REST 查询超时（ms）。首次查询需 embedding 冷启动（4-5s），后续 300-400ms。推荐：15000', path: 'qmdMcpQueryTimeout' }],
+  qmdMcpQueryTimeout: [{ type: 'number', description: 'QMD MCP/REST 查询超时（ms）。首次查询需 embedding 冷启动（4-5s），后续 300-400ms；远程 LAN qmd + 本地 LLM rerank 单次可达 10s+。推荐：30000（SD-DEF-3）', path: 'qmdMcpQueryTimeout' }],
   tripletTimeoutMs: [{ type: 'number', description: '三元组提取超时（ms）：afterTurn 三元组 LLM 调用超时。本地大模型建议 60s。推荐：60000', path: 'tripletTimeoutMs' }],
   experienceTtlIntervalMs: [{ type: 'number', description: '经验 TTL 清理间隔（ms）。推荐：86400000（每 24 小时）', path: 'experienceTtlIntervalMs' }],
   enableCliFallback: [{ type: 'boolean', description: '启用 QMD CLI 降级。关闭可避免 CLI 卡死；若 MCP+REST 均失败则直接报错。推荐：true', path: 'enableCliFallback' }],
@@ -169,6 +192,20 @@ const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' |
     { type: 'number', description: '图谱检索缓存大小（>=10）。推荐：50', path: 'retrieval.graph.searchCacheSize' },
     { type: 'number', description: 'L2/L4 查询缓存大小（>=10）。推荐：50', path: 'retrieval.cacheSize' },
     { type: 'number', description: 'QMD vec/hyde 查询文本分片阈值（字符数，>=500）。超过拆分为多个分片独立查询，用 RRF 合并。推荐：8000；若遇到 documents exceed context size 可降到 3000', path: 'retrieval.qmdQueryMaxChars' },
+    // v2.3.6 在线学习：JudgeManager（I-2 裁判）—— 与 gm-pro 生效配置解耦，lcm 侧注入参数
+    { type: 'boolean', description: '在线学习裁判是否启用（JudgeManager 注入 Recaller，形成反馈闭环）。推荐：true', path: 'retrieval.graph.judge.enabled' },
+    { type: 'number', description: '裁判层级：1=启发式(零 LLM) | 2=LLM 裁判 | 3=自定义。推荐：1', path: 'retrieval.graph.judge.tier' },
+    { type: 'number', description: '裁判冷启动阈值（反馈数，默认 20，见 gm-pro DEFAULT_JUDGE_CONFIG）。推荐：20', path: 'retrieval.graph.judge.judgeWarmupFeedbacks' },
+    { type: 'string', description: '启发式匹配维度：id | name | both。推荐：both', path: 'retrieval.graph.judge.heuristicMatch' },
+    { type: 'number', description: 'LLM 裁判单次最多送入的节点数。推荐：8', path: 'retrieval.graph.judge.llmJudgeMaxNodes' },
+    { type: 'number', description: 'LLM 裁判超时（ms）。推荐：30000', path: 'retrieval.graph.judge.llmJudgeTimeoutMs' },
+    // v2.3.6 在线学习：关联矩阵 M（L-1），默认关闭，需显式启用
+    { type: 'boolean', description: '关联矩阵 M 是否启用（在线学习，默认关闭需显式开启）。推荐：false（按需开启）', path: 'retrieval.graph.associationMatrix.enabled' },
+    { type: 'number', description: '关联矩阵学习率（0-1）。推荐：0.1', path: 'retrieval.graph.associationMatrix.learningRate' },
+    { type: 'number', description: '关联矩阵冷启动反馈数。推荐：20', path: 'retrieval.graph.associationMatrix.warmupFeedbacks' },
+    { type: 'string', description: '关联矩阵持久化路径（空=默认路径）。推荐：空字符串', path: 'retrieval.graph.associationMatrix.persistPath' },
+    // v2.3.5 方案 A：agent_end 自动反馈采集（冷启动死循环破除）
+    { type: 'boolean', description: 'agent_end 自动反馈采集（破除冷启动死循环）。推荐：true', path: 'retrieval.graph.autoFeedback.enabled' },
   ],
 
   // ─── 上下文监控 ─────────────────────────────────────────────────────────
@@ -197,6 +234,10 @@ const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' |
     { type: 'number', description: '低压上下文字符数。推荐：12000', path: 'lcmMonitor.maxContextChars.low' },
     { type: 'number', description: '中压上下文字符数。推荐：6000', path: 'lcmMonitor.maxContextChars.medium' },
     { type: 'number', description: '高压上下文字符数。推荐：1600', path: 'lcmMonitor.maxContextChars.high' },
+    // v2.5.0/2.5.1: 摘要模型窗口分离 + 压缩冷却（避免活跃对话反复打满本地 LLM 队列）
+    { type: 'number', description: '摘要模型上下文窗口（tokens，0=跟随主模型 contextWindow）。summary 模型窗口更小时设此项，避免 compactTokenBudget 超限导致压缩失败。推荐：0', path: 'lcmMonitor.summaryModelContextWindow' },
+    { type: 'number', description: '预压缩冷却（ms）：同一会话冷却期内不重复提交预压缩任务。推荐：60000', path: 'lcmMonitor.preCompactCooldownMs' },
+    { type: 'number', description: '插件 compact() 入口同会话冷却（ms）：SDK 后台维护每轮都会调用，冷却可避免活跃对话被反复压缩。推荐：120000', path: 'lcmMonitor.compactCooldownMs' },
   ],
 
   // ─── LLM 超时 ───────────────────────────────────────────────────────────
@@ -261,6 +302,7 @@ const UPDATABLE_FIELDS: Record<string, { type: 'number' | 'boolean' | 'string' |
     { type: 'string', description: 'Embedding Base URL（走独立 embedding 服务时填）。推荐：空字符串', path: 'embedding.baseURL' },
     { type: 'number', description: 'Embedding 维度（0=模型自带默认）。推荐：0', path: 'embedding.dimensions' },
     { type: 'string', description: 'Embedding Keep Alive。推荐：空字符串', path: 'embedding.keepAlive' },
+    { type: 'number', description: '单次批量 embedding 请求最大文本数（批量 upsert 实体向量时按此切分子批，减少 HTTP 往返）。推荐：32', path: 'embedding.batchSize' },
   ],
 
   // ─── Dashboard Snapshot ─────────────────────────────────────────────────
@@ -344,7 +386,7 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'cliTimeout', type: 'number', description: 'CLI 超时（毫秒）：QMD CLI fallback 命令执行超时。推荐：30000（30s）', updatable: true, defaultValue: 30000 },
     { path: 'cliFallbackSearchType', type: 'string', description: 'CLI 降级搜索类型：search | hybrid。search=轻量词法（无向量）；hybrid=词法+向量（结果更全，推荐）。推荐：hybrid', updatable: true, defaultValue: 'hybrid' },
     { path: 'qmdMcpTimeout', type: 'number', description: 'QMD MCP 初始化握手超时（ms）。JSON-RPC 握手通常 <500ms。推荐：3000', updatable: true, defaultValue: 3000 },
-    { path: 'qmdMcpQueryTimeout', type: 'number', description: 'QMD MCP/REST 查询超时（ms）。首次查询需 embedding 冷启动（4-5s），后续 300-400ms。推荐：15000', updatable: true, defaultValue: 15000 },
+    { path: 'qmdMcpQueryTimeout', type: 'number', description: 'QMD MCP/REST 查询超时（ms）。首次查询需 embedding 冷启动（4-5s），后续 300-400ms；远程 LAN qmd + 本地 LLM rerank 单次可达 10s+。推荐：30000（SD-DEF-3；原 15s 偏紧）', updatable: true, defaultValue: 30000 },
     { path: 'tripletTimeoutMs', type: 'number', description: '三元组提取超时（ms）：afterTurn 三元组 LLM 调用超时。本地大模型建议 60s。推荐：60000', updatable: true, defaultValue: 60000 },
     { path: 'experienceTtlIntervalMs', type: 'number', description: '经验 TTL 清理间隔（ms）。推荐：86400000（每 24 小时）', updatable: true, defaultValue: 86400000 },
     { path: 'enableCliFallback', type: 'boolean', description: '启用 QMD CLI 降级。关闭可避免 CLI 卡死；若 MCP+REST 均失败则直接报错。推荐：true', updatable: true, defaultValue: true },
@@ -380,6 +422,18 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'retrieval.graph.searchCacheSize', type: 'number', description: '图谱检索缓存大小（>=10）。推荐：50', updatable: true, defaultValue: 50 },
     { path: 'retrieval.cacheSize', type: 'number', description: 'L2/L4 查询缓存大小（>=10）。推荐：50', updatable: true, defaultValue: 50 },
     { path: 'retrieval.qmdQueryMaxChars', type: 'number', description: 'QMD vec/hyde 查询文本分片阈值（字符数，>=500）。超过拆分为多个分片独立查询，用 RRF 合并。推荐：8000；若遇到 documents exceed context size 可降到 3000', updatable: true, defaultValue: 8000 },
+    // v2.3.6 在线学习：JudgeManager / 关联矩阵 M / 自动反馈采集
+    { path: 'retrieval.graph.judge.enabled', type: 'boolean', description: '在线学习裁判是否启用（JudgeManager 注入 Recaller，形成反馈闭环）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'retrieval.graph.judge.tier', type: 'number', description: '裁判层级：1=启发式(零 LLM) | 2=LLM 裁判 | 3=自定义。推荐：1', updatable: true, defaultValue: 1 },
+    { path: 'retrieval.graph.judge.judgeWarmupFeedbacks', type: 'number', description: '裁判冷启动阈值（反馈数，默认 20，见 gm-pro DEFAULT_JUDGE_CONFIG）。推荐：20', updatable: true, defaultValue: 20 },
+    { path: 'retrieval.graph.judge.heuristicMatch', type: 'string', description: '启发式匹配维度：id | name | both。推荐：both', updatable: true, defaultValue: 'both' },
+    { path: 'retrieval.graph.judge.llmJudgeMaxNodes', type: 'number', description: 'LLM 裁判单次最多送入的节点数。推荐：8', updatable: true, defaultValue: 8 },
+    { path: 'retrieval.graph.judge.llmJudgeTimeoutMs', type: 'number', description: 'LLM 裁判超时（ms）。推荐：30000', updatable: true, defaultValue: 30000 },
+    { path: 'retrieval.graph.associationMatrix.enabled', type: 'boolean', description: '关联矩阵 M 是否启用（在线学习，默认关闭需显式开启）。推荐：false（按需开启）', updatable: true, defaultValue: false },
+    { path: 'retrieval.graph.associationMatrix.learningRate', type: 'number', description: '关联矩阵学习率（0-1）。推荐：0.1', updatable: true, defaultValue: 0.1 },
+    { path: 'retrieval.graph.associationMatrix.warmupFeedbacks', type: 'number', description: '关联矩阵冷启动反馈数。推荐：20', updatable: true, defaultValue: 20 },
+    { path: 'retrieval.graph.associationMatrix.persistPath', type: 'string', description: '关联矩阵持久化路径（空=默认路径）。推荐：空字符串', updatable: true, defaultValue: '' },
+    { path: 'retrieval.graph.autoFeedback.enabled', type: 'boolean', description: 'agent_end 自动反馈采集（破除冷启动死循环）。推荐：true', updatable: true, defaultValue: true },
 
     // ─── 上下文监控 ──────────────────────────────────────────────────────
     { path: 'lcmMonitor.enabled', type: 'boolean', description: '是否启用 LCM 上下文监控与主动压缩。推荐：true', updatable: true, defaultValue: true },
@@ -404,6 +458,10 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'lcmMonitor.maxContextChars.low', type: 'number', description: '低压上下文字符数。推荐：12000', updatable: true, defaultValue: 12000 },
     { path: 'lcmMonitor.maxContextChars.medium', type: 'number', description: '中压上下文字符数。推荐：6000', updatable: true, defaultValue: 6000 },
     { path: 'lcmMonitor.maxContextChars.high', type: 'number', description: '高压上下文字符数。推荐：1600', updatable: true, defaultValue: 1600 },
+    // v2.5.0/2.5.1: 摘要模型窗口分离 + 压缩冷却
+    { path: 'lcmMonitor.summaryModelContextWindow', type: 'number', description: '摘要模型上下文窗口（tokens，0=跟随主模型 contextWindow）。summary 模型窗口更小时设此项，避免 compactTokenBudget 超限导致压缩失败。推荐：0', updatable: true, defaultValue: 0 },
+    { path: 'lcmMonitor.preCompactCooldownMs', type: 'number', description: '预压缩冷却（ms）：同一会话冷却期内不重复提交预压缩任务，避免活跃对话每轮 assemble 都触发 compact。推荐：60000', updatable: true, defaultValue: 60000 },
+    { path: 'lcmMonitor.compactCooldownMs', type: 'number', description: '插件 compact() 入口同会话冷却（ms）：SDK 后台维护每轮都会调用，冷却可避免活跃对话被反复压缩（显式强制压缩不受影响）。推荐：120000', updatable: true, defaultValue: 120000 },
 
     // ─── LLM 超时 ────────────────────────────────────────────────────────
     { path: 'llmTimeouts.rerankTimeoutMs', type: 'number', description: 'Rerank 超时（ms）。推荐：30000', updatable: true, defaultValue: 30000 },
@@ -455,6 +513,7 @@ function buildSchemaDoc(): SchemaFieldDoc[] {
     { path: 'embedding.baseURL', type: 'string', description: 'Embedding Base URL（走独立 embedding 服务时填）。推荐：空字符串', updatable: true, defaultValue: '' },
     { path: 'embedding.dimensions', type: 'number', description: 'Embedding 维度（0=模型自带默认）。推荐：0', updatable: true, defaultValue: 0 },
     { path: 'embedding.keepAlive', type: 'string', description: 'Embedding Keep Alive。推荐：空字符串', updatable: true, defaultValue: '' },
+    { path: 'embedding.batchSize', type: 'number', description: '单次批量 embedding 请求最大文本数（批量 upsert 实体向量时按此切分子批，减少 HTTP 往返与本地 Ollama 队列压力；非法/非正值回退默认 32）。推荐：32', updatable: true, defaultValue: 32 },
 
     // ─── Dashboard Snapshot ──────────────────────────────────────────────
     { path: 'dashboardSnapshot.enabled', type: 'boolean', description: '是否启用 Snapshot 能力服务（端口 7423，供设置页切换能力档次）。推荐：true', updatable: true, defaultValue: true },
@@ -772,9 +831,8 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     if (!pluginEntry.config) pluginEntry.config = {};
     const config = pluginEntry.config as Record<string, unknown>;
 
-    for (const [key, value] of Object.entries(updates)) {
-      config[key] = value;
-    }
+    // 深合并：只改被点名的叶子字段，保留 apiServer.authToken 等同级未提交字段
+    deepMergeInto(config, updates);
 
     ensureConfigDir();
     writeFileSync(path, JSON.stringify(root, null, 2), 'utf-8');
@@ -1000,6 +1058,25 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     { path: 'graphHealth.scoring.sparseIsolatedRatioThreshold', type: 'number', description: 'v2.6.0: 稀疏判定孤立率阈值 —— 孤立节点占比高于此值标记为稀疏图。推荐：0.3', updatable: true, defaultValue: 0.3 },
   ];
 
+  /**
+   * v2.4.0 recall 段 schema overlay：Graph Memory Pro 的 recall（点1-6 检索质量增强）
+   * 在运行时配置中以默认值形式存在（RecallConfigCard 已只读展示），但上游
+   * openclaw.plugin.json 未必声明这些子字段 → 未声明时 GUI 无法读取/配置。
+   * 这里补齐 schema 文档（默认值与 gm-pro 内置默认一致），使「读取」与「配置」对齐。
+   * 仅追加缺失路径（existingPaths 去重），不影响上游已声明的字段。
+   */
+  const GM_PRO_RECALL_SCHEMA_OVERLAY: SchemaFieldDoc[] = [
+    { path: 'recall.memorySliceChars', type: 'number', description: 'v2.4.0 点2: 嵌入文本记忆切片长度（字符）。推荐：800', updatable: true, defaultValue: 800 },
+    { path: 'recall.multiStage', type: 'boolean', description: 'v2.4.0 点5: 多阶段检索（FTS 种子 → graphWalk 邻域筛选 → 候选内向量排序）。推荐：false（按需开启）', updatable: true, defaultValue: false },
+    { path: 'recall.temporalWeight', type: 'number', description: 'v2.4.0 点4: 时序权重（0~1），与关联矩阵 M 共同加权。推荐：0.3', updatable: true, defaultValue: 0.3 },
+    { path: 'recall.chunking.enabled', type: 'boolean', description: 'v2.4.0 点6: 长文本分段嵌入（长节点内容分片后分别嵌入）。推荐：false（按需开启）', updatable: true, defaultValue: false },
+    { path: 'recall.chunking.chunkSize', type: 'number', description: 'v2.4.0 点6: 单段字符数（默认 400 字符 ≈ 400~500 token，贴近 512 token 窗口上限；建议 ≤384 留余量）。推荐：384', updatable: true, defaultValue: 400 },
+    { path: 'recall.chunking.chunkOverlap', type: 'number', description: 'v2.4.0 点6: 段间重叠字符数。默认 40/400 = 10% 偏低，建议占比 15~20%（400 字符下约 60~80）。推荐：64', updatable: true, defaultValue: 40 },
+    { path: 'recall.outputFormat.enabled', type: 'boolean', description: 'v2.4.0 点3: 标准格式化输出（注入简洁/贴近原文/减少篡改 policy）。推荐：true', updatable: true, defaultValue: true },
+    { path: 'recall.outputFormat.concise', type: 'boolean', description: 'v2.4.0 点3: 是否要求简洁。推荐：true', updatable: true, defaultValue: true },
+    { path: 'recall.outputFormat.faithful', type: 'boolean', description: 'v2.4.0 点3: 是否要求贴近原文表述（减少篡改）。推荐：true', updatable: true, defaultValue: true },
+  ];
+
   function buildGmProSchemaDoc(): SchemaFieldDoc[] {
     if (_gmProSchemaDocCache) return _gmProSchemaDocCache;
 
@@ -1025,8 +1102,9 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       );
       // v2.6.0 overlay：上游 openclaw.plugin.json 尚未声明 sparseHeal / graphHealth.scoring，
       // dashboard 端补充 schema 文档，使新配置字段可在 GUI 中查看与热更新。
+      // v2.4.0 recall overlay：同理补齐点1-6 检索增强字段（已只读展示，补齐后可配置）。
       const existingPaths = new Set(docs.map((d) => d.path));
-      for (const doc of GM_PRO_V260_SCHEMA_OVERLAY) {
+      for (const doc of [...GM_PRO_V260_SCHEMA_OVERLAY, ...GM_PRO_RECALL_SCHEMA_OVERLAY]) {
         if (!existingPaths.has(doc.path)) docs.push(doc);
       }
       _gmProSchemaDocCache = docs;

@@ -37,6 +37,8 @@ import {
   invokeRestore,
   invokeSync,
   invokeImport,
+  invokePin,
+  invokeForget,
   invokeExtractRebuild,
   fetchExtractRebuildProgress,
   type ExtractRebuildProgress,
@@ -79,6 +81,23 @@ const breakerOptions = [
   { label: 'QMD (memory file engine)', value: 'qmd' },
   { label: 'Neo4j (graph-memory-pro)', value: 'neo4j' },
 ];
+
+// 卡片 5.1：节点置顶（lcmg_pin）
+const pinNodeId = ref<string>('');
+const pinUnpin = ref<boolean>(false);
+
+// 卡片 5.2：主动遗忘（lcmg_forget）
+const forgetNodeId = ref<string>('');
+const forgetQuery = ref<string>('');
+const forgetMode = ref<'soft' | 'hard'>('soft');
+const forgetConfirm = ref<boolean>(false);
+const forgetModeOptions = [
+  { label: '软遗忘 (soft, 降权仍可检索)', value: 'soft' },
+  { label: '硬遗忘 (hard, 标记 superseded)', value: 'hard' },
+];
+// hard 模式才视为危险操作 + 二次确认
+const forgetDanger = computed(() => forgetMode.value === 'hard');
+const forgetConfirmLevel = computed<0 | 1 | 2>(() => (forgetMode.value === 'hard' ? 2 : 1));
 
 // 卡片 6：备份
 const todayStamp = (() => {
@@ -509,6 +528,58 @@ function executeTtlCleanup(): void {
   });
 }
 
+/**
+ * 节点置顶（lcmg_pin）：置顶节点豁免 TTL 清理与自动删除；unpin=true 恢复常规语义。
+ * 节点 ID 必填（工具按 id 精确定位）。
+ */
+function executePin(): void {
+  const id = pinNodeId.value.trim();
+  if (!id) {
+    message.error('请填写节点 ID');
+    return;
+  }
+  runMutation({
+    cardKey: 'pin',
+    tool: 'lcmg_pin',
+    params: { id, unpin: pinUnpin.value },
+    invokeFn: () => invokePin(id, pinUnpin.value),
+  });
+}
+
+/**
+ * 主动遗忘（lcmg_forget）：id 或 query 至少填一个；hard 模式需 confirm=true。
+ * soft=降权（仍可检索）；hard=标记 superseded（从检索中排除，不可逆）。
+ */
+function executeForget(): void {
+  const id = forgetNodeId.value.trim();
+  const query = forgetQuery.value.trim();
+  if (!id && !query) {
+    message.error('请填写节点 ID 或查询词（至少一项）');
+    return;
+  }
+  if (forgetMode.value === 'hard' && !forgetConfirm.value) {
+    message.error('硬遗忘需勾选 confirm 确认（防止误删）');
+    return;
+  }
+  const mode = forgetMode.value;
+  runMutation({
+    cardKey: 'forget',
+    tool: 'lcmg_forget',
+    params: {
+      ...(id ? { id } : {}),
+      ...(query ? { query } : {}),
+      mode,
+      ...(mode === 'hard' ? { confirm: forgetConfirm.value } : {}),
+    },
+    invokeFn: () => invokeForget({
+      id: id || undefined,
+      query: query || undefined,
+      mode,
+      confirm: forgetConfirm.value,
+    }),
+  });
+}
+
 function executeBackup(): void {
   const err = validateOpenclawPath(backupOutputPath.value);
   if (err) {
@@ -624,11 +695,11 @@ function executeReembed(): void {
   <div class="maintain-view">
     <div class="maintain-header">
       <h2 style="margin: 0">维护操作</h2>
-      <span class="muted">15 项手动维护入口 · 危险操作需多次确认</span>
+      <span class="muted">17 项手动维护入口 · 危险操作需多次确认</span>
     </div>
 
     <NSpace vertical :size="12" style="margin-top: 12px">
-      <!-- 15 张操作卡片网格（2 列响应式） -->
+      <!-- 17 张操作卡片网格（2 列响应式） -->
       <NGrid :cols="'1 s:1 m:2'" :x-gap="12" :y-gap="12" responsive="screen">
         <!-- 卡片 1: 图谱维护 -->
         <NGi>
@@ -868,6 +939,83 @@ function executeReembed(): void {
           >
             <template #extra>
               <OperationRecentHistory :logs="ttlCleanupHistory" />
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 5.1: 节点置顶（lcmg_pin） -->
+        <NGi>
+          <OperationCard
+            title="节点置顶"
+            description="置顶指定图谱节点：置顶节点被排除在 TTL 清理与自动删除之外（长期保留重要知识）。取消置顶后恢复常规 TTL 语义。"
+            icon="save"
+            :confirm-level="0"
+            :loading="!!loadingMap.pin"
+            tool-name="lcmg_pin"
+            :last-status="lastResultMap.pin?.status ?? null"
+            :last-details="lastResultMap.pin?.details ?? null"
+            :last-text="lastResultMap.pin?.text ?? null"
+            @execute="executePin"
+          >
+            <template #form>
+              <NFormItem label="节点 ID" size="small" :show-feedback="false">
+                <NInput v-model:value="pinNodeId" size="small" placeholder="图谱节点 id（可从图谱探索复制）" clearable />
+              </NFormItem>
+              <NFormItem label="取消置顶 (unpin)" size="small" :show-feedback="false">
+                <NSwitch v-model:value="pinUnpin" size="small" />
+                <span class="muted" style="margin-left: 8px">
+                  {{ pinUnpin ? '取消置顶（恢复 TTL 清理）' : '置顶（豁免 TTL 清理）' }}
+                </span>
+              </NFormItem>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_pin')" />
+            </template>
+          </OperationCard>
+        </NGi>
+
+        <!-- 卡片 5.2: 主动遗忘（lcmg_forget，hard 模式升级为危险 + 三次确认） -->
+        <NGi>
+          <OperationCard
+            title="主动遗忘"
+            description="遗忘/废弃指定节点：soft 降低权重（仍可检索），hard 标记 superseded（从检索中排除，不可逆）。需填写节点 ID 或查询词定位目标。"
+            icon="trash"
+            :danger="forgetDanger"
+            :confirm-level="forgetConfirmLevel"
+            :loading="!!loadingMap.forget"
+            tool-name="lcmg_forget"
+            :last-status="lastResultMap.forget?.status ?? null"
+            :last-details="lastResultMap.forget?.details ?? null"
+            :last-text="lastResultMap.forget?.text ?? null"
+            @execute="executeForget"
+          >
+            <template #form>
+              <NFormItem label="节点 ID（可选）" size="small" :show-feedback="false">
+                <NInput v-model:value="forgetNodeId" size="small" placeholder="精确指定节点 id；与查询词二选一" clearable />
+              </NFormItem>
+              <NFormItem label="查询词（可选）" size="small" :show-feedback="false">
+                <NInput v-model:value="forgetQuery" size="small" placeholder="按语义定位待遗忘节点（与 ID 二选一）" clearable />
+              </NFormItem>
+              <NFormItem label="遗忘模式" size="small" :show-feedback="false">
+                <NSelect v-model:value="forgetMode" :options="forgetModeOptions" size="small" />
+              </NFormItem>
+              <NFormItem v-if="forgetMode === 'hard'" label="confirm（硬遗忘必选）" size="small" :show-feedback="false">
+                <NSwitch v-model:value="forgetConfirm" size="small" />
+                <span class="muted" style="margin-left: 8px">
+                  硬遗忘将从检索中排除该节点，不可逆
+                </span>
+              </NFormItem>
+              <NAlert
+                v-if="forgetMode === 'hard'"
+                type="warning"
+                :show-icon="true"
+                style="margin-top: 8px"
+              >
+                硬遗忘不可逆：节点被标记 superseded 后不再参与检索。请确认目标节点无误。
+              </NAlert>
+            </template>
+            <template #extra>
+              <OperationRecentHistory :logs="historyOf('lcmg_forget')" />
             </template>
           </OperationCard>
         </NGi>

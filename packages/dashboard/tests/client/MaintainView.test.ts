@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { ref, defineComponent, h } from 'vue';
-import { NMessageProvider, NConfigProvider, zhCN, dateZhCN } from 'naive-ui';
+import { NMessageProvider, NConfigProvider, NSelect, NSwitch, zhCN, dateZhCN } from 'naive-ui';
 
 // happy-dom 缺失 matchMedia（naive-ui 响应式 grid 需要）
 if (!window.matchMedia) {
@@ -191,10 +191,105 @@ describe('MaintainView', () => {
     // gm-pro 运维卡片已合并到操作卡片中，系统诊断保留
     expect(text).toContain('系统诊断');
     expect(text).toContain('Bootstrap 反馈');
+    // 新增维护工具卡片（lcmg_pin / lcmg_forget）
+    expect(text).toContain('节点置顶');
+    expect(text).toContain('主动遗忘');
     // 日志区
     expect(text).toContain('操作日志');
     // 初始空日志
     expect(text).toContain('暂无操作记录');
+  });
+
+  it('节点置顶卡片：填写节点 ID 后调用 lcmg_pin（默认 unpin=false）', async () => {
+    const wrapper = mountView();
+    const input = wrapper.find('input[placeholder*="图谱节点 id"]');
+    await input.setValue('node-abc');
+    const cards = wrapper.findAllComponents({ name: 'OperationCard' });
+    const card = cards.find((c) => c.props('title') === '节点置顶');
+    expect(card).toBeTruthy();
+    expect(card!.props('confirmLevel')).toBe(0);
+    card!.vm.$emit('execute');
+    await flushPromises();
+    expect(invokeMcpToolMock).toHaveBeenCalledWith(
+      'lcmg_pin',
+      expect.objectContaining({ id: 'node-abc', unpin: false }),
+    );
+  });
+
+  it('节点置顶卡片：未填 ID 时不调用工具', async () => {
+    const wrapper = mountView();
+    const cards = wrapper.findAllComponents({ name: 'OperationCard' });
+    const card = cards.find((c) => c.props('title') === '节点置顶');
+    card!.vm.$emit('execute');
+    await flushPromises();
+    expect(invokeMcpToolMock).not.toHaveBeenCalled();
+  });
+
+  it('主动遗忘卡片：soft 模式按查询词调用 lcmg_forget（不带 confirm）', async () => {
+    const wrapper = mountView();
+    const input = wrapper.find('input[placeholder*="按语义定位待遗忘节点"]');
+    await input.setValue('过期的构建方式');
+    const cards = wrapper.findAllComponents({ name: 'OperationCard' });
+    const card = cards.find((c) => c.props('title') === '主动遗忘');
+    expect(card).toBeTruthy();
+    // soft 模式：confirmLevel=1，非 danger
+    expect(card!.props('danger')).toBe(false);
+    expect(card!.props('confirmLevel')).toBe(1);
+    card!.vm.$emit('execute');
+    await flushPromises();
+    expect(invokeMcpToolMock).toHaveBeenCalledWith(
+      'lcmg_forget',
+      expect.objectContaining({ query: '过期的构建方式', mode: 'soft' }),
+    );
+    // soft 模式不发送 confirm
+    const call = invokeMcpToolMock.mock.calls.find((c) => c[0] === 'lcmg_forget');
+    expect(call![1]).not.toHaveProperty('confirm');
+  });
+
+  it('主动遗忘卡片：hard 模式未勾选 confirm 时不执行', async () => {
+    const wrapper = mountView();
+    const input = wrapper.find('input[placeholder*="精确指定节点 id"]');
+    await input.setValue('node-xyz');
+    const cards = wrapper.findAllComponents({ name: 'OperationCard' });
+    const card = cards.find((c) => c.props('title') === '主动遗忘');
+    // 通过 NSelect（选项含 hard）切换到硬遗忘模式
+    const modeSelect = wrapper
+      .findAllComponents(NSelect)
+      .find((s) => JSON.stringify(s.props('options') ?? '').includes('hard'));
+    expect(modeSelect).toBeTruthy();
+    modeSelect!.vm.$emit('update:value', 'hard');
+    await flushPromises();
+    // 切到 hard 后升级为危险操作 + 三次确认
+    expect(card!.props('danger')).toBe(true);
+    expect(card!.props('confirmLevel')).toBe(2);
+    // 未勾选 confirm → 不发起调用（与插件侧安全校验对齐）
+    card!.vm.$emit('execute');
+    await flushPromises();
+    expect(invokeMcpToolMock).not.toHaveBeenCalled();
+  });
+
+  it('主动遗忘卡片：hard 模式勾选 confirm 后携带 confirm=true 调用', async () => {
+    const wrapper = mountView();
+    await wrapper.find('input[placeholder*="精确指定节点 id"]').setValue('node-xyz');
+    const modeSelect = wrapper
+      .findAllComponents(NSelect)
+      .find((s) => JSON.stringify(s.props('options') ?? '').includes('hard'));
+    modeSelect!.vm.$emit('update:value', 'hard');
+    await flushPromises();
+    // 勾选 confirm 开关（hard 模式下才渲染的 NSwitch，作用域限定在遗忘卡片内）
+    const card = wrapper
+      .findAllComponents({ name: 'OperationCard' })
+      .find((c) => c.props('title') === '主动遗忘');
+    const confirmSwitch = card!.findAllComponents(NSwitch)[0];
+    expect(confirmSwitch, 'hard 模式下应渲染 confirm 开关').toBeTruthy();
+    confirmSwitch.vm.$emit('update:value', true);
+    await flushPromises();
+    card!.vm.$emit('execute');
+    await flushPromises();
+    expect(invokeMcpToolMock).toHaveBeenCalledWith(
+      'lcmg_forget',
+      expect.objectContaining({ id: 'node-xyz', mode: 'hard', confirm: true }),
+    );
   });
 
   it('点击 distill 卡片执行按钮（confirmLevel=0）触发 invokeMcpTool', async () => {

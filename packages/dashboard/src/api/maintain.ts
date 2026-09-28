@@ -83,6 +83,38 @@ export function invokeImport(source: string, limit: number): Promise<McpInvokeRe
 }
 
 /**
+ * 节点置顶 / 取消置顶（lcmg_pin）。
+ * 置顶节点被排除在 TTL 清理与自动删除之外（unpin=true 恢复常规 TTL 语义）。
+ */
+export function invokePin(id: string, unpin: boolean = false): Promise<McpInvokeResponse> {
+  return invokeMcpTool('lcmg_pin', { id: id.trim(), unpin });
+}
+
+/**
+ * 主动遗忘 / 废弃节点（lcmg_forget）。
+ * - mode=soft（默认）：降低权重，仍可被检索
+ * - mode=hard：标记 superseded（从检索中排除），需 confirm=true 安全校验
+ * 必须提供 id 或 query 之一（query 用于先定位待遗忘节点）。
+ */
+export function invokeForget(opts: {
+  id?: string;
+  query?: string;
+  mode?: 'soft' | 'hard';
+  confirm?: boolean;
+}): Promise<McpInvokeResponse> {
+  const params: Record<string, unknown> = {};
+  const id = opts.id?.trim();
+  const query = opts.query?.trim();
+  if (id) params.id = id;
+  if (query) params.query = query;
+  const mode = opts.mode ?? 'soft';
+  params.mode = mode;
+  // hard 模式必须显式 confirm（与插件侧安全校验一致，否则工具会拒绝执行）
+  if (mode === 'hard') params.confirm = opts.confirm === true;
+  return invokeMcpTool('lcmg_forget', params);
+}
+
+/**
  * 三级节点重建：完全复用 graph-memory-pro 的 HTTP API（POST /api/extract/rebuild[-all]）。
  * sessionKey 给定 → 单会话重建（同步）；省略 → 批量重建全部会话（v2.4.1 异步化：202+jobId+轮询）。
  * concurrency = 会话内 LLM 并发窗口（1-128，默认 4）；sessionConcurrency = 批量重建时同时处理的会话数（1-32，默认 2）；
