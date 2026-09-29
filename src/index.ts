@@ -42,6 +42,7 @@ import {
 } from "./lcm-bridge.js";
 import { invalidateSessionStateForReset } from "./session-reset.js";
 import { raceDeadline } from "./utils/deadline.js";
+import { compactEarlyExit } from "./utils/compact-result.js";
 import { beginMainTurn, endMainTurn, isMainTurnActive } from "./async/main-turn-gate.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
 
@@ -1087,12 +1088,13 @@ const pluginEntry: any = definePluginEntry({
 
       async compact(params: any) {
     if (params.abortSignal?.aborted) {
-      return { ok: false, compacted: false, reason: 'compaction aborted' };
+      // 早退走真实报错（ok/compacted=false + error），不伪造 result：见 utils/compact-result.ts
+      return compactEarlyExit('compaction aborted', 'compact aborted: host abortSignal already aborted before compaction started');
     }
           // AbortSignal support - early exit if cancelled
           const signal = (params as any).abortSignal || (params as any).signal;
           if (signal?.aborted) {
-            return { ok: false, compacted: false, reason: 'aborted' };
+            return compactEarlyExit('aborted', 'compact aborted: signal already aborted before compaction started');
           }
 
           // FIX: ensure adapter + deps are initialized before compacting
@@ -1103,7 +1105,7 @@ const pluginEntry: any = definePluginEntry({
           } catch (initErr) {
             const errMsg = initErr instanceof Error ? initErr.message : String(initErr);
             logger?.warn?.("compact: init failed", { err: errMsg });
-            return { ok: false, compacted: false, reason: 'init failed: ' + errMsg };
+            return compactEarlyExit('init failed: ' + errMsg, 'compact init failed: ' + errMsg);
           }
 
         try {
@@ -1220,7 +1222,10 @@ const pluginEntry: any = definePluginEntry({
                     'compact_deferred_main_turn',
                   );
                 }
-                return { ok: false, compacted: false, reason: 'main_turn_active' };
+                return compactEarlyExit(
+                  'main_turn_active',
+                  'compact deferred: a main conversation turn is active for this session; compaction debt recorded and will be retried between turns',
+                );
               }
             } catch { /* gate 不可用，维持原行为 */ }
             const _lcmCompactKey = _compactSessionKey || _compactSessionId || '';
@@ -1237,7 +1242,10 @@ const pluginEntry: any = definePluginEntry({
                   isInputOverflow: _isInputOverflow,
                   forceCompact: _forceCompact,
                 });
-                return { ok: false, compacted: false, reason: 'cooldown' };
+                return compactEarlyExit(
+                  'cooldown',
+                  `compact skipped: same-session cooldown still active (${_lcmNow - _lcmLast}ms < ${_lcmCooldownMs}ms since last attempt); no compaction performed`,
+                );
               }
               _lcmCompactLastTs.set(_lcmCompactKey, _lcmNow);
               // 防止 Map 无限增长：会话数过多时清理最旧条目
@@ -1880,10 +1888,14 @@ const pluginEntry: any = definePluginEntry({
           };
         } catch (err) {
           logger?.warn?.("compact: top-level failed (non-fatal)", { err: serializeError(err) });
+          const _errMsg = err instanceof Error ? err.message : String(err);
           return {
             ok: false,
             compacted: false,
-            reason: String(err),
+            reason: _errMsg,
+            // 契约字段（与 LosslessClawAdapter.compact 错误分支一致）：真实报错，
+            // 不携带 result，避免把"顶层异常"伪装成一次有效压缩结果。
+            error: _errMsg,
             // P0-4: 给 SDK/用户提供 actionable 建议，避免 "Auto-compaction could not recover" 后用户不知道下一步
             suggestedAction: 'compact_failed',
             userHint: '压缩失败。可尝试发送 /compact 手动重试，或 /new 开始新会话（历史记忆不受影响）。',
