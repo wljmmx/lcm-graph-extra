@@ -2,6 +2,7 @@ import { Type, Static, type TSchemaOptions, type TLiteral, type TUnion } from 't
 import { Value } from 'typebox/value';
 import { resolve } from 'path';
 import { getGlobalLogger } from './utils/logger.js';
+import { DEFAULTS } from './config/defaults.js';
 
 /**
  * 所有支持的 LLM provider 类型（统一枚举常量）。
@@ -312,7 +313,18 @@ export const PluginConfigSchema = Type.Object({
     proactiveThreshold: Type.Number({ default: 0.55, minimum: 0, maximum: 1 }),
     systemPromptOverheadTokens: Type.Number({ default: 17_000, minimum: 0 }),
     compactTokenBudget: Type.Number({ default: 154_624, minimum: 0 }),
-    compactTimeout: Type.Number({ default: 60_000, minimum: 0 }),
+    /**
+     * 单次 DAG 压缩（LLM 摘要）尝试超时（ms）。
+     * 取值来源见 DEFAULTS.compact.attemptTimeoutMs（此前 index.ts / adapter 各自硬编码）。
+     * 环境变量 LCMG_COMPACT_TIMEOUT_MS 优先级更高（运维应急覆盖，见 lossless-claw-adapter）。
+     */
+    compactTimeout: Type.Number({ default: DEFAULTS.compact.attemptTimeoutMs, minimum: 1 }),
+    /**
+     * 输入超限阈值（contextWindow 占比，0~1）：当前 token 超过该比例即视为输入超限，
+     * 触发渐进式降级压缩（tokenBudget 逐级 100%→50%→25%→10%）。
+     * 与 assemble 侧输入超限保护共用同一取值，避免两条路径阈值漂移。
+     */
+    inputOverflowThreshold: Type.Number({ default: DEFAULTS.compact.inputOverflowRatio, minimum: 0.1, maximum: 1 }),
     maxSummaryTokenRatio: Type.Number({ default: 0.45, minimum: 0, maximum: 1 }),
     // 预压缩冷却时间（ms）：同一会话在冷却期内不重复提交预压缩任务，
     // 避免活跃对话中每轮 assemble 都触发 compact，打满本地 LLM pending 队列。
@@ -552,7 +564,9 @@ export function validateConfig(input: unknown): PluginConfig {
     highPressureThreshold: 0.85, mediumPressureThreshold: 0.70,
     proactiveThreshold: 0.65, systemPromptOverheadTokens: 17_000,
     // 0.59 × 262144 ≈ 154665，取整
-    compactTokenBudget: 154_624, compactTimeout: 60_000, maxSummaryTokenRatio: 0.45,
+    compactTokenBudget: 154_624, compactTimeout: DEFAULTS.compact.attemptTimeoutMs,
+    inputOverflowThreshold: DEFAULTS.compact.inputOverflowRatio,
+    maxSummaryTokenRatio: 0.45,
     preCompactCooldownMs: 60_000, compactCooldownMs: 120_000
   };
   // distillationLlm 未配置时保持 undefined，由 resolveDistillationLlm 的 fallback 处理

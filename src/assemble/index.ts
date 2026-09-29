@@ -30,6 +30,7 @@ import {
 // 重复 force compact（no-op）+ 无谓的 memory 文件备份
 import { clearDebt } from '../core/debt-manager.js';
 import { resolveContextProfile, SDK_OVERHEAD_TOKENS } from '../config.js';
+import { resolveCompactOptions } from '../config/defaults.js';
 import { backgroundTasks } from '../async/task-registry.js';
 import { isMainTurnActive } from '../async/main-turn-gate.js';
 import { serializeError } from '../utils/logger.js';
@@ -364,6 +365,10 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
     // 噪音治理: 该调试输出每轮 repeat，无信息量，降为 debug（原为 info 导致每轮一行）
     ctx.logger?.debug?.("[DEBUG] wmConfig keys: " + (wmConfig ? Object.keys(wmConfig).join(",") : "NULL/UNDEFINED"));
     const wm = wmConfig?.enabled !== false ? wmConfig : null;
+    // compact 相关配置集中解析（输入超限阈值等）：与 compact() 入口同源，
+    // 非法/缺失回退 DEFAULTS.compact；此处基于原始 wmConfig，保证窗口监视关闭时
+    // 输入超限保护仍按默认阈值生效（与既有行为一致）。
+    const compactOptions = resolveCompactOptions(wmConfig as any);
     const tokenBudget = params.tokenBudget;
     // SD-DEF-1: msgCount 需在残留前缀防御裁剪后同步更新，故用 let。
     let msgCount = messages.length;
@@ -761,12 +766,13 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
             return result;
           };
 
-          // ── P0: 输入超限保护 —— 当 raw token 超过 LLM 上下文窗口 80% 时，同步 compact 可能超时 ──
-          // 原公式 contextWindow * 0.90 - compactTokenBudget 存在逻辑错误：
-          // compactTokenBudget 是压缩目标预算（约 59%），不是压缩过程的额外开销。
-          // 对于 128K 窗口，原公式得到 41K（仅 32%）就触发降级，过于保守。
-          // 修复：直接用 contextWindow 的 80% 作为阈值，消息超过 80% 才跳过同步 compact。
-          const inputOverflowThreshold = Math.floor(contextWindow * 0.80);
+          // ── P0: 输入超限保护 —— 当 raw token 超过 LLM 上下文窗口阈值比例（默认 80%）时，同步 compact 可能超时 ──
+          // 阈值取自 lcmMonitor.inputOverflowThreshold（经 resolveCompactOptions 归一化，
+          // 非法/缺失回退 DEFAULTS.compact.inputOverflowRatio），与 compact() 入口同源，
+          // 避免两条路径各写一份魔数后漂移。
+          // 注意不得用 `contextWindow * 0.9 - compactTokenBudget` 推导：compactTokenBudget
+          // 是压缩「目标预算」而非「压缩开销」，相减会在 budget 接近窗口时得到负阈值。
+          const inputOverflowThreshold = Math.floor(contextWindow * compactOptions.inputOverflowRatio);
           if (effectiveTokenCount > inputOverflowThreshold && effectiveTokenCount > 0) {
             ctx.logger?.warn?.('[assemble] compact input overflow — skipping sync compact, using degraded context', {
               effectiveTokenCount,

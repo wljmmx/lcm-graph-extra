@@ -30,7 +30,7 @@ import { PluginConfigSchema, autoMatchMaxTokens, DEFAULT_CONFIG } from "./config
 import { setGlobalLogger, adaptLogger, createLogger, serializeError } from "./utils/logger.js";
 import { resolveSessionCacheKey } from "./utils/session-key.js";
 import { evaluateTurnCommit } from "./utils/commit-turn.js";
-import { DEFAULTS, configureLlmTimeouts } from "./config/defaults.js";
+import { DEFAULTS, configureLlmTimeouts, resolveCompactOptions } from "./config/defaults.js";
 
 import {
   getConversationId,
@@ -1123,6 +1123,9 @@ const pluginEntry: any = definePluginEntry({
           const _currentTokens = (params as any).currentTokenCount ?? 0;
           const _cfg = (api as any).pluginConfig ?? (api as any).config ?? {};
           const _lcmMonitor = _cfg?.lcmMonitor ?? {};
+          // compact 相关配置集中解析（超时 / 输入超限阈值）：显式配置优先，非法或缺失回退
+          // DEFAULTS.compact。宿主注入的 pluginConfig 不一定填过默认值，故必做此归一化。
+          const _compactOptions = resolveCompactOptions(_lcmMonitor as any);
 
           // 上下文窗口解析（按优先级）：
           //   1) params.contextWindow（SDK 直接传入）
@@ -1167,7 +1170,13 @@ const pluginEntry: any = definePluginEntry({
             : (_lcmMonitor as any)?.contextWindow ? 'lcmMonitor.contextWindow'
             : 'default(131072)';
           const _compactBudget = (_lcmMonitor as any)?.compactTokenBudget ?? Math.floor(_contextWindow * 0.59);
-          const _overflowThreshold = Math.floor(_contextWindow * 0.90) - _compactBudget;
+          // 输入超限阈值：直接用 contextWindow 的比例判定（compactOptions.inputOverflowRatio，默认 0.80）。
+          // BUGFIX: 原公式 `_contextWindow * 0.90 - _compactBudget` 逻辑错误 ——
+          // _compactBudget 是压缩「目标预算」而非「压缩开销」，当 compactTokenBudget 接近或
+          // 超过窗口 90%（默认 154624 vs 131072×0.9=117964）时结果为负，
+          // _isInputOverflow 对任何非零 token 数恒为 true → 每次压缩都误走 4 级渐进降级。
+          // 阈值取值与 assemble 侧输入超限保护（同语义）共用，见 DEFAULTS.compact.inputOverflowRatio。
+          const _overflowThreshold = Math.floor(_contextWindow * _compactOptions.inputOverflowRatio);
           const _isInputOverflow = _currentTokens > _overflowThreshold && _currentTokens > 0;
 
           // 渐进式 budget 列表：从默认 budget 依次降级到 50% → 25% → 10%
@@ -1387,6 +1396,8 @@ const pluginEntry: any = definePluginEntry({
             // 依次尝试每个 budget，直到某个 budget 成功通过 precheck 并完成压缩。
             // 非超限场景下 _progressiveBudgets = [_compactBudget]，退化为单次调用。
             let _succeededBudget = 0; // 记录成功时的 budget，用于判断是否需要 follow-up 迭代压缩
+            // 本轮是否因超时收束（超时后不再尝试更小 budget，见下方 catch）
+            let _timedOut = false;
             for (const _tryBudget of _progressiveBudgets) {
               if (adapterCompacted) break; // 已成功，跳出循环
 
@@ -1403,7 +1414,10 @@ const pluginEntry: any = definePluginEntry({
               // 避免高压超时后定时器与 abort listener 泄漏；并对未决的 timeout/abort promise 预吞 reject。
               let compactTimer: ReturnType<typeof setTimeout> | undefined;
               const compactTimeoutPromise = new Promise<never>((_, reject) => {
-                compactTimer = setTimeout(() => reject(new Error('compact: 300s timeout reached')), 300_000);
+                compactTimer = setTimeout(
+                  () => reject(new Error(`compact: ${_compactOptions.attemptTimeoutMs}ms timeout reached`)),
+                  _compactOptions.attemptTimeoutMs,
+                );
               });
               compactTimeoutPromise.catch(() => {});
               let abortListener: (() => void) | null = null;
@@ -1453,6 +1467,9 @@ const pluginEntry: any = definePluginEntry({
                     tokenBudget: _isInputOverflow
                       ? _tryBudget
                       : (params.force === true ? _forceCompactBudget : _contextWindow),
+                    // 单次尝试超时统一由配置决定（lcmMonitor.compactTimeout → DEFAULTS.compact.attemptTimeoutMs），
+                    // 不再由 adapter 内部另取一套硬编码值；env LCMG_COMPACT_TIMEOUT_MS 仍在 adapter 内优先。
+                    timeoutMs: _compactOptions.attemptTimeoutMs,
                     // BUGFIX: 默认 force=true — 我们的 compact hook 总是被 /compact 主动触发，
                     // 不依赖 SDK 是否传 force。
                     force: true,
@@ -1509,7 +1526,17 @@ const pluginEntry: any = definePluginEntry({
                   logger?.warn?.("compact: DAG compaction aborted by host", { err: serializeError(ceErr) });
                   break; // abort 时不再重试后续 budget
                 } else if (msg.includes('timeout')) {
-                  logger?.warn?.("compact: DAG compaction timed out after 300s", { err: serializeError(ceErr), budget: _tryBudget });
+                  // 超时说明引擎/摘要 LLM 侧卡住（而非"budget 太大被 precheck 拒绝"）。
+                  // 渐进式降级只对后者有效：换更小的 budget 不会解开卡住的请求，只会
+                  // 把阻塞时间成倍放大（原实现最坏 4 × compactTimeout）。故与 abort 同样
+                  // 立即收束，剩余超限处理交给下方"预算耗尽 → 记债务 + 降级摘要"分支，
+                  // 由债务调度器在轮次间隙异步重试。整体阻塞上限收敛为 1 × compactTimeout。
+                  logger?.warn?.(
+                    `compact: DAG compaction timed out after ${_compactOptions.attemptTimeoutMs}ms, stop retrying smaller budgets`,
+                    { err: serializeError(ceErr), budget: _tryBudget, timeoutMs: _compactOptions.attemptTimeoutMs },
+                  );
+                  _timedOut = true;
+                  break;
                 } else {
                   logger?.warn?.("compact: background DAG compaction failed", { err: serializeError(ceErr), budget: _tryBudget });
                 }
@@ -1524,6 +1551,7 @@ const pluginEntry: any = definePluginEntry({
                 budgetsTried: _progressiveBudgets,
                 currentTokenCount: _currentTokens,
                 currentThreshold: _overflowThreshold,
+                timedOut: _timedOut,
               });
 
               // 记录负债：debt-manager 后续异步重试
@@ -1539,7 +1567,8 @@ const pluginEntry: any = definePluginEntry({
                   _convId,
                   _compactBudget,
                   _currentTokens,
-                  'compact_budgets_exhausted_' + _currentTokens + '_gt_' + _overflowThreshold,
+                  'compact_budgets_exhausted_' + _currentTokens + '_gt_' + _overflowThreshold
+                    + (_timedOut ? '_timeout' : ''),
                 );
               }
 
@@ -1581,7 +1610,10 @@ const pluginEntry: any = definePluginEntry({
           // P0-3b H-4 + SEC-10 M-16: 同 DAG compact 块，捕获 timer/abort listener handle 并在 finally 清理。
           let hookTimer: ReturnType<typeof setTimeout> | undefined;
           const hookTimeoutPromise = new Promise<never>((_, reject) => {
-            hookTimer = setTimeout(() => reject(new Error('onCompaction: 300s timeout reached')), 300_000);
+            hookTimer = setTimeout(
+              () => reject(new Error(`onCompaction: ${_compactOptions.attemptTimeoutMs}ms timeout reached`)),
+              _compactOptions.attemptTimeoutMs,
+            );
           });
           hookTimeoutPromise.catch(() => {});
           let hookAbortListener: (() => void) | null = null;

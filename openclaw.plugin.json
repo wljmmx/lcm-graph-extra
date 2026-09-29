@@ -337,7 +337,16 @@
           },
           "compactTimeout": {
             "type": "integer",
-            "default": 60000
+            "default": 300000,
+            "minimum": 1,
+            "description": "单次 DAG 压缩（LLM 摘要）尝试超时（ms）。默认 300000。环境变量 LCMG_COMPACT_TIMEOUT_MS 优先级更高。"
+          },
+          "inputOverflowThreshold": {
+            "type": "number",
+            "default": 0.8,
+            "minimum": 0.1,
+            "maximum": 1,
+            "description": "输入超限阈值（contextWindow 占比）：当前 token 超过该比例即视为输入超限，触发渐进式降级压缩（tokenBudget 逐级 100%→50%→25%→10%）。默认 0.8，与 assemble 侧输入超限保护共用同一取值。"
           },
           "maxSummaryTokenRatio": {
             "type": "number",

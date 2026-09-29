@@ -122,7 +122,64 @@ export const DEFAULTS = {
   ttl: {
     halfLifeDays: 45, // 权重半衰期
   },
+
+  /**
+   * compact（DAG 压缩 / LLM 摘要）默认值 —— 单一来源，供 compact() 入口
+   * （index.ts）与 lossless-claw adapter 共用，避免两处各自硬编码后漂移。
+   */
+  compact: {
+    /**
+     * 单次压缩尝试超时（ms）。
+     * 取值依据：本地 27B 模型对长上下文做摘要最坏 ~2-3min（对齐 llm.distillMs=120s
+     * 同类场景并留余量）。此前 index.ts / adapter 各自硬编码 300_000，
+     * 此处收编为默认值，用户经 lcmMonitor.compactTimeout 覆盖。
+     */
+    attemptTimeoutMs: 300_000,
+    /**
+     * 输入超限阈值（contextWindow 占比）：当前 token 超过该比例即视为「输入超限」，
+     * 触发渐进式降级压缩（逐级缩小 tokenBudget）。
+     * 取值依据：与 assemble 侧输入超限保护同一语义（原为硬编码 0.80）。
+     * 注意：不得用 `contextWindow * 0.9 - compactTokenBudget` 之类公式推导 ——
+     * compactTokenBudget 是压缩「目标」而非「开销」，相减会在 budget 接近窗口时
+     * 得到负阈值，导致每次压缩都被误判为超限。
+     */
+    inputOverflowRatio: 0.80,
+  },
 } as const;
 
 /** 便利子对象类型（用于函数参数默认值等场景） */
 export type Defaults = typeof DEFAULTS;
+
+/** lcmMonitor 中与 compact 相关的配置子集（原始 pluginConfig 可能未填默认值） */
+export interface CompactConfigInput {
+  compactTimeout?: number;
+  inputOverflowThreshold?: number;
+}
+
+export interface CompactOptions {
+  /** 单次压缩尝试超时（ms） */
+  attemptTimeoutMs: number;
+  /** 输入超限阈值（contextWindow 占比，0~1） */
+  inputOverflowRatio: number;
+}
+
+/**
+ * 从 pluginConfig.lcmMonitor 解析 compact 选项：显式配置优先，非法/缺失回退 DEFAULTS.compact。
+ *
+ * 为什么需要它：index.ts / assemble 读的是宿主注入的**原始** pluginConfig，
+ * 不一定经过 validateConfig 填默认值；两处各自 `?? 300_000`/`?? 0.80` 又会漂移。
+ * 集中解析 + 校验，保证默认值只有一处来源。
+ */
+export function resolveCompactOptions(lcmMonitor?: CompactConfigInput | null): CompactOptions {
+  const rawTimeout = Number((lcmMonitor as CompactConfigInput | undefined)?.compactTimeout);
+  const attemptTimeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? Math.floor(rawTimeout)
+    : DEFAULTS.compact.attemptTimeoutMs;
+
+  const rawRatio = Number((lcmMonitor as CompactConfigInput | undefined)?.inputOverflowThreshold);
+  const inputOverflowRatio = Number.isFinite(rawRatio) && rawRatio > 0 && rawRatio <= 1
+    ? rawRatio
+    : DEFAULTS.compact.inputOverflowRatio;
+
+  return { attemptTimeoutMs, inputOverflowRatio };
+}

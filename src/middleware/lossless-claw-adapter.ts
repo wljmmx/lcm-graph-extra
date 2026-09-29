@@ -66,6 +66,8 @@ interface LosslessClawEngine {
     currentTokenCount?: number;
     compactionTarget?: 'budget' | 'threshold';
     customInstructions?: string;
+    /** 单次压缩尝试超时（ms）。由 compact() 入口按配置传入；缺省走 env / DEFAULTS.compact */
+    timeoutMs?: number;
     runtimeContext?: any;
     runtimeSettings?: any;
     legacyParams?: any;
@@ -697,6 +699,8 @@ export class LosslessClawAdapter {
     currentTokenCount?: number;
     compactionTarget?: 'budget' | 'threshold';
     customInstructions?: string;
+    /** 单次压缩尝试超时（ms）。由 compact() 入口按配置传入；缺省走 env / DEFAULTS.compact */
+    timeoutMs?: number;
     runtimeContext?: any;
     runtimeSettings?: any;
     legacyParams?: any;
@@ -788,10 +792,16 @@ export class LosslessClawAdapter {
         compactionTarget: params.compactionTarget,
         currentTokenCount: params.currentTokenCount,
       });
+      // 超时取值优先级（从高到低）：
+      //   1) LCMG_COMPACT_TIMEOUT_MS —— 运维应急覆盖（跨所有会话生效，保持既有文档语义）
+      //   2) params.timeoutMs —— 调用方按配置传入（lcmMonitor.compactTimeout）
+      //   3) DEFAULTS.compact.attemptTimeoutMs —— 集中默认值（不再本地硬编码）
       const compactTimeoutMs = (() => {
         const raw = process.env.LCMG_COMPACT_TIMEOUT_MS;
         if (raw) { const n = Number(raw); if (Number.isFinite(n) && n > 0) return n; }
-        return 300_000; // 5min 默认上限
+        const fromParams = Number(params.timeoutMs);
+        if (Number.isFinite(fromParams) && fromParams > 0) return Math.floor(fromParams);
+        return DEFAULTS.compact.attemptTimeoutMs;
       })();
       let compactTimer: ReturnType<typeof setTimeout> | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
