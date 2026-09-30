@@ -390,11 +390,26 @@ export async function detectNeo4jEdition(): Promise<Neo4jEdition> {
 }
 
 /**
+ * 向量索引目标参数（单一事实来源，建索引与建后校验共用）。
+ *
+ * Neo4j 2026.x 的 Provider 为 `vector-2.0`：HNSW / 量化参数**不再有全局默认配置**
+ * （dbms.index.vector.default.* 已废弃），必须在 CREATE VECTOR INDEX 的
+ * OPTIONS { indexProvider, vectorConfig } 里显式指定。
+ * `efSearch` 不在此列 —— 它是**查询期**参数，写在 db.index.vector.queryNodes 的第 4 个入参。
+ */
+const VECTOR_HNSW_M = 16;
+const VECTOR_HNSW_EF_CONSTRUCTION = 96;
+const VECTOR_SEARCH_EXPANSION_FACTOR = 2.0;
+const VECTOR_QUANTIZATION_TYPE = 'SCALAR';
+
+/**
  * 幂等建立 Neo4j schema（约束 + 全文索引 + 向量索引）。
- * 对齐 gm-pro v2.4.1：按版别选用向量索引精细参数。
- *  - Enterprise：m=16 / ef_construction=128 / scalar 量化 + default_search_expansion_factor=1.5（HFQ 增强重打分）
- *  - Community/未知：跳过量化和 HNSW 精细选项，仅基础 multi-label 向量索引
- * 任一语句失败仅吞掉（IF NOT EXISTS 幂等；老版本不支持时回落过程化调用），不阻塞调用方。
+ *
+ * 向量索引：目标参数 m=16 / efConstruction=96 / SCALAR 量化 / searchExpansionFactor=2.0
+ * （见上方 VECTOR_* 常量），按"2026.x vector-2.0 → 5.x indexConfig(精细) →
+ * 5.x indexConfig(基础) → <5.11 过程化"的顺序尝试，任一成功即视为建好；
+ * 建后读回 SHOW VECTOR INDEXES 校验实际参数并告警不一致。
+ * 其余语句任一失败仅吞掉（IF NOT EXISTS 幂等），不阻塞调用方。
  */
 export async function ensureNeo4jSchema(): Promise<void> {
   if (_schemaReady) return _schemaReady;
@@ -467,28 +482,65 @@ export async function ensureNeo4jSchema(): Promise<void> {
           }
         }
 
-        // 向量索引（Neo4j 5.11+）：跨 Task|Skill|Event 单索引
-        // 企业版启用精细 HNSW + 量化（针对 NAS/内存有限场景）；社区版仅基础参数
+        // 向量索引（Neo4j 5.11+）：跨 Task|Skill|Event 单索引。
+        //
+        // Neo4j 2026.x 起向量 Provider 为 `vector-2.0`，**HNSW / 量化参数不再有全局默认配置**
+        // （dbms.index.vector.default.* 已废弃，全局环境变量不起作用），必须在建索引的 Cypher 里
+        // 通过 OPTIONS { indexProvider, vectorConfig } 显式指定。
+        // 目标参数：dimensions=配置值(默认 1024) / quantizationType=SCALAR /
+        //           hnsw.m=16 / hnsw.efConstruction=96 / searchExpansionFactor=2.0。
+        // 注意：efSearch(=48) 是**查询期**参数，只写在 db.index.vector.queryNodes 的第 4 个入参，
+        //       建索引阶段不存在该参数（它是检索候选队列，不是索引存储参数）。
+        //
+        // 变体链（与上面 FULLTEXT 同样思路：按"新语法 → 旧语法 → 过程化"依次尝试，
+        // 任一成功即视为建好）——不同 Neo4j 版本/版别接受的语法不同：
+        //   1. 2026.x：indexProvider:'vector-2.0' + vectorConfig（本文件的目标形态）
+        //   2. 5.11~5.x Enterprise：OPTIONS { indexConfig: { `vector.*` } } + HNSW/量化
+        //   3. 5.11~5.x Community：indexConfig 仅 dimensions + similarity（量化/HNSW 不可用）
+        //   4. <5.11：过程化 db.index.vector.createNodeIndex
         const dim = resolveEmbeddingConfig(getPluginNeo4jConfig())?.dimensions ?? 1024;
-        try {
-          if (isEnterprise) {
-            await session.run(`
-              CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+        const VECTOR_INDEX_NAME = 'gm_node_embedding';
+        const vectorVariants: Array<{ label: string; cypher: string }> = [
+          {
+            label: 'vector-2.0 (Neo4j 2026.x)',
+            cypher: `
+              CREATE VECTOR INDEX ${VECTOR_INDEX_NAME} IF NOT EXISTS
+              FOR (n:Task|Skill|Event) ON (n.embedding)
+              OPTIONS {
+                indexProvider: 'vector-2.0',
+                vectorConfig: {
+                  dimensions: ${dim},
+                  quantizationType: '${VECTOR_QUANTIZATION_TYPE}',
+                  hnsw: {
+                    m: ${VECTOR_HNSW_M},
+                    efConstruction: ${VECTOR_HNSW_EF_CONSTRUCTION}
+                  },
+                  searchExpansionFactor: ${VECTOR_SEARCH_EXPANSION_FACTOR}
+                }
+              }
+            `,
+          },
+          {
+            label: 'indexConfig + HNSW/SCALAR (5.x Enterprise)',
+            cypher: `
+              CREATE VECTOR INDEX ${VECTOR_INDEX_NAME} IF NOT EXISTS
               FOR (n:Task|Skill|Event) ON n.embedding
               OPTIONS {
                 indexConfig: {
                   \`vector.dimensions\`: ${dim},
                   \`vector.similarity_function\`: 'cosine',
-                  \`vector.quantization.type\`: 'scalar',
-                  \`vector.default_search_expansion_factor\`: 1.5,
-                  \`vector.hnsw.m\`: 16,
-                  \`vector.hnsw.ef_construction\`: 128
+                  \`vector.quantization.type\`: '${VECTOR_QUANTIZATION_TYPE.toLowerCase()}',
+                  \`vector.default_search_expansion_factor\`: ${VECTOR_SEARCH_EXPANSION_FACTOR},
+                  \`vector.hnsw.m\`: ${VECTOR_HNSW_M},
+                  \`vector.hnsw.ef_construction\`: ${VECTOR_HNSW_EF_CONSTRUCTION}
                 }
               }
-            `);
-          } else {
-            await session.run(`
-              CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+            `,
+          },
+          {
+            label: 'indexConfig basic (5.x Community)',
+            cypher: `
+              CREATE VECTOR INDEX ${VECTOR_INDEX_NAME} IF NOT EXISTS
               FOR (n:Task|Skill|Event) ON n.embedding
               OPTIONS {
                 indexConfig: {
@@ -496,16 +548,100 @@ export async function ensureNeo4jSchema(): Promise<void> {
                   \`vector.similarity_function\`: 'cosine'
                 }
               }
-            `);
-          }
-        } catch {
-          // 老版本不支持 CREATE VECTOR INDEX / 多 label 选项 → 回落过程化调用
+            `,
+          },
+          {
+            label: 'procedural createNodeIndex (<5.11)',
+            cypher: `CALL db.index.vector.createNodeIndex('${VECTOR_INDEX_NAME}', ['Task', 'Skill', 'Event'], 'embedding', ${dim}, 'cosine')`,
+          },
+        ];
+        let vectorVariant: string | null = null;
+        const vectorErrors: string[] = [];
+        for (const v of vectorVariants) {
           try {
-            await session.run(
-              `CALL db.index.vector.createNodeIndex('gm_node_embedding', ['Task', 'Skill', 'Event'], 'embedding', ${dim}, 'cosine')`,
-            );
-          } catch { /* may exist or version < 5.11 */ }
+            await session.run(v.cypher);
+            vectorVariant = v.label;
+            break;
+          } catch (e) {
+            vectorErrors.push(`${v.label}: ${e instanceof Error ? e.message : String(e)}`);
+          }
         }
+        if (vectorVariant) {
+          getGlobalLogger()?.info?.(`[lcm-graph-extra] vector index ${VECTOR_INDEX_NAME} ensured via ${vectorVariant} (dim=${dim})`);
+        } else {
+          // 全部变体失败必须告警（而不是静默吞掉）：向量索引缺失会让检索侧
+          // "查不到向量索引" 且无人察觉。这里把每个变体的错误都带出来。
+          getGlobalLogger()?.warn?.(
+            '[lcm-graph-extra] CREATE VECTOR INDEX failed for ALL syntax variants',
+            { name: VECTOR_INDEX_NAME, dim, errors: vectorErrors },
+          );
+        }
+
+        // 建后校验：读回真实 provider / vectorConfig / state。
+        // 必要性：CREATE ... IF NOT EXISTS 对**已存在**的索引不会更新参数 —— 若线上还是
+        // 旧参数（例如 5.x 建的 efConstruction=128、或旧 Provider）索引，新参数永远不会生效。
+        // 这里只如实告警并给出确切的重建 DDL，不擅自 DROP（重建大向量库耗时长且期间不可用）。
+        try {
+          // driver 返回的 map 可能是 Map / 原生对象，统一转成普通对象后再比对
+          const toPlain = (v: any): any => {
+            if (v == null || typeof v !== 'object') return v;
+            if (Array.isArray(v)) return v.map(toPlain);
+            if (typeof v.toObject === 'function') return toPlain(v.toObject());
+            if (typeof v.get === 'function' && typeof v.keys === 'function') {
+              const o: Record<string, any> = {};
+              for (const k of v.keys()) o[String(k)] = toPlain(v.get(k));
+              return o;
+            }
+            const o: Record<string, any> = {};
+            for (const k of Object.keys(v)) o[k] = toPlain(v[k]);
+            return o;
+          };
+          const shown = await session.run(
+            'SHOW VECTOR INDEXES YIELD name, indexProvider, vectorConfig, state',
+          );
+          for (const rec of shown.records) {
+            if (String(rec.get('name')) !== VECTOR_INDEX_NAME) continue;
+            const provider = rec.get('indexProvider');
+            const state = rec.get('state');
+            const cfg = toPlain(rec.get('vectorConfig')) ?? {};
+            const hnsw = cfg.hnsw ?? {};
+            const liveEf = Number(hnsw.efConstruction ?? cfg['hnsw.ef_construction']);
+            const liveDim = Number(cfg.dimensions ?? cfg['vector.dimensions']);
+            const liveQuant = String(cfg.quantizationType ?? cfg['quantization.type'] ?? '');
+            getGlobalLogger()?.info?.(
+              `[lcm-graph-extra] vector index live config: provider=${provider} state=${state} `
+              + `dimensions=${cfg.dimensions ?? cfg['vector.dimensions'] ?? 'n/a'} `
+              + `efConstruction=${hnsw.efConstruction ?? cfg['hnsw.ef_construction'] ?? 'n/a'} `
+              + `quantizationType=${liveQuant || 'n/a'} `
+              + `searchExpansionFactor=${cfg.searchExpansionFactor ?? cfg['default_search_expansion_factor'] ?? 'n/a'}`,
+            );
+            // 只比对"确实读出来的"值：形状不可识别时保持沉默，避免误报
+            const mismatch: string[] = [];
+            if (Number.isFinite(liveEf) && liveEf !== VECTOR_HNSW_EF_CONSTRUCTION) {
+              mismatch.push(`efConstruction=${liveEf}（目标 ${VECTOR_HNSW_EF_CONSTRUCTION}）`);
+            }
+            if (Number.isFinite(liveDim) && liveDim !== dim) {
+              mismatch.push(`dimensions=${liveDim}（目标 ${dim}）`);
+            }
+            if (liveQuant && liveQuant.toLowerCase() !== 'scalar') {
+              mismatch.push(`quantizationType=${liveQuant}（目标 SCALAR）`);
+            }
+            if (mismatch.length > 0) {
+              getGlobalLogger()?.warn?.(
+                `[lcm-graph-extra] vector index ${VECTOR_INDEX_NAME} 参数与目标不一致：${mismatch.join('; ')}`
+                + ` —— CREATE INDEX IF NOT EXISTS 不会更新既有索引的参数。`
+                + ` 如需按 m=${VECTOR_HNSW_M} / efConstruction=${VECTOR_HNSW_EF_CONSTRUCTION} / SCALAR /`
+                + ` searchExpansionFactor=2.0 重建，请手动执行：DROP VECTOR INDEX \`${VECTOR_INDEX_NAME}\` IF EXISTS;`
+                + ` 然后重跑 schema 初始化。重建为后台异步（state=POPULATING），ONLINE 后检索才可用。`,
+              );
+            }
+            if (state && String(state) !== 'ONLINE') {
+              getGlobalLogger()?.info?.(
+                `[lcm-graph-extra] vector index ${VECTOR_INDEX_NAME} state=${state}（构建为后台异步，ONLINE 前检索不可用）`,
+              );
+            }
+          }
+        } catch { /* SHOW VECTOR INDEXES 的列/语法在老版本不可用 → 跳过校验 */ }
       } finally { await session.close(); }
     } catch (e) {
       // schema 初始化失败不阻塞工具主体（仅降低后续查询性能），
