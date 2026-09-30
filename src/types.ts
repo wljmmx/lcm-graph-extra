@@ -13,6 +13,12 @@ export interface EmbeddingConfig {
   keepAlive?: string;
   /** 单次批量嵌入请求携带的最大文本数（默认 32）；用于 batchUpsert 等批量场景 */
   batchSize?: number;
+  /** 同一端点的 embedding 并发上限（默认 2）。上限 32。对齐 graph-memory-pro v2.8.x */
+  maxConcurrency?: number;
+  /** 相邻两次 embedding 发送的最小间隔 ms（默认 0 = 关闭）。用于抑制"无间隔连续请求流" */
+  requestIntervalMs?: number;
+  /** 单个子批次的总字符预算（默认 0 = 关闭，仅按 batchSize 切分）。长度感知装箱用 */
+  maxBatchChars?: number;
 }
 
 export type RetrievalSource = 'qmd' | 'graph';

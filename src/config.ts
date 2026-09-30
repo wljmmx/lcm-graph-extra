@@ -232,6 +232,10 @@ export const PluginConfigSchema = Type.Object({
     dimensions: Type.Optional(Type.Number()),
     keepAlive: Type.Optional(Type.String()),
     batchSize: Type.Optional(Type.Number()),
+    // 并发与节流（对齐 graph-memory-pro v2.8.x）：默认并发 2；间隔默认关闭（0）
+    maxConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: 32 })),
+    requestIntervalMs: Type.Optional(Type.Number({ minimum: 0 })),
+    maxBatchChars: Type.Optional(Type.Number({ minimum: 0 })),
   })),
 
   neo4j: Type.Optional(Type.Object({

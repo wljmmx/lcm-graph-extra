@@ -456,6 +456,22 @@
             "type": "integer",
             "minimum": 1,
             "description": "单次批量 embedding 请求携带的最大文本数（默认 32）。批量 upsert 实体向量生成时，按此值切分子批，减少 HTTP 往返与本地 Ollama 队列压力。"
+          },
+          "maxConcurrency": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "description": "同一 embedding 端点（baseURL|model）的最大并发请求数（默认 2）。并发上限保护下游服务（本地 Ollama / OVMS），与对话请求共存时的安全值；过大可能触发服务端 503 / maximum pending requests exceeded。"
+          },
+          "requestIntervalMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "相邻两次 embedding 发送的最小间隔（毫秒，默认 0 = 关闭）。并发上限只限制同时在飞的数量，释放后下一个请求会立即补位、形成零间隔请求流；实测 OVMS 在此模式下会间歇返回 404 Mediapipe graph not found，而增加间隔后消失。可设为如 50~200 抑制该问题。"
+          },
+          "maxBatchChars": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "单个批量 embedding 子批次的总字符预算（默认 0 = 关闭，仅按 batchSize 切分）。只按条数装箱时单请求工作量方差极大（32 条 10 字 vs 32 条 800 字），长文本场景易被固定超时击穿并触发重试；设置后可长度感知装箱。"
           }
         }
       },

@@ -140,7 +140,11 @@
     "baseURL": "http://127.0.0.1:18789/v1",
     "model": "nomic-embed-text",
     "dimensions": 768,
-    "keepAlive": "1h"
+    "keepAlive": "1h",
+    "batchSize": 32,
+    "maxConcurrency": 2,
+    "requestIntervalMs": 0,
+    "maxBatchChars": 0
   }
 }
 ```
@@ -152,6 +156,14 @@
 | `embedding.model` | `string` | 嵌入模型名 |
 | `embedding.dimensions` | `number` | 向量维度 |
 | `embedding.keepAlive` | `string` | Ollama keepAlive |
+| `embedding.batchSize` | `number` | 单请求最大文本数（默认 32） |
+| `embedding.maxConcurrency` | `number` | 同一端点（`baseURL\|model`）最大并发（默认 2，上限 32）。并发上限只限制"同时在飞"的数量，**不限制发送频率** |
+| `embedding.requestIntervalMs` | `number` | 相邻两次发送的最小间隔 ms（默认 0 = 关闭）。用于抑制"零间隔连续请求流"——实测 OVMS 在该模式下会间歇返回 404 Mediapipe graph not found，增加间隔即消失 |
+| `embedding.maxBatchChars` | `number` | 单个子批次的总字符预算（默认 0 = 关闭，仅按 `batchSize` 切分）。开启后按长度感知装箱，避免长文本子批次被固定超时击穿后触发重试 |
+
+> 并发与节流语义对齐 graph-memory-pro v2.8.x（信号量 + pacing 游标）。
+> 本地/私网 Ollama 端点另有一层全局闸门 `OLLAMA_MAX_CONCURRENCY`（默认 2，与 LLM 调用共用）；
+> 本插件的 `maxConcurrency`/`requestIntervalMs` 对**所有**端点生效（含公网 OVMS）。
 
 ---
 

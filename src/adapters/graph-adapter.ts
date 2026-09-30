@@ -1254,8 +1254,9 @@ export class GraphAdapter {
               this.logger?.debug?.('[graph-adapter] batch embedding gen failed', { err: e instanceof Error ? e.message : String(e) });
             }
           } else {
-            // 回退路径（无批量能力）：v2.9.0 并发 8→4 —— 与全局 Ollama 并发闸门
-            // （OLLAMA_MAX_CONCURRENCY 默认 2）协同，避免打进本地 Ollama 造成 503。
+            // 回退路径（无批量能力）：本地 worker 并发 4 —— 这只是**提交并发**，
+            // 真正的下游上限由 embed-fn 的每端点信号量（embedding.maxConcurrency，默认 2）
+            // 与 withOllamaSlot（OLLAMA_MAX_CONCURRENCY，默认 2）共同收敛，故不会打爆服务端。
             const CONCURRENCY = 4;
             let idx = 0;
             const worker = async () => {

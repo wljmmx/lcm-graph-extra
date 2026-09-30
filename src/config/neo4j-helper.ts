@@ -166,12 +166,29 @@ export function resolveEmbeddingConfig(
   const batchSize = typeof rawBatchSize === 'number' && Number.isFinite(rawBatchSize) && rawBatchSize >= 1
     ? Math.floor(rawBatchSize)
     : undefined;
+  // 并发上限 / 发送间隔 / 批量字符预算：非法值交给 embed-fn 的 resolve* 回退默认
+  // （并发默认 2、间隔默认关闭=0、字符预算默认关闭=0），与 graph-memory-pro v2.8.x 同语义。
+  const rawMaxConcurrency = embeddingSection.maxConcurrency;
+  const maxConcurrency = typeof rawMaxConcurrency === 'number' && Number.isFinite(rawMaxConcurrency) && rawMaxConcurrency >= 1
+    ? Math.min(32, Math.floor(rawMaxConcurrency))
+    : undefined;
+  const rawRequestIntervalMs = embeddingSection.requestIntervalMs;
+  const requestIntervalMs = typeof rawRequestIntervalMs === 'number' && Number.isFinite(rawRequestIntervalMs) && rawRequestIntervalMs > 0
+    ? Math.floor(rawRequestIntervalMs)
+    : undefined;
+  const rawMaxBatchChars = embeddingSection.maxBatchChars;
+  const maxBatchChars = typeof rawMaxBatchChars === 'number' && Number.isFinite(rawMaxBatchChars) && rawMaxBatchChars > 0
+    ? Math.floor(rawMaxBatchChars)
+    : undefined;
   // P1-6 BUG-3: 原返回对象丢失 apiKey 与 options，导致需要鉴权的远程 embedding 端点不可用。
   const apiKey = (embeddingSection.apiKey as string) || process.env.GM_EMBED_API_KEY || undefined;
   const options = (embeddingSection.options as Record<string, number | boolean | string>) || undefined;
 
   const result: EmbeddingConfig = { model, baseURL, dimensions, keepAlive };
   if (batchSize !== undefined) result.batchSize = batchSize;
+  if (maxConcurrency !== undefined) result.maxConcurrency = maxConcurrency;
+  if (requestIntervalMs !== undefined) result.requestIntervalMs = requestIntervalMs;
+  if (maxBatchChars !== undefined) result.maxBatchChars = maxBatchChars;
   if (apiKey) result.apiKey = apiKey;
   if (options) result.options = options;
   return result;

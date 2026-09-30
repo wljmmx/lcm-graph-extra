@@ -38,6 +38,7 @@
 import type { EmbeddingConfig } from '../types.js';
 import { cleanBaseURL, isOllamaEndpoint, isOpenAiCompatibleEndpoint } from '../utils/url.js';
 import { withOllamaSlot } from '../async/ollama-slot.js';
+import { getGlobalLogger } from '../utils/logger.js';
 // P2-9: 接入集中化 LLM 超时常量
 import { llmTimeout } from '../config/defaults.js';
 
@@ -75,6 +76,114 @@ function embedCacheKey(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// 并发闸门 + 发送节流
+// 对齐 graph-memory-pro v2.8.x `src/engine/embed.ts` 的实现（信号量 + pacing 游标）：
+//   - 信号量：管"同时在飞 ≤ maxConcurrency"（默认 2）
+//   - pacing 游标：管"相邻两次发送间隔 ≥ requestIntervalMs"（默认 0 = 关闭）
+// 两者叠加，才是完整的下游保护；单靠并发上限挡不住**零间隔连续请求流**。
+//
+// 为什么要 pacing（gm-pro 的现场证据，直接适用本插件）：
+//   信号量只限制同时在飞的数量，释放许可后下一个请求**立即补位**（正常路径零间隔）。
+//   实测 OVMS 在背靠背连续请求流下会间歇返回
+//   `404 Mediapipe graph definition with requested name is not found`，而
+//   并发仅 2 却失败、用户手动 8~16 并发全部 200、增加间隔后不再报错
+//   ⇒ 触发点是**持续速率/无间隔**，不是并发上限。
+//
+// 与 withOllamaSlot 的分工（两者都要保留，不可互相替代）：
+//   - 本信号量：**端点无关**（含公网 OVMS —— withOllamaSlot 对非私网端点直接放行），
+//     按 `${baseURL}|${model}` 限并发，闭掉"判定外的端点完全无限制"这个开口。
+//   - withOllamaSlot：只覆盖本机/私网 Ollama，额外提供**跨模型串行**（防模型互踢换载），
+//     且与插件的 LLM 调用共用同一队列。
+//   叠加顺序：信号量（外）→ pacing → withOllamaSlot（内）→ fetch。
+//   不会死锁：内层槽位必然最终释放（LLM 请求即使正占用，也会结束）。
+// ---------------------------------------------------------------------------
+
+/** 每端点 embed 并发上限（默认 2）。与对话共存的安全值，可用 embedding.maxConcurrency 调整 */
+const DEFAULT_EMBED_MAX_CONCURRENCY = 2;
+
+/** 重试退避（对齐 gm-pro v2.8.x RETRY_DELAYS） */
+const RETRY_DELAYS_MS = [1000, 3000, 5000];
+/** 重试退避的 jitter 上限——防止并发失败时重试波峰对齐，加剧下游过载 */
+const RETRY_JITTER_MAX_MS = 500;
+/** 可重试状态码（服务端过载/瞬时故障） */
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 529]);
+/** 批量路径超时（对齐 gm-pro：批量输入多，弱 CPU 下用单文本超时易误超时 → 触发重试风暴） */
+const BATCH_TIMEOUT_MS = 120_000;
+/** 子批次失败后逐条重发的连续失败短路阈值（判定为系统性故障，立即停止，防请求风暴） */
+const FALLBACK_CONSECUTIVE_FAIL_LIMIT = 2;
+
+interface Semaphore {
+  acquire(): Promise<() => void>;
+}
+
+function createSemaphore(max: number): Semaphore {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  return {
+    async acquire(): Promise<() => void> {
+      if (active >= max) {
+        await new Promise<void>((resolve) => waiters.push(resolve));
+      }
+      active++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        active--;
+        const next = waiters.shift();
+        if (next) next();
+      };
+    },
+  };
+}
+
+/** 模块级共享信号量：同 `baseURL|model` 的所有调用方（单文本/批量/graph 实体）共用同一限制器 */
+const _semaphores = new Map<string, Semaphore>();
+
+function getSemaphore(baseURL: string, model: string, maxConcurrency: number): Semaphore {
+  const key = `${baseURL}|${model}`;
+  let sem = _semaphores.get(key);
+  if (!sem) {
+    sem = createSemaphore(maxConcurrency);
+    _semaphores.set(key, sem);
+  }
+  return sem;
+}
+
+/** 每端点"下一次允许发送"的时间游标（pacing） */
+const _pacingGates = new Map<string, { nextAt: number }>();
+
+/**
+ * 等待到该端点允许发送的时刻。
+ *
+ * 竞态说明：游标在 await 之前同步推进（JS 单线程，await 前不会被打断）→ 天然无竞态，
+ * 多个并发调用会各拿到互不重叠的时间片。
+ */
+async function waitForPacing(key: string, intervalMs: number): Promise<void> {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+  let gate = _pacingGates.get(key);
+  if (!gate) {
+    gate = { nextAt: 0 };
+    _pacingGates.set(key, gate);
+  }
+  const now = Date.now();
+  const at = Math.max(now, gate.nextAt);
+  // 同步推进游标（await 之前，不会被其它调用插入）
+  gate.nextAt = at + intervalMs;
+  const wait = at - now;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
+/**
+ * 清空模块级并发/节流状态。
+ * 用途：测试隔离（避免跨用例共享信号量导致断言失真）+ 运行期配置变更后重置。
+ */
+export function clearEmbedConcurrencyState(): void {
+  _semaphores.clear();
+  _pacingGates.clear();
+}
+
+// ---------------------------------------------------------------------------
 // 端点解析：单文本与批量共用，保证两条链路判定一致
 // ---------------------------------------------------------------------------
 
@@ -91,6 +200,8 @@ interface ResolvedEmbedTarget {
   headers: Record<string, string>;
   keepAliveNorm: string | number;
   options?: Record<string, number | boolean | string>;
+  /** 相邻两次发送的最小间隔（ms，0 = 关闭节流） */
+  requestIntervalMs: number;
 }
 
 /** 端点判定闭包状态：Ollama 旧版回退标记（闭包持久化，避免每次探测） */
@@ -128,7 +239,10 @@ function resolveEmbedTarget(ecfg: EmbeddingConfig): ResolvedEmbedTarget {
   // 因此需要将 "-1" 字符串转换为数字 -1。
   const keepAliveNorm: string | number = keepAlive === '-1' ? -1 : keepAlive;
 
-  return { baseURL, baseClean, baseForOllama, model, isOllama, isOpenAiCompatible, headers, keepAliveNorm, options };
+  return {
+    baseURL, baseClean, baseForOllama, model, isOllama, isOpenAiCompatible, headers, keepAliveNorm, options,
+    requestIntervalMs: resolveRequestIntervalMs(ecfg.requestIntervalMs),
+  };
 }
 
 /**
@@ -176,16 +290,25 @@ function parseEmbedResponse(data: any, count: number, isOpenAiCompatible: boolea
  * - Ollama 新版：/api/embed + input 数组 + keep_alive
  * - Ollama 旧版回退：/api/embeddings + prompt（仅单文本）
  *
- * 404 回退：新版端点不存在（旧版 Ollama）且为单文本时，切旧版重试一次；
- * 多文本数组遇到 404 直接抛出，由批量调用方降级为逐条请求处理。
+ * 发送前先过 pacing 游标（`waitForPacing`）——放在**最底层发送点**而不是调用方，
+ * 这样重试、旧版端点回退等所有出网路径都无法绕过节流（gm-pro 是在调用侧等，
+ * 这里是更严的不变式：任何一次 fetch 之前都已被节流）。
+ *
+ * 重试（对齐 gm-pro v2.8.x）：429/5xx 退避重试，退避带 jitter 防止并发重试波峰对齐；
+ * OpenAI 兼容端点的 404 属**瞬时资源问题**（OVMS Mediapipe graph 未就绪），只额外重试 1 次。
+ * 404 回退：旧版 Ollama 端点不存在且为单文本时，切旧版重试（端点形态切换，不消耗重试预算）。
  */
 async function requestEmbed(
   target: ResolvedEmbedTarget,
   inputs: string[],
   state: EmbedRuntimeState,
+  timeoutMs: number = llmTimeout('embedTimeoutMs'),
 ): Promise<{ vecs: (number[] | null)[]; raw: any }> {
-  // 最多重试一次：新版端点 404 时回退到旧版
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const pacingKey = `${target.baseURL}|${target.model}`;
+  let lastError: Error | null = null;
+
+  // 最多 1 次首发 + RETRY_DELAYS_MS.length 次重试
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     let ep: string;
     let body: Record<string, unknown>;
     if (target.isOpenAiCompatible) {
@@ -213,19 +336,24 @@ async function requestEmbed(
       }
     }
 
+    // 发送节流：相邻两次出网至少间隔 requestIntervalMs（默认 0 = 关闭，保持原行为）
+    await waitForPacing(pacingKey, target.requestIntervalMs);
+
     // 本地 Ollama 全局并发闸门（与 LLM 请求共用，OLLAMA_MAX_CONCURRENCY 默认 2）：
     // embedding 与 LLM 摘要/主生成共用同一 Ollama 队列，不加闸会叠加打爆服务端。
     const resp = await withOllamaSlot(target.baseURL, target.model, () => fetch(ep, {
       method: 'POST',
       headers: target.headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(llmTimeout('embedTimeoutMs')),
+      signal: AbortSignal.timeout(timeoutMs),
     }));
 
     // 新版端点不存在（旧版 Ollama）→ 切换旧版并重试（仅单文本可回退）
+    // 这是端点形态切换，不消耗重试预算（continue 不推进退避）。
     if (resp.status === 404 && !target.isOpenAiCompatible && !state.useLegacyOllama) {
       if (inputs.length === 1) {
         state.useLegacyOllama = true;
+        attempt -= 1;
         continue;
       }
       throw new Error(`Embedding API 404: ${ep}`);
@@ -237,14 +365,27 @@ async function requestEmbed(
       if (resp.status === 400 && errText.includes('invalid input type')) {
         hint = '. 提示：请检查 embedding.model 配置是否为支持 embedding 的模型（如 nomic-embed-text、bge-large-zh），聊天模型（如 qwen3.6）不支持 embedding';
       }
-      throw new Error(`Embedding API ${resp.status}: ${errText.slice(0, 200)}${hint}`);
+      const err = new Error(`Embedding API ${resp.status}: ${errText.slice(0, 200)}${hint}`);
+
+      // 可重试判定：
+      //   - 429/5xx：服务端过载或瞬时故障（gm-pro 的可重试集合）
+      //   - OpenAI 兼容端点的 404：OVMS 的 Mediapipe graph 瞬时未就绪，只额外重试 1 次
+      const isRetryableStatus = RETRYABLE_STATUS.has(resp.status);
+      const isRetryable404 = resp.status === 404 && target.isOpenAiCompatible;
+      const canRetry = (isRetryableStatus || isRetryable404) && attempt < RETRY_DELAYS_MS.length;
+      if (!canRetry || (isRetryable404 && attempt >= 1)) throw err;
+
+      lastError = err;
+      // 退避 + jitter：防止并发失败时重试波峰对齐，反而加剧下游过载
+      const jitter = Math.random() * RETRY_JITTER_MAX_MS;
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt] + jitter));
+      continue;
     }
 
     const data: any = await resp.json();
     return { vecs: parseEmbedResponse(data, inputs.length, target.isOpenAiCompatible), raw: data };
   }
-  // 理论上不会到达
-  throw new Error('Embedding API: exhausted retries');
+  throw lastError ?? new Error('Embedding API: exhausted retries');
 }
 
 // ---------------------------------------------------------------------------
@@ -262,22 +403,96 @@ function resolveBatchSize(raw: unknown): number {
   return typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : DEFAULT_BATCH_SIZE;
 }
 
+/**
+ * 归一化并发上限：非法/非正值回退默认 2。
+ *
+ * 硬上限 32 与 withOllamaSlot 的 OLLAMA_MAX_CONCURRENCY 校验一致，防止误配成超大值
+ * 把下游一次打爆（并发上限是保护，不是性能旋钮的唯一来源）。
+ */
+function resolveMaxConcurrency(raw: unknown): number {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 1) {
+    return Math.min(32, Math.floor(raw));
+  }
+  return DEFAULT_EMBED_MAX_CONCURRENCY;
+}
+
+/** 归一化发送间隔：非法/负值视为关闭（0），保持"默认零额外延迟"的原有行为 */
+function resolveRequestIntervalMs(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+/**
+ * 归一化批量总长度预算：非法/非正值视为关闭（0）。
+ *
+ * 只按条数装箱时，单请求工作量方差极大（32 条 10 字 vs 32 条 800 字相差数十倍），
+ * 固定超时时松时紧，长文本场景易被击穿后触发重试风暴。
+ */
+function resolveMaxBatchChars(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+/**
+ * 子批次切分：条数上限 + 可选总长度预算（对齐 gm-pro v2.8.x splitSubBatches）。
+ *
+ * 保证：
+ *   - 每个子批次条数 ≤ batchSize，字符数 ≤ maxBatchChars（单条自身超预算时除外）
+ *   - 单条自身超预算时独占一个子批次 → 严格前进，不会死循环/饿死
+ *   - maxBatchChars <= 0 时退化为纯按条数切分，与旧实现逐字节等价
+ *   - 不改变输入顺序（子批次内保序，配合并发限流不影响结果回填）
+ */
+function splitSubBatches(
+  toEmbed: number[],
+  textLen: (index: number) => number,
+  batchSize: number,
+  maxBatchChars: number,
+): number[][] {
+  const useCharBudget = maxBatchChars > 0;
+  const out: number[][] = [];
+  let cur: number[] = [];
+  let curChars = 0;
+  for (const i of toEmbed) {
+    const len = textLen(i);
+    const countFull = cur.length >= batchSize;
+    // cur.length > 0 条件：单条超预算时不无限等待，让它独占一个子批次
+    const charsFull = useCharBudget && cur.length > 0 && curChars + len > maxBatchChars;
+    if ((countFull || charsFull) && cur.length > 0) {
+      out.push(cur);
+      cur = [];
+      curChars = 0;
+    }
+    cur.push(i);
+    curChars += len;
+  }
+  if (cur.length > 0) out.push(cur);
+  return out;
+}
+
 export interface LocalEmbedFns {
   embed: (text: string) => Promise<number[]>;
   embedBatch: BatchEmbedFn;
 }
 
 /**
- * 创建单文本 + 批量 embedding 函数（共享端点解析 / LRU 缓存 / 旧版回退状态）。
+ * 创建单文本 + 批量 embedding 函数（共享端点解析 / LRU 缓存 / 旧版回退状态 / 并发闸门）
  *
  * 每次调用都会向 embedding 端点发送 HTTP 请求，body 中包含 keep_alive（仅 Ollama），
  * 确保 Ollama 保持模型驻留内存。
+ *
+ * 并发与节流（对齐 gm-pro v2.8.x）：
+ *   - 单文本与批量**都**先取信号量（同 `baseURL|model` 共享，上限 embedding.maxConcurrency，默认 2）；
+ *     重试在持锁期间复用同一槽位，不额外占用。
+ *   - 批量子批次**并发发送**（`Promise.all`），并发度由信号量自然收敛——旧实现是串行
+ *     for 循环，等于放弃了 maxConcurrency（gm-pro 已改为并发）。
+ *   - 相邻发送间隔由 `embedding.requestIntervalMs` 控制（默认 0 = 关闭）。
  */
 export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
   const target = resolveEmbedTarget(ecfg);
   const cache = new EmbedLRUCache();
   const state: EmbedRuntimeState = { useLegacyOllama: false };
   const batchSize = resolveBatchSize(ecfg.batchSize);
+  const maxBatchChars = resolveMaxBatchChars(ecfg.maxBatchChars);
+  const semaphore = getSemaphore(target.baseURL, target.model, resolveMaxConcurrency(ecfg.maxConcurrency));
+  const semaphoreLabel = `${target.baseURL}|${target.model}`;
 
   async function embed(text: string): Promise<number[]> {
     if (text == null || text === '') {
@@ -288,13 +503,19 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
-    const { vecs, raw } = await requestEmbed(target, [text], state);
-    const result = vecs[0];
-    if (result) {
-      cache.set(cacheKey, result);
-      return result;
+    // 缓存未命中才占并发槽位（命中不消耗下游配额）
+    const release = await semaphore.acquire();
+    try {
+      const { vecs, raw } = await requestEmbed(target, [text], state);
+      const result = vecs[0];
+      if (result) {
+        cache.set(cacheKey, result);
+        return result;
+      }
+      throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(raw || {}).join(',')})`);
+    } finally {
+      release();
     }
-    throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(raw || {}).join(',')})`);
   }
 
   async function embedBatch(texts: string[]): Promise<(number[] | null)[]> {
@@ -312,12 +533,16 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
     }
     if (!pending.length) return out;
 
-    // 按 batchSize 切分子批，串行发送（保持对本地 Ollama 队列的友好度）
-    for (let start = 0; start < pending.length; start += batchSize) {
-      const idxs = pending.slice(start, start + batchSize);
+    // 装箱：条数上限 + 可选总长度预算（长度感知，避免单请求工作量方差过大被超时击穿）
+    const subBatches = splitSubBatches(pending, (i) => texts[i]?.length ?? 0, batchSize, maxBatchChars);
+
+    // 子批次并发发送：并发度由信号量收敛到 ≤ maxConcurrency，发送间隔由 pacing 保证。
+    // 这样既提高吞吐（旧实现串行浪费了并发额度），又不会形成零间隔请求流。
+    await Promise.all(subBatches.map(async (idxs) => {
       const inputs = idxs.map((i) => texts[i]);
+      const release = await semaphore.acquire();
       try {
-        const { vecs } = await requestEmbed(target, inputs, state);
+        const { vecs } = await requestEmbed(target, inputs, state, BATCH_TIMEOUT_MS);
         for (let k = 0; k < idxs.length; k++) {
           const v = vecs[k];
           if (v) {
@@ -326,22 +551,43 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
           }
         }
       } catch (err) {
-        // 子批整体失败 → 逐条降级，保留单条隔离（避免一条坏输入/超长文本拖垮整批）
-        const msg = err instanceof Error ? err.message : String(err);
-        for (const i of idxs) {
-          try {
-            const { vecs } = await requestEmbed(target, [texts[i]], state);
-            const v = vecs[0];
-            if (v) {
-              out[i] = v;
-              cache.set(embedCacheKey(texts[i]), v);
+        // 子批整体失败 → 逐条降级（避免一条坏输入/超长文本拖垮整批）。
+        // 注意：逐条重发同样受 pacing 与信号量约束（都在 requestEmbed 内部/外层），
+        // 且连续失败达到阈值即短路 —— 否则"批量失败后的逐条重发"会在后端
+        // 已经吃紧时再打出一串请求，把一次失败放大成请求风暴（gm-pro 的实测教训）。
+        getGlobalLogger()?.warn?.('[embed] batch sub-batch failed, degrading to single-item requests', {
+          endpoint: semaphoreLabel,
+          inputCount: idxs.length,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        if (idxs.length > 1) {
+          let consecutiveFails = 0;
+          let recovered = 0;
+          for (const i of idxs) {
+            if (consecutiveFails >= FALLBACK_CONSECUTIVE_FAIL_LIMIT) {
+              getGlobalLogger()?.warn?.('[embed] single-item fallback aborted (systematic failure)', {
+                endpoint: semaphoreLabel, recovered, attempted: idxs.length,
+              });
+              break;
             }
-          } catch { /* 单条失败 → 保持 null，由调用方降级 */ }
+            try {
+              const { vecs } = await requestEmbed(target, [texts[i]], state, BATCH_TIMEOUT_MS);
+              const v = vecs[0];
+              if (v) {
+                out[i] = v;
+                cache.set(embedCacheKey(texts[i]), v);
+                recovered += 1;
+                consecutiveFails = 0;
+              } else {
+                consecutiveFails += 1;
+              }
+            } catch { consecutiveFails += 1; /* 单条失败 → 保持 null，由调用方降级 */ }
+          }
         }
-        // 仅在子批失败时输出（逐条降级已记录各自结果）
-        void msg;
+      } finally {
+        release();
       }
-    }
+    }));
     return out;
   }
 
