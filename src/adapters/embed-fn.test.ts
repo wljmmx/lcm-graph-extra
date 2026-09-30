@@ -17,6 +17,12 @@ import type { EmbeddingConfig } from '../types.js';
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
+// 模块级共享缓存/信号量/pacing 会跨用例串扰（同 baseURL|model），每个用例前必须清空
+// （对应 gm-pro 的 clearEmbedCacheAll）。各 describe 的 beforeEach 统一调用它。
+beforeEach(() => {
+  clearEmbedConcurrencyState();
+});
+
 describe('createLocalEmbedFn', () => {
   beforeEach(() => {
     mockFetch.mockReset();
@@ -754,4 +760,73 @@ describe('并发闸门与发送节流（对齐 gm-pro）', () => {
     expect(await embed('x')).toEqual([0.5]);
     expect(mockFetch).toHaveBeenCalledTimes(2);
   }, 10_000);
+
+  it('expectedDim 不匹配 → 抛错（对齐 gm-pro 维度校验）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [1, 2, 3] }] }),
+    });
+
+    const embed = createLocalEmbedFn({
+      model: 'dim-model',
+      baseURL: 'https://dim.example.com/v3',
+      dimensions: 1024, // 期望 1024，返回 3
+    });
+    await expect(embed('x')).rejects.toThrow('dimension mismatch');
+    // 维度校验失败 → 不写缓存 → 下次仍会请求（不污染）
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ data: [{ index: 0, embedding: [1, 2, 3] }] }),
+    });
+    await expect(embed('x')).rejects.toThrow('dimension mismatch');
+  });
+
+  it('向量含 NaN/Infinity → 该条丢弃为 null（不阻塞、不写缓存）', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        data: [
+          { index: 0, embedding: [1, NaN] },
+          { index: 1, embedding: [2, 3] },
+        ],
+      }),
+    });
+
+    const { embedBatch } = createLocalEmbedFns({
+      model: 'nan-model',
+      baseURL: 'https://nan.example.com/v3',
+    });
+    const out = await embedBatch(['bad', 'good']);
+    expect(out).toEqual([null, [2, 3]]);
+  });
+
+  it('cacheSize=0 关闭缓存：重复文本每次都会发请求', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ embedding: [1] }) });
+
+    const embed = createLocalEmbedFn({
+      model: 'nocache-model',
+      baseURL: 'https://nocache.example.com/v3',
+      cacheSize: 0,
+    });
+    await embed('x');
+    await embed('x');
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('cacheSize/cacheTtlMs 可配：小容量 LRU 生效', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ embedding: [1] }) });
+
+    // 容量 1：第二次调用会把第一次挤出 → 再查 'first' 需重新请求
+    const { embed } = createLocalEmbedFns({
+      model: 'tinycache-model',
+      baseURL: 'https://tinycache.example.com/v3',
+      cacheSize: 1,
+    });
+    await embed('first');
+    await embed('second');
+    await embed('first'); // 被挤出 → 重新请求
+
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
 });

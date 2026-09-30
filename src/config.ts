@@ -236,6 +236,9 @@ export const PluginConfigSchema = Type.Object({
     maxConcurrency: Type.Optional(Type.Number({ minimum: 1, maximum: 32 })),
     requestIntervalMs: Type.Optional(Type.Number({ minimum: 0 })),
     maxBatchChars: Type.Optional(Type.Number({ minimum: 0 })),
+    // 缓存（对齐 gm-pro）：默认 256 / 10min；≤0 关闭
+    cacheSize: Type.Optional(Type.Number({ minimum: 0 })),
+    cacheTtlMs: Type.Optional(Type.Number({ minimum: 0 })),
   })),
 
   neo4j: Type.Optional(Type.Object({

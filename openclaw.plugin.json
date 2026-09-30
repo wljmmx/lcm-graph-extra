@@ -472,6 +472,16 @@
             "type": "integer",
             "minimum": 0,
             "description": "单个批量 embedding 子批次的总字符预算（默认 0 = 关闭，仅按 batchSize 切分）。只按条数装箱时单请求工作量方差极大（32 条 10 字 vs 32 条 800 字），长文本场景易被固定超时击穿并触发重试；设置后可长度感知装箱。"
+          },
+          "cacheSize": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "embedding 结果 LRU 缓存容量（默认 256；≤0 = 关闭缓存）。缓存键为文本的 FNV-1a 64 位 hash，避免长文本原始键占额外内存。对齐 graph-memory-pro v2.8.x。"
+          },
+          "cacheTtlMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "embedding 结果缓存 TTL（毫秒，默认 600000 = 10 分钟；≤0 = 关闭缓存）。短于上游 QueryCache 30min，保证嵌入新鲜度。"
           }
         }
       },

@@ -45,34 +45,85 @@ import { llmTimeout } from '../config/defaults.js';
 // ---------------------------------------------------------------------------
 // LRU 缓存：相同 query 文本的 embedding 结果缓存，避免重复请求 Ollama
 // （assemble 中相似/重复 query 可命中缓存，vec_embed 2.5s → ~0ms）
+// 对齐 graph-memory-pro v2.8.x `src/engine/embed.ts`：
+//   - 缓存键用 FNV-1a 64-bit hash（而非原始文本）——长文本/高频写入下避免
+//     原始文本占额外内存；hash 键固定 16 位十六进制，256 条目碰撞概率 ≈ 4e-15
+//   - 容量/TTL 可配（embedding.cacheSize / embedding.cacheTtlMs，默认 256 / 10min）
+//   - 按 `${baseURL}|${model}` **模块级共享**：单文本 embed 与批量 batchEmbed
+//     复用同一缓存；不同端点隔离
+//   - cacheSize <= 0 或 cacheTtlMs <= 0 → 关闭缓存（返回 null）
 // ---------------------------------------------------------------------------
-const EMBED_CACHE_CAPACITY = 64;
-const EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分钟
+const DEFAULT_EMBED_CACHE_SIZE = 256;
+const DEFAULT_EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10min（短于 QueryCache 30min，保证嵌入新鲜度）
 
-class EmbedLRUCache {
-  private map = new Map<string, { value: number[]; expiresAt: number }>();
-  get(key: string): number[] | undefined {
-    const e = this.map.get(key);
-    if (!e) return undefined;
-    if (Date.now() > e.expiresAt) { this.map.delete(key); return undefined; }
-    // move-to-end（Map 迭代顺序 = 插入顺序 = LRU 顺序）
-    this.map.delete(key);
-    this.map.set(key, e);
-    return e.value;
+/** FNV-1a 64-bit（JS 用 BigInt 实现）——缓存键，对齐 gm-pro */
+function embedCacheKey(text: string): string {
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < text.length; i++) {
+    h ^= BigInt(text.charCodeAt(i));
+    h = (h * prime) & 0xffffffffffffffffn;
   }
-  set(key: string, value: number[]): void {
-    if (this.map.has(key)) this.map.delete(key);
-    else if (this.map.size >= EMBED_CACHE_CAPACITY) {
-      const first = this.map.keys().next().value;
-      if (first !== undefined) this.map.delete(first);
-    }
-    this.map.set(key, { value, expiresAt: Date.now() + EMBED_CACHE_TTL_MS });
-  }
+  return h.toString(16);
 }
 
-/** 缓存键：长文本截断，避免超长 key 额外占用内存（确定性映射） */
-function embedCacheKey(text: string): string {
-  return text.length > 500 ? text.slice(0, 500) + ':' + text.length : text;
+interface EmbedCacheEntry {
+  vec: number[];
+  ts: number;
+}
+
+interface EmbedLruCache {
+  get(key: string): number[] | null;
+  set(key: string, vec: number[]): void;
+}
+
+/** 简易 LRU（基于 Map 插入顺序），语义与 gm-pro createLruCache 逐项一致 */
+function createLruCache(capacity: number, ttlMs: number): EmbedLruCache {
+  const map = new Map<string, EmbedCacheEntry>();
+  return {
+    get(key: string): number[] | null {
+      const entry = map.get(key);
+      if (!entry) return null;
+      if (Date.now() - entry.ts > ttlMs) {
+        map.delete(key);
+        return null;
+      }
+      // 命中：移到末尾（Map 末尾为最近使用）
+      map.delete(key);
+      map.set(key, entry);
+      return entry.vec;
+    },
+    set(key: string, vec: number[]): void {
+      if (map.size >= capacity) {
+        const oldestKey = map.keys().next().value;
+        if (oldestKey !== undefined) map.delete(oldestKey);
+      }
+      map.set(key, { vec, ts: Date.now() });
+    },
+  };
+}
+
+/** 模块级共享缓存句柄：键 `baseURL|model`，单文本/批量复用（gm-pro getSharedEmbedCache 语义） */
+const _embedCacheHandles = new Map<string, EmbedLruCache>();
+
+function getSharedEmbedCache(key: string, cacheSize: number, cacheTtlMs: number): EmbedLruCache | null {
+  if (cacheSize <= 0 || cacheTtlMs <= 0) return null;
+  let handle = _embedCacheHandles.get(key);
+  if (!handle) {
+    handle = createLruCache(cacheSize, cacheTtlMs);
+    _embedCacheHandles.set(key, handle);
+  }
+  return handle;
+}
+
+/**
+ * 清空模块级 embed 状态（LRU 缓存 + 共享信号量 + pacing 游标）。
+ * 用途：测试隔离（避免跨用例共享缓存导致断言失真）+ 运行期配置变更后重置。
+ */
+export function clearEmbedConcurrencyState(): void {
+  _embedCacheHandles.clear();
+  _semaphores.clear();
+  _pacingGates.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -174,15 +225,6 @@ async function waitForPacing(key: string, intervalMs: number): Promise<void> {
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 }
 
-/**
- * 清空模块级并发/节流状态。
- * 用途：测试隔离（避免跨用例共享信号量导致断言失真）+ 运行期配置变更后重置。
- */
-export function clearEmbedConcurrencyState(): void {
-  _semaphores.clear();
-  _pacingGates.clear();
-}
-
 // ---------------------------------------------------------------------------
 // 端点解析：单文本与批量共用，保证两条链路判定一致
 // ---------------------------------------------------------------------------
@@ -202,6 +244,8 @@ interface ResolvedEmbedTarget {
   options?: Record<string, number | boolean | string>;
   /** 相邻两次发送的最小间隔（ms，0 = 关闭节流） */
   requestIntervalMs: number;
+  /** 期望向量维度（有则校验每个返回值，不匹配即抛错；无则跳过） */
+  expectedDim?: number;
 }
 
 /** 端点判定闭包状态：Ollama 旧版回退标记（闭包持久化，避免每次探测） */
@@ -238,10 +282,13 @@ function resolveEmbedTarget(ecfg: EmbeddingConfig): ResolvedEmbedTarget {
   // 但字符串 "-1" 会被 Ollama 解析为 duration 失败 → 回退到默认 5m。
   // 因此需要将 "-1" 字符串转换为数字 -1。
   const keepAliveNorm: string | number = keepAlive === '-1' ? -1 : keepAlive;
+  const dim = ecfg.dimensions;
+  const expectedDim = typeof dim === 'number' && Number.isFinite(dim) && dim > 0 ? Math.floor(dim) : undefined;
 
   return {
     baseURL, baseClean, baseForOllama, model, isOllama, isOpenAiCompatible, headers, keepAliveNorm, options,
     requestIntervalMs: resolveRequestIntervalMs(ecfg.requestIntervalMs),
+    expectedDim,
   };
 }
 
@@ -250,9 +297,18 @@ function resolveEmbedTarget(ecfg: EmbeddingConfig): ResolvedEmbedTarget {
  * - OpenAI 兼容：{ data: [{ embedding, index }] }，按 index 对齐（OVMS 明确返回 index）
  * - Ollama 新版：{ embeddings: number[][] }，按位置对齐
  * 缺失的位置保持 null（批量路径不阻塞整批）。
+ *
+ * 对齐 gm-pro v2.8.x 的后处理：
+ *   - `expectedDim` 存在时逐条校验维度，不匹配即抛错（防维度漂移静默污染图）
+ *   - 过滤含 NaN/Infinity 的向量（v2.5.2：防下游污染关联矩阵）
  */
-function parseEmbedResponse(data: any, count: number, isOpenAiCompatible: boolean): (number[] | null)[] {
-  const out: (number[] | null)[] = new Array(count).fill(null);
+function parseEmbedResponse(
+  data: any,
+  count: number,
+  isOpenAiCompatible: boolean,
+  expectedDim?: number,
+): (number[] | null)[] {
+  const raw: (number[] | null)[] = new Array(count).fill(null);
   if (isOpenAiCompatible) {
     const arr = Array.isArray(data?.data) ? data.data : null;
     if (arr) {
@@ -260,26 +316,48 @@ function parseEmbedResponse(data: any, count: number, isOpenAiCompatible: boolea
         const emb = item?.embedding;
         if (!Array.isArray(emb)) continue;
         const rawIdx = item?.index;
-        const idx = typeof rawIdx === 'number' && rawIdx >= 0 && rawIdx < count ? rawIdx : out.indexOf(null);
-        if (idx >= 0) out[idx] = emb;
+        const idx = typeof rawIdx === 'number' && rawIdx >= 0 && rawIdx < count ? rawIdx : raw.indexOf(null);
+        if (idx >= 0) raw[idx] = emb;
       }
-      return out;
+    } else if (Array.isArray(data?.embedding) && count >= 1) {
+      // 兼容部分 OpenAI 兼容端点返回的扁平格式: { embedding: number[] }
+      raw[0] = data.embedding;
     }
-    // 兼容部分 OpenAI 兼容端点返回的扁平格式: { embedding: number[] }
-    if (Array.isArray(data?.embedding) && count >= 1) out[0] = data.embedding;
-    return out;
-  }
-  // Ollama 原生
-  if (Array.isArray(data?.embeddings)) {
-    for (let i = 0; i < Math.min(count, data.embeddings.length); i++) {
-      if (Array.isArray(data.embeddings[i])) out[i] = data.embeddings[i];
+  } else {
+    // Ollama 原生
+    if (Array.isArray(data?.embeddings)) {
+      for (let i = 0; i < Math.min(count, data.embeddings.length); i++) {
+        if (Array.isArray(data.embeddings[i])) raw[i] = data.embeddings[i];
+      }
     }
-    return out;
+    // 兼容旧版/部分版本: { embedding: number[] }
+    if (Array.isArray(data?.embedding) && count >= 1) raw[0] = data.embedding;
+    // 兼容部分 Ollama 版本返回嵌套格式: { data: [{ embedding: number[] }] }
+    if (Array.isArray(data?.data?.[0]?.embedding) && count >= 1) raw[0] = data.data[0].embedding;
   }
-  // 兼容旧版/部分版本: { embedding: number[] }
-  if (Array.isArray(data?.embedding) && count >= 1) out[0] = data.embedding;
-  // 兼容部分 Ollama 版本返回嵌套格式: { data: [{ embedding: number[] }] }
-  if (Array.isArray(data?.data?.[0]?.embedding) && count >= 1) out[0] = data.data[0].embedding;
+
+  // 后处理：维度校验 + NaN/Infinity 过滤
+  const out: (number[] | null)[] = new Array(count).fill(null);
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (!v) continue;
+    if (expectedDim != null && v.length !== expectedDim) {
+      throw new Error(
+        `Embedding dimension mismatch: expected ${expectedDim}, got ${v.length}. ` +
+        `Check embedding.model or embedding.dimensions in config.`,
+      );
+    }
+    // 过滤含 NaN/Infinity 的向量（保持 null → 调用方降级），而非污染下游
+    let hasBad = false;
+    for (let j = 0; j < v.length; j++) {
+      if (!Number.isFinite(v[j])) { hasBad = true; break; }
+    }
+    if (hasBad) {
+      getGlobalLogger()?.warn?.('[embed] vector contains NaN/Infinity, dropped', { inputIndex: i });
+      continue;
+    }
+    out[i] = v;
+  }
   return out;
 }
 
@@ -383,7 +461,7 @@ async function requestEmbed(
     }
 
     const data: any = await resp.json();
-    return { vecs: parseEmbedResponse(data, inputs.length, target.isOpenAiCompatible), raw: data };
+    return { vecs: parseEmbedResponse(data, inputs.length, target.isOpenAiCompatible, target.expectedDim), raw: data };
   }
   throw lastError ?? new Error('Embedding API: exhausted retries');
 }
@@ -421,13 +499,25 @@ function resolveRequestIntervalMs(raw: unknown): number {
   return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
-/**
- * 归一化批量总长度预算：非法/非正值视为关闭（0）。
- *
- * 只按条数装箱时，单请求工作量方差极大（32 条 10 字 vs 32 条 800 字相差数十倍），
- * 固定超时时松时紧，长文本场景易被击穿后触发重试风暴。
- */
+/** 归一化批量总长度预算：非法/非正值视为关闭（0）。 */
 function resolveMaxBatchChars(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+/**
+ * 归一化缓存容量：undefined → 默认 256；显式 ≤0/非法 → 关闭（0，getSharedEmbedCache 返回 null）。
+ * 对齐 gm-pro：`config.cacheSize ?? DEFAULT_EMBED_CACHE_SIZE`，但允许显式 0 关闭。
+ */
+function resolveCacheSize(raw: unknown): number {
+  if (raw === undefined) return DEFAULT_EMBED_CACHE_SIZE;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
+/**
+ * 归一化缓存 TTL（ms）：undefined → 默认 10min；显式 ≤0/非法 → 关闭（0）。
+ */
+function resolveCacheTtlMs(raw: unknown): number {
+  if (raw === undefined) return DEFAULT_EMBED_CACHE_TTL_MS;
   return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
@@ -487,7 +577,11 @@ export interface LocalEmbedFns {
  */
 export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
   const target = resolveEmbedTarget(ecfg);
-  const cache = new EmbedLRUCache();
+  const cacheKey = `${target.baseURL}|${target.model}`;
+  // 可配缓存：容量/TTL 默认 256/10min；任一 ≤0 → 关闭（与 gm-pro getSharedEmbedCache 一致）
+  const cacheSize = resolveCacheSize(ecfg.cacheSize);
+  const cacheTtlMs = resolveCacheTtlMs(ecfg.cacheTtlMs);
+  const cache = getSharedEmbedCache(cacheKey, cacheSize, cacheTtlMs);
   const state: EmbedRuntimeState = { useLegacyOllama: false };
   const batchSize = resolveBatchSize(ecfg.batchSize);
   const maxBatchChars = resolveMaxBatchChars(ecfg.maxBatchChars);
@@ -499,8 +593,8 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
       throw new Error('Embedding API: input text cannot be null, undefined, or empty');
     }
     // 缓存命中：相同 query 文本的 embedding 是确定性的
-    const cacheKey = embedCacheKey(text);
-    const cached = cache.get(cacheKey);
+    const cacheKeyText = embedCacheKey(text);
+    const cached = cache?.get(cacheKeyText);
     if (cached) return cached;
 
     // 缓存未命中才占并发槽位（命中不消耗下游配额）
@@ -509,7 +603,7 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
       const { vecs, raw } = await requestEmbed(target, [text], state);
       const result = vecs[0];
       if (result) {
-        cache.set(cacheKey, result);
+        cache?.set(cacheKeyText, result);
         return result;
       }
       throw new Error(`Embedding API: missing embedding in response (keys: ${Object.keys(raw || {}).join(',')})`);
@@ -527,7 +621,7 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
     for (let i = 0; i < texts.length; i++) {
       const t = texts[i];
       if (t == null || t === '') continue;
-      const cached = cache.get(embedCacheKey(t));
+      const cached = cache?.get(embedCacheKey(t));
       if (cached) { out[i] = cached; continue; }
       pending.push(i);
     }
@@ -547,7 +641,7 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
           const v = vecs[k];
           if (v) {
             out[idxs[k]] = v;
-            cache.set(embedCacheKey(inputs[k]), v);
+            cache?.set(embedCacheKey(inputs[k]), v);
           }
         }
       } catch (err) {
@@ -575,7 +669,7 @@ export function createLocalEmbedFns(ecfg: EmbeddingConfig): LocalEmbedFns {
               const v = vecs[0];
               if (v) {
                 out[i] = v;
-                cache.set(embedCacheKey(texts[i]), v);
+                cache?.set(embedCacheKey(texts[i]), v);
                 recovered += 1;
                 consecutiveFails = 0;
               } else {

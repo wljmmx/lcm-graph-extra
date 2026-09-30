@@ -180,6 +180,15 @@ export function resolveEmbeddingConfig(
   const maxBatchChars = typeof rawMaxBatchChars === 'number' && Number.isFinite(rawMaxBatchChars) && rawMaxBatchChars > 0
     ? Math.floor(rawMaxBatchChars)
     : undefined;
+  // 缓存容量 / TTL：非法值交给 embed-fn 的 resolve* 回退（关闭=0），默认 256 / 10min。
+  const rawCacheSize = embeddingSection.cacheSize;
+  const cacheSize = typeof rawCacheSize === 'number' && Number.isFinite(rawCacheSize) && rawCacheSize > 0
+    ? Math.floor(rawCacheSize)
+    : undefined;
+  const rawCacheTtlMs = embeddingSection.cacheTtlMs;
+  const cacheTtlMs = typeof rawCacheTtlMs === 'number' && Number.isFinite(rawCacheTtlMs) && rawCacheTtlMs > 0
+    ? Math.floor(rawCacheTtlMs)
+    : undefined;
   // P1-6 BUG-3: 原返回对象丢失 apiKey 与 options，导致需要鉴权的远程 embedding 端点不可用。
   const apiKey = (embeddingSection.apiKey as string) || process.env.GM_EMBED_API_KEY || undefined;
   const options = (embeddingSection.options as Record<string, number | boolean | string>) || undefined;
@@ -189,6 +198,8 @@ export function resolveEmbeddingConfig(
   if (maxConcurrency !== undefined) result.maxConcurrency = maxConcurrency;
   if (requestIntervalMs !== undefined) result.requestIntervalMs = requestIntervalMs;
   if (maxBatchChars !== undefined) result.maxBatchChars = maxBatchChars;
+  if (cacheSize !== undefined) result.cacheSize = cacheSize;
+  if (cacheTtlMs !== undefined) result.cacheTtlMs = cacheTtlMs;
   if (apiKey) result.apiKey = apiKey;
   if (options) result.options = options;
   return result;

@@ -144,7 +144,9 @@
     "batchSize": 32,
     "maxConcurrency": 2,
     "requestIntervalMs": 0,
-    "maxBatchChars": 0
+    "maxBatchChars": 0,
+    "cacheSize": 256,
+    "cacheTtlMs": 600000
   }
 }
 ```
@@ -160,6 +162,8 @@
 | `embedding.maxConcurrency` | `number` | 同一端点（`baseURL\|model`）最大并发（默认 2，上限 32）。并发上限只限制"同时在飞"的数量，**不限制发送频率** |
 | `embedding.requestIntervalMs` | `number` | 相邻两次发送的最小间隔 ms（默认 0 = 关闭）。用于抑制"零间隔连续请求流"——实测 OVMS 在该模式下会间歇返回 404 Mediapipe graph not found，增加间隔即消失 |
 | `embedding.maxBatchChars` | `number` | 单个子批次的总字符预算（默认 0 = 关闭，仅按 `batchSize` 切分）。开启后按长度感知装箱，避免长文本子批次被固定超时击穿后触发重试 |
+| `embedding.cacheSize` | `number` | embedding 结果 LRU 缓存容量（默认 256；≤0 = 关闭缓存）。缓存键为文本的 FNV-1a 64 位 hash |
+| `embedding.cacheTtlMs` | `number` | 缓存 TTL 毫秒（默认 600000 = 10min；≤0 = 关闭缓存）。短于上游 QueryCache 30min，保证嵌入新鲜度 |
 
 > 并发与节流语义对齐 graph-memory-pro v2.8.x（信号量 + pacing 游标）。
 > 本地/私网 Ollama 端点另有一层全局闸门 `OLLAMA_MAX_CONCURRENCY`（默认 2，与 LLM 调用共用）；

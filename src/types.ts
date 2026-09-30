@@ -19,6 +19,10 @@ export interface EmbeddingConfig {
   requestIntervalMs?: number;
   /** 单个子批次的总字符预算（默认 0 = 关闭，仅按 batchSize 切分）。长度感知装箱用 */
   maxBatchChars?: number;
+  /** embedding 结果 LRU 缓存容量（默认 256；≤0 = 关闭缓存）。对齐 graph-memory-pro v2.8.x */
+  cacheSize?: number;
+  /** embedding 结果缓存 TTL（ms，默认 10min；≤0 = 关闭缓存） */
+  cacheTtlMs?: number;
 }
 
 export type RetrievalSource = 'qmd' | 'graph';
