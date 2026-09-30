@@ -1578,28 +1578,59 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         }
         const { driver, session } = await neo4jSession();
         try {
-          // Find Neo4j nodes with sessionId property
-          const allMsgNodes = await session.run(
-            `MATCH (n:ConversationMessage) RETURN n.id AS id, n.sessionId AS sid, n.sessionKey AS skey LIMIT 5000`
-          );
-          neo4jMsgNodes = allMsgNodes.records.length;
-          push(`  Neo4j: ${neo4jMsgNodes} ConversationMessage nodes\n`);
-
-          if (existingSids.size === 0) {
-            // 安全护栏：两个来源都没读到会话清单时，绝不能把全图消息判为孤儿
-            // （否则一次 repair 会清空消息节点）。宁可跳过并如实说明。
-            push(`  ⚠️ No session catalog available from any source → orphan detection SKIPPED (refusing to treat all nodes as orphans)\n`);
-          } else {
-            for (const rec of allMsgNodes.records) {
+          // 分批全量核查（原实现为 `LIMIT 5000` 抽样：第 5000 个之后的节点完全不参与
+          // 孤儿判定，图越大漏检越多）。现按 :ConversationMessage(id) 唯一索引做
+          // keyset 分页，全表走一遍、每页命中索引、页间让出事件循环并可被 abort 打断。
+          const PAGE = 2000;
+          // 孤儿 id 列表只服务于「样本展示 + Phase 3 删除」，而 Phase 3 本身受
+          // MAX_DELETE=1000 约束，故设上限避免在异常图上占满内存；
+          // 真实数量由 orphanNodes 计数保证，不受此上限影响。
+          const ORPHAN_ID_CAP = 2000;
+          let lastId = '';
+          let pages = 0;
+          const scanStartedAt = Date.now();
+          for (;;) {
+            if (signal?.aborted) {
+              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+            }
+            const page = await session.run(
+              `MATCH (n:ConversationMessage) WHERE n.id > $last
+               RETURN n.id AS id, n.sessionId AS sid, n.sessionKey AS skey
+               ORDER BY n.id LIMIT $page`,
+              { last: lastId, page: neo4jDriver.int(PAGE) },
+            );
+            if (page.records.length === 0) break;
+            for (const rec of page.records) {
+              const id = rec.get("id") ? String(rec.get("id")) : "";
+              if (!id) continue; // 无 id 无法推进游标，跳过（不参与判定）
+              lastId = id;
+              neo4jMsgNodes += 1;
               const sid = rec.get("sid") ? String(rec.get("sid")) : "";
               const skey = rec.get("skey") ? String(rec.get("skey")) : "";
               if (!sid && !skey) continue; // 无任何会话标识 → 不参与孤儿判定
               const known = (sid && existingSids.has(sid)) || (skey && existingSids.has(skey));
               if (!known) {
                 orphanNodes++;
-                orphanedIds.push(rec.get("id") ?? sid ?? skey);
+                if (orphanedIds.length < ORPHAN_ID_CAP) orphanedIds.push(id);
               }
             }
+            pages += 1;
+            // 每 20 页输出进度：工具返回值是单次聚合文本，运行中无法回报，只能走宿主日志
+            if (pages % 20 === 0) {
+              getGlobalLogger().info?.(
+                `[lcmg_sync] Phase 1 scanning :ConversationMessage … scanned=${neo4jMsgNodes} orphans=${orphanNodes}`,
+              );
+            }
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          push(`  Neo4j scanned: ${neo4jMsgNodes} :ConversationMessage via indexed keyset scan (${Date.now() - scanStartedAt}ms, ${pages} pages; full, no LIMIT)\n`);
+
+          if (existingSids.size === 0) {
+            // 安全护栏：两个来源都没读到会话清单时，绝不能把全图消息判为孤儿
+            // （否则一次 repair 会清空消息节点）。宁可跳过并如实说明。
+            push(`  ⚠️ No session catalog available from any source → orphan detection SKIPPED (refusing to treat all nodes as orphans)\n`);
+            orphanNodes = 0;
+            orphanedIds = [];
           }
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) { push(`  ❌ Neo4j: ${e.message}\n`); }
@@ -1610,6 +1641,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           for (const id of orphanedIds) push(`    - ${id}\n`);
         } else {
           push(`    First 5: ${orphanedIds.slice(0, 5).join(", ")}...\n`);
+        }
+        if (orphanedIds.length < orphanNodes) {
+          push(`    (id list truncated at ${orphanedIds.length} for memory safety; count above is exact)\n`);
         }
       } else {
         push(`  ✅ No orphaned nodes found\n`);
@@ -1764,7 +1798,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         // P0-5 SEC-4: 删除数量上限保护，防止误删大量数据
         const MAX_DELETE = 1000;
         if (orphanNodes > MAX_DELETE) {
-          push(`  ❌ Aborted: ${orphanNodes} orphan nodes exceed safety limit (${MAX_DELETE}). Re-run with explicit smaller scope or contact admin.\n`);
+          push(`  ❌ Aborted: ${orphanNodes} orphan nodes exceed safety limit (${MAX_DELETE}).\n`);
+          push(`     孤儿总数由 Phase 1 全量核查得出（不再受旧 LIMIT 5000 抽样限制），但删除动作仍受该安全上限约束。\n`);
+          push(`     本次未删除任何节点 —— 需先人工确认这批会话确实可以清理，再显式放开上限。\n`);
         } else {
           try {
             if (signal?.aborted) {
