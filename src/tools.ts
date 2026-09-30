@@ -17,6 +17,7 @@ import {
   planGmMessageRows,
   resolveGmSessionKey,
 } from './utils/gm-message-contract.js';
+import { estimateTokensFromText } from './lcm-bridge.js';
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { registerSearchTool } from './tools/search.js';
 import { registerDiagnoseTool } from './tools/diagnose.js';
@@ -128,6 +129,104 @@ function parseMemoryFileTime(content: string, filePath: string): number {
   } catch {
     return Date.now();
   }
+}
+
+// ---------------------------------------------------------------------------
+// 会话消息来源加载（官方权威源优先，lcm.db 回退）—— 导入与同步共用
+// ---------------------------------------------------------------------------
+
+interface MessageSourceSession {
+  sessionKey: string;
+  sessionId: string;
+  msgs: { role: unknown; content: unknown; createdAt: number }[];
+}
+
+interface MessageSourceLoad {
+  sessions: MessageSourceSession[];
+  /** 人类可读的来源描述（写进工具输出，便于判断读到的是哪个库） */
+  source: string;
+  /** 官方转录中被 zstd 压缩、本工具无法解压的行数 */
+  compressed: number;
+  /** 非 message entry 数（session 头 / compaction / label 等） */
+  nonMessage: number;
+  parseErrors: number;
+  /** 因无可用会话键（session_key 与 session_id 皆空）被跳过的消息数 */
+  skippedNoKey: number;
+  errors: string[];
+}
+
+/**
+ * 加载会话消息（按官方 SDK 逻辑排序来源）：
+ *
+ *  1. **官方 per-agent SQLite `transcript_events`** —— openclaw 2.0+ 的权威转录存储。
+ *     官方存储教义（`src/state/openclaw-agent-schema.sql`）：
+ *       "session_windows and their children own transcript generations"
+ *     消息原文以 canonical entry JSON 存于 `event_json`（`{type:'message', message:{role, content}}`），
+ *     content 可为字符串或块数组。JSONL / sessionFile 已标记为 legacy
+ *     （sessionFile 现为进程内路由 token，不再是文件路径）。
+ *  2. **lossless-claw 的 lcm.db `conversations`/`messages`** —— 回退。
+ *     仅在官方库不存在或尚无转录（未迁移环境）时使用：它是 lossless-claw 的镜像，
+ *     可能滞后或被过滤，而官方转录是宿主写入的原文。
+ *
+ * 两条来源产出的行统一交给 gm-message-contract 的 planGmMessageRows 处理，
+ * 故 role 过滤 / 内容扁平化 / id 生成只有一份实现。
+ */
+async function loadMessageSourceSessions(): Promise<MessageSourceLoad> {
+  const out: MessageSourceLoad = {
+    sessions: [], source: 'none', compressed: 0, nonMessage: 0, parseErrors: 0, skippedNoKey: 0, errors: [],
+  };
+
+  // 优先级 1：官方转录
+  try {
+    const { readAgentTranscriptMessages } = await import('./adapters/openclaw-agent-db.js');
+    const tr = readAgentTranscriptMessages();
+    out.compressed = tr.skippedCompressed;
+    out.nonMessage = tr.skippedNonMessage;
+    out.parseErrors = tr.parseErrors;
+    if (tr.messages.length > 0) {
+      // 按稳定 sessionKey 归组：跨 /new 轮换的多个 session_window 属同一逻辑会话，
+      // 上游 gm-pro 也正是按 sessionKey 枚举会话。
+      const byKey = new Map<string, MessageSourceSession>();
+      for (const m of tr.messages) {
+        const key = resolveGmSessionKey(m.sessionKey, m.sessionId);
+        if (!key) { out.skippedNoKey += 1; continue; }
+        let g = byKey.get(key);
+        if (!g) { g = { sessionKey: key, sessionId: m.sessionId, msgs: [] }; byKey.set(key, g); }
+        g.msgs.push({ role: m.role, content: m.content, createdAt: m.createdAt });
+      }
+      out.sessions = [...byKey.values()];
+      out.source = `openclaw-agent.sqlite transcript_events (agents=${tr.agentsScanned})`;
+      return out;
+    }
+  } catch (e: any) {
+    out.errors.push(`官方转录读取失败：${e?.message ?? String(e)}`);
+  }
+
+  // 优先级 2：lcm.db 回退
+  let db: any = null;
+  try {
+    db = openDb();
+    const convs = db.prepare(
+      "SELECT conversation_id, session_id, session_key FROM conversations " +
+      "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
+      "ORDER BY conversation_id DESC"
+    ).all() as any[];
+    for (const conv of convs) {
+      const key = resolveGmSessionKey(conv.session_key, conv.session_id);
+      const rows = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
+      if (!key) { out.skippedNoKey += rows.length; continue; }
+      out.sessions.push({
+        sessionKey: key,
+        sessionId: conv.session_id != null ? String(conv.session_id) : '',
+        msgs: rows.map((m: any) => ({ role: m.role, content: m.content, createdAt: toRealTs(m.created_at) })),
+      });
+    }
+    out.source = 'lcm.db conversations/messages (fallback: official transcript empty)';
+  } catch (e: any) {
+    out.errors.push(`lcm.db 读取失败：${e.message}`);
+  } finally { if (db) { try { db.close(); } catch {} } }
+
+  return out;
 }
 
 /**
@@ -501,10 +600,21 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         db = openDb();
         const convs = db.prepare("SELECT conversation_id, session_id, session_key FROM conversations ORDER BY conversation_id").all() as any[];
         for (const conv of convs) {
-          const msgs = db.prepare("SELECT seq, role, content FROM messages WHERE conversation_id = ? ORDER BY seq").all(conv.conversation_id) as any[];
+          // 导出 created_at 原始值（lcm.db 存的是 'YYYY-MM-DD HH:MM:SS' 文本，见 sync 的解析约定）
+          // 与 session_key 原始值：二者都是「恢复后无法再凭空重建」的事实，
+          // 此前备份丢失它们 → 恢复只能写 Date.now() + 合成键 'restored'，真实时序永久丢失。
+          const msgs = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq").all(conv.conversation_id) as any[];
           (backup.lcm as any).conversations.push({
             sessionId: conv.session_id,
-            messages: msgs.map((m) => ({ seq: m.seq, role: m.role, content: (m.content ?? "").slice(0, 10000) })),
+            sessionKey: conv.session_key ?? null,
+            // 不截断 content：内容指纹是消息身份（gm:<sessionKey>:<role>:<fnv1a64(全文)>:<occ>）的输入，
+            // 截断会同时改变指纹与 id，导致恢复后既丢数据又与上游节点对不上。
+            messages: msgs.map((m) => ({
+              seq: m.seq,
+              role: m.role,
+              content: m.content ?? "",
+              createdAt: m.created_at ?? null,
+            })),
           });
         }
       } catch (e) { /* DB unavailable */
@@ -689,18 +799,34 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         try {
           db = openDb();
           let msgCount = 0;
-          const insertMsg = db.prepare("INSERT OR IGNORE INTO messages (conversation_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+          // created_at / session_key 按备份原值回写：
+          //  - created_at 必须是 lcm.db 的 'YYYY-MM-DD HH:MM:SS' 文本（回退 datetime('now')），
+          //    此前硬写 Date.now()（毫秒整数）→ 时间戳被写成非约定格式且全部塌成恢复时刻；
+          //  - session_key 缺失时写 NULL（不合成 'restored'）：导入侧的 resolveGmSessionKey
+          //    会回退到 session_id，使消息仍能落到上游认可的会话键上；
+          //    而 'restored' 这种合成键会让同一会话在 Neo4j 里分裂成两个 sessionKey。
+          const insertMsg = db.prepare(
+            "INSERT OR IGNORE INTO messages (conversation_id, seq, role, content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?)");
           for (const conv of (data.lcm as any)?.conversations ?? []) {
             let convId = 1;
             const exists = db.prepare("SELECT conversation_id FROM conversations WHERE session_id = ?").get(conv.sessionId ?? "") as any;
             if (exists) {
               convId = exists.conversation_id;
             } else {
-              db.prepare("INSERT INTO conversations (session_id, session_key, active, created_at) VALUES (?, 'restored', 1, datetime('now'))").run(conv.sessionId ?? "unknown");
+              db.prepare("INSERT INTO conversations (session_id, session_key, active, created_at) VALUES (?, ?, 1, datetime('now'))")
+                .run(conv.sessionId ?? "unknown", conv.sessionKey ?? null);
               convId = Number(db.prepare("SELECT last_insert_rowid() as id").get()?.id ?? 1);
             }
             for (const msg of (conv.messages ?? [])) {
-              insertMsg.run(convId, msg.seq ?? 0, msg.role ?? "user", msg.content ?? "", (msg.content?.length ?? 0), Date.now());
+              const content = msg.content ?? "";
+              // 旧备份无 createdAt 时用当前 UTC 时间兜底（保持 'YYYY-MM-DD HH:MM:SS' 约定格式，不写 NULL）
+              const createdAt = msg.createdAt
+                ?? new Date().toISOString().slice(0, 19).replace('T', ' ');
+              insertMsg.run(
+                convId, msg.seq ?? 0, msg.role ?? "user", content,
+                estimateTokensFromText(content),
+                createdAt,
+              );
               msgCount++;
             }
           }
@@ -812,20 +938,32 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         let db: any = null;
         try {
           db = openDb();
-          // limit = 每批记录数上限；工具自动分多批直到全部导入（清理 Neo4j 后完整重建）
           const batchSize = Math.max(1, limit);
 
-          // 1) 全量收集待导入消息队列：不再 LIMIT 截断会话，会话内不再只取 5 条。
-          //    时序使用 messages.created_at 真实时间（非导入时刻），供 :GmMessage / 三级节点建时序。
-          // 查询需同时取出 conversation_id / session_id / session_key：
-          //   gm-pro :GmMessage.sessionKey 对应 SDK 层 ctx.sessionKey = conversations.session_key。
-          const convs = db.prepare(
-            "SELECT conversation_id, session_id, session_key FROM conversations " +
-            "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
-            "ORDER BY conversation_id DESC"
-          ).all() as any[];
+          // 1) 加载会话消息来源：官方 SQLite 转录优先、lcm.db 回退。
+          //    来源选择与理由集中在 loadMessageSourceSessions（与 lcmg_sync 共用同一实现）。
+          const src = await loadMessageSourceSessions();
+          const sessions = src.sessions;
+          let msgSkippedNoKey = src.skippedNoKey;
+          let msgSkippedNonConv = 0;
+          let msgSkippedEmpty = 0;
+          for (const err of src.errors) lines.push(`⚠ ${err}`);
 
-          // 2) 按 conversation 逐会话构建两类行：
+          if (src.source === 'none' || sessions.length === 0) {
+            lines.push('⚠ 未找到会话消息来源（官方 transcript_events 与 lcm.db 均无数据）');
+          } else {
+            lines.push(`ℹ 消息来源：${src.source}，会话数 ${sessions.length}`);
+          }
+          if (src.compressed > 0) {
+            lines.push(`⚠ 官方转录有 ${src.compressed} 行是 zstd 压缩载荷（event_json IS NULL）：`
+              + `本工具无法调用官方 SQL 解压函数 openclaw_transcript_payload_decode，已如实跳过`);
+          }
+          if (src.nonMessage > 0) {
+            lines.push(`ℹ 跳过 ${src.nonMessage} 条非消息 entry（session 头/compaction/label/model_change 等）`
+              + (src.parseErrors > 0 ? `，解析失败 ${src.parseErrors} 行` : ''));
+          }
+
+          // 2) 逐会话构建两类行：
           //    convRows —— :ConversationMessage（上游全文索引 conversation_search 的语料标签）
           //    gmRows   —— :GmMessage（上游 rebuild 读取配对三级节点的唯一来源）
           //
@@ -846,27 +984,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             id: string; sessionKey: string; role: string; content: string;
             turnIndex: number; createdAt: number;
           }[] = [];
-          let msgSkippedNoKey = 0;
-          let msgSkippedNonConv = 0;
-          let msgSkippedEmpty = 0;
 
-          for (const conv of convs) {
-            // 上游 agent_end：ctx.sessionKey ?? ctx.sessionId ?? _lastSessionKey，三者皆空则整轮跳过。
-            // 对应本地两列：session_key（ctx.sessionKey）/ session_id（ctx.sessionId）。
-            // 不得自造 conv:<id> 合成键：上游无此约定，且合成键会让同一段历史被 rebuild 两遍。
-            const realSessionKey = resolveGmSessionKey(conv.session_key, conv.session_id);
-            const msgs = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
-            const sid = conv.session_id != null ? String(conv.session_id) : "";
-            if (!realSessionKey) {
-              msgSkippedNoKey += msgs.length;
-              continue;
-            }
-
-            // :GmMessage 行按上游语义规划（role 过滤 + 全文指纹 + occurrence + turnIndex）
-            const plan = planGmMessageRows(
-              msgs.map((m: any) => ({ role: m.role, content: m.content, createdAt: toRealTs(m.created_at) })),
-              realSessionKey,
-            );
+          for (const sess of sessions) {
+            const plan = planGmMessageRows(sess.msgs, sess.sessionKey);
             msgSkippedNonConv += plan.skippedNonConversational;
             msgSkippedEmpty += plan.skippedEmpty;
             for (const row of plan.rows) {
@@ -886,8 +1006,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 role: row.role,
                 content: row.content,
                 sessionKey: row.sessionKey,
-                sessionId: sid,
-                tokens: row.content.length,
+                sessionId: sess.sessionId,
+                tokens: estimateTokensFromText(row.content),
                 ts: row.createdAt,
               });
             }
@@ -1441,108 +1561,104 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         push(`  ✅ No orphaned nodes found\n`);
       }
 
-      // --- N-1 Phase 1.5: updatedAt timestamp drift detection ---
-      // 跨端时间戳一致性校验：对比 lcm.db messages.created_at 与 Neo4j ConversationMessage.updatedAt。
-      // 不一致 → 在 repair 模式下增量 MERGE 更新到 Neo4j（以 lcm.db 为权威源）。
-      push("\n## Phase 1.5: updatedAt timestamp drift (N-1)\n");
+      // --- N-1 Phase 1.5: 消息 createdAt 逐条校验（按契约 id 映射） ---
+      // 官方逻辑：会话消息的权威源是官方 SQLite 转录（其次 lcm.db 镜像）；
+      // Neo4j 侧只由 lcmg_import 写契约字段 createdAt。
+      // 旧实现的两个错误：
+      //   1) 比对 `updatedAt` —— 没有任何写者写该字段，匹配恒为 0 行、repair 永不执行；
+      //   2) 用「每会话 MAX(created_at)」对「每节点 updatedAt」，属跨粒度比较
+      //      （即便字段存在，除最新一条外每条都会"漂移"）。
+      // 现改为：对源消息复用 gm-message-contract 的 plan 规则算出契约 id，
+      // 再按 id **逐条**比对 createdAt。
+      push("\n## Phase 1.5: message createdAt drift (per-message, contract id)\n");
+      const DRIFT_TOLERANCE_MS = 60_000; // 容忍写入延迟
       let driftCount = 0;
       const driftIds: string[] = [];
-      let lcmDb2: any = null;
       try {
         if (signal?.aborted) {
           return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
         }
-        const { driver, session } = await neo4jSession();
-        try {
-          // 取 Neo4j 中所有 ConversationMessage 的 updatedAt 与 sessionId
-          const neo4jTsResult = await session.run(
-            `MATCH (n:ConversationMessage)
-             WHERE n.sessionId IS NOT NULL AND n.updatedAt IS NOT NULL
-             RETURN n.id AS id, n.sessionId AS sid, n.updatedAt AS updatedAt, n.content AS content
-             LIMIT 5000`
-          );
-          const neo4jRows = neo4jTsResult.records.map((r: any) => ({
-            id: r.get("id"),
-            sid: r.get("sid"),
-            updatedAt: typeof r.get("updatedAt")?.toNumber === 'function'
-              ? r.get("updatedAt").toNumber()
-              : Number(r.get("updatedAt") ?? 0),
-            content: r.get("content") ?? '',
-          }));
+        const src = await loadMessageSourceSessions();
+        if (src.sessions.length === 0) {
+          push("  ⚠️ No message source available（官方 transcript_events 与 lcm.db 均无数据）；skip drift check\n");
+        } else {
+          // 源消息 → 契约 id + createdAt（与导入完全同一套 plan 规则，故 id 可直接对齐）
+          const expected: Array<{ id: string; ts: number }> = [];
+          for (const sess of src.sessions) {
+            for (const row of planGmMessageRows(sess.msgs, sess.sessionKey).rows) {
+              expected.push({ id: row.id, ts: row.createdAt });
+            }
+          }
+          push(`  Source: ${src.source}; mapped messages: ${expected.length}\n`);
 
-          // BUGFIX(P1-6): 批量 GROUP BY 查询替代逐行 SELECT，消除 N 次 SQLite 往返
-          // 一次性查出每个 conversation_id 的最新 created_at，内存中对比检测 drift
-          const sidToLatestTs = new Map<string, number>();
+          const { driver, session } = await neo4jSession();
           try {
-            lcmDb2 = openDb();
-            const allSids = neo4jRows.filter((r: any) => r.sid).map((r: any) => String(r.sid));
-            const BATCH = 500; // SQLite IN 参数分批，避免超 999 限制
-            for (let i = 0; i < allSids.length; i += BATCH) {
-              const batch = allSids.slice(i, i + BATCH);
-              const placeholders = batch.map(() => '?').join(',');
-              const rows = lcmDb2.prepare(
-                `SELECT conversation_id, MAX(created_at) AS ca FROM messages WHERE conversation_id IN (${placeholders}) GROUP BY conversation_id`
-              ).all(...batch) as any[];
-              for (const row of rows) {
-                if (!row.ca) continue;
-                // lcm.db created_at 是 'YYYY-MM-DD HH:MM:SS' 格式，转毫秒时间戳
-                const ts = new Date(String(row.ca).replace(' ', 'T') + 'Z').getTime() || 0;
-                if (ts > 0) sidToLatestTs.set(String(row.conversation_id), ts);
+            const BATCH = 500;
+            const driftRows: Array<{ id: string; ts: number }> = [];
+            let matched = 0;
+            let missing = 0;
+            for (let i = 0; i < expected.length; i += BATCH) {
+              if (signal?.aborted) {
+                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
-            }
-          } finally { if (lcmDb2) { try { lcmDb2.close(); } catch {} } }
-
-          // 内存中检测 drift（时间戳差异超过 60s 视为 drift，容忍写延迟）
-          const driftRows: Array<{ id: string; ts: number }> = [];
-          for (const row of neo4jRows) {
-            if (!row.sid) continue;
-            const lcmTs = sidToLatestTs.get(String(row.sid));
-            if (!lcmTs) continue;
-            const diffMs = Math.abs(lcmTs - row.updatedAt);
-            if (diffMs > 60_000) {
-              driftCount++;
-              if (driftIds.length < 10) driftIds.push(row.id);
-              driftRows.push({ id: row.id, ts: lcmTs });
-            }
-          }
-
-          push(`  Neo4j ConversationMessage with updatedAt: ${neo4jRows.length}\n`);
-          push(`  Timestamp drift > 60s: ${driftCount}\n`);
-          if (driftIds.length > 0) {
-            push(`  Sample drift IDs: ${driftIds.join(", ")}\n`);
-          }
-
-          // N-1 Phase 1.5 repair: 增量 MERGE updatedAt（以 lcm.db 为权威源）
-          // BUGFIX(P1-6): UNWIND 批量 MERGE 替代逐条 session.run，复用 check 阶段的 driftRows 无需再查 SQLite
-          if (mode === "repair" && !isDryRun && driftCount > 0) {
-            if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-            }
-            push(`\n  Repairing ${driftCount} drifted nodes via MERGE...\n`);
-            let merged = 0;
-            try {
-              const updates = driftRows.map(d => ({ id: d.id, ts: neo4jDriver.int(d.ts) as any }));
-              const BATCH = 500;
-              for (let i = 0; i < updates.length; i += BATCH) {
-                const batch = updates.slice(i, i + BATCH);
-                const result = await session.run(
-                  `UNWIND $updates AS u
-                   MATCH (n:ConversationMessage {id: u.id})
-                   SET n.updatedAt = u.ts, n.syncSource = 'lcm-db-merge', n.syncedAt = timestamp()
-                   RETURN count(*) AS c`,
-                  { updates: batch }
+              const batch = expected.slice(i, i + BATCH);
+              const res = await session.run(
+                "UNWIND $ids AS id MATCH (n {id: id}) RETURN n.id AS id, n.createdAt AS createdAt",
+                { ids: batch.map((b) => b.id) },
+              );
+              const actual = new Map<string, number>();
+              for (const r of res.records) {
+                const cv = r.get("createdAt");
+                actual.set(
+                  String(r.get("id")),
+                  typeof cv?.toNumber === 'function' ? cv.toNumber() : Number(cv ?? 0),
                 );
-                merged += result.records[0]?.get("c")?.toNumber?.() ?? batch.length;
               }
-            } catch (e: any) { push(`  ⚠️ MERGE error: ${e.message}\n`); }
-            push(`  ✅ MERGE'd ${merged} nodes with corrected updatedAt\n`);
-          } else if (mode === "repair" && isDryRun && driftCount > 0) {
-            push(`  (Dry run) Would MERGE ${driftCount} nodes with corrected updatedAt\n`);
-          } else if (driftCount === 0) {
-            push(`  ✅ No timestamp drift detected\n`);
-          }
-        } finally { await closeNeo4j(driver, session); }
-      } catch (e: any) { push(`  ❌ updatedAt drift check error: ${e.message}\n`); }
+              for (const b of batch) {
+                const a = actual.get(b.id);
+                if (a == null) { missing += 1; continue; } // 尚未导入 / 源中已删
+                matched += 1;
+                if (Math.abs(a - b.ts) > DRIFT_TOLERANCE_MS) {
+                  driftCount += 1;
+                  if (driftIds.length < 10) driftIds.push(b.id);
+                  driftRows.push({ id: b.id, ts: b.ts });
+                }
+              }
+            }
+            push(`  Neo4j matched: ${matched}; not present in graph: ${missing}\n`);
+            push(`  createdAt drift > ${DRIFT_TOLERANCE_MS / 1000}s: ${driftCount}\n`);
+            if (driftIds.length > 0) {
+              push(`  Sample drift IDs: ${driftIds.join(", ")}\n`);
+            }
+
+            // Repair：以消息源为权威，纠正逐个节点的 createdAt（不再写 updatedAt）
+            if (mode === "repair" && !isDryRun && driftCount > 0) {
+              push(`\n  Repairing ${driftCount} drifted nodes (SET createdAt from message source)...\n`);
+              let merged = 0;
+              try {
+                const updates = driftRows.map((d) => ({ id: d.id, ts: neo4jDriver.int(d.ts) }));
+                const RB = 500;
+                for (let i = 0; i < updates.length; i += RB) {
+                  const batch = updates.slice(i, i + RB);
+                  const result = await session.run(
+                    `UNWIND $updates AS u
+                     MATCH (n {id: u.id})
+                     SET n.createdAt = u.ts, n.syncSource = 'message-source', n.syncedAt = timestamp()
+                     RETURN count(*) AS c`,
+                    { updates: batch },
+                  );
+                  merged += result.records[0]?.get("c")?.toNumber?.() ?? batch.length;
+                }
+              } catch (e: any) { push(`  ⚠️ createdAt repair error: ${e.message}\n`); }
+              push(`  ✅ Corrected createdAt on ${merged} nodes\n`);
+            } else if (mode === "repair" && isDryRun && driftCount > 0) {
+              push(`  (Dry run) Would correct createdAt on ${driftCount} nodes\n`);
+            } else if (driftCount === 0) {
+              push(`  ✅ No message createdAt drift detected\n`);
+            }
+          } finally { await closeNeo4j(driver, session); }
+        }
+      } catch (e: any) { push(`  ❌ message createdAt drift check error: ${e.message}\n`); }
 
       // --- Phase 2: Check TTL-expired nodes (pinned? expired?) ---
       push("\n## Phase 2: TTL & pin status\n");
@@ -1580,21 +1696,15 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
               }
               const deleted = orphanedIds.length;
-              // P1-6: 批量清理查询逻辑修复。
-              // 原查询 `NOT EXISTS { MATCH (m:ConversationMessage) WHERE m.id = n.id } AND n:ConversationMessage`
-              // 中，子查询用同一 label 匹配同 id，节点自身即满足 EXISTS，NOT EXISTS 恒为 false，导致清理永远 0 删除。
-              // 正确语义：删除那些 id 在 lossless-claw 会话消息表中已不存在的 ConversationMessage 节点。
-              // 此处 orphanedIds 已在上面逐个删除，批量清理作为补充：删除剩余无任何关系的孤立 ConversationMessage。
-              if (signal?.aborted) {
-                return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-              }
-              const relCleanup = await session.run(
-                `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
-              );
-              // P1-AUDIT: 批量清理结果从 Neo4j result summary 中提取实际删除数，
-              // 修复前硬编码 moreDeleted=0，用户无法知道额外清理了多少节点。
-              const moreDeleted = (relCleanup?.summary?.counters?.nodesDeleted?.() ?? 0) as number;
-              push(`  ✅ Pruned ${deleted} orphan nodes, ${moreDeleted} additional via batch cleanup\n`);
+              // BUGFIX(S1-数据丢失): 原实现额外执行 `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
+              // —— 语义是"删除所有无关系的 ConversationMessage"，**不限于孤儿**，且 MAX_DELETE 只约束
+              // orphanedIds、对该批量删除无任何上限。而 lcmg_import 产出的消息节点在设计上就是无边孤立节点
+              // （MENTIONS 边从 :MemoryFile 出发，不从消息出发），且与 :GmMessage 是同一节点
+              // → 一次 repair 可清空全部导入语料并连带删掉 rebuild 的源数据。
+              // 官方语义（graph-memory-pro）：消息节点是 rebuild 的输入，其生命周期由 GmMessage 会话决定，
+              // 与"是否有关系边"无关。故此处**移除**该批量清理：孤儿判定唯一依据是
+              // "sessionId 已不在 lcm.db / 官方转录源中"（即上面的 orphanedIds，已受 MAX_DELETE 保护）。
+              push(`  ✅ Pruned ${deleted} orphan nodes (scope = sessionId missing from message source; no relationship-based cleanup)\n`);
             } finally { await closeNeo4j(driver, session); }
           } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
         }

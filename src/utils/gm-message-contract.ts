@@ -38,12 +38,42 @@ export interface GmMessageRow {
   occurrence: number;
 }
 
-/** 导入侧的原始消息行（来自 lossless-claw 本地 sqlite） */
+/** 导入侧的原始消息行（来自 lossless-claw 本地 sqlite 或官方 per-agent sqlite） */
 export interface GmMessageSourceRow {
-  role?: string | null;
-  content?: string | null;
+  /**
+   * 消息角色：来源可能是任意 JSON 值（官方转录由 JSON.parse 得到），
+   * 由 normalizeGmRole 按上游规则归一，非 user/assistant 一律丢弃。
+   */
+  role?: unknown;
+  /**
+   * 消息内容：字符串或 block 数组（官方转录两种都存）。
+   * 扁平化规则见 flattenGmMessageContent —— 必须与上游取文本的规则一致，
+   * 否则指纹不同 → id 不同 → MERGE 命不中上游节点。
+   */
+  content?: unknown;
   /** 消息真实时间（ms）。上游取宿主消息时间戳；缺失时写 0 由调用方兜底 */
   createdAt?: number;
+}
+
+/**
+ * 消息内容扁平化 —— 与上游 `extractMessageText` 的处理**逐字对齐**：
+ *   - 字符串：原样返回（不 trim，trim 会改变指纹）
+ *   - 数组：保留「字符串元素」与「type === 'text' 的块」，取 `b.text ?? ''`，以 `"\n"` 连接
+ *   - 其他：返回空串
+ *
+ * 为什么必须一致：上游持久化时先取文本、再对该文本算 FNV 指纹并构成 id。
+ * 若这里多做一次 trim、换用别的分隔符、或忽略 input_text 块，
+ * 同一条消息在两处会算出不同 id，MERGE 永不命中 → 历史被复制。
+ */
+export function flattenGmMessageContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b: any) => b && (typeof b === 'string' || b?.type === 'text'))
+      .map((b: any) => (typeof b === 'string' ? b : (b?.text ?? '')))
+      .join('\n');
+  }
+  return '';
 }
 
 /**
@@ -141,7 +171,7 @@ export function planGmMessageRows(
       skippedNonConversational += 1;
       continue;
     }
-    const content = typeof src?.content === 'string' ? src.content : '';
+    const content = flattenGmMessageContent(src?.content);
     if (!content.trim()) {
       skippedEmpty += 1;
       continue;

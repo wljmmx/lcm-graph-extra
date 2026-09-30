@@ -14,6 +14,7 @@ import {
   normalizeGmRole,
   resolveGmSessionKey,
   planGmMessageRows,
+  flattenGmMessageContent,
   type GmMessageSourceRow,
 } from './gm-message-contract.js';
 
@@ -101,6 +102,43 @@ describe('resolveGmSessionKey（上游 agent_end 回退链）', () => {
 
   it('不再自造 conv:<id> 合成键（上游无此约定）', () => {
     expect(resolveGmSessionKey(null, null)).not.toContain('conv:');
+  });
+});
+
+describe('flattenGmMessageContent（与上游 extractMessageText 对齐）', () => {
+  it('字符串原样返回（不 trim，trim 会改变指纹）', () => {
+    expect(flattenGmMessageContent('  hello  ')).toBe('  hello  ');
+    expect(flattenGmMessageContent('')).toBe('');
+  });
+
+  it('文本块数组以 \\n 连接，保留未 trim 的原文', () => {
+    expect(flattenGmMessageContent([
+      { type: 'text', text: '  a  ' },
+      { type: 'text', text: 'b' },
+    ])).toBe('  a  \nb');
+  });
+
+  it('忽略非文本块，但保留字符串元素', () => {
+    expect(flattenGmMessageContent([
+      'raw',
+      { type: 'tool_use', id: 'x' },
+      { type: 'text', text: 'tail' },
+    ])).toBe('raw\ntail');
+  });
+
+  it('非字符串/非数组内容视为空', () => {
+    expect(flattenGmMessageContent(null)).toBe('');
+    expect(flattenGmMessageContent(undefined)).toBe('');
+    expect(flattenGmMessageContent(42)).toBe('');
+    expect(flattenGmMessageContent({ type: 'text', text: 'x' })).toBe('');
+  });
+
+  it('块数组经 planGmMessageRows 后参与 id 指纹（两种来源共用同一规则）', () => {
+    const blocks = [{ type: 'text', text: 'line1' }, { type: 'text', text: 'line2' }];
+    const fromArray = planGmMessageRows([{ role: 'assistant', content: blocks }], 's');
+    const fromString = planGmMessageRows([{ role: 'assistant', content: 'line1\nline2' }], 's');
+    expect(fromArray.rows[0].content).toBe('line1\nline2');
+    expect(fromArray.rows[0].id).toBe(fromString.rows[0].id);
   });
 });
 

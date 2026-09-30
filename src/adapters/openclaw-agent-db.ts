@@ -216,6 +216,150 @@ export function tokenizeMemoryQuery(q: string): string[] {
 /** chunk 基础列（memory_index_chunks）；列缺失时降级 [] */
 const CHUNK_BASE_COLS = 'id, path, source, start_line, end_line, model, text, updated_at';
 
+// ---------------------------------------------------------------------------
+// 官方转录（transcript_events）—— 会话消息的权威来源
+// ---------------------------------------------------------------------------
+//
+// 官方存储教义（openclaw/openclaw `src/state/openclaw-agent-schema.sql` 顶部注释）：
+//   "session_windows and their children own transcript generations"
+//   —— 会话消息的权威存储是 per-agent SQLite 的 transcript_events，不是 JSONL。
+//   JSONL / sessionFile 已被标记为 legacy（仅归档、迁移、plugin SDK 兼容用途，
+//   `sessionFile` 现在是"进程内路由 token"而非文件路径）。
+//
+// 表结构（逐字来自官方 DDL，仅取本读取器需要的列）：
+//   transcript_events(session_id, seq, event_json|event_zstd+event_utf8_bytes, created_at,
+//                     PRIMARY KEY(session_id, seq))
+//   session_windows(session_id PK, session_key, ...)
+//   transcript_event_identities(session_id, event_id, seq, ...)
+// event_json 内容 = 一条 canonical transcript entry，消息条为
+//   { id, parentId?, timestamp?, type: "message", message: { role, content } }
+// （与 JSONL 行同形；角色取值 user|assistant|toolResult|custom|bashExecution）。
+
+/** 一条官方转录消息（已解析 event_json，content 保持原始形态：字符串或块数组） */
+export interface AgentTranscriptMessage {
+  agentId: string;
+  /** 稳定会话键（session_windows.session_key），跨 /new 轮换不变 */
+  sessionKey: string;
+  sessionId: string;
+  /** 会话内单调序号（transcript_events 主键之一） */
+  seq: number;
+  /** entry id（transcript_event_identities.event_id），缺失为 null */
+  eventId: string | null;
+  role: string;
+  /** 原始 content（字符串或块数组）；扁平化由调用方按上游规则处理 */
+  content: unknown;
+  /** ms 时间戳 */
+  createdAt: number;
+}
+
+export interface AgentTranscriptReadResult {
+  messages: AgentTranscriptMessage[];
+  /** 被 zstd 压缩的行数（event_json IS NULL）——见下方 skippedCompressed 注释 */
+  skippedCompressed: number;
+  /** 非 message 类型 entry 数（session 头 / compaction / label / model_change 等） */
+  skippedNonMessage: number;
+  /** 解析失败的行数 */
+  parseErrors: number;
+  agentsScanned: number;
+}
+
+/** 时间戳归一为 ms：官方 INTEGER 约定为 ms；若明显是秒则换算（防御性，不改动已合法值） */
+function normalizeEpochMs(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 1e12 ? Math.floor(n * 1000) : Math.floor(n);
+}
+
+/**
+ * 读取官方 per-agent SQLite 的会话转录消息（权威来源）。
+ *
+ * 设计约束（沿用本模块既有约定）：
+ *   - 只读打开，不写任何文件；
+ *   - 表/列缺失即降级为空结果，不抛错（官方 schema 演进时不炸）；
+ *   - **无法解压 zstd 行**：官方用注册函数 `openclaw_transcript_payload_decode(event_zstd, ...)`
+ *     读取压缩行，本模块用 node:sqlite 只读打开、无法注册该函数，故只读 `event_json IS NOT NULL`
+ *     的行，压缩行计入 skippedCompressed 由调用方如实上报。
+ *
+ * @param options.agentsDir 覆盖 agents 目录（测试用）
+ * @param options.agentId   只读指定 agent
+ */
+export function readAgentTranscriptMessages(
+  options: OpenClawAgentDbOptions & { agentId?: string } = {},
+): AgentTranscriptReadResult {
+  const result: AgentTranscriptReadResult = {
+    messages: [], skippedCompressed: 0, skippedNonMessage: 0, parseErrors: 0, agentsScanned: 0,
+  };
+  const agents = discoverAgentDbs(options).filter((a) => !options.agentId || a.agentId === options.agentId);
+  for (const agent of agents) {
+    const db = openReadOnly(agent.dbPath);
+    if (!db) continue;
+    result.agentsScanned += 1;
+    try {
+      // 官方 schema 演进防御：核心两表缺失即跳过该库
+      if (!tableExists(db, 'transcript_events') || !tableExists(db, 'session_windows')) continue;
+
+      // 压缩行统计（无法解压，需如实上报而非静默漏读）
+      try {
+        const c = db.prepare('SELECT COUNT(*) AS c FROM transcript_events WHERE event_json IS NULL').get() as { c?: unknown };
+        result.skippedCompressed += Number(c?.c ?? 0) || 0;
+      } catch { /* 列缺失，忽略 */ }
+
+      // event_id 映射（可选表）
+      const eventIds = new Map<string, string>();
+      if (tableExists(db, 'transcript_event_identities')) {
+        try {
+          for (const r of db.prepare('SELECT session_id, seq, event_id FROM transcript_event_identities').all() as any[]) {
+            if (r?.event_id) eventIds.set(`${r.session_id}:${r.seq}`, String(r.event_id));
+          }
+        } catch { /* 忽略 */ }
+      }
+
+      // 主查询：消息行 JOIN 会话窗口取稳定 sessionKey（列名不符即降级跳过该库）。
+      // 排序 = 会话键 → 窗口创建时间 → 窗口内序号：同一 session_key 在 /new 后会开新
+      // session_window（各自 seq 从 1 起），只按 seq 排会把不同窗口交错，必须带上窗口时间。
+      const rows = db.prepare(
+        `SELECT e.session_id AS session_id, e.seq AS seq, e.event_json AS event_json,
+                e.created_at AS created_at, w.session_key AS session_key
+         FROM transcript_events e
+         JOIN session_windows w ON w.session_id = e.session_id
+         WHERE e.event_json IS NOT NULL
+         ORDER BY w.session_key ASC, w.created_at ASC, e.seq ASC`,
+      ).all() as any[];
+
+      for (const row of rows) {
+        let entry: any;
+        try {
+          entry = JSON.parse(String(row.event_json));
+        } catch {
+          result.parseErrors += 1;
+          continue;
+        }
+        if (!entry || entry.type !== 'message' || !entry.message) {
+          result.skippedNonMessage += 1;
+          continue;
+        }
+        const sessionId = String(row.session_id ?? '');
+        const seq = Number(row.seq ?? 0);
+        result.messages.push({
+          agentId: agent.agentId,
+          sessionKey: String(row.session_key ?? ''),
+          sessionId,
+          seq,
+          eventId: eventIds.get(`${sessionId}:${seq}`) ?? (entry.id != null ? String(entry.id) : null),
+          role: String(entry.message.role ?? ''),
+          content: entry.message.content,
+          createdAt: normalizeEpochMs(row.created_at),
+        });
+      }
+    } catch {
+      // 单库失败不影响其余库
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
+  }
+  return result;
+}
+
 interface BaseChunkRow {
   id?: unknown;
   path?: unknown;
