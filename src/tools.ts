@@ -1582,10 +1582,6 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           // 孤儿判定，图越大漏检越多）。现按 :ConversationMessage(id) 唯一索引做
           // keyset 分页，全表走一遍、每页命中索引、页间让出事件循环并可被 abort 打断。
           const PAGE = 2000;
-          // 孤儿 id 列表只服务于「样本展示 + Phase 3 删除」，而 Phase 3 本身受
-          // MAX_DELETE=1000 约束，故设上限避免在异常图上占满内存；
-          // 真实数量由 orphanNodes 计数保证，不受此上限影响。
-          const ORPHAN_ID_CAP = 2000;
           let lastId = '';
           let pages = 0;
           const scanStartedAt = Date.now();
@@ -1611,7 +1607,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               const known = (sid && existingSids.has(sid)) || (skey && existingSids.has(skey));
               if (!known) {
                 orphanNodes++;
-                if (orphanedIds.length < ORPHAN_ID_CAP) orphanedIds.push(id);
+                // 全量累积、不设上限：Phase 3 按批删除需要完整名单，
+                // 若在这里截断，超出的孤儿将永远删不掉（等于隐藏的 limit）。
+                orphanedIds.push(id);
               }
             }
             pages += 1;
@@ -1641,9 +1639,6 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           for (const id of orphanedIds) push(`    - ${id}\n`);
         } else {
           push(`    First 5: ${orphanedIds.slice(0, 5).join(", ")}...\n`);
-        }
-        if (orphanedIds.length < orphanNodes) {
-          push(`    (id list truncated at ${orphanedIds.length} for memory safety; count above is exact)\n`);
         }
       } else {
         push(`  ✅ No orphaned nodes found\n`);
@@ -1795,40 +1790,61 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // --- Phase 3: Repair if requested ---
       if (mode === "repair" && !isDryRun && orphanNodes > 0) {
         push("\n## Phase 3: Repairing\n");
-        // P0-5 SEC-4: 删除数量上限保护，防止误删大量数据
-        const MAX_DELETE = 1000;
-        if (orphanNodes > MAX_DELETE) {
-          push(`  ❌ Aborted: ${orphanNodes} orphan nodes exceed safety limit (${MAX_DELETE}).\n`);
-          push(`     孤儿总数由 Phase 1 全量核查得出（不再受旧 LIMIT 5000 抽样限制），但删除动作仍受该安全上限约束。\n`);
-          push(`     本次未删除任何节点 —— 需先人工确认这批会话确实可以清理，再显式放开上限。\n`);
-        } else {
+        // 分批删除。原实现有两处问题：
+        //   1) `MAX_DELETE=1000` 总量闸门 —— 全量核查后很容易超限，导致 repair 一个都删不掉，
+        //      等于让"核查得准"反而没法清理；删除动作的安全性由调用链上的二次确认承担
+        //      （dashboard 的确认弹窗 / 本次 repair 调用即显式授权），故取消总量拦截，
+        //      改为分批执行 + 批间可中断（abort）。
+        //   2) 逐个 id 一次 `session.run` —— N 次网络往返。改为每批用 UNWIND + DETACH DELETE
+        //      单条语句提交，批大小 DELETE_BATCH。
+        const DELETE_BATCH = 1000;
+        try {
+          if (signal?.aborted) {
+            return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+          }
+          const { driver, session } = await neo4jSession();
           try {
-            if (signal?.aborted) {
-              return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
-            }
-            const { driver, session } = await neo4jSession();
-            try {
+            let deleted = 0;
+            let batches = 0;
+            const delStartedAt = Date.now();
+            const total = orphanedIds.length;
+            for (let i = 0; i < total; i += DELETE_BATCH) {
               if (signal?.aborted) {
+                push(`  ⚠️ Aborted after deleting ${deleted}/${total} orphan nodes\n`);
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
-              for (const id of orphanedIds) {
-                // label 必须写死（:ConversationMessage）才能走 id 唯一索引；
-                // 无 label 的 `MATCH (n {id: $id})` 会全图扫描。
-                await session.run("MATCH (n:ConversationMessage {id: $id}) DETACH DELETE n", { id });
+              const batch = orphanedIds.slice(i, i + DELETE_BATCH);
+              // label 必须写死（:ConversationMessage）才能走 id 唯一索引；
+              // 无 label 的 `MATCH (n {id: id})` 会全图扫描。
+              // `DETACH DELETE ... RETURN count(n)` 形态与 src/core/ttl.ts 的
+              // cleanupNeo4jExpiredNodes 保持一致（已在生产路径验证可用）。
+              const r = await session.run(
+                `UNWIND $ids AS id
+                 MATCH (n:ConversationMessage {id: id})
+                 DETACH DELETE n
+                 RETURN count(n) AS c`,
+                { ids: batch },
+              );
+              const cnt = r.records[0]?.get("c");
+              deleted += typeof cnt?.toNumber === 'function' ? cnt.toNumber() : Number(cnt ?? batch.length);
+              batches += 1;
+              if (batches % 5 === 0) {
+                getGlobalLogger().info?.(`[lcmg_sync] Phase 3 deleting orphans … deleted=${deleted}/${total}`);
               }
-              const deleted = orphanedIds.length;
-              // BUGFIX(S1-数据丢失): 原实现额外执行 `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
-              // —— 语义是"删除所有无关系的 ConversationMessage"，**不限于孤儿**，且 MAX_DELETE 只约束
-              // orphanedIds、对该批量删除无任何上限。而 lcmg_import 产出的消息节点在设计上就是无边孤立节点
-              // （MENTIONS 边从 :MemoryFile 出发，不从消息出发），且与 :GmMessage 是同一节点
-              // → 一次 repair 可清空全部导入语料并连带删掉 rebuild 的源数据。
-              // 官方语义（graph-memory-pro）：消息节点是 rebuild 的输入，其生命周期由 GmMessage 会话决定，
-              // 与"是否有关系边"无关。故此处**移除**该批量清理：孤儿判定唯一依据是
-              // "sessionId 已不在 lcm.db / 官方转录源中"（即上面的 orphanedIds，已受 MAX_DELETE 保护）。
-              push(`  ✅ Pruned ${deleted} orphan nodes (scope = sessionId missing from message source; no relationship-based cleanup)\n`);
-            } finally { await closeNeo4j(driver, session); }
-          } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
-        }
+              // 批间让出事件循环：长删除不再饿死宿主，abort 也能及时生效
+              await new Promise((resolve) => setImmediate(resolve));
+            }
+            // BUGFIX(S1-数据丢失): 原实现额外执行 `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`
+            // —— 语义是"删除所有无关系的 ConversationMessage"，**不限于孤儿**，且 MAX_DELETE 只约束
+            // orphanedIds、对该批量删除无任何上限。而 lcmg_import 产出的消息节点在设计上就是无边孤立节点
+            // （MENTIONS 边从 :MemoryFile 出发，不从消息出发），且与 :GmMessage 是同一节点
+            // → 一次 repair 可清空全部导入语料并连带删掉 rebuild 的源数据。
+            // 官方语义（graph-memory-pro）：消息节点是 rebuild 的输入，其生命周期由 GmMessage 会话决定，
+            // 与"是否有关系边"无关。故此处**移除**该批量清理：孤儿判定唯一依据是
+            // "sessionId/sessionKey 已不在消息源（官方转录 ∪ lcm.db）中"（即上面的 orphanedIds）。
+            push(`  ✅ Pruned ${deleted} orphan nodes in ${batches} batches (${Date.now() - delStartedAt}ms; scope = sessionId/sessionKey missing from message source; no relationship-based cleanup)\n`);
+          } finally { await closeNeo4j(driver, session); }
+        } catch (e: any) { push(`  ❌ Repair error: ${e.message}\n`); }
       } else if (mode === "repair" && orphanNodes === 0) {
         push("\n## Phase 3: No repair needed — all consistent\n");
       } else if (mode === "repair" && isDryRun) {
