@@ -12,7 +12,7 @@ import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readAgentTranscriptMessages, clearAgentDbDiscoveryCache } from './openclaw-agent-db';
+import { readAgentTranscriptMessages, readAgentTranscriptSessions, clearAgentDbDiscoveryCache } from './openclaw-agent-db';
 
 const req = createRequire(import.meta.url);
 const { DatabaseSync } = req('node:sqlite') as {
@@ -255,5 +255,28 @@ describe('readAgentTranscriptMessages', () => {
     const r = readAgentTranscriptMessages();
     expect(r.messages).toEqual([]);
     expect(r.agentsScanned).toBe(0);
+  });
+});
+
+describe('readAgentTranscriptSessions（轻量会话清单）', () => {
+  it('只读 session_windows：不读事件、不依赖 transcript_events 是否存在', () => {
+    seedTranscriptDb('main', [{
+      sessionId: 'sess-1', sessionKey: 'agent:main:main', windowCreatedAt: 1_700_000_000_000,
+      events: [{ seq: 1, entry: msgEntry('e1', 'user', 'x') }],
+    }]);
+    const sessions = readAgentTranscriptSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({
+      agentId: 'main', sessionId: 'sess-1', sessionKey: 'agent:main:main',
+    });
+  });
+
+  it('session_windows 缺失 → 空数组且不抛错', () => {
+    const agentDbDir = join(tmpRoot!, 'agents', 'legacy', 'agent');
+    mkdirSync(agentDbDir, { recursive: true });
+    const db = new DatabaseSync(join(agentDbDir, 'openclaw-agent.sqlite'));
+    db.exec('CREATE TABLE something_else (id TEXT PRIMARY KEY) STRICT;');
+    db.close();
+    expect(readAgentTranscriptSessions()).toEqual([]);
   });
 });

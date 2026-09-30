@@ -166,40 +166,62 @@ interface MessageSourceLoad {
  *     消息原文以 canonical entry JSON 存于 `event_json`（`{type:'message', message:{role, content}}`），
  *     content 可为字符串或块数组。JSONL / sessionFile 已标记为 legacy
  *     （sessionFile 现为进程内路由 token，不再是文件路径）。
+ *     压缩行（冷转录）按官方 `openclaw_transcript_payload_decode` 语义解压后读取。
  *  2. **lossless-claw 的 lcm.db `conversations`/`messages`** —— 回退。
  *     仅在官方库不存在或尚无转录（未迁移环境）时使用：它是 lossless-claw 的镜像，
  *     可能滞后或被过滤，而官方转录是宿主写入的原文。
  *
  * 两条来源产出的行统一交给 gm-message-contract 的 planGmMessageRows 处理，
  * 故 role 过滤 / 内容扁平化 / id 生成只有一份实现。
+ *
+ * @param opts.sessionsOnly 只要会话清单（不读消息体）——孤儿检测等场景用，
+ *        可避免 O(消息量) 的事件读取与 zstd 解压开销
  */
-async function loadMessageSourceSessions(): Promise<MessageSourceLoad> {
+async function loadMessageSourceSessions(
+  opts: { sessionsOnly?: boolean } = {},
+): Promise<MessageSourceLoad> {
   const out: MessageSourceLoad = {
     sessions: [], source: 'none', compressed: 0, decodedCompressed: 0, nonMessage: 0, parseErrors: 0, skippedNoKey: 0, errors: [],
   };
 
   // 优先级 1：官方转录
   try {
-    const { readAgentTranscriptMessages } = await import('./adapters/openclaw-agent-db.js');
-    const tr = readAgentTranscriptMessages();
-    out.compressed = tr.skippedCompressed;
-    out.decodedCompressed = tr.decodedCompressed;
-    out.nonMessage = tr.skippedNonMessage;
-    out.parseErrors = tr.parseErrors;
-    if (tr.messages.length > 0) {
-      // 按稳定 sessionKey 归组：跨 /new 轮换的多个 session_window 属同一逻辑会话，
-      // 上游 gm-pro 也正是按 sessionKey 枚举会话。
-      const byKey = new Map<string, MessageSourceSession>();
-      for (const m of tr.messages) {
-        const key = resolveGmSessionKey(m.sessionKey, m.sessionId);
-        if (!key) { out.skippedNoKey += 1; continue; }
-        let g = byKey.get(key);
-        if (!g) { g = { sessionKey: key, sessionId: m.sessionId, msgs: [] }; byKey.set(key, g); }
-        g.msgs.push({ role: m.role, content: m.content, createdAt: m.createdAt });
+    const mod = await import('./adapters/openclaw-agent-db.js');
+    if (opts.sessionsOnly) {
+      // 轻量路径：只读 session_windows（不读 transcript_events，不解压）
+      const sessions = mod.readAgentTranscriptSessions();
+      if (sessions.length > 0) {
+        const byKey = new Map<string, MessageSourceSession>();
+        for (const s of sessions) {
+          const key = resolveGmSessionKey(s.sessionKey, s.sessionId);
+          if (!key) { out.skippedNoKey += 1; continue; }
+          if (!byKey.has(key)) byKey.set(key, { sessionKey: key, sessionId: s.sessionId, msgs: [] });
+        }
+        out.sessions = [...byKey.values()];
+        out.source = `openclaw-agent.sqlite session_windows (agents, sessions-only)`;
+        return out;
       }
-      out.sessions = [...byKey.values()];
-      out.source = `openclaw-agent.sqlite transcript_events (agents=${tr.agentsScanned})`;
-      return out;
+    } else {
+      const tr = mod.readAgentTranscriptMessages();
+      out.compressed = tr.skippedCompressed;
+      out.decodedCompressed = tr.decodedCompressed;
+      out.nonMessage = tr.skippedNonMessage;
+      out.parseErrors = tr.parseErrors;
+      if (tr.messages.length > 0) {
+        // 按稳定 sessionKey 归组：跨 /new 轮换的多个 session_window 属同一逻辑会话，
+        // 上游 gm-pro 也正是按 sessionKey 枚举会话。
+        const byKey = new Map<string, MessageSourceSession>();
+        for (const m of tr.messages) {
+          const key = resolveGmSessionKey(m.sessionKey, m.sessionId);
+          if (!key) { out.skippedNoKey += 1; continue; }
+          let g = byKey.get(key);
+          if (!g) { g = { sessionKey: key, sessionId: m.sessionId, msgs: [] }; byKey.set(key, g); }
+          g.msgs.push({ role: m.role, content: m.content, createdAt: m.createdAt });
+        }
+        out.sessions = [...byKey.values()];
+        out.source = `openclaw-agent.sqlite transcript_events (agents=${tr.agentsScanned})`;
+        return out;
+      }
     }
   } catch (e: any) {
     out.errors.push(`官方转录读取失败：${e?.message ?? String(e)}`);
@@ -209,6 +231,21 @@ async function loadMessageSourceSessions(): Promise<MessageSourceLoad> {
   let db: any = null;
   try {
     db = openDb();
+    if (opts.sessionsOnly) {
+      // 轻量路径：只读 conversations（不读 messages）
+      const convs = db.prepare("SELECT conversation_id, session_id, session_key FROM conversations").all() as any[];
+      for (const conv of convs) {
+        const key = resolveGmSessionKey(conv.session_key, conv.session_id);
+        if (!key) { out.skippedNoKey += 1; continue; }
+        out.sessions.push({
+          sessionKey: key,
+          sessionId: conv.session_id != null ? String(conv.session_id) : '',
+          msgs: [],
+        });
+      }
+      out.source = 'lcm.db conversations (fallback, sessions-only)';
+      return out;
+    }
     const convs = db.prepare(
       "SELECT conversation_id, session_id, session_key FROM conversations " +
       "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
@@ -1505,12 +1542,34 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       let orphanNodes = 0;
       let orphanedIds: string[] = [];
 
+      // 会话存在性判定必须以**消息源**为准，且取两个来源的并集：
+      //   lcmg_import 以官方 transcript_events 为权威源，其 session_id 未必出现在 lcm.db 的
+      //   conversations 表里；若只查 lcm.db，这些会话会被误判为孤儿，进而在 repair 下被删除。
+      // 轻量读取（sessionsOnly）：只查 session_windows / conversations，不读消息体、不解压。
+      const existingSids = new Set<string>();
+      let sourceSessions = 0;
+      try {
+        const sessLoad = await loadMessageSourceSessions({ sessionsOnly: true });
+        sourceSessions = sessLoad.sessions.length;
+        for (const s of sessLoad.sessions) {
+          if (s.sessionId) existingSids.add(String(s.sessionId));
+          if (s.sessionKey) existingSids.add(String(s.sessionKey));
+        }
+        push(`  message source: ${sessLoad.source}; sessions: ${sourceSessions}\n`);
+        for (const err of sessLoad.errors) push(`  ⚠ ${err}\n`);
+      } catch (e: any) { push(`  ❌ message source: ${e.message}\n`); }
+
+      // 并集补充 lcm.db（官方源与 lcm.db 并存时，任一登记过该会话即视为存在）
       let db: any = null;
       try {
         db = openDb();
-        const convs = db.prepare("SELECT DISTINCT conversation_id FROM messages").all() as any[];
-        push(`  lossless-claw: ${convs.length} active conversations\n`);
-      } catch (e: any) { push(`  ❌ lossless-claw: ${e.message}\n`); }
+        const convs = db.prepare("SELECT DISTINCT session_id, session_key FROM conversations").all() as any[];
+        for (const c of convs) {
+          if (c.session_id) existingSids.add(String(c.session_id));
+          if (c.session_key) existingSids.add(String(c.session_key));
+        }
+        push(`  known sessions (official ∪ lcm.db): ${existingSids.size}\n`);
+      } catch (e: any) { push(`  ❌ lcm.db: ${e.message}\n`); }
       finally { if (db) { try { db.close(); } catch {} } }
 
       try {
@@ -1521,43 +1580,32 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         try {
           // Find Neo4j nodes with sessionId property
           const allMsgNodes = await session.run(
-            `MATCH (n:ConversationMessage) RETURN n.id AS id, n.sessionId AS sid LIMIT 5000`
+            `MATCH (n:ConversationMessage) RETURN n.id AS id, n.sessionId AS sid, n.sessionKey AS skey LIMIT 5000`
           );
           neo4jMsgNodes = allMsgNodes.records.length;
           push(`  Neo4j: ${neo4jMsgNodes} ConversationMessage nodes\n`);
 
-          // BUGFIX(P1-6): 批量 IN 查询替代逐行 COUNT，消除 N 次 SQLite 往返
-          // SEC-3 H-6: db2 嵌套在 neo4j session 内，需独立 finally 清理
-          let db2: any = null;
-          try {
-            db2 = openDb();
-            const allSids = allMsgNodes.records
-              .map((r: any) => r.get("sid"))
-              .filter((s: any) => s && String(s).trim())
-              .map((s: any) => String(s));
-            const existingSids = new Set<string>();
-            const BATCH = 500; // SQLite IN 参数分批，避免超 999 限制
-            for (let i = 0; i < allSids.length; i += BATCH) {
-              const batch = allSids.slice(i, i + BATCH);
-              const placeholders = batch.map(() => '?').join(',');
-              const rows = db2.prepare(
-                `SELECT session_id FROM conversations WHERE session_id IN (${placeholders})`
-              ).all(...batch) as any[];
-              for (const row of rows) existingSids.add(String(row.session_id));
-            }
+          if (existingSids.size === 0) {
+            // 安全护栏：两个来源都没读到会话清单时，绝不能把全图消息判为孤儿
+            // （否则一次 repair 会清空消息节点）。宁可跳过并如实说明。
+            push(`  ⚠️ No session catalog available from any source → orphan detection SKIPPED (refusing to treat all nodes as orphans)\n`);
+          } else {
             for (const rec of allMsgNodes.records) {
-              const sid = rec.get("sid") ?? "";
-              if (sid && !existingSids.has(String(sid))) {
+              const sid = rec.get("sid") ? String(rec.get("sid")) : "";
+              const skey = rec.get("skey") ? String(rec.get("skey")) : "";
+              if (!sid && !skey) continue; // 无任何会话标识 → 不参与孤儿判定
+              const known = (sid && existingSids.has(sid)) || (skey && existingSids.has(skey));
+              if (!known) {
                 orphanNodes++;
-                orphanedIds.push(rec.get("id") ?? sid);
+                orphanedIds.push(rec.get("id") ?? sid ?? skey);
               }
             }
-          } finally { if (db2) { try { db2.close(); } catch {} } }
+          }
         } finally { await closeNeo4j(driver, session); }
       } catch (e: any) { push(`  ❌ Neo4j: ${e.message}\n`); }
 
       if (orphanNodes > 0) {
-        push(`  ⚠️ ${orphanNodes} orphaned Neo4j nodes (session no longer in lcm.db)\n`);
+        push(`  ⚠️ ${orphanNodes} orphaned Neo4j nodes (session absent from message source: official transcript ∪ lcm.db)\n`);
         if (orphanedIds.length <= 5) {
           for (const id of orphanedIds) push(`    - ${id}\n`);
         } else {
@@ -1599,45 +1647,70 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
 
           const { driver, session } = await neo4jSession();
           try {
-            const BATCH = 500;
+            // 索引化单遍扫描（性能修复）。
+            // 旧实现是 `UNWIND $ids AS id MATCH (n {id: id})`：**不带 label 的属性匹配无法命中
+            // 任何索引** —— 本库的 id 唯一约束建在 :ConversationMessage(id) / :GmMessage(id) 上，
+            // 于是 Neo4j 退化为 AllNodesScan：每 500 个 id 就全图扫一遍，
+            // 消息量为 M 时总代价 ≈ O(全图节点数 × M/500) → 表现为工具"永不返回"。
+            // 现改为按 :ConversationMessage(id) 唯一索引做 keyset 分页：
+            // 全图只走一遍、每页都命中索引，并在页间让出事件循环（长任务不再饿死宿主）。
+            const expectedMap = new Map<string, number>();
+            for (const b of expected) expectedMap.set(b.id, b.ts);
+            const PAGE = 1000;
             const driftRows: Array<{ id: string; ts: number }> = [];
             let matched = 0;
-            let missing = 0;
-            for (let i = 0; i < expected.length; i += BATCH) {
+            let scanned = 0;
+            let lastId = '';
+            let pages = 0;
+            const scanStartedAt = Date.now();
+            for (;;) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
-              const batch = expected.slice(i, i + BATCH);
               const res = await session.run(
-                "UNWIND $ids AS id MATCH (n {id: id}) RETURN n.id AS id, n.createdAt AS createdAt",
-                { ids: batch.map((b) => b.id) },
+                `MATCH (n:ConversationMessage) WHERE n.id > $last
+                 RETURN n.id AS id, n.createdAt AS createdAt
+                 ORDER BY n.id LIMIT $page`,
+                { last: lastId, page: neo4jDriver.int(PAGE) },
               );
-              const actual = new Map<string, number>();
+              if (res.records.length === 0) break;
               for (const r of res.records) {
+                const id = String(r.get("id") ?? '');
+                if (!id) continue;
+                lastId = id;
+                scanned += 1;
+                const expTs = expectedMap.get(id);
+                if (expTs == null) continue; // 图中有、消息源中无 → 不在本次比对范围
                 const cv = r.get("createdAt");
-                actual.set(
-                  String(r.get("id")),
-                  typeof cv?.toNumber === 'function' ? cv.toNumber() : Number(cv ?? 0),
-                );
-              }
-              for (const b of batch) {
-                const a = actual.get(b.id);
-                if (a == null) { missing += 1; continue; } // 尚未导入 / 源中已删
+                const actual = typeof cv?.toNumber === 'function' ? cv.toNumber() : Number(cv ?? 0);
                 matched += 1;
-                if (Math.abs(a - b.ts) > DRIFT_TOLERANCE_MS) {
+                if (Math.abs(actual - expTs) > DRIFT_TOLERANCE_MS) {
                   driftCount += 1;
-                  if (driftIds.length < 10) driftIds.push(b.id);
-                  driftRows.push({ id: b.id, ts: b.ts });
+                  if (driftIds.length < 10) driftIds.push(id);
+                  driftRows.push({ id, ts: expTs });
                 }
               }
+              pages += 1;
+              // 每 20 页输出一次进度：工具返回值是单次聚合文本，运行中无法回报，
+              // 只能走宿主日志，便于判断"是慢还是卡死"。
+              if (pages % 20 === 0) {
+                getGlobalLogger().info?.(
+                  `[lcmg_sync] Phase 1.5 scanning :ConversationMessage … scanned=${scanned} matched=${matched} drift=${driftCount}`,
+                );
+              }
+              // 页间让出事件循环：宿主仍可处理其它请求，abort 也能及时生效
+              await new Promise((resolve) => setImmediate(resolve));
             }
-            push(`  Neo4j matched: ${matched}; not present in graph: ${missing}\n`);
+            const notPresent = Math.max(0, expected.length - matched);
+            push(`  Neo4j scanned: ${scanned} :ConversationMessage via indexed keyset scan (${Date.now() - scanStartedAt}ms, ${pages} pages)\n`);
+            push(`  Neo4j matched: ${matched}; not present in graph: ${notPresent}\n`);
             push(`  createdAt drift > ${DRIFT_TOLERANCE_MS / 1000}s: ${driftCount}\n`);
             if (driftIds.length > 0) {
               push(`  Sample drift IDs: ${driftIds.join(", ")}\n`);
             }
 
-            // Repair：以消息源为权威，纠正逐个节点的 createdAt（不再写 updatedAt）
+            // Repair：以消息源为权威，纠正逐个节点的 createdAt（不再写 updatedAt）。
+            // label 必须写死为 :ConversationMessage —— 带 label 才能命中 id 唯一索引。
             if (mode === "repair" && !isDryRun && driftCount > 0) {
               push(`\n  Repairing ${driftCount} drifted nodes (SET createdAt from message source)...\n`);
               let merged = 0;
@@ -1645,15 +1718,19 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 const updates = driftRows.map((d) => ({ id: d.id, ts: neo4jDriver.int(d.ts) }));
                 const RB = 500;
                 for (let i = 0; i < updates.length; i += RB) {
+                  if (signal?.aborted) {
+                    return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+                  }
                   const batch = updates.slice(i, i + RB);
                   const result = await session.run(
                     `UNWIND $updates AS u
-                     MATCH (n {id: u.id})
+                     MATCH (n:ConversationMessage {id: u.id})
                      SET n.createdAt = u.ts, n.syncSource = 'message-source', n.syncedAt = timestamp()
                      RETURN count(*) AS c`,
                     { updates: batch },
                   );
                   merged += result.records[0]?.get("c")?.toNumber?.() ?? batch.length;
+                  await new Promise((resolve) => setImmediate(resolve));
                 }
               } catch (e: any) { push(`  ⚠️ createdAt repair error: ${e.message}\n`); }
               push(`  ✅ Corrected createdAt on ${merged} nodes\n`);
@@ -1699,7 +1776,9 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
               for (const id of orphanedIds) {
-                await session.run("MATCH (n {id: $id}) DETACH DELETE n", { id });
+                // label 必须写死（:ConversationMessage）才能走 id 唯一索引；
+                // 无 label 的 `MATCH (n {id: $id})` 会全图扫描。
+                await session.run("MATCH (n:ConversationMessage {id: $id}) DETACH DELETE n", { id });
               }
               const deleted = orphanedIds.length;
               // BUGFIX(S1-数据丢失): 原实现额外执行 `MATCH (n:ConversationMessage) WHERE NOT (n)--() DELETE n`

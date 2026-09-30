@@ -337,6 +337,52 @@ function registerTranscriptPayloadDecoder(
   }
 }
 
+/** 一条会话窗口记录（只读 session_windows，不碰 transcript_events） */
+export interface AgentTranscriptSession {
+  agentId: string;
+  sessionKey: string;
+  sessionId: string;
+  /** 窗口创建时间（ms）：同一 sessionKey 的多个窗口按此排序 */
+  createdAt: number;
+}
+
+/**
+ * 轻量读取官方库的会话清单（仅 `session_windows` 一表）。
+ *
+ * 用途：需要判断"某会话是否仍存在"时（如 lcmg_sync 的孤儿检测），
+ * 不必读取 transcript_events 全量事件（那是 O(消息量) 的 I/O 与解压成本）。
+ * 表缺失即降级为空数组，不抛错。
+ */
+export function readAgentTranscriptSessions(
+  options: OpenClawAgentDbOptions & { agentId?: string } = {},
+): AgentTranscriptSession[] {
+  const out: AgentTranscriptSession[] = [];
+  const agents = discoverAgentDbs(options).filter((a) => !options.agentId || a.agentId === options.agentId);
+  for (const agent of agents) {
+    const db = openReadOnly(agent.dbPath);
+    if (!db) continue;
+    try {
+      if (!tableExists(db, 'session_windows')) continue;
+      const rows = db.prepare(
+        'SELECT session_id, session_key, created_at FROM session_windows',
+      ).all() as any[];
+      for (const r of rows) {
+        out.push({
+          agentId: agent.agentId,
+          sessionKey: String(r.session_key ?? ''),
+          sessionId: String(r.session_id ?? ''),
+          createdAt: normalizeEpochMs(r.created_at),
+        });
+      }
+    } catch {
+      // 单库失败不影响其余库
+    } finally {
+      try { db.close(); } catch { /* ignore */ }
+    }
+  }
+  return out;
+}
+
 /** 时间戳归一为 ms：官方 INTEGER 约定为 ms；若明显是秒则换算（防御性，不改动已合法值） */
 function normalizeEpochMs(v: unknown): number {
   const n = typeof v === 'number' ? v : Number(v);
