@@ -13,6 +13,10 @@ import { join, basename, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { exportMarkdownToPdf, exportMarkdownToFile } from './utils/pdf-export.js';
 import { getGlobalLogger } from './utils/logger.js';
+import {
+  planGmMessageRows,
+  resolveGmSessionKey,
+} from './utils/gm-message-contract.js';
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { registerSearchTool } from './tools/search.js';
 import { registerDiagnoseTool } from './tools/diagnose.js';
@@ -650,15 +654,17 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
               return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
             }
             for (const ent of (data.neo4j as any)?.entities ?? []) {
-              // 对齐 gm-pro batchUpsertNodes：重建/恢复知识节点时补齐时序默认字段
-              // （recordedAt/validFrom/source/state/scores）。ON CREATE SET 只在新建时
-              // 填充默认值，不覆盖备份中已存在的时序数据。
+              // 对齐 gm-pro batchUpsertNodes 的时序/来源字段命名：
+              // recordedAt / validFrom / source / status。ON CREATE SET 只在新建时填充，
+              // 不覆盖已存在的时序数据（同上游「createdAt 只在新节点写」的语义）。
+              // 不写 state/scores：上游 state 枚举为 current/superseded/transitional，
+              // 'active' 属 status 取值域；scores 不是上游属性。
               await session.run(
                 // Neo4j 语法：ON CREATE SET 必须紧跟 MERGE pattern，再跟 SET 子句
                 "MERGE (n {id: $id}) " +
-                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = $source, n.state = 'active', n.scores = $scores " +
+                "ON CREATE SET n.recordedAt = $now, n.validFrom = $now, n.source = 'imported', n.status = 'active', n.createdAt = $now " +
                 "SET n.name = $name, n.labels = $labels",
-                { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [], now: Date.now(), source: 'lcm-restore', scores: '{}' },
+                { id: ent.id, name: ent.name ?? "", labels: ent.labels ?? [], now: Date.now() },
               );
               nCount++;
             }
@@ -773,8 +779,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
   api.registerTool({
     name: "lcmg_import",
     label: "历史导入",
-    description: "One-time import of historical data into Neo4j knowledge graph. source=lcm_messages imports chat history, source=memory_files imports *.md files, source=all does both. Uses LLM entity extraction when configured." +
-      " limit 为每批记录数上限，工具会自动分多批循环直到全部记录导入完成（清理后重建图库时用于完整恢复）。",
+    description: "One-time import of historical data into Neo4j knowledge graph. source=lcm_messages imports chat history, source=memory_files imports *.md files, source=all does both." +
+      " Writes :GmMessage / :ConversationMessage / :MemoryFile strictly to the graph-memory-pro contract (message id = gm:<sessionKey>:<role>:<fnv1a64(full text)>:<occurrence>, sessionKey = session_key ?? session_id, user/assistant with non-empty text only, createdAt on create only), so imported rows merge with upstream's own writes instead of duplicating them." +
+      " After import it triggers graph-memory-pro's batch three-level rebuild (POST /api/extract/rebuild-all, async 202 + jobId) and reports the jobId." +
+      " limit 为每批记录数上限，工具会自动分多批循环直到全部记录导入完成（清理后重建图库时用于完整恢复；因 id 与上游一致，在已有图库上重复导入亦幂等）。",
     parameters: Type.Object({
       source: Type.String({ description: '"lcm_messages", "memory_files", or "all"' }),
       limit: Type.Optional(Type.Number({ description: "每批处理的记录数上限（默认 100），自动多批直到全部导入", minimum: 1, maximum: 500 })),
@@ -811,77 +819,126 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           //    时序使用 messages.created_at 真实时间（非导入时刻），供 :GmMessage / 三级节点建时序。
           // 查询需同时取出 conversation_id / session_id / session_key：
           //   gm-pro :GmMessage.sessionKey 对应 SDK 层 ctx.sessionKey = conversations.session_key。
-          //   当 session_key 为 NULL 时，SDK 层回退为 "conv:" + conversation_id（见 debt-manager
-          //   中 const sessionKey = sessionInfo.sessionKey ?? "conv:" + debt.conversationId），
-          //   绝对不能混用 session_id——两者值完全不同，会导致 listAllSessionKeys 枚举到的 key
-          //   与正常 ingest 写入的 key 不匹配，从而三级重建秒结束 0 处理。
           const convs = db.prepare(
             "SELECT conversation_id, session_id, session_key FROM conversations " +
             "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
             "ORDER BY conversation_id DESC"
           ).all() as any[];
-          const pending: { id: string; role: string; content: string; sid: string; tokens: number; ts: number }[] = [];
-          // GmMessage 行：同一消息节点补 :GmMessage 标签 + turnIndex/seq/createdAt（真实时间）
-          // skey = SDK ctx.sessionKey 的真实回填规则：session_key ?? "conv:" + conversation_id
-          const gmRows: { id: string; role: string; content: string; sid: string; skey: string; turnIndex: number; ts: number; seq: number }[] = [];
+
+          // 2) 按 conversation 逐会话构建两类行：
+          //    convRows —— :ConversationMessage（上游全文索引 conversation_search 的语料标签）
+          //    gmRows   —— :GmMessage（上游 rebuild 读取配对三级节点的唯一来源）
+          //
+          // 契约来源：graph-memory-pro v2.4.7 `src/store/messages.ts`
+          //   - 身份：`gm:<sessionKey>:<role>:<fnv1a64(全文)>:<同内容出现序号>`
+          //   - 字段：id / sessionKey / turnIndex / role / content / createdAt(仅 ON CREATE)
+          //   - 过滤：仅 user/assistant 且文本非空（system/tool 上游同样不持久化）
+          //   - sessionKey 回退链：session_key ?? session_id（对齐上游 ctx.sessionKey ?? ctx.sessionId）
+          // 本地镜像实现与单测见 src/utils/gm-message-contract.ts。
+          //
+          // 对齐动因：上游每轮 agent_end 会**全量重放**整段会话。id 若与上游不同，
+          // 重放算出的 id 命不中导入的节点 → MERGE 退化为插入 → 历史被复制一份。
+          const convRows: {
+            id: string; role: string; content: string; sessionKey: string; sessionId: string;
+            tokens: number; ts: number;
+          }[] = [];
+          const gmRows: {
+            id: string; sessionKey: string; role: string; content: string;
+            turnIndex: number; createdAt: number;
+          }[] = [];
+          let msgSkippedNoKey = 0;
+          let msgSkippedNonConv = 0;
+          let msgSkippedEmpty = 0;
+
           for (const conv of convs) {
+            // 上游 agent_end：ctx.sessionKey ?? ctx.sessionId ?? _lastSessionKey，三者皆空则整轮跳过。
+            // 对应本地两列：session_key（ctx.sessionKey）/ session_id（ctx.sessionId）。
+            // 不得自造 conv:<id> 合成键：上游无此约定，且合成键会让同一段历史被 rebuild 两遍。
+            const realSessionKey = resolveGmSessionKey(conv.session_key, conv.session_id);
             const msgs = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
-            const realSessionKey = (conv.session_key && String(conv.session_key).trim())
-              ? conv.session_key
-              : `conv:${conv.conversation_id}`;
-            let turnIndex = 0;
-            for (const msg of msgs) {
-              const ts = toRealTs(msg.created_at);
-              if (msg.role === 'user') turnIndex += 1; // 每遇 user 开新轮
-              const id = `${conv.session_id}-${msg.seq}`;
-              const content = (msg.content ?? "").slice(0, 5000);
-              pending.push({ id, role: msg.role, content, sid: conv.session_id, tokens: msg.content?.length ?? 0, ts });
-              gmRows.push({ id, role: msg.role, content, sid: conv.session_id, skey: realSessionKey, turnIndex, ts, seq: Number(msg.seq ?? 0) });
+            const sid = conv.session_id != null ? String(conv.session_id) : "";
+            if (!realSessionKey) {
+              msgSkippedNoKey += msgs.length;
+              continue;
+            }
+
+            // :GmMessage 行按上游语义规划（role 过滤 + 全文指纹 + occurrence + turnIndex）
+            const plan = planGmMessageRows(
+              msgs.map((m: any) => ({ role: m.role, content: m.content, createdAt: toRealTs(m.created_at) })),
+              realSessionKey,
+            );
+            msgSkippedNonConv += plan.skippedNonConversational;
+            msgSkippedEmpty += plan.skippedEmpty;
+            for (const row of plan.rows) {
+              gmRows.push({
+                id: row.id,
+                sessionKey: row.sessionKey,
+                role: row.role,
+                content: row.content,
+                turnIndex: row.turnIndex,
+                createdAt: row.createdAt,
+              });
+              // :ConversationMessage 与 :GmMessage 复用同一 id（同节点双标签）：
+              // 上游读取面按 :GmMessage 枚举会话，全文检索面按 :ConversationMessage 命中语料，
+              // 双标签让导入的历史对两条读取路径都可见。
+              convRows.push({
+                id: row.id,
+                role: row.role,
+                content: row.content,
+                sessionKey: row.sessionKey,
+                sessionId: sid,
+                tokens: row.content.length,
+                ts: row.createdAt,
+              });
             }
           }
 
           const { driver, session } = await neo4jSession();
           try {
-            // 2) 按批次写入，直到队列耗尽。
+            // 3) 按批次写入，直到队列耗尽。
             // 性能优化：UNWIND 批量 MERGE（每批仅一次往返），避免逐条 session.run
             // 造成数百上千次往返而拖慢全量导入（清理后完整重建场景数据量大）。
-            for (let i = 0; i < pending.length; i += batchSize) {
+            //
+            // 时序字段一律 ON CREATE：上游 saveMessage 明确「createdAt 只在新建时写」，
+            // 否则每次重放都会把整段历史的时间戳刷成本轮时间（真实时间不可恢复）。
+            for (let i = 0; i < gmRows.length; i += batchSize) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
-              const chunk = pending.slice(i, i + batchSize);
-              await session.run(
-                "UNWIND $rows AS m " +
-                "MERGE (n:ConversationMessage {id: m.id}) " +
-                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = m.source, n.state = 'active', n.scores = m.scores " +
-                "SET n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.tokens = m.tokens, n.createdAt = m.ts",
-                { rows: chunk.map((m) => ({ ...m, source: 'lcm-import', scores: '{}' })) }
-              );
-              total += chunk.length;
-            }
-
-            // 3) 补写 :GmMessage（同一节点双标签，供 graph-memory-pro 重建读取配对三级节点）。
-            //    写入 turnIndex/createdAt/seq，时序用真实会话时间。
-            //    graph-memory-pro 的 rebuild 按 m.sessionKey 枚举会话（listAllSessionKeys）。
-            //    sessionKey 写入规则与 SDK ctx.sessionKey 完全一致：
-            //      有 conversations.session_key → 用其值；
-            //      无（大量历史会话为 NULL） → 回退 "conv:" + conversation_id。
-            //    绝对不能写 session_id——两者值完全不同，会导致正常 ingest 写入的 key
-            //    与重建枚举到的 key 不一致，重建秒结束 0 处理。
-            //    sessionId 字段单独存 session_id，与 sessionKey 明确区分。
-            for (let i = 0; i < gmRows.length; i += batchSize) {
-              if (signal?.aborted) break;
               const chunk = gmRows.slice(i, i + batchSize);
               await session.run(
                 "UNWIND $rows AS m " +
                 "MERGE (n:GmMessage {id: m.id}) " +
-                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = 'lcm-import', n.state = 'active', n.scores = '{}' " +
-                "SET n.sessionKey = m.skey, n.role = m.role, n.content = m.content, n.sessionId = m.sid, n.turnIndex = m.turnIndex, n.seq = m.seq, n.createdAt = m.ts",
-                { rows: chunk }
+                "ON CREATE SET n.createdAt = m.createdAt " +
+                "SET n.sessionKey = m.sessionKey, n.turnIndex = toInteger(m.turnIndex), n.role = m.role, n.content = m.content",
+                { rows: chunk.map((m) => ({ ...m, createdAt: neo4jDriver.int(m.createdAt), turnIndex: neo4jDriver.int(m.turnIndex) })) },
+              );
+              total += chunk.length;
+            }
+
+            // 4) :ConversationMessage 同 id 双标签（上游全文索引 conversation_search 的语料）。
+            //    字段按上游契约：status（上游 searchNodes 过滤字段，取值 'active'）+ 时序四件套。
+            //    不写 state/scores：上游无 scores 属性，state 枚举为 current/superseded/transitional，
+            //    与 'active' 冲突；'active' 是 status 的取值域。
+            for (let i = 0; i < convRows.length; i += batchSize) {
+              if (signal?.aborted) break;
+              const chunk = convRows.slice(i, i + batchSize);
+              await session.run(
+                "UNWIND $rows AS m " +
+                "MERGE (n:ConversationMessage {id: m.id}) " +
+                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = 'imported', n.status = 'active', n.createdAt = m.ts " +
+                "SET n.role = m.role, n.content = m.content, n.sessionKey = m.sessionKey, n.sessionId = m.sessionId, n.tokens = m.tokens",
+                { rows: chunk.map((m) => ({ ...m, ts: neo4jDriver.int(m.ts) })) },
               );
             }
           } finally { await closeNeo4j(driver, session); }
-          lines.push(`✅ Imported ${total}/${pending.length} messages from lossless-claw DB (batch=${batchSize}, batches=${Math.ceil(pending.length / batchSize)})`);
+          lines.push(`✅ Imported ${total} :GmMessage / ${convRows.length} :ConversationMessage rows (batch=${batchSize}, batches=${Math.ceil(gmRows.length / batchSize)})`);
+          if (msgSkippedNoKey > 0) {
+            lines.push(`⚠ Skipped ${msgSkippedNoKey} messages: conversation has neither session_key nor session_id (matches upstream "no sessionKey → skip turn")`);
+          }
+          if (msgSkippedNonConv > 0 || msgSkippedEmpty > 0) {
+            lines.push(`ℹ Skipped ${msgSkippedNonConv} non-conversational (system/tool) + ${msgSkippedEmpty} empty messages (upstream persists user/assistant with non-empty text only)`);
+          }
         } catch (e: any) { lines.push(`❌ lossless-claw import: ${e.message}`); }
         finally { if (db) { try { db.close(); } catch {} } }
       }
@@ -902,26 +959,33 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             // 1) 一次性读取全部文件内容（仅读一次），构建节点写入行 + 关键词缓存。
             //    性能优化：避免节点写入与语义匹配各读一遍文件（2 万文件 → 少 1 万次读盘）。
             //    时序使用每个文件真实时间（frontmatter date 优先，回退文件系统 mtime）。
-            const rows: { id: string; name: string; content: string; ts: number; source: string; scores: string }[] = [];
+            const rows: { id: string; name: string; content: string; ts: number }[] = [];
             const fileKeywords = new Map<string, string[]>();
             for (const file of allFiles) {
               const content = readFileSync(join(memDir, file), "utf-8").slice(0, 5000);
               const ts = parseMemoryFileTime(content, join(memDir, file));
-              rows.push({ id: `file-${file}`, name: file, content, ts, source: 'lcm-import', scores: '{}' });
+              rows.push({ id: `file-${file}`, name: file, content, ts });
               fileKeywords.set(file, extractMemoryKeywords(content));
             }
 
-            // 2) 批量写入 MemoryFile 节点（UNWIND，每批仅一次往返）
+            // 2) 批量写入 MemoryFile 节点（UNWIND，每批仅一次往返）。
+            //    字段按上游规范：status='active'（上游 searchNodes 过滤字段）、
+            //    source='imported'（上游 NodeSource 枚举 experience|knowledge|imported）。
+            //    不写 state/scores：上游 state 枚举为 current/superseded/transitional，
+            //    'active' 属 status 取值域；scores 不是上游属性。
+            //    时序字段仅 ON CREATE（node:MemoryFile 亦被上游 timestamp-backfill 按
+            //    COALESCE 补时序，重复导入不应刷掉真实时间）。
             for (let i = 0; i < rows.length; i += batchSize) {
               if (signal?.aborted) {
                 return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
               }
+              const chunk = rows.slice(i, i + batchSize);
               await session.run(
                 "UNWIND $rows AS m " +
                 "MERGE (n:MemoryFile {id: m.id}) " +
-                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = m.source, n.state = 'active', n.scores = m.scores " +
-                "SET n.name = m.name, n.content = m.content, n.createdAt = m.ts",
-                { rows: rows.slice(i, i + batchSize) },
+                "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = 'imported', n.status = 'active', n.createdAt = m.ts " +
+                "SET n.name = m.name, n.content = m.content",
+                { rows: chunk.map((m) => ({ ...m, ts: neo4jDriver.int(m.ts) })) },
               );
               fCount = Math.min(rows.length, i + batchSize);
               filesImported = fCount;
@@ -975,7 +1039,7 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         } catch (e: any) { lines.push(`❌ memory files import: ${e.message}`); }
       }
 
-      // OpenClaw 官方记忆索引（per-agent sqlite）→ MemoryFile 节点（source='openclaw-import'）。
+      // OpenClaw 官方记忆索引（per-agent sqlite）→ MemoryFile 节点。
       // openclaw 2.0 起记忆正文以 sqlite 为权威存储，这里把官方索引 chunk（memory_index_chunks.text）
       // 也纳入图谱，与文件导入互补，避免 2.0 迁移后文件布局缺数据。
       if (params.source === "memory_files" || params.source === "all") {
@@ -993,8 +1057,6 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 name: `${r.agentId}:${r.path}`,
                 content: (r.text ?? "").slice(0, 5000),
                 ts: r.updatedAt ?? Date.now(),
-                source: 'openclaw-import',
-                scores: '{}',
               }));
               const batchSize = Math.max(1, limit);
               for (let i = 0; i < rows.length; i += batchSize) {
@@ -1004,14 +1066,14 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
                 await session.run(
                   "UNWIND $rows AS m " +
                   "MERGE (n:MemoryFile {id: m.id}) " +
-                  "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = m.source, n.state = 'active', n.scores = m.scores " +
-                  "SET n.name = m.name, n.content = m.content, n.createdAt = m.ts",
-                  { rows: rows.slice(i, i + batchSize) },
+                  "ON CREATE SET n.recordedAt = m.ts, n.validFrom = m.ts, n.source = 'imported', n.status = 'active', n.createdAt = m.ts " +
+                  "SET n.name = m.name, n.content = m.content",
+                  { rows: rows.slice(i, i + batchSize).map((m) => ({ ...m, ts: neo4jDriver.int(m.ts) })) },
                 );
                 ocChunksImported = Math.min(rows.length, i + batchSize);
               }
             } finally { await closeNeo4j(driver, session); }
-            lines.push(`✅ Imported ${ocChunksImported} OpenClaw official memory chunks into Neo4j (source='openclaw-import')`);
+            lines.push(`✅ Imported ${ocChunksImported} OpenClaw official memory chunks into Neo4j (:MemoryFile, source='imported')`);
           }
         } catch (e: any) { lines.push(`❌ OpenClaw memory import: ${e.message}`); }
       }
@@ -1020,35 +1082,48 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       //    完全复用 graph-memory-pro 的批量重建 API（POST /api/extract/rebuild-all）。
       //    默认开启；openclaw.json → lcm-graph-extra.config.buildThreeLevel.onImport=false 可关闭。
       //    提取模式默认 heuristic（规则快速提取，零 LLM、毫秒级）；onImportMode="llm" 可切回 LLM 精炼。
-      //    异步 fire-and-forget，导入立即返回不阻塞（避免大库导入超时）；
-      //    进度与断点续传由 gm-pro 在 progressPath 落盘，本地不再自建重建逻辑。
+      //
+      //    覆盖范围对齐上游语义：上游 `limitSessions` 默认 0 = **全部会话**。
+      //    此前固定传 batchLimit(默认 50) 会导致"完整恢复"只重建前 50 个会话。
+      //    这里默认不下传 limitSessions（=上游全量），仅当用户显式配置 batchLimit>0 时才限制。
+      //
+      //    上游响应是**立即 202 + jobId**（长任务后台跑），故此处 await 只花一次往返：
+      //    换取「失败可见」（不再只写 logger.warn）+ jobId 回显供用户轮询进度。
       const buildCfg = api?.pluginConfig?.buildThreeLevel ?? {};
       const enabled = buildCfg.enabled !== false;
       const onImport = buildCfg.onImport !== false;
       if (enabled && onImport && (params.source === "all" || params.source === "lcm_messages")) {
-        const bLimit = Number(buildCfg.batchLimit ?? 50);
-        const batchLimit = Math.max(1, Math.min(500, Number.isFinite(bLimit) ? bLimit : 50));
+        // 未配置 → 不限制（上游全量）；显式配置正数才透传（上游上限 100000）
+        const bLimit = Number(buildCfg.batchLimit);
+        const limitSessions = Number.isFinite(bLimit) && bLimit > 0
+          ? Math.max(1, Math.min(100_000, Math.floor(bLimit)))
+          : undefined;
         // 批量导入后默认按规则快速提取（heuristic），避免导入即触发 LLM 批量开销；
         // 重点会话再用 mode=llm + thinking:false 精炼补全。
         const importMode: 'llm' | 'heuristic' = buildCfg.onImportMode === 'llm' ? 'llm' : 'heuristic';
-        lines.push(`⏳ 三级节点重建已异步启动（走 graph-memory-pro 批量重建 API，模式=${importMode}，batch=${batchLimit}）…`);
-        (async () => {
-          try {
-            const { triggerGmProRebuildAll } = await import('./tools/shared.js');
-            const r = await triggerGmProRebuildAll({
-              mode: importMode,
-              limitSessions: batchLimit,
-              progressPath: buildCfg.progressPath,
-            });
-            if (!r.ok) {
-              getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败（触发 gm-pro 未成功）', { error: r.error });
-            } else {
-              getGlobalLogger().info?.(`[lcmg_import] 已触发 graph-memory-pro 三级节点重建（mode=${importMode}）`);
-            }
-          } catch (e) {
-            getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败', { err: e instanceof Error ? e.message : String(e) });
+        try {
+          const { triggerGmProRebuildAll } = await import('./tools/shared.js');
+          const r = await triggerGmProRebuildAll({
+            mode: importMode,
+            limitSessions,
+            progressPath: buildCfg.progressPath,
+            signal,
+          });
+          if (!r.ok) {
+            // 失败要让用户看见（原先只写 logger.warn，工具返回值里看不到）
+            lines.push(`⚠ 三级节点重建未触发：${r.error ?? 'unknown error'}`);
+          } else if (r.jobId) {
+            lines.push(`⏳ 三级节点重建已启动（graph-memory-pro 批量重建，mode=${importMode}，`
+              + `${limitSessions ? `limitSessions=${limitSessions}` : '全部会话'}）`);
+            lines.push(`   进度查询：GET /api/extract/rebuild-all/job/${r.jobId}`);
+          } else {
+            lines.push(`⏳ 三级节点重建已启动（mode=${importMode}）`);
           }
-        })().catch(() => {});
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          lines.push(`⚠ 三级节点重建未触发：${msg}`);
+          getGlobalLogger().warn?.('[lcmg_import] 三级节点自动重建失败', { err: msg });
+        }
       }
 
       return {

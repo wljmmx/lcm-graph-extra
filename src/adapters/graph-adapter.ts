@@ -270,8 +270,39 @@ function mapEdgeType(raw: string): string {
   return 'USED_SKILL';
 }
 
-function makeNodeId(name: string, typeName: string): string {
-  return `${typeName.toLowerCase()}-${createHash('sha256').update(`${typeName}:${name}`).digest('hex').slice(0, 12)}`;
+/**
+ * 32-bit FNV-1a 哈希（无符号小写十六进制）—— 与上游 graph-memory-pro
+ * `src/services/extract-service.ts` 的 `hashString` 逐字一致。
+ * 公开测试向量守护见 graph-adapter.node-id.test.ts。
+ *
+ * @export 供契约单测用 FNV 规范公开向量锁定算法本身
+ */
+export function fnv1a32(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+/**
+ * 知识节点 id —— 与上游 `deterministicNodeId(type, name)` **逐字对齐**：
+ *   `gn-<fnv1a32(TYPE|name)>`，其中 TYPE 为大写实体类型（TASK/SKILL/EVENT）。
+ *
+ * 为什么必须对齐：同一实体在上游由生产/重建链路（写 `gn-*`）与本插件运行链路
+ * （原先写 `${type}-${sha256}`）各写一次，id 不同则 `MERGE` 永不命中 →
+ * 同名实体在图中留下两份节点，双方都读到重复内容。
+ * 对齐后两条链路 `MERGE` 到同一节点，天然去重；历史遗留的旧 id 节点会被上游
+ * dedup（同 type + embedding 余弦 ≥ dedupThreshold）软合并（state='superseded'）。
+ *
+ * 注意入参 typeName 为 **Title Case**（Task/Skill/Event，与 Neo4j label 一致），
+ * 内部统一 `.toUpperCase()` 后再参与哈希，与上游 `enode.type.toUpperCase()` 同源。
+ *
+ * @export 供契约单测断言（对齐上游导出 deterministicNodeId 的做法）
+ */
+export function makeNodeId(name: string, typeName: string): string {
+  return `gn-${fnv1a32(`${typeName.toUpperCase()}|${name}`)}`;
 }
 
 type GmModule = Record<string, any>;
@@ -1174,7 +1205,7 @@ export class GraphAdapter {
       if (validEntities.length > 0) {
         const now = Date.now();
         const nodeData: Array<{
-          id: string; label: string; name: string; description: string; content: string;
+          id: string; label: string; type: string; name: string; description: string; content: string;
           status: string; pagerank: number; updatedAt: number; embedding: number[] | null;
         }> = validEntities.map((e) => {
           const t = mapEntityType(e.type);
@@ -1183,6 +1214,9 @@ export class GraphAdapter {
           return {
             id: nid,
             label: t,
+            // 上游 NodeType 契约：大写类型（TASK/SKILL/EVENT）。上游 dedup 的匹配谓词含
+            // `a.type = b.type`，缺失该属性的节点永远进不了去重候选集 → 必须写入。
+            type: t.toUpperCase(),
             name: e.name.trim(),
             description: (e.description ?? '').slice(0, 500),
             content: (e.content ?? '').slice(0, 2000),
@@ -1282,6 +1316,7 @@ export class GraphAdapter {
               MERGE (n:\`${label}\` { id: node.id })
               ON CREATE SET
                 n.name = node.name,
+                n.type = node.type,
                 n.description = node.description,
                 n.content = node.content,
                 n.status = node.status,
@@ -1294,6 +1329,7 @@ export class GraphAdapter {
                 n.content = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.content ELSE n.content END,
                 n.status = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.status ELSE n.status END,
                 n.pagerank = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.pagerank ELSE n.pagerank END,
+                n.type = node.type,
                 n.updatedAt = CASE WHEN node.updatedAt > coalesce(n.updatedAt, 0) THEN node.updatedAt ELSE n.updatedAt END${embedSetOnMatch}
               RETURN count(*) AS cnt
             `;

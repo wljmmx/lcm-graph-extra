@@ -41,26 +41,46 @@ export function setPluginApiRef(apiRef: any): void {
 
 /**
  * 触发 gm-pro 批量重建全部会话（POST /api/extract/rebuild-all）。
- * 返回是否成功；失败不抛错（调用方 fire-and-forget）。
+ *
+ * 接口契约（graph-memory-pro v2.4.7 `src/routes/crud.ts` → `handleRebuildAll`）：
+ *   - body: { mode?, sessionConcurrency?, concurrency?, limitSessions?, pageSize?,
+ *            writeBatchSize?, progressPath?, includeMemorySessions?,
+ *            excludeSessionKeySubstrings?, markProcessed? }
+ *   - `sessionConcurrency` 默认 2、上限 64；`limitSessions` 默认 0 = **全部**（上限 100000）
+ *   - 鉴权：POST 恒需 `x-auth-token`（当 gm-pro 配置了 apiServer.authToken）
+ *   - 响应：**立即 202** `{ jobId, status: "running", message }`，进度轮询
+ *     `GET /api/extract/rebuild-all/job/:jobId`
+ *
+ * 地址来源与令牌同源：均取 openclaw.json 中 graph-memory-pro 的 `apiServer` 段
+ * （host/port/authToken），避免用户改端口后触发打到默认 7850。env `GM_PRO_HTTP_URL` 优先。
+ *
+ * 返回是否成功 + jobId（调用方 fire-and-forget，但需把 jobId 透出给用户轮询）。
  */
 export async function triggerGmProRebuildAll(
   opts: {
     mode?: 'llm' | 'heuristic';
     sessionConcurrency?: number;
     progressPath?: string;
+    /** 上游默认 0 = 全部会话；显式 >0 才限制数量 */
     limitSessions?: number;
+    /** 调用方的取消信号（工具 AbortSignal），透传给 fetch */
+    signal?: AbortSignal;
   } = {},
-): Promise<{ ok: boolean; error?: string }> {
-  const baseUrl = (process.env.GM_PRO_HTTP_URL || 'http://127.0.0.1:7850').replace(/\/+$/, '');
-  // 鉴权令牌：与 dashboard gm-pro 代理同一来源（openclaw.json graph-memory-pro 配置段 apiServer.authToken）
+): Promise<{ ok: boolean; error?: string; jobId?: string; status?: string }> {
+  // 与令牌同源读取 apiServer.host/port（上游默认 127.0.0.1:7850）
+  let apiServer: Record<string, unknown> | undefined;
   let authToken = '';
   try {
     const p = homedir() + '/.openclaw/openclaw.json';
     if (existsSync(p)) {
       const d = JSON.parse(readFileSync(p, 'utf8'));
-      authToken = d?.plugins?.entries?.['graph-memory-pro']?.config?.apiServer?.authToken ?? '';
+      apiServer = d?.plugins?.entries?.['graph-memory-pro']?.config?.apiServer;
+      authToken = (apiServer?.authToken as string) ?? '';
     }
-  } catch { /* 读不到令牌则不带鉴权头 */ }
+  } catch { /* 读不到配置则回退 env / 默认值 */ }
+  const host = (apiServer?.host as string) || '127.0.0.1';
+  const port = Number(apiServer?.port) > 0 ? Number(apiServer?.port) : 7850;
+  const baseUrl = (process.env.GM_PRO_HTTP_URL || `http://${host}:${port}`).replace(/\/+$/, '');
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (authToken) headers['x-auth-token'] = authToken;
   const body: Record<string, unknown> = {
@@ -68,15 +88,19 @@ export async function triggerGmProRebuildAll(
     sessionConcurrency: opts.sessionConcurrency ?? 2,
   };
   if (opts.progressPath) body.progressPath = opts.progressPath;
+  // 上游 0 = 全部；仅在显式给出正数时下传 limitSessions
   if (opts.limitSessions != null && opts.limitSessions > 0) body.limitSessions = opts.limitSessions;
   try {
     const resp = await fetch(`${baseUrl}/api/extract/rebuild-all`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: opts.signal,
     });
     if (!resp.ok) return { ok: false, error: `gm-pro HTTP ${resp.status}` };
-    return { ok: true };
+    // 202 { jobId, status, message } —— jobId 透出给调用方供 GET .../job/:id 轮询
+    const payload = await resp.json().catch(() => null) as { jobId?: string; status?: string } | null;
+    return { ok: true, jobId: payload?.jobId, status: payload?.status };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
