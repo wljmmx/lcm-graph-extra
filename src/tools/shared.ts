@@ -521,18 +521,34 @@ export async function ensureNeo4jSchema(): Promise<void> {
 
 // ── Tool handler registry ──
 
-const _registeredToolHandlers = new Map<string, (toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>>();
+/** 已注册 handler + 其声明的 TypeBox 参数 schema（用于 dashboard 调用边界的参数校验） */
+interface RegisteredTool {
+  handler: (toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>;
+  /** TypeBox schema（toolDef.parameters）；未提供则为 undefined，边界处跳过校验 */
+  schema?: unknown;
+}
+
+const _registeredToolHandlers = new Map<string, RegisteredTool>();
 
 export function getRegisteredToolHandler(name: string): ((toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>) | undefined {
-  return _registeredToolHandlers.get(name);
+  return _registeredToolHandlers.get(name)?.handler;
+}
+
+/** 取工具声明的参数 schema（供 dashboard 调用边界做类型/范围校验） */
+export function getRegisteredToolSchema(name: string): unknown | undefined {
+  return _registeredToolHandlers.get(name)?.schema;
 }
 
 export function _resetRegisteredToolHandlers(): void {
   _registeredToolHandlers.clear();
 }
 
-export function registerToolHandler(name: string, handler: (toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>): void {
-  _registeredToolHandlers.set(name, handler);
+export function registerToolHandler(
+  name: string,
+  handler: (toolCallId: string, params: any, signal?: AbortSignal) => Promise<any>,
+  schema?: unknown,
+): void {
+  _registeredToolHandlers.set(name, { handler, schema });
 }
 
 // ── DashboardToolContext ──
@@ -593,7 +609,7 @@ export function createAuditWrapper(originalRegisterTool: any) {
       }
       return result;
     };
-    registerToolHandler(toolName, toolDef.execute);
+    registerToolHandler(toolName, toolDef.execute, toolDef.parameters);
     return originalRegisterTool(toolDef, opts);
   };
 }

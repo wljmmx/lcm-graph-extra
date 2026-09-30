@@ -24,6 +24,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { existsSync, readdirSync } from 'node:fs';
+import * as zlib from 'node:zlib';
 
 const req = createRequire(import.meta.url);
 // node:sqlite 是 Node 内置模块；与 src/health-metrics.ts 一致用 createRequire 动态加载，
@@ -254,13 +255,86 @@ export interface AgentTranscriptMessage {
 
 export interface AgentTranscriptReadResult {
   messages: AgentTranscriptMessage[];
-  /** 被 zstd 压缩的行数（event_json IS NULL）——见下方 skippedCompressed 注释 */
+  /** 成功解压 zstd 载荷的行数（官方新版会把冷 transcript 压成 zstd） */
+  decodedCompressed: number;
+  /** 解压/解码失败而跳过的行数（载荷损坏、长度不符、运行时无 zstd 等） */
   skippedCompressed: number;
   /** 非 message 类型 entry 数（session 头 / compaction / label / model_change 等） */
   skippedNonMessage: number;
   /** 解析失败的行数 */
   parseErrors: number;
   agentsScanned: number;
+}
+
+/** 官方上限：单条压缩载荷最大 4MB（openclaw transcript-payload.ts MAX_COMPRESSED_EVENT_BYTES） */
+const MAX_COMPRESSED_EVENT_BYTES = 4 * 1024 * 1024;
+/** 官方解码函数名：镜像它可让 SQL 表达式与官方逐字一致 */
+const TRANSCRIPT_DECODE_FUNCTION = 'openclaw_transcript_payload_decode';
+
+/** 运行时能否解压 zstd（Node 22.15+/23.8+ 内置 zlib.zstdDecompressSync） */
+function resolveZstdDecompress(): ((bytes: Uint8Array) => Uint8Array) | undefined {
+  const fn = (zlib as unknown as { zstdDecompressSync?: (b: Uint8Array) => Uint8Array }).zstdDecompressSync;
+  return typeof fn === 'function' ? fn : undefined;
+}
+
+/**
+ * 注册官方同名的 zstd 解码 SQL 函数（`openclaw_transcript_payload_decode`）。
+ *
+ * 官方实现（openclaw `src/config/sessions/transcript-payload.ts` `registerDecoder`）：
+ *   database.function(DECODE_FUNCTION, { deterministic: true, directOnly: true }, (bytes, rawBytes) => {
+ *     // 校验：Uint8Array、1..4MB、rawBytes 为安全整数且 1..4MB
+ *     const decoded = codec.decompress(bytes, rawBytes);
+ *     if (decoded.byteLength !== rawBytes) throw ...;
+ *     return utf8Decoder.decode(decoded);   // TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+ *   });
+ *   SQL:  coalesce(event_json, openclaw_transcript_payload_decode(event_zstd, event_utf8_bytes))
+ *
+ * 与官方的**唯一差异**（有意的）：单行解码失败返回 NULL 而不 throw。
+ * 官方 throw 会让整条 SELECT 失败；本读取器是旁路消费者，不能让一行损坏载荷
+ * 导致整次导入读不到任何消息，故降级为跳过该行并计数（调用方可见）。
+ */
+function registerTranscriptPayloadDecoder(
+  db: { function?: (name: string, options: Record<string, unknown>, fn: (...args: unknown[]) => unknown) => void },
+  stats: { decoded: number; failed: number },
+): boolean {
+  if (typeof db.function !== 'function') return false;
+  const decompress = resolveZstdDecompress();
+  if (!decompress) return false;
+  try {
+    db.function(
+      TRANSCRIPT_DECODE_FUNCTION,
+      { deterministic: true, directOnly: true },
+      (bytes, rawBytes) => {
+        try {
+          if (
+            !(bytes instanceof Uint8Array) ||
+            bytes.byteLength === 0 ||
+            bytes.byteLength > MAX_COMPRESSED_EVENT_BYTES ||
+            typeof rawBytes !== 'number' ||
+            !Number.isSafeInteger(rawBytes) ||
+            rawBytes < 1 ||
+            rawBytes > MAX_COMPRESSED_EVENT_BYTES
+          ) {
+            throw new Error('Invalid compressed transcript payload bounds');
+          }
+          const decoded = decompress(bytes);
+          if (decoded.byteLength !== rawBytes) {
+            throw new Error('Compressed transcript payload length does not match its recorded UTF-8 size');
+          }
+          // 与官方一致：fatal UTF-8 解码，遇非法字节即失败（不静默替换字符）
+          const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(decoded);
+          stats.decoded += 1;
+          return text;
+        } catch {
+          stats.failed += 1;
+          return null;
+        }
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 时间戳归一为 ms：官方 INTEGER 约定为 ms；若明显是秒则换算（防御性，不改动已合法值） */
@@ -287,7 +361,7 @@ export function readAgentTranscriptMessages(
   options: OpenClawAgentDbOptions & { agentId?: string } = {},
 ): AgentTranscriptReadResult {
   const result: AgentTranscriptReadResult = {
-    messages: [], skippedCompressed: 0, skippedNonMessage: 0, parseErrors: 0, agentsScanned: 0,
+    messages: [], decodedCompressed: 0, skippedCompressed: 0, skippedNonMessage: 0, parseErrors: 0, agentsScanned: 0,
   };
   const agents = discoverAgentDbs(options).filter((a) => !options.agentId || a.agentId === options.agentId);
   for (const agent of agents) {
@@ -297,12 +371,6 @@ export function readAgentTranscriptMessages(
     try {
       // 官方 schema 演进防御：核心两表缺失即跳过该库
       if (!tableExists(db, 'transcript_events') || !tableExists(db, 'session_windows')) continue;
-
-      // 压缩行统计（无法解压，需如实上报而非静默漏读）
-      try {
-        const c = db.prepare('SELECT COUNT(*) AS c FROM transcript_events WHERE event_json IS NULL').get() as { c?: unknown };
-        result.skippedCompressed += Number(c?.c ?? 0) || 0;
-      } catch { /* 列缺失，忽略 */ }
 
       // event_id 映射（可选表）
       const eventIds = new Map<string, string>();
@@ -314,19 +382,34 @@ export function readAgentTranscriptMessages(
         } catch { /* 忽略 */ }
       }
 
+      // 注册官方同名 zstd 解码函数；成功则用**官方同款 SQL 表达式**读取，
+      // 连压缩行一起读（否则只读 event_json 非空的行，压缩历史会缺失）。
+      const decodeStats = { decoded: 0, failed: 0 };
+      const canDecode = registerTranscriptPayloadDecoder(db as any, decodeStats);
+      const jsonExpr = canDecode
+        ? `COALESCE(e.event_json, ${TRANSCRIPT_DECODE_FUNCTION}(e.event_zstd, e.event_utf8_bytes))`
+        : 'e.event_json';
+      const whereClause = canDecode ? '' : 'WHERE e.event_json IS NOT NULL';
+
       // 主查询：消息行 JOIN 会话窗口取稳定 sessionKey（列名不符即降级跳过该库）。
       // 排序 = 会话键 → 窗口创建时间 → 窗口内序号：同一 session_key 在 /new 后会开新
       // session_window（各自 seq 从 1 起），只按 seq 排会把不同窗口交错，必须带上窗口时间。
       const rows = db.prepare(
-        `SELECT e.session_id AS session_id, e.seq AS seq, e.event_json AS event_json,
+        `SELECT e.session_id AS session_id, e.seq AS seq, ${jsonExpr} AS event_json,
                 e.created_at AS created_at, w.session_key AS session_key
          FROM transcript_events e
          JOIN session_windows w ON w.session_id = e.session_id
-         WHERE e.event_json IS NOT NULL
+         ${whereClause}
          ORDER BY w.session_key ASC, w.created_at ASC, e.seq ASC`,
       ).all() as any[];
+      result.decodedCompressed += decodeStats.decoded;
 
       for (const row of rows) {
+        // 压缩行解码失败（返回 NULL）→ 如实计入跳过数，不中断整次读取
+        if (row.event_json == null) {
+          result.skippedCompressed += 1;
+          continue;
+        }
         let entry: any;
         try {
           entry = JSON.parse(String(row.event_json));

@@ -32,7 +32,15 @@ interface SeedWindow {
   /** 窗口创建时间（ms），决定跨 /new 轮换的先后 */
   windowCreatedAt: number;
   /** 该窗口内的事件：seq 从 1 起 */
-  events: Array<{ seq: number; entry: unknown; createdAt?: number; compressed?: boolean; label?: string }>;
+  events: Array<{ seq: number; entry: unknown; createdAt?: number; compressed?: boolean; label?: string; corruptPayload?: boolean }>;
+}
+
+/** 用 node:zstd 压缩 payload（模拟官方冷转录行） */
+function compressZstd(text: string): { bytes: Uint8Array; utf8Bytes: number } {
+  const zstd = (req('node:zlib') as { zstdCompressSync?: (b: Uint8Array) => Uint8Array }).zstdCompressSync;
+  if (typeof zstd !== 'function') throw new Error('runtime lacks zstd');
+  const utf8 = Buffer.from(text, 'utf-8');
+  return { bytes: zstd(utf8), utf8Bytes: utf8.byteLength };
 }
 
 /** 按官方 DDL 建立 per-agent 库并写入窗口/事件 */
@@ -74,9 +82,14 @@ function seedTranscriptDb(agentId: string, windows: SeedWindow[]): void {
     for (const e of w.events) {
       const createdAt = e.createdAt ?? w.windowCreatedAt;
       if (e.compressed) {
+        // 官方压缩行：event_json 为 NULL，载荷在 event_zstd + event_utf8_bytes。
+        // corruptPayload = 塞入非 zstd 字节，模拟损坏载荷。
+        const payload = e.corruptPayload
+          ? { bytes: new Uint8Array([1, 2, 3, 4, 5]), utf8Bytes: 10 }
+          : compressZstd(JSON.stringify(e.entry));
         db.prepare(
           'INSERT INTO transcript_events (session_id, seq, event_json, created_at, event_zstd, event_utf8_bytes, navigation_json) VALUES (?, ?, NULL, ?, ?, ?, ?)',
-        ).run(w.sessionId, e.seq, createdAt, new Uint8Array([1, 2, 3]), 10, '{"version":1}');
+        ).run(w.sessionId, e.seq, createdAt, payload.bytes, payload.utf8Bytes, '{"version":1}');
       } else {
         db.prepare('INSERT INTO transcript_events (session_id, seq, event_json, created_at) VALUES (?, ?, ?, ?)')
           .run(w.sessionId, e.seq, JSON.stringify(e.entry), createdAt);
@@ -147,17 +160,34 @@ describe('readAgentTranscriptMessages', () => {
     expect(r.skippedNonMessage).toBe(2);
   });
 
-  it('zstd 压缩行（event_json IS NULL）如实计数并跳过，不抛错', () => {
+  it('zstd 压缩行按官方 openclaw_transcript_payload_decode 语义解压并读取', () => {
     seedTranscriptDb('main', [{
-      sessionId: 'sess-1', sessionKey: 'sk', windowCreatedAt: 1,
+      sessionId: 'sess-1', sessionKey: 'sk', windowCreatedAt: 1_700_000_000_000,
       events: [
-        { seq: 1, entry: null, compressed: true },
-        { seq: 2, entry: msgEntry('e2', 'user', 'kept') },
+        { seq: 1, entry: msgEntry('e1', 'user', '压缩前的原始消息'), compressed: true, label: 'evt-1' },
+        { seq: 2, entry: msgEntry('e2', 'assistant', 'plain') },
       ],
     }]);
     const r = readAgentTranscriptMessages();
-    expect(r.messages).toHaveLength(1);
+    expect(r.decodedCompressed).toBe(1);
+    expect(r.skippedCompressed).toBe(0);
+    expect(r.messages).toHaveLength(2);
+    expect(r.messages[0]).toMatchObject({
+      seq: 1, role: 'user', content: '压缩前的原始消息', eventId: 'evt-1',
+    });
+  });
+
+  it('压缩载荷损坏（非 zstd 字节）→ 仅跳过该行并计数，不中断整次读取', () => {
+    seedTranscriptDb('main', [{
+      sessionId: 'sess-1', sessionKey: 'sk', windowCreatedAt: 1,
+      events: [
+        { seq: 1, entry: msgEntry('bad', 'user', 'x'), compressed: true, corruptPayload: true },
+        { seq: 2, entry: msgEntry('good', 'user', 'kept') },
+      ],
+    }]);
+    const r = readAgentTranscriptMessages();
     expect(r.skippedCompressed).toBe(1);
+    expect(r.messages.map((m) => m.content)).toEqual(['kept']);
   });
 
   it('content 保持原始形态：块数组不被扁平化（扁平化由契约层负责）', () => {

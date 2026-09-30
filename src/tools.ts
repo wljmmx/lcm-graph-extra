@@ -32,13 +32,13 @@ import {
   neo4jToNumber, getNeo4jDriver, neo4jSession, closeNeo4j, closeNeo4jDriver,
   mergeEntriesNeo4jConfig, ensureNeo4jSchema,
   // registry
-  getRegisteredToolHandler, _resetRegisteredToolHandlers, registerToolHandler,
+  getRegisteredToolHandler, getRegisteredToolSchema, _resetRegisteredToolHandlers, registerToolHandler,
   createAuditWrapper,
   // types
   type DashboardToolContext,
 } from './tools/shared.js';
 
-export { getRegisteredToolHandler, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange, ensureNeo4jSchema };
+export { getRegisteredToolHandler, getRegisteredToolSchema, _resetRegisteredToolHandlers, closeSharedDb, closeNeo4jDriver, mergeEntriesNeo4jConfig, parseTimeRange, ensureNeo4jSchema };
 export type { DashboardToolContext };
 
 export function registerOperationalTools(api: any): void {
@@ -145,8 +145,10 @@ interface MessageSourceLoad {
   sessions: MessageSourceSession[];
   /** 人类可读的来源描述（写进工具输出，便于判断读到的是哪个库） */
   source: string;
-  /** 官方转录中被 zstd 压缩、本工具无法解压的行数 */
+  /** 解压失败/无 zstd 支持而跳过的官方转录行数 */
   compressed: number;
+  /** 成功按官方语义解压的官方转录行数 */
+  decodedCompressed: number;
   /** 非 message entry 数（session 头 / compaction / label 等） */
   nonMessage: number;
   parseErrors: number;
@@ -173,7 +175,7 @@ interface MessageSourceLoad {
  */
 async function loadMessageSourceSessions(): Promise<MessageSourceLoad> {
   const out: MessageSourceLoad = {
-    sessions: [], source: 'none', compressed: 0, nonMessage: 0, parseErrors: 0, skippedNoKey: 0, errors: [],
+    sessions: [], source: 'none', compressed: 0, decodedCompressed: 0, nonMessage: 0, parseErrors: 0, skippedNoKey: 0, errors: [],
   };
 
   // 优先级 1：官方转录
@@ -181,6 +183,7 @@ async function loadMessageSourceSessions(): Promise<MessageSourceLoad> {
     const { readAgentTranscriptMessages } = await import('./adapters/openclaw-agent-db.js');
     const tr = readAgentTranscriptMessages();
     out.compressed = tr.skippedCompressed;
+    out.decodedCompressed = tr.decodedCompressed;
     out.nonMessage = tr.skippedNonMessage;
     out.parseErrors = tr.parseErrors;
     if (tr.messages.length > 0) {
@@ -955,8 +958,11 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
             lines.push(`ℹ 消息来源：${src.source}，会话数 ${sessions.length}`);
           }
           if (src.compressed > 0) {
-            lines.push(`⚠ 官方转录有 ${src.compressed} 行是 zstd 压缩载荷（event_json IS NULL）：`
-              + `本工具无法调用官方 SQL 解压函数 openclaw_transcript_payload_decode，已如实跳过`);
+            lines.push(`⚠ 官方转录有 ${src.compressed} 行 zstd 载荷解压失败（已跳过）：`
+              + `可能是载荷损坏/长度不符，或运行时缺少 zstd 支持（需 Node 22.15+/23.8+ 的 zlib.zstdDecompressSync）`);
+          }
+          if (src.decodedCompressed > 0) {
+            lines.push(`ℹ 已按官方 openclaw_transcript_payload_decode 语义解压 ${src.decodedCompressed} 行 zstd 转录载荷`);
           }
           if (src.nonMessage > 0) {
             lines.push(`ℹ 跳过 ${src.nonMessage} 条非消息 entry（session 头/compaction/label/model_change 等）`

@@ -22,7 +22,8 @@ import { getGlobalLogger } from './utils/logger.js';
 // v1.2.0-1/3: 直方图与业务指标（用于 Prometheus /metrics 暴露）
 import { latencyHistograms, businessMetrics } from './health-metrics.js';
 // MCP 工具调用：从 tools.ts 注册表中查询 handler
-import { getRegisteredToolHandler } from './tools.js';
+import { getRegisteredToolHandler, getRegisteredToolSchema } from './tools.js';
+import { Value } from 'typebox/value';
 // MoA 性能追踪
 import { getMoaPerformance } from './moa/perf-tracker.js';
 
@@ -171,12 +172,69 @@ const ALLOWED_MCP_TOOLS = new Set<string>([
 ]);
 
 /**
+ * 用工具声明的 TypeBox schema 校验并归一化 dashboard 传来的参数。
+ *
+ * 为什么需要（长批次安全）：dashboard 转发的 params 是**跨进程外部输入**，
+ * 而工具内部普遍是 `params.x ?? default` 的宽松读取 —— 例如 lcmg_import 的
+ * `limit` 直接作为每批记录数，若传入 0/负数/超大值，批次切分会退化为逐条
+ * 或一次性巨批，长批次行为不可预期。此处按 schema 做类型校验 + 范围校验。
+ *
+ * 策略（不破坏既有调用）：
+ *   1. 类型不符先尝试 Value.Convert 安全转换（"100" → 100、'true' → true）；
+ *   2. 仍不符（含越界，如 limit > maximum）→ 拒绝并回报具体字段与原因；
+ *   3. schema 未声明的键**保留透传**（例如 dashboard 给 lcmg_maintain 附带
+ *      source 作为历史标签，而插件侧 schema 无此字段），但在 debug 日志里点名，
+ *      让两端定义漂移可见，而不是静默丢弃或直接报错。
+ */
+function validateToolParams(
+  tool: string,
+  schema: unknown,
+  params: Record<string, unknown>,
+): { ok: true; params: Record<string, unknown> } | { ok: false; error: string } {
+  if (!schema || typeof schema !== 'object') return { ok: true, params };
+  let candidate: unknown = params;
+  try {
+    if (!Value.Check(schema as any, candidate)) {
+      // 类型级转换（字符串数字/布尔）后再校验一次
+      const converted = Value.Convert(schema as any, candidate);
+      if (!Value.Check(schema as any, converted)) {
+        const first = Value.Errors(schema as any, converted)[0];
+        const where = first?.instancePath ? first.instancePath.replace(/^\//, '') : '(root)';
+        return { ok: false, error: `invalid params for ${tool}: ${where} ${first?.message ?? 'failed schema validation'}` };
+      }
+      candidate = converted;
+    }
+  } catch (e) {
+    // schema 本身异常（非预期）→ 不阻塞调用，交回工具自行处理
+    getGlobalLogger().debug?.('[dashboard-snapshot] tool param schema check threw; skipping validation', {
+      tool, err: e instanceof Error ? e.message : String(e),
+    });
+    return { ok: true, params };
+  }
+  const normalized = (candidate ?? {}) as Record<string, unknown>;
+  const declared = (schema as any)?.properties;
+  if (declared && typeof declared === 'object') {
+    const extra = Object.keys(normalized).filter((k) => !(k in declared));
+    if (extra.length > 0) {
+      getGlobalLogger().debug?.('[dashboard-snapshot] tool params contain keys absent from schema (passed through)', {
+        tool, extraKeys: extra,
+      });
+    }
+  }
+  return { ok: true, params: normalized };
+}
+
+/**
  * 从 tools.ts 注册表中查询 handler 并执行 MCP 工具调用。
  *
  * @param rawBody 原始请求体字符串（JSON）
+ * @param signal  由调用方连接生命周期驱动的取消信号（dashboard 超时断开 → 长批次应停止）
  * @returns { ok: boolean, result?: unknown, error?: string }
  */
-async function invokeMcpToolFromRegistry(rawBody: string): Promise<{ ok: boolean; result?: unknown; error?: string }> {
+async function invokeMcpToolFromRegistry(
+  rawBody: string,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   let parsed: { tool?: string; params?: Record<string, unknown> };
   try {
     parsed = JSON.parse(rawBody);
@@ -184,7 +242,7 @@ async function invokeMcpToolFromRegistry(rawBody: string): Promise<{ ok: boolean
     return { ok: false, error: 'invalid JSON body' };
   }
   const tool = parsed.tool;
-  const params = parsed.params ?? {};
+  const rawParams = parsed.params ?? {};
   if (!tool || typeof tool !== 'string') {
     return { ok: false, error: 'missing tool' };
   }
@@ -195,10 +253,19 @@ async function invokeMcpToolFromRegistry(rawBody: string): Promise<{ ok: boolean
   if (!handler || typeof handler !== 'function') {
     return { ok: false, error: `tool "${tool}" not registered` };
   }
+  if (signal?.aborted) {
+    return { ok: false, error: 'invoke aborted before start (caller disconnected)' };
+  }
+  const checked = validateToolParams(tool, getRegisteredToolSchema(tool), rawParams);
+  if (!checked.ok) {
+    return { ok: false, error: checked.error };
+  }
   // 合成 toolCallId（dashboard 转发的调用没有真实 toolCallId）
   const toolCallId = `dashboard-invoke-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
-    const result = await handler(toolCallId, params);
+    // 第三参传 signal：长批次工具（如 lcmg_import）在每个批次边界检查 aborted，
+    // 使 dashboard 端超时/用户中止能真正停下来，而不是在后台无界空转。
+    const result = await handler(toolCallId, checked.params, signal);
     return { ok: true, result };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -965,12 +1032,28 @@ export function startDashboardSnapshotServer(opts: StartSnapshotServerOpts): Sna
           let body = '';
           req.on('data', (chunk) => { body += chunk; if (body.length > 1_000_000) req.destroy(); });
           req.on('end', () => {
-            invokeMcpToolFromRegistry(body)
+            // 连接生命周期 → 取消信号：dashboard 出站超时会 destroy 自己的 socket
+            // （见 packages/dashboard/server/lib/mcp.ts 的 TIMEOUT_AFTER_*）。
+            // 若不把该断开转成 abort，长批次工具（lcmg_import 的逐批循环）会继续
+            // 在后台跑完，既拖住 Neo4j/LLM，又让用户以为已失败而重复提交。
+            // 因此在响应未发出前监听 close/aborted → abort，并在批间检查点生效。
+            const ac = new AbortController();
+            let responded = false;
+            const abortIfPending = (why: string) => {
+              if (responded || ac.signal.aborted) return;
+              ac.abort();
+              getGlobalLogger().debug?.('[dashboard-snapshot] /internal/mcp-invoke caller disconnected; aborting tool', { why });
+            };
+            res.on('close', () => { if (!responded) abortIfPending('res close before response'); });
+            req.on('aborted', () => abortIfPending('req aborted'));
+            invokeMcpToolFromRegistry(body, ac.signal)
               .then((result) => {
+                responded = true;
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(result));
               })
               .catch((err) => {
+                responded = true;
                 getGlobalLogger().warn('[dashboard-snapshot] /internal/mcp-invoke failed', { err: err instanceof Error ? err.message : String(err) });
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ ok: false, error: 'invoke failed: ' + (err instanceof Error ? err.message : String(err)) }));

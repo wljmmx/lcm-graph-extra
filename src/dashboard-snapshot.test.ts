@@ -14,13 +14,15 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import { startDashboardSnapshotServer, type SnapshotProviders, type SnapshotServerHandle } from './dashboard-snapshot.js';
 
-// mock tools.js 的 getRegisteredToolHandler，避免引入完整插件依赖
+// mock tools.js 的 handler 注册表查询，避免引入完整插件依赖
 vi.mock('./tools.js', () => ({
   getRegisteredToolHandler: vi.fn(),
+  getRegisteredToolSchema: vi.fn(),
   closeSharedDb: vi.fn(),
 }));
-import { getRegisteredToolHandler } from './tools.js';
+import { getRegisteredToolHandler, getRegisteredToolSchema } from './tools.js';
 const mockGetHandler = vi.mocked(getRegisteredToolHandler);
+const mockGetSchema = vi.mocked(getRegisteredToolSchema);
 
 // 随机端口避免冲突
 function getRandomPort(): number {
@@ -498,6 +500,9 @@ describe('DashboardSnapshotServer', () => {
   describe('POST /internal/mcp-invoke', () => {
     beforeEach(() => {
       mockGetHandler.mockReset();
+      // 默认无 schema（跳过参数校验）——与既有用例语义一致
+      mockGetSchema.mockReset();
+      mockGetSchema.mockReturnValue(undefined);
     });
 
     it('缺失 tool → 200 + ok:false + missing tool', async () => {
@@ -614,6 +619,99 @@ describe('DashboardSnapshotServer', () => {
       const body = await resp.json();
       expect(body.ok).toBe(false);
       expect(body.error).toContain('distillation failed');
+    });
+
+    it('参数越界（schema 声明 maximum）→ ok:false 且不调用 handler', async () => {
+      const { Type } = await import('typebox');
+      mockGetSchema.mockReturnValue(Type.Object({
+        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
+      }));
+      const handler = vi.fn(async () => ({ done: true }));
+      mockGetHandler.mockReturnValue(handler);
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'lcmg_distill', params: { limit: 999_999 } }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('invalid params');
+      // 关键：越界参数不得进入工具（否则长批次会按超大 limit 切分）
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('字符串型数字参数按 schema 归一化后传入（兼容表单序列化）', async () => {
+      const { Type } = await import('typebox');
+      mockGetSchema.mockReturnValue(Type.Object({
+        limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
+      }));
+      const handler = vi.fn(async () => ({ done: true }));
+      mockGetHandler.mockReturnValue(handler);
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const resp = await fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'lcmg_distill', params: { limit: '128' } }),
+      });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.ok).toBe(true);
+      const passed = handler.mock.calls[0]?.[1] as { limit?: unknown };
+      expect(passed.limit).toBe(128);
+    });
+
+    it('调用方断开（长批次中途放弃）→ 传给 handler 的 signal 被 abort', async () => {
+      let seenSignal: AbortSignal | undefined;
+      mockGetHandler.mockReturnValue(async (_id: string, _p: unknown, signal?: AbortSignal) => {
+        seenSignal = signal;
+        // 模拟长批次：等 signal 被 abort 才返回
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) return resolve();
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return { aborted: true };
+      });
+      const port = getRandomPort();
+      const handle = startDashboardSnapshotServer({
+        port,
+        host: '127.0.0.1',
+        providers: makeProviders(),
+      });
+      stoppers.push(handle.stop);
+      expect(await waitForStartup(handle)).toBe(true);
+
+      const ac = new AbortController();
+      const reqPromise = fetch(`http://127.0.0.1:${port}/internal/mcp-invoke`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ tool: 'lcmg_import', params: { source: 'all', limit: 100 } }),
+        signal: ac.signal,
+      }).catch(() => 'client-aborted');
+      // 客户端断开 → 服务端应 abort 工具
+      await new Promise((r) => setTimeout(r, 150));
+      ac.abort();
+      await reqPromise;
+      await new Promise((r) => setTimeout(r, 150));
+      expect(seenSignal).toBeInstanceOf(AbortSignal);
+      expect(seenSignal?.aborted).toBe(true);
     });
 
     it('非法 JSON body → ok:false + invalid JSON', async () => {
