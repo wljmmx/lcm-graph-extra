@@ -17,6 +17,10 @@ import {
   planGmMessageRows,
   resolveGmSessionKey,
 } from './utils/gm-message-contract.js';
+import {
+  mergeMessageSourceSessions,
+  type MessageSourceSessionLike,
+} from './utils/message-source-union.js';
 import { estimateTokensFromText } from './lcm-bridge.js';
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { registerSearchTool } from './tools/search.js';
@@ -132,19 +136,24 @@ function parseMemoryFileTime(content: string, filePath: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// 会话消息来源加载（官方权威源优先，lcm.db 回退）—— 导入与同步共用
+// 会话消息来源加载（官方权威源 ∪ lcm.db 补集）—— 导入与同步共用
 // ---------------------------------------------------------------------------
+// 历史教训：曾经实现成"官方有数据就 return"（互斥选择而不是并集），
+// 结果是**迁移不完整时，只存在于 lcm.db 的整段会话静默丢失、永不进图**。
+// 现在固定为会话级并集：官方为准 + 补齐 lcm.db 独有的会话（见 message-source-union）。
 
-interface MessageSourceSession {
-  sessionKey: string;
-  sessionId: string;
-  msgs: { role: unknown; content: unknown; createdAt: number }[];
-}
+interface MessageSourceSession extends MessageSourceSessionLike {}
 
 interface MessageSourceLoad {
   sessions: MessageSourceSession[];
   /** 人类可读的来源描述（写进工具输出，便于判断读到的是哪个库） */
   source: string;
+  /** 官方侧会话数 */
+  officialSessions: number;
+  /** 仅存在于 lcm.db、被补入的会话数（>0 说明 lcm.db 不可退役） */
+  lcmOnlySessions: number;
+  /** 两侧都有的会话数（以官方为准） */
+  overlapSessions: number;
   /** 解压失败/无 zstd 支持而跳过的官方转录行数 */
   compressed: number;
   /** 成功按官方语义解压的官方转录行数 */
@@ -158,7 +167,7 @@ interface MessageSourceLoad {
 }
 
 /**
- * 加载会话消息（按官方 SDK 逻辑排序来源）：
+ * 加载会话消息（官方权威源 ∪ lcm.db 补集）：
  *
  *  1. **官方 per-agent SQLite `transcript_events`** —— openclaw 2.0+ 的权威转录存储。
  *     官方存储教义（`src/state/openclaw-agent-schema.sql`）：
@@ -167,10 +176,12 @@ interface MessageSourceLoad {
  *     content 可为字符串或块数组。JSONL / sessionFile 已标记为 legacy
  *     （sessionFile 现为进程内路由 token，不再是文件路径）。
  *     压缩行（冷转录）按官方 `openclaw_transcript_payload_decode` 语义解压后读取。
- *  2. **lossless-claw 的 lcm.db `conversations`/`messages`** —— 回退。
- *     仅在官方库不存在或尚无转录（未迁移环境）时使用：它是 lossless-claw 的镜像，
- *     可能滞后或被过滤，而官方转录是宿主写入的原文。
+ *  2. **lossless-claw 的 lcm.db `conversations`/`messages`** —— **补集来源，不是二选一**。
+ *     官方迁移常常不完整（老会话可能只留在 lcm.db），所以这里**总是**读 lcm.db，
+ *     把"官方没有的会话"补进来；两侧都有的会话一律以官方为准（不混源）。
+ *     注意 lcm.db 仍是现役数据源（备份/检索/诊断都读它），不是可忽略的 legacy。
  *
+ * 合并语义与原因见 utils/message-source-union。
  * 两条来源产出的行统一交给 gm-message-contract 的 planGmMessageRows 处理，
  * 故 role 过滤 / 内容扁平化 / id 生成只有一份实现。
  *
@@ -181,25 +192,27 @@ async function loadMessageSourceSessions(
   opts: { sessionsOnly?: boolean } = {},
 ): Promise<MessageSourceLoad> {
   const out: MessageSourceLoad = {
-    sessions: [], source: 'none', compressed: 0, decodedCompressed: 0, nonMessage: 0, parseErrors: 0, skippedNoKey: 0, errors: [],
+    sessions: [], source: 'none', officialSessions: 0, lcmOnlySessions: 0, overlapSessions: 0,
+    compressed: 0, decodedCompressed: 0, nonMessage: 0, parseErrors: 0, skippedNoKey: 0, errors: [],
   };
+  const officialSessions: MessageSourceSession[] = [];
+  let officialLabel = '';
 
-  // 优先级 1：官方转录
+  // 来源 1：官方转录（读到就记为官方侧，但**不早退** —— 还要读 lcm.db 补集）
   try {
     const mod = await import('./adapters/openclaw-agent-db.js');
     if (opts.sessionsOnly) {
       // 轻量路径：只读 session_windows（不读 transcript_events，不解压）
       const sessions = mod.readAgentTranscriptSessions();
-      if (sessions.length > 0) {
-        const byKey = new Map<string, MessageSourceSession>();
-        for (const s of sessions) {
-          const key = resolveGmSessionKey(s.sessionKey, s.sessionId);
-          if (!key) { out.skippedNoKey += 1; continue; }
-          if (!byKey.has(key)) byKey.set(key, { sessionKey: key, sessionId: s.sessionId, msgs: [] });
-        }
-        out.sessions = [...byKey.values()];
-        out.source = `openclaw-agent.sqlite session_windows (agents, sessions-only)`;
-        return out;
+      const byKey = new Map<string, MessageSourceSession>();
+      for (const s of sessions) {
+        const key = resolveGmSessionKey(s.sessionKey, s.sessionId);
+        if (!key) { out.skippedNoKey += 1; continue; }
+        if (!byKey.has(key)) byKey.set(key, { sessionKey: key, sessionId: s.sessionId, msgs: [] });
+      }
+      officialSessions.push(...byKey.values());
+      if (officialSessions.length > 0) {
+        officialLabel = 'openclaw-agent.sqlite session_windows (agents, sessions-only)';
       }
     } else {
       const tr = mod.readAgentTranscriptMessages();
@@ -218,16 +231,16 @@ async function loadMessageSourceSessions(
           if (!g) { g = { sessionKey: key, sessionId: m.sessionId, msgs: [] }; byKey.set(key, g); }
           g.msgs.push({ role: m.role, content: m.content, createdAt: m.createdAt });
         }
-        out.sessions = [...byKey.values()];
-        out.source = `openclaw-agent.sqlite transcript_events (agents=${tr.agentsScanned})`;
-        return out;
+        officialSessions.push(...byKey.values());
+        officialLabel = `openclaw-agent.sqlite transcript_events (agents=${tr.agentsScanned})`;
       }
     }
   } catch (e: any) {
     out.errors.push(`官方转录读取失败：${e?.message ?? String(e)}`);
   }
 
-  // 优先级 2：lcm.db 回退
+  // 来源 2：lcm.db —— **总是读**，用于补齐"官方没有的会话"（会话级并集）。
+  const lcmSessions: MessageSourceSession[] = [];
   let db: any = null;
   try {
     db = openDb();
@@ -237,35 +250,48 @@ async function loadMessageSourceSessions(
       for (const conv of convs) {
         const key = resolveGmSessionKey(conv.session_key, conv.session_id);
         if (!key) { out.skippedNoKey += 1; continue; }
-        out.sessions.push({
+        lcmSessions.push({
           sessionKey: key,
           sessionId: conv.session_id != null ? String(conv.session_id) : '',
           msgs: [],
         });
       }
-      out.source = 'lcm.db conversations (fallback, sessions-only)';
-      return out;
+    } else {
+      const convs = db.prepare(
+        "SELECT conversation_id, session_id, session_key FROM conversations " +
+        "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
+        "ORDER BY conversation_id DESC"
+      ).all() as any[];
+      for (const conv of convs) {
+        const key = resolveGmSessionKey(conv.session_key, conv.session_id);
+        const rows = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
+        if (!key) { out.skippedNoKey += rows.length; continue; }
+        lcmSessions.push({
+          sessionKey: key,
+          sessionId: conv.session_id != null ? String(conv.session_id) : '',
+          msgs: rows.map((m: any) => ({ role: m.role, content: m.content, createdAt: toRealTs(m.created_at) })),
+        });
+      }
     }
-    const convs = db.prepare(
-      "SELECT conversation_id, session_id, session_key FROM conversations " +
-      "WHERE conversation_id IN (SELECT DISTINCT conversation_id FROM messages) " +
-      "ORDER BY conversation_id DESC"
-    ).all() as any[];
-    for (const conv of convs) {
-      const key = resolveGmSessionKey(conv.session_key, conv.session_id);
-      const rows = db.prepare("SELECT seq, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY seq ASC").all(conv.conversation_id) as any[];
-      if (!key) { out.skippedNoKey += rows.length; continue; }
-      out.sessions.push({
-        sessionKey: key,
-        sessionId: conv.session_id != null ? String(conv.session_id) : '',
-        msgs: rows.map((m: any) => ({ role: m.role, content: m.content, createdAt: toRealTs(m.created_at) })),
-      });
-    }
-    out.source = 'lcm.db conversations/messages (fallback: official transcript empty)';
   } catch (e: any) {
     out.errors.push(`lcm.db 读取失败：${e.message}`);
   } finally { if (db) { try { db.close(); } catch {} } }
 
+  // 会话级并集：官方为准 + 补齐仅 lcm.db 有的会话（同 key 不混源，避免重复消息节点）
+  const union = mergeMessageSourceSessions(officialSessions, lcmSessions);
+  out.sessions = union.sessions;
+  out.officialSessions = union.officialSessions;
+  out.lcmOnlySessions = union.lcmOnlySessions;
+  out.overlapSessions = union.overlapSessions;
+  if (officialSessions.length > 0 && union.lcmOnlySessions > 0) {
+    out.source = `${officialLabel} + lcm.db supplement (official ${union.officialSessions} ∪ lcm-only ${union.lcmOnlySessions}; overlap ${union.overlapSessions})`;
+  } else if (officialSessions.length > 0) {
+    out.source = officialLabel;
+  } else if (lcmSessions.length > 0) {
+    out.source = 'lcm.db conversations/messages (fallback: official transcript empty)';
+  } else {
+    out.source = 'none';
+  }
   return out;
 }
 
@@ -994,6 +1020,12 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           } else {
             lines.push(`ℹ 消息来源：${src.source}，会话数 ${sessions.length}`);
           }
+          // 覆盖度可见化（对应迁移的 completion_evidence）：只要还有会话只存在于 lcm.db，
+          // 就说明官方迁移不完整、lcm.db 尚不可退役；补入的会话会照常导入，不再静默丢弃。
+          if (src.lcmOnlySessions > 0) {
+            lines.push(`⚠ lcm.db 补入 ${src.lcmOnlySessions} 个官方转录未覆盖的会话（两侧都有的 ${src.overlapSessions} 个以官方为准）`
+              + `；lcm.db 仍不可退役，正式退役前需连续多轮补入数为 0`);
+          }
           if (src.compressed > 0) {
             lines.push(`⚠ 官方转录有 ${src.compressed} 行 zstd 载荷解压失败（已跳过）：`
               + `可能是载荷损坏/长度不符，或运行时缺少 zstd 支持（需 Node 22.15+/23.8+ 的 zlib.zstdDecompressSync）`);
@@ -1545,7 +1577,8 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
       // 会话存在性判定必须以**消息源**为准，且取两个来源的并集：
       //   lcmg_import 以官方 transcript_events 为权威源，其 session_id 未必出现在 lcm.db 的
       //   conversations 表里；若只查 lcm.db，这些会话会被误判为孤儿，进而在 repair 下被删除。
-      // 轻量读取（sessionsOnly）：只查 session_windows / conversations，不读消息体、不解压。
+      //   loadMessageSourceSessions 现在本身就是"官方 ∪ lcm.db 补集"（sessionsOnly 轻量读：
+      //   只查 session_windows / conversations，不读消息体、不解压），故此处一次读取即可。
       const existingSids = new Set<string>();
       let sourceSessions = 0;
       try {
@@ -1555,22 +1588,10 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
           if (s.sessionId) existingSids.add(String(s.sessionId));
           if (s.sessionKey) existingSids.add(String(s.sessionKey));
         }
-        push(`  message source: ${sessLoad.source}; sessions: ${sourceSessions}\n`);
+        push(`  message source: ${sessLoad.source}; sessions: ${sourceSessions}`
+          + ` (official ${sessLoad.officialSessions}, lcm-only ${sessLoad.lcmOnlySessions})\n`);
         for (const err of sessLoad.errors) push(`  ⚠ ${err}\n`);
       } catch (e: any) { push(`  ❌ message source: ${e.message}\n`); }
-
-      // 并集补充 lcm.db（官方源与 lcm.db 并存时，任一登记过该会话即视为存在）
-      let db: any = null;
-      try {
-        db = openDb();
-        const convs = db.prepare("SELECT DISTINCT session_id, session_key FROM conversations").all() as any[];
-        for (const c of convs) {
-          if (c.session_id) existingSids.add(String(c.session_id));
-          if (c.session_key) existingSids.add(String(c.session_key));
-        }
-        push(`  known sessions (official ∪ lcm.db): ${existingSids.size}\n`);
-      } catch (e: any) { push(`  ❌ lcm.db: ${e.message}\n`); }
-      finally { if (db) { try { db.close(); } catch {} } }
 
       try {
         if (signal?.aborted) {
