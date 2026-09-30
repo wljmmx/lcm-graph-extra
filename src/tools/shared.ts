@@ -11,7 +11,7 @@ import { createRequire } from "node:module";
 import { readFileSync, existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { resolveNeo4jConfig, resolveEmbeddingConfig } from '../config/neo4j-helper';
+import { resolveNeo4jConfig, resolveEmbeddingConfig, resolveVectorIndexProvider } from '../config/neo4j-helper';
 import { getGlobalLogger } from '../utils/logger.js';
 import { cleanBaseURL } from '../utils/url.js';
 import { callLlm } from '../utils/llm-call.js';
@@ -392,15 +392,20 @@ export async function detectNeo4jEdition(): Promise<Neo4jEdition> {
 /**
  * 向量索引目标参数（单一事实来源，建索引与建后校验共用）。
  *
- * Neo4j 2026.x 的 Provider 为 `vector-2.0`：HNSW / 量化参数**不再有全局默认配置**
- * （dbms.index.vector.default.* 已废弃），必须在 CREATE VECTOR INDEX 的
- * OPTIONS { indexProvider, vectorConfig } 里显式指定。
+ * HNSW / 量化参数在 2026.x 一类的发行版里**不再有全局默认配置**
+ * （dbms.index.vector.default.* 已废弃），必须写在 CREATE VECTOR INDEX 的
+ * OPTIONS { indexProvider, vectorConfig } 内 —— 但 `indexProvider` 的**注册名是
+ * 版本相关的引擎标识符（有语义名，也有版本化命名），因此不在代码里写死**，
+ * 由 ensureNeo4jSchema 在运行时解析（配置 → 既有索引 → 引擎错误自证 → 探测候选）。
  * `efSearch` 不在此列 —— 它是**查询期**参数，写在 db.index.vector.queryNodes 的第 4 个入参。
  */
 const VECTOR_HNSW_M = 16;
 const VECTOR_HNSW_EF_CONSTRUCTION = 96;
 const VECTOR_SEARCH_EXPANSION_FACTOR = 2.0;
 const VECTOR_QUANTIZATION_TYPE = 'SCALAR';
+
+/** 本进程解析成功的向量索引 Provider 名（跨次 ensure 缓存，避免重复探测） */
+let _resolvedVectorProvider: string | null = null;
 
 /**
  * 幂等建立 Neo4j schema（约束 + 全文索引 + 向量索引）。
@@ -484,30 +489,37 @@ export async function ensureNeo4jSchema(): Promise<void> {
 
         // 向量索引（Neo4j 5.11+）：跨 Task|Skill|Event 单索引。
         //
-        // Neo4j 2026.x 起向量 Provider 为 `vector-2.0`，**HNSW / 量化参数不再有全局默认配置**
-        // （dbms.index.vector.default.* 已废弃，全局环境变量不起作用），必须在建索引的 Cypher 里
-        // 通过 OPTIONS { indexProvider, vectorConfig } 显式指定。
         // 目标参数：dimensions=配置值(默认 1024) / quantizationType=SCALAR /
         //           hnsw.m=16 / hnsw.efConstruction=96 / searchExpansionFactor=2.0。
         // 注意：efSearch(=48) 是**查询期**参数，只写在 db.index.vector.queryNodes 的第 4 个入参，
         //       建索引阶段不存在该参数（它是检索候选队列，不是索引存储参数）。
         //
-        // 变体链（与上面 FULLTEXT 同样思路：按"新语法 → 旧语法 → 过程化"依次尝试，
-        // 任一成功即视为建好）——不同 Neo4j 版本/版别接受的语法不同：
-        //   1. 2026.x：indexProvider:'vector-2.0' + vectorConfig（本文件的目标形态）
-        //   2. 5.11~5.x Enterprise：OPTIONS { indexConfig: { `vector.*` } } + HNSW/量化
-        //   3. 5.11~5.x Community：indexConfig 仅 dimensions + similarity（量化/HNSW 不可用）
-        //   4. <5.11：过程化 db.index.vector.createNodeIndex
+        // ⚠ Provider 名（indexProvider）是**版本相关的引擎标识符，不可硬编码**：
+        //   HNSW/量化参数在 2026.x 一类的版本里不再有全局默认配置，必须写在
+        //   OPTIONS { indexProvider, vectorConfig } 内；而 Provider 的注册名在不同发行版/年份
+        //   会变（既有语义名，也有版本化命名）。把某个字面量写死 = 换版本即建不出索引。
+        //   因此这里按下面顺序**运行时解析**，以引擎自身为权威：
+        //     1) 显式配置：plugin config `neo4j.vectorIndexProvider` 或环境变量 NEO4J_VECTOR_INDEX_PROVIDER
+        //     2) 本进程上次解析成功的值（_resolvedVectorProvider 缓存）
+        //     3) 该库既有向量索引的 indexProvider（SHOW VECTOR INDEXES，最权威）
+        //     4) 引擎报错自证：CREATE 失败信息通常列出 "Available providers: [...]"，
+        //        从中挑出向量类 Provider 再试一次
+        //     5) 最后才用内置候选字面量兜底（失败也不致命，1~4 会补上）
+        //
+        // 语法变体链（与上面 FULLTEXT 同样思路：依次尝试，任一成功即视为建好）：
+        //   A. vectorConfig + 解析出的 Provider（目标形态）
+        //   B. 5.11~5.x Enterprise：OPTIONS { indexConfig: { `vector.*` } } + HNSW/量化（不需 Provider 名）
+        //   C. 5.11~5.x Community：indexConfig 仅 dimensions + similarity
+        //   D. <5.11：过程化 db.index.vector.createNodeIndex
         const dim = resolveEmbeddingConfig(getPluginNeo4jConfig())?.dimensions ?? 1024;
         const VECTOR_INDEX_NAME = 'gm_node_embedding';
-        const vectorVariants: Array<{ label: string; cypher: string }> = [
-          {
-            label: 'vector-2.0 (Neo4j 2026.x)',
-            cypher: `
+        // Provider 名只允许安全字符，避免配置/错误文本被注入 Cypher
+        const isSafeProviderName = (p: string): boolean => /^[A-Za-z0-9._-]+$/.test(p);
+        const vectorConfigCypher = (provider: string): string => `
               CREATE VECTOR INDEX ${VECTOR_INDEX_NAME} IF NOT EXISTS
               FOR (n:Task|Skill|Event) ON (n.embedding)
               OPTIONS {
-                indexProvider: 'vector-2.0',
+                indexProvider: '${provider}',
                 vectorConfig: {
                   dimensions: ${dim},
                   quantizationType: '${VECTOR_QUANTIZATION_TYPE}',
@@ -518,8 +530,42 @@ export async function ensureNeo4jSchema(): Promise<void> {
                   searchExpansionFactor: ${VECTOR_SEARCH_EXPANSION_FACTOR}
                 }
               }
-            `,
-          },
+            `;
+
+        // Provider 候选（按权威度排序）
+        const providerCandidates: string[] = [];
+        const seenProviders = new Set<string>();
+        const addProviderCandidate = (p: unknown): void => {
+          const v = typeof p === 'string' ? p.trim() : '';
+          if (!v || seenProviders.has(v)) return;
+          if (!isSafeProviderName(v)) {
+            getGlobalLogger()?.warn?.(`[lcm-graph-extra] 忽略非法向量 Provider 名：${v}`);
+            return;
+          }
+          seenProviders.add(v);
+          providerCandidates.push(v);
+        };
+        addProviderCandidate(resolveVectorIndexProvider(getPluginNeo4jConfig()));
+        addProviderCandidate(_resolvedVectorProvider);
+        try {
+          const existing = await session.run('SHOW VECTOR INDEXES YIELD name, indexProvider');
+          for (const rec of existing.records) {
+            const p = rec.get('indexProvider');
+            if (p) {
+              getGlobalLogger()?.info?.(`[lcm-graph-extra] 从既有向量索引发现 Provider：${p}`);
+              addProviderCandidate(p);
+              break;
+            }
+          }
+        } catch { /* 老版本 SHOW VECTOR INDEXES 不接受这些列 → 跳过 */ }
+        // 内置探测候选：**只是探测值，不是断言** —— 引擎接受即用，拒绝时其错误信息会
+        // 列出真正可用的 Provider 名（上面的自证路径随即采用），因此写错也不致命。
+        // 语义名见于 5.18+ 线；版本化命名见于更晚的发行版；两者都留，避免任一侧失效时无候选。
+        addProviderCandidate('vector-2.0');
+        addProviderCandidate('vector-2026.07');
+
+        const vectorAttempts: Array<{ label: string; cypher: string; provider?: string }> = [
+          ...providerCandidates.map((p) => ({ label: `vectorConfig + provider '${p}'`, cypher: vectorConfigCypher(p), provider: p })),
           {
             label: 'indexConfig + HNSW/SCALAR (5.x Enterprise)',
             cypher: `
@@ -556,24 +602,55 @@ export async function ensureNeo4jSchema(): Promise<void> {
           },
         ];
         let vectorVariant: string | null = null;
+        let resolvedProvider: string | null = null;
         const vectorErrors: string[] = [];
-        for (const v of vectorVariants) {
+        // 引擎自证：从 "Unknown index provider 'x'. Available providers are: [a, b]" 里取向量类 Provider
+        const parseAvailableProviders = (msg: string): string[] => {
+          const m = /available providers[^[]*\[([^\]]*)\]/i.exec(msg);
+          if (!m) return [];
+          return m[1]
+            .split(',')
+            .map((s) => s.trim().replace(/^['"`]|['"`]$/g, ''))
+            .filter((p) => /vector/i.test(p));
+        };
+        let extraAttempts = 0;
+        const MAX_EXTRA_ATTEMPTS = 3;
+        for (let i = 0; i < vectorAttempts.length && !vectorVariant; i++) {
+          const attempt = vectorAttempts[i];
           try {
-            await session.run(v.cypher);
-            vectorVariant = v.label;
-            break;
+            await session.run(attempt.cypher);
+            vectorVariant = attempt.label;
+            resolvedProvider = attempt.provider ?? resolvedProvider;
           } catch (e) {
-            vectorErrors.push(`${v.label}: ${e instanceof Error ? e.message : String(e)}`);
+            const msg = e instanceof Error ? e.message : String(e);
+            vectorErrors.push(`${attempt.label}: ${msg}`);
+            if (extraAttempts < MAX_EXTRA_ATTEMPTS) {
+              for (const p of parseAvailableProviders(msg)) {
+                if (seenProviders.has(p) || !isSafeProviderName(p)) continue;
+                seenProviders.add(p);
+                extraAttempts += 1;
+                getGlobalLogger()?.info?.(`[lcm-graph-extra] 引擎报告可用向量 Provider：${p} → 追加尝试`);
+                vectorAttempts.push({
+                  label: `vectorConfig + engine-reported provider '${p}'`,
+                  cypher: vectorConfigCypher(p),
+                  provider: p,
+                });
+              }
+            }
           }
         }
         if (vectorVariant) {
-          getGlobalLogger()?.info?.(`[lcm-graph-extra] vector index ${VECTOR_INDEX_NAME} ensured via ${vectorVariant} (dim=${dim})`);
+          if (resolvedProvider) _resolvedVectorProvider = resolvedProvider;
+          getGlobalLogger()?.info?.(
+            `[lcm-graph-extra] vector index ${VECTOR_INDEX_NAME} ensured via ${vectorVariant} (dim=${dim}`
+            + `${resolvedProvider ? `, provider=${resolvedProvider}` : ''})`,
+          );
         } else {
           // 全部变体失败必须告警（而不是静默吞掉）：向量索引缺失会让检索侧
           // "查不到向量索引" 且无人察觉。这里把每个变体的错误都带出来。
           getGlobalLogger()?.warn?.(
             '[lcm-graph-extra] CREATE VECTOR INDEX failed for ALL syntax variants',
-            { name: VECTOR_INDEX_NAME, dim, errors: vectorErrors },
+            { name: VECTOR_INDEX_NAME, dim, triedProviders: providerCandidates, errors: vectorErrors },
           );
         }
 
@@ -603,6 +680,7 @@ export async function ensureNeo4jSchema(): Promise<void> {
             if (String(rec.get('name')) !== VECTOR_INDEX_NAME) continue;
             const provider = rec.get('indexProvider');
             const state = rec.get('state');
+            const liveProvider = provider != null ? String(provider) : '';
             const cfg = toPlain(rec.get('vectorConfig')) ?? {};
             const hnsw = cfg.hnsw ?? {};
             const liveEf = Number(hnsw.efConstruction ?? cfg['hnsw.ef_construction']);
@@ -625,6 +703,10 @@ export async function ensureNeo4jSchema(): Promise<void> {
             }
             if (liveQuant && liveQuant.toLowerCase() !== 'scalar') {
               mismatch.push(`quantizationType=${liveQuant}（目标 SCALAR）`);
+            }
+            // Provider 不同同样需要重建：索引参数是绑定 Provider 的，换 Provider 只能重建
+            if (resolvedProvider && liveProvider && liveProvider !== resolvedProvider) {
+              mismatch.push(`indexProvider=${liveProvider}（期望 ${resolvedProvider}）`);
             }
             if (mismatch.length > 0) {
               getGlobalLogger()?.warn?.(

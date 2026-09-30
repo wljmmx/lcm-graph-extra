@@ -113,6 +113,26 @@ export function resolveNeo4jSearchConfig(
 }
 
 /**
+ * Resolve 向量索引 Provider 名（`indexProvider`）。
+ *
+ * 为什么需要显式配置项：Provider 的注册名是**版本相关的引擎标识符**（既有语义名，
+ * 也有版本化命名），不同发行版会变。写死在代码里 = 换版本即建不出向量索引。
+ * 正常路径下无需配置（运行时可从既有索引 / 引擎报错自证），
+ * 这里只提供一条"运维显式指定"的逃生通道。
+ *
+ * 优先级：plugin config `neo4j.vectorIndexProvider` > 环境变量 NEO4J_VECTOR_INDEX_PROVIDER > ''（交由运行时探测）
+ */
+export function resolveVectorIndexProvider(
+  pluginConfig: Record<string, unknown> | undefined,
+): string {
+  const neo4jSection = (pluginConfig?.neo4j ?? {}) as Record<string, unknown>;
+  const fromConfig =
+    typeof neo4jSection.vectorIndexProvider === 'string' ? neo4jSection.vectorIndexProvider.trim() : '';
+  const fromEnv = (process.env.NEO4J_VECTOR_INDEX_PROVIDER || '').trim();
+  return fromConfig || fromEnv || '';
+}
+
+/**
  * Resolve embedding config from plugin config or defaults.
  * Uses EmbeddingConfig type from graph-memory-pro for unified configuration.
  */
