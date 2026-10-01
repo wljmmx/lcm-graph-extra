@@ -110,6 +110,65 @@ describe('openclaw.plugin.json ↔ src/config.ts Schema 一致性', () => {
     }
   });
 
+  // 回归（2026-09-30）：openclaw.plugin.json 的 retrieval.graph / lcmMonitor 漏掉
+  // judge/associationMatrix/autoFeedback 与 summaryModelContextWindow/preCompactCooldownMs/
+  // compactCooldownMs，宿主（additionalProperties:false）把用户配置整体拒绝。
+  // 这类"嵌套键两侧漂移"必须被测试钉住，不能只靠人工核对。
+  describe('1b. 嵌套关键路径两侧一致性（回归）', () => {
+    const nestedPaths = [
+      'retrieval.graph.judge',
+      'retrieval.graph.judge.enabled',
+      'retrieval.graph.judge.tier',
+      'retrieval.graph.judge.judgeWarmupFeedbacks',
+      'retrieval.graph.judge.heuristicMatch',
+      'retrieval.graph.judge.llmJudgeMaxNodes',
+      'retrieval.graph.judge.llmJudgeTimeoutMs',
+      'retrieval.graph.associationMatrix',
+      'retrieval.graph.associationMatrix.enabled',
+      'retrieval.graph.associationMatrix.learningRate',
+      'retrieval.graph.associationMatrix.warmupFeedbacks',
+      'retrieval.graph.associationMatrix.persistPath',
+      'retrieval.graph.autoFeedback',
+      'retrieval.graph.autoFeedback.enabled',
+      'lcmMonitor.summaryModelContextWindow',
+      'lcmMonitor.preCompactCooldownMs',
+      'lcmMonitor.compactCooldownMs',
+    ];
+    for (const p of nestedPaths) {
+      it(`${p} 在 config.ts 与 plugin.json 中均存在`, () => {
+        const tsSchema = resolveSchemaPath(PluginConfigSchema, p);
+        const jsonSchema = resolveSchemaPath(pluginJson.configSchema, p);
+        expect(tsSchema, `config.ts 中 ${p} 不存在`).toBeDefined();
+        expect(jsonSchema, `plugin.json 中 ${p} 不存在`).toBeDefined();
+      });
+    }
+
+    // 关键默认值两侧一致（防止"补上了键但默认值抄错"）
+    const defaultCases: Array<{ path: string; expected: any }> = [
+      { path: 'retrieval.graph.judge.enabled', expected: true },
+      { path: 'retrieval.graph.judge.tier', expected: 1 },
+      { path: 'retrieval.graph.judge.judgeWarmupFeedbacks', expected: 20 },
+      { path: 'retrieval.graph.judge.heuristicMatch', expected: 'both' },
+      { path: 'retrieval.graph.judge.llmJudgeMaxNodes', expected: 8 },
+      { path: 'retrieval.graph.judge.llmJudgeTimeoutMs', expected: 30_000 },
+      { path: 'retrieval.graph.associationMatrix.enabled', expected: false },
+      { path: 'retrieval.graph.associationMatrix.learningRate', expected: 0.1 },
+      { path: 'retrieval.graph.associationMatrix.warmupFeedbacks', expected: 20 },
+      { path: 'retrieval.graph.autoFeedback.enabled', expected: true },
+      { path: 'lcmMonitor.summaryModelContextWindow', expected: 0 },
+      { path: 'lcmMonitor.preCompactCooldownMs', expected: 60_000 },
+      { path: 'lcmMonitor.compactCooldownMs', expected: 120_000 },
+    ];
+    for (const c of defaultCases) {
+      it(`${c.path} 默认值在两侧一致（${JSON.stringify(c.expected)}）`, () => {
+        const tsSchema = resolveSchemaPath(PluginConfigSchema, c.path);
+        const jsonSchema = resolveSchemaPath(pluginJson.configSchema, c.path);
+        expect(tsSchema.default).toBe(c.expected);
+        expect(jsonSchema.default).toBe(c.expected);
+      });
+    }
+  });
+
   describe('3. enum 一致性', () => {
     // config.ts 中用 Type.Union([Type.Literal(...)]) 定义的 enum 字段
     const enumCases: Array<{ name: string; path: string; expected: any[] }> = [

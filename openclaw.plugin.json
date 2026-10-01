@@ -198,6 +198,35 @@
                 "default": 50,
                 "minimum": 10,
                 "description": "图谱检索缓存大小"
+              },
+              "judge": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": { "type": "boolean", "default": true },
+                  "tier": { "type": "integer", "enum": [1, 2, 3], "default": 1, "description": "1=启发式(零LLM) / 2=LLM裁判 / 3=自定义" },
+                  "judgeWarmupFeedbacks": { "type": "integer", "default": 20, "minimum": 1 },
+                  "heuristicMatch": { "type": "string", "enum": ["id", "name", "both"], "default": "both" },
+                  "llmJudgeMaxNodes": { "type": "integer", "default": 8, "minimum": 1 },
+                  "llmJudgeTimeoutMs": { "type": "integer", "default": 30000, "minimum": 1000 }
+                }
+              },
+              "associationMatrix": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": { "type": "boolean", "default": false },
+                  "learningRate": { "type": "number", "default": 0.1, "minimum": 0, "maximum": 1 },
+                  "warmupFeedbacks": { "type": "integer", "default": 20, "minimum": 1 },
+                  "persistPath": { "type": "string" }
+                }
+              },
+              "autoFeedback": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": { "type": "boolean", "default": true }
+                }
               }
             }
           },
@@ -340,6 +369,24 @@
             "default": 300000,
             "minimum": 1,
             "description": "单次 DAG 压缩（LLM 摘要）尝试超时（ms）。默认 300000。环境变量 LCMG_COMPACT_TIMEOUT_MS 优先级更高。"
+          },
+          "summaryModelContextWindow": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "description": "summary 模型（lossless-claw compact 使用的模型）的上下文窗口大小。与主模型 contextWindow 不同时，compactTokenBudget 基于此值计算，避免 summary 模型窗口小于主模型窗口时 token budget 超限导致 compaction 失败。默认 0（未设置）→ 回退到 contextWindow。"
+          },
+          "preCompactCooldownMs": {
+            "type": "integer",
+            "default": 60000,
+            "minimum": 0,
+            "description": "预压缩冷却时间（ms）：同一会话在冷却期内不重复提交预压缩任务，避免活跃对话中每轮 assemble 都触发 compact，打满本地 LLM pending 队列。"
+          },
+          "compactCooldownMs": {
+            "type": "integer",
+            "default": 120000,
+            "minimum": 0,
+            "description": "插件 compact() 入口同会话冷却（ms）：SDK 后台维护每轮 turn 结束都会调用 compact()，仅在无显式 force / 无真实溢出压力时应用冷却，显式强制压缩不受影响。"
           },
           "inputOverflowThreshold": {
             "type": "number",
