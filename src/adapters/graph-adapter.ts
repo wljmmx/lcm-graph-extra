@@ -640,18 +640,22 @@ export class GraphAdapter {
               gmCfg.associationMatrix.warmupFeedbacks = wf;
               gmCfg.warmup.warmupFeedbacks = wf;
             }
-            const am = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
+            const persisted = await mod.createAssociationMatrixPersisted(dim, gmCfg, {
               // 未显式配置 persistPath 时，统一落盘 ~/.openclaw/data/association-matrix/
               //（extensions 之外避免 watch 热重载死循环；与 gm-pro 共用单份数据）
               path: lcmAm?.persistPath ?? DEFAULT_AM_PERSIST_PATH,
             });
+            // gm-pro 的 createAssociationMatrixPersisted 返回 { am, loaded, path } 包装对象；
+            // 两种形状都兼容，避免把包装对象当矩阵注入 Recaller
+            // （否则 judge 反馈处理时报 this.associationMatrix?.isEnabled is not a function）。
+            const am = persisted?.am ?? persisted;
             if (am) {
               this._recaller.setAssociationMatrix(am);
               this._associationMatrix = am;
               this.logger?.info?.('[graph-adapter] injected AssociationMatrix into Recaller (online learning on)', {
                 dim,
                 configSource: useGmProConfig && gmAm?.enabled === true ? 'graph-memory-pro' : 'lcm',
-                persistedRestored: (am as any).__persistLoaded ?? false,
+                persistedRestored: persisted?.loaded ?? (am as any).__persistLoaded ?? false,
               });
             }
           } else {
