@@ -263,8 +263,24 @@ async function fetchNodes(session, limit, sample) {
 }
 
 /**
+ * Lucene 查询转义：转义 queryparser 特殊字符，防止 ParseException。
+ *
+ * 为什么必要：审计查询是把 title/context/tags 字段**原样**拼接的，天然含
+ * `( ) : - "` 等字符——这些在 Lucene 语法里是操作符/语法结构。直接传给
+ * `db.index.fulltext.queryNodes` 会抛
+ * `ParseException: Encountered "<EOF>" ... Was expecting <BAREOPER> ...`。
+ * 生产路径传的是用户自然语言查询，很少踩；审计拼接字段必然踩。
+ * 转义后特殊字符按字面处理，空格仍保留为词间分隔（不改变 OR 语义）。
+ */
+function escapeLucene(s) {
+  return String(s).replace(/([+\-&|!(){}[\]^"~*?:\\/])/g, '\\$1');
+}
+
+/**
  * 用**与生产同口径**的全文检索判断目标节点能否进入 top-K。
  * 打分/过滤/排序表达式逐字对齐 src/experience/storage.ts `_searchByFulltextIndex`。
+ * 仅有的差异：queryKeyword 先做 Lucene 转义（上面 escapeLucene），防止字段里的
+ * 特殊字符被 queryparser 当语法解析而抛异常。
  */
 async function retrieves(session, query, targetId, topK) {
   if (!query || !query.trim()) return false;
@@ -283,7 +299,7 @@ async function retrieves(session, query, targetId, topK) {
      RETURN e.id AS id
      ORDER BY (coalesce(e.relevanceScore, 0) * 0.6) + (ftScore * 0.4) + (decayedMatchCount * 0.1) DESC
      LIMIT $limit`,
-    { queryKeyword: query, halfLifeDays: neo4jInteger(30), limit: neo4jInteger(topK) },
+    { queryKeyword: escapeLucene(query), halfLifeDays: neo4jInteger(30), limit: neo4jInteger(topK) },
   );
   return res.records.some((r) => String(r.get('id') ?? '') === targetId);
 }
@@ -403,6 +419,39 @@ function selftest() {
   }
   if (failed === 0) console.log('✓ classify 真值表 5/5');
 
+  // Lucene 转义：特殊字符必须被转义；空格/CJK/字母数字保留
+  const escCases = [
+    ['neo4j (m=16) : vector', 'neo4j \\(m=16\\) \\: vector'],
+    ['ann-index', 'ann\\-index'],
+    ['导入向量时', '导入向量时'],
+    ['a b "c" ~d', 'a b \\"c\\" \\~d'],
+  ];
+  for (const [inp, expected] of escCases) {
+    const got = escapeLucene(inp);
+    if (got !== expected) {
+      failed += 1;
+      console.error(`✗ escapeLucene(${JSON.stringify(inp)}) = ${JSON.stringify(got)}，期望 ${JSON.stringify(expected)}`);
+    }
+  }
+  if (failed === 0) console.log('✓ escapeLucene 4/4');
+
+  // parseArgs：`-- limit 300` 空格误写应被容错为 --limit 300
+  const paCases = [
+    [['--', 'limit', '300'], { limit: 300 }],
+    [['--limit=300', '--embed'], { limit: 300, embed: true }],
+    [['--', 'limit', '300', '--', 'topk', '8'], { limit: 300, topk: 8 }],
+  ];
+  for (const [argv, expectPart] of paCases) {
+    const got = parseArgs(argv);
+    for (const [k, v] of Object.entries(expectPart)) {
+      if (got[k] !== v) {
+        failed += 1;
+        console.error(`✗ parseArgs(${JSON.stringify(argv)}).${k} = ${got[k]}，期望 ${v}`);
+      }
+    }
+  }
+  if (failed === 0) console.log('✓ parseArgs 容错 3/3');
+
   // 汇总
   const rows = table.map(([, k]) => ({ category: k }));
   const s = summarize(rows);
@@ -420,23 +469,33 @@ function selftest() {
 
 function parseArgs(argv) {
   const out = { limit: 200, topk: 5, sample: 'rand', embed: false, json: false, selftest: false, fixture: null };
+  // 容错：`-- limit`（连字符与参数名之间多一个空格）会被拆成 ['--','limit'] 两个 token。
+  // 把孤立 `--` 之后紧跟的已知参数名合并回 `--limit`，避免用户误写时空跑默认值。
+  const KNOWN = new Set(['limit', 'topk', 'sample', 'embed', 'json', 'selftest', 'fixture']);
+  const normalized = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    // 支持 `--limit=300`（等号形式）与 `--limit 300`（空格形式）。
-    // 注意：`-- limit`（连字符与参数名之间多一个空格）不会被识别——那是错误的 CLI 写法，
-    // 会被当作两个独立 token 忽略，参数保持默认值。
+    if (a === '--' && KNOWN.has(argv[i + 1])) {
+      normalized.push(`--${argv[i + 1]}`);
+      i += 1; // 跳过已被合并的参数名
+    } else {
+      normalized.push(a);
+    }
+  }
+  for (let i = 0; i < normalized.length; i++) {
+    const a = normalized[i];
     if (a.startsWith('--limit=')) out.limit = Number(a.slice('--limit='.length)) || 200;
-    else if (a === '--limit') out.limit = Number(argv[++i]) || 200;
+    else if (a === '--limit') out.limit = Number(normalized[++i]) || 200;
     else if (a.startsWith('--topk=')) out.topk = Number(a.slice('--topk='.length)) || 5;
-    else if (a === '--topk') out.topk = Number(argv[++i]) || 5;
+    else if (a === '--topk') out.topk = Number(normalized[++i]) || 5;
     else if (a.startsWith('--sample=')) out.sample = a.slice('--sample='.length) === 'recent' ? 'recent' : 'rand';
-    else if (a === '--sample') out.sample = argv[++i] === 'recent' ? 'recent' : 'rand';
+    else if (a === '--sample') out.sample = normalized[++i] === 'recent' ? 'recent' : 'rand';
     else if (a === '--embed') out.embed = true;
     else if (a === '--json') out.json = true;
     else if (a === '--selftest') out.selftest = true;
     else if (a.startsWith('--fixture=')) out.fixture = a.slice('--fixture='.length);
-    else if (a === '--fixture') out.fixture = argv[++i];
-    // 其余 token（含误写的 `-- limit`）静默跳过，避免未知参数直接炸
+    else if (a === '--fixture') out.fixture = normalized[++i];
+    // 其余 token 静默跳过
   }
   return out;
 }
