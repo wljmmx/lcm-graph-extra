@@ -310,6 +310,11 @@ export class ExperienceStorage {
   async ensureIndexes(force = false): Promise<boolean> {
     const INDEX_NAME = 'experience_search';
     const INDEX_FIELDS = ['summary', 'context', 'title', 'detail'];
+    // Phase 1（T-Mem 借鉴）: tag 关联通道用的独立全文索引。
+    // 字段只含标签/概念（tags_* + relatedConcepts）——查询词若能匹配 tag，即命中。
+    // 与 experience_search 隔离：不改变主索引行为（契约 I2 只加不替）。
+    const TAGS_INDEX_NAME = 'experience_tags_search';
+    const TAGS_INDEX_FIELDS = ['tags_free', 'tags_scenario', 'tags_techStack', 'relatedConcepts'];
     try {
       // 已存在非 FULLTEXT 索引或 force 重建时 → 先删除再重建
       // 索引不存在时也创建（IF NOT EXISTS 幂等，但需要显式创建）
@@ -332,6 +337,36 @@ export class ExperienceStorage {
         await this.adapter.query(
           `CREATE FULLTEXT INDEX ${INDEX_NAME} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${INDEX_FIELDS.join(', e.')} ] OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
         );
+      }
+
+      // tag 关联索引：幂等创建；若类型非 FULLTEXT（历史误建）则重建。
+      // force=true 时与主索引同契约：无条件 DROP+CREATE（不经 SHOW INDEXES，避免
+      // "SHOW 报 FULLTEXT 但索引实际损坏"的自愈死角）。
+      // 失败不阻塞主索引结果（tag 通道是可选的增强，契约 I3 默认关）。
+      try {
+        const ensureTag = async () => {
+          try { await this.adapter.query(`DROP INDEX ${TAGS_INDEX_NAME} IF EXISTS`); } catch { /* ignore */ }
+          await this.adapter.query(
+            `CREATE FULLTEXT INDEX ${TAGS_INDEX_NAME} IF NOT EXISTS FOR (e:${LABEL}) ON EACH [e.${TAGS_INDEX_FIELDS.join(', e.')} ] OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`,
+          );
+        };
+        if (force) {
+          await ensureTag();
+        } else {
+          const rows = await this.adapter.query('SHOW INDEXES YIELD name, type');
+          const tagIdx = (rows ?? []).find((r: any) => (r as any).name === TAGS_INDEX_NAME);
+          if (!tagIdx || String((tagIdx as any).type).toUpperCase() !== 'FULLTEXT') {
+            await ensureTag();
+          }
+        }
+      } catch (tagIdxErr) {
+        const tagErr = tagIdxErr instanceof Error ? tagIdxErr.message : String(tagIdxErr);
+        if (!/already exists|IF NOT EXISTS/i.test(tagErr)) {
+          (this.adapter as any)?.logger?.warn?.(
+            '[ExperienceStorage] CREATE tag fulltext index failed (optional channel, ignored)',
+            { index: TAGS_INDEX_NAME, err: tagErr },
+          );
+        }
       }
     } catch (idxErr) {
       const errMsg = idxErr instanceof Error ? idxErr.message : String(idxErr);
@@ -455,6 +490,70 @@ export class ExperienceStorage {
     }
 
     return this._searchByContains(options, halfLifeDays);
+  }
+
+  /**
+   * Phase 1（T-Mem 借鉴）: tag 关联通道 —— 独立于 searchByQuery，只加不替（契约 I2）。
+   *
+   * 用查询词查独立 tag 全文索引 `experience_tags_search`（字段：tags_* + relatedConcepts）。
+   * 目的：用户查询里含 tag 概念词（如 "cooldown"、"deployment"）时，能召回
+   * tags 与之匹配的经验——即使经验正文（summary/detail）没出现这些词。
+   * 审计证明（scripts/audit-cue-coverage.mjs）：90.7% 经验的 tag 词与其正文无字面重叠，
+   * 主全文索引对这类查询几乎不可达；此通道补上这一缺口。
+   *
+   * 约束：
+   *   - 不改 searchByQuery / _searchByFulltextIndex 一行（隔离，I2）
+   *   - 排序：tag 命中为主（ftScore 60%），relevanceScore 为次（40%）——与主路径
+   *     的权重取向相反，因为它本质是"按 tag 相关性"召回
+   *   - 失败/索引缺失 → 返回 []（调用方追加逻辑自行跳过），绝不抛错干扰主路径
+   */
+  async searchByTags(
+    query: string,
+    options: Pick<ExperienceQueryOptions, 'limit' | 'minScore' | 'halfLifeDays'> = {},
+  ): Promise<ExperienceSearchResult[]> {
+    const { limit = 3, minScore = 0.3, halfLifeDays = 30 } = options;
+    const q = (query || '').trim();
+    if (!q) return [];
+    try {
+      const rows = await this.adapter.query(
+        `CALL db.index.fulltext.queryNodes('experience_tags_search', $queryKeyword) YIELD node AS e, score AS ftScore
+         WHERE e:${LABEL}
+           AND e.status = 'DISTILLED'
+           AND (e.state IS NULL OR e.state <> 'superseded')
+           AND (e.expiresAt IS NULL OR e.expiresAt > timestamp())
+           AND coalesce(e.relevanceScore, 0) >= $minScore
+         WITH e, ftScore
+         WITH e, ftScore,
+           CASE WHEN e.lastRecalledAt IS NOT NULL
+             THEN coalesce(e.matchCount, 0) * (0.5 ^ ((timestamp() - e.lastRecalledAt) / (1000.0 * 60 * 60 * 24 * $halfLifeDays)))
+             ELSE coalesce(e.matchCount, 0) * 0.5
+           END AS decayedMatchCount
+         RETURN e.id AS id, e.title AS title, e.summary AS summary, e.detail AS detail,
+                e.context AS context, e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
+                e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
+                e.tags_scenario AS tags_scenario,
+                e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
+                e.tags_free AS tags_free,
+                (ftScore * 0.6) AS queryMatch
+         ORDER BY (coalesce(e.relevanceScore, 0) * 0.4) + (ftScore * 0.6) + (decayedMatchCount * 0.1) DESC
+         LIMIT $limit`,
+        {
+          queryKeyword: q,
+          minScore,
+          limit: Math.trunc(Math.max(1, limit)),
+          halfLifeDays,
+        },
+      );
+      // 行结构与全文路径同构（含 queryMatch），可直接复用映射
+      return this._mapFulltextRows(rows);
+    } catch (err) {
+      // tag 通道失败（索引未建/版本不支持）→ 静默降级为无结果，不影响主检索
+      (this.adapter as any)?.logger?.debug?.(
+        '[ExperienceStorage] searchByTags failed (optional channel, returning empty)',
+        { err: err instanceof Error ? err.message : String(err) },
+      );
+      return [];
+    }
   }
 
   /**

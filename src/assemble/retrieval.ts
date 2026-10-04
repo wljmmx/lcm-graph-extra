@@ -292,6 +292,34 @@ export async function performRetrieval(
         if (Array.isArray(memRes) && memRes.length > 0) openclawResults = memRes;
       } catch { /* non-fatal */ }
     }
+
+    // Phase 1（T-Mem 借鉴）: L4 tag 关联通道 —— 只加不替（契约 I2）。
+    // 用查询词查独立 tag 全文索引（experience_tags_search，见 ExperienceStorage.searchByTags），
+    // 把 tag 命中**追加**到 expResults 之后（不改既有顺序/排序，按 id 去重）。
+    // 目的：用户查询含 tag 概念词时，召回 tags 匹配但正文不含这些词的经验
+    // （审计：90.7% 经验的 tag 词与其正文无字面重叠，主全文索引够不到）。
+    // 默认关（契约 I3）——配置 retrieval.graph.tags.enabled 开启。
+    try {
+      const tagsCfg = ((ctx.api?.pluginConfig?.retrieval?.graph) as any)?.tags;
+      if (tagsCfg?.enabled && ctx.expStore && typeof ctx.expStore.searchByTags === 'function') {
+        // expHalfLifeDays 定义在上方 if(ctx.expStore) 块内，这里不可见 → 独立解析（同默认值）
+        const tagHalfLife = ((ctx.api?.pluginConfig?.retrieval) as any)?.expHalfLifeDays
+          ?? DEFAULTS.retrieval.expHalfLifeDays;
+        const tagTopK = Math.max(1, Math.min(10, Number(tagsCfg.topK) || 3));
+        const tagMinScore = typeof tagsCfg.minScore === 'number' ? tagsCfg.minScore : 0.3;
+        const tagRes = await ctx.expStore.searchByTags(qmdQuery, { limit: tagTopK, minScore: tagMinScore, halfLifeDays: tagHalfLife });
+        if (Array.isArray(tagRes) && tagRes.length > 0) {
+          const existing = new Set(
+            expResults.map((e: any) => String(e?.experience?.id ?? e?.id ?? '')),
+          );
+          const added = tagRes.filter((r: any) => !existing.has(String(r?.experience?.id ?? '')));
+          if (added.length > 0) {
+            expResults = [...expResults, ...added];
+            ctx.logger?.debug?.('[assemble] L4 tags channel added', { added: added.length, total: expResults.length });
+          }
+        }
+      }
+    } catch { /* tag 通道失败非致命（searchByTags 内部已降级为空） */ }
   }
 
   // 同步更新 RetrievalGateway.stats，确保 Dashboard 检索性能摘要反映真实数据

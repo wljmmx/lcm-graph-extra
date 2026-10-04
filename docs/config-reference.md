@@ -200,6 +200,9 @@
 | `retrieval.limits.exp` | `number` | `3` | 经验检索上限 |
 | `retrieval.graph.enabled` | `boolean` | `true` | 图谱检索开关 |
 | `retrieval.graph.searchLimit` | `number` | `5` | 图谱搜索限制 |
+| `retrieval.graph.tags.enabled` | `boolean` | `false` | **Phase 1（T-Mem 借鉴）tag 关联通道开关**。开启后用查询词查独立 tag 全文索引，把 tag 命中追加到经验检索之后（只加不替，不改既有排序）。审计显示 90.7% 经验的 tag 词与其正文无字面重叠，主全文索引够不到——此通道补上该缺口 |
+| `retrieval.graph.tags.topK` | `number` | `3` | tag 通道追加条数上限（1~10） |
+| `retrieval.graph.tags.minScore` | `number` | `0.3` | tag 通道最小 relevanceScore 过滤 |
 
 ---
 

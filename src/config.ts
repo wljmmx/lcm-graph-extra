@@ -292,6 +292,13 @@ export const PluginConfigSchema = Type.Object({
       autoFeedback: Type.Optional(Type.Object({
         enabled: Type.Optional(Type.Boolean({ default: true })),
       })),
+      // Phase 1（T-Mem 借鉴）: tag 关联通道 —— 只加不替（契约 I2），默认关（契约 I3）。
+      // 用查询词查独立 tag 全文索引，把 tag 命中追加到经验检索之后。
+      tags: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: false })),
+        topK: Type.Optional(Type.Number({ default: 3, minimum: 1, maximum: 10 })),
+        minScore: Type.Optional(Type.Number({ default: 0.3, minimum: 0, maximum: 1 })),
+      })),
     })),
     // BUG-6: L2/L4 查询缓存大小可配置（原硬编码 QUERY_CACHE_MAX = 50）
     cacheSize: Type.Optional(Type.Number({ default: 50, minimum: 10 })),

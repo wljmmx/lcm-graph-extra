@@ -55,6 +55,7 @@
  *   node scripts/audit-cue-coverage.mjs --json          # 机器可读输出
  *   node scripts/audit-cue-coverage.mjs --selftest      # 逻辑自检（无需数据库，验证分类器正确）
  *   node scripts/audit-cue-coverage.mjs --fixture f.json
+ *   node scripts/audit-cue-coverage.mjs --tag-channel   # disjoint 改查 experience_tags_search（Phase 1 模拟）
  *
  * 环境变量：NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD（缺省回退 ~/.openclaw/openclaw.json）
  */
@@ -140,12 +141,26 @@ export function tokens(s) {
   return out;
 }
 
-/** 把 tag/concept 串拆成片段（,,，、;；/ 与空白均为分隔符） */
+/** 把 tag/concept 串拆成片段（,,，、;；/ 与空白均为分隔符）。
+ *
+ * 过滤"噪声残留"（v2）：context 被粗切后会产生 `记录:`、`失败:`、`修复通过:`、
+ * `"bridgeDispatchS` 这类无意义片段——它们让 disjoint 查询比真实用户查询更"碎"，
+ * 会略微高估盲区。过滤规则：
+ *   - 长度 < 2
+ *   - 以 `:` 或 `：` 结尾（未完的标签/状态词残留）
+ *   - 不含任何 CJK / 字母 / 数字（纯标点）
+ * 引号类字符也加入分隔符集合（消除 `\"` 转义残留）。 */
 export function splitChunks(s) {
   return String(s ?? '')
-    .split(/[,，、;；/\s]+/)
+    .split(/[,，、;；/\\\s"'`]+/)
     .map((x) => x.trim())
-    .filter((x) => x.length > 0);
+    .filter((x) => {
+      if (!x) return false;
+      if (x.length < 2) return false;
+      if (/[:：]$/.test(x)) return false; // 残留片段，如 "记录:" / "失败:"
+      if (!/[\u4e00-\u9fffA-Za-z0-9]/.test(x)) return false; // 纯标点
+      return true;
+    });
 }
 
 /** 片段相对事实文本的字面重叠比例（0~1） */
@@ -281,11 +296,14 @@ function escapeLucene(s) {
  * 打分/过滤/排序表达式逐字对齐 src/experience/storage.ts `_searchByFulltextIndex`。
  * 仅有的差异：queryKeyword 先做 Lucene 转义（上面 escapeLucene），防止字段里的
  * 特殊字符被 queryparser 当语法解析而抛异常。
+ *
+ * @param indexName 全文索引名。默认 'experience_search'（现状主索引）；
+ *   传 'experience_tags_search' 即 Phase 1 的 tag 关联通道（见 --tag-channel）。
  */
-async function retrieves(session, query, targetId, topK) {
+async function retrieves(session, query, targetId, topK, indexName = 'experience_search') {
   if (!query || !query.trim()) return false;
   const res = await session.run(
-    `CALL db.index.fulltext.queryNodes('experience_search', $queryKeyword) YIELD node AS e, score AS ftScore
+    `CALL db.index.fulltext.queryNodes('${indexName}', $queryKeyword) YIELD node AS e, score AS ftScore
      WHERE e:${LABEL}
        AND e.status = 'DISTILLED'
        AND (e.state IS NULL OR e.state <> 'superseded')
@@ -468,10 +486,10 @@ function selftest() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const out = { limit: 200, topk: 5, sample: 'rand', embed: false, json: false, selftest: false, fixture: null };
+  const out = { limit: 200, topk: 5, sample: 'rand', embed: false, json: false, selftest: false, fixture: null, tagChannel: false };
   // 容错：`-- limit`（连字符与参数名之间多一个空格）会被拆成 ['--','limit'] 两个 token。
   // 把孤立 `--` 之后紧跟的已知参数名合并回 `--limit`，避免用户误写时空跑默认值。
-  const KNOWN = new Set(['limit', 'topk', 'sample', 'embed', 'json', 'selftest', 'fixture']);
+  const KNOWN = new Set(['limit', 'topk', 'sample', 'embed', 'json', 'selftest', 'fixture', 'tag-channel']);
   const normalized = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -493,6 +511,7 @@ function parseArgs(argv) {
     else if (a === '--embed') out.embed = true;
     else if (a === '--json') out.json = true;
     else if (a === '--selftest') out.selftest = true;
+    else if (a === '--tag-channel') out.tagChannel = true;
     else if (a.startsWith('--fixture=')) out.fixture = a.slice('--fixture='.length);
     else if (a === '--fixture') out.fixture = normalized[++i];
     // 其余 token 静默跳过
@@ -522,6 +541,9 @@ async function runAudit(args) {
     console.log('=== 关联盲区审计（只读）===');
     console.log(`Neo4j: ${c.uri}（user=${c.user}，READ 访问模式）`);
     console.log(`样本: ${args.limit} 条 DISTILLED（sample=${args.sample}），topK=${args.topk}`);
+    if (args.tagChannel) {
+      console.log('tag 通道: 开启 —— disjoint 查询改查 experience_tags_search（Phase 1 模拟）');
+    }
     console.log('');
   }
 
@@ -535,7 +557,7 @@ async function runAudit(args) {
       const inLiteral = await retrieves(session, v.literal, node.id, args.topk);
       const inDisjoint = disjointEmpty
         ? false
-        : await retrieves(session, v.disjoint, node.id, args.topk);
+        : await retrieves(session, v.disjoint, node.id, args.topk, args.tagChannel ? 'experience_tags_search' : 'experience_search');
 
       let embedCos = null;
       if (args.embed && !disjointEmpty) {
