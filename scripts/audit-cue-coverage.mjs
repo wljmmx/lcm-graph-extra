@@ -222,6 +222,8 @@ async function withNeo4jRead(fn) {
   const driver = neo4j.driver(uri, neo4j.auth.basic(user, password));
   // READ 访问模式：即便脚本被误改，服务端也会拒绝写操作
   const session = driver.session({ defaultAccessMode: neo4j.session.READ });
+  // 注入整数构造器：所有 LIMIT/halfLifeDays 参数经 neo4j.int() 发送，杜绝 FLOAT 类型错误
+  _intFn = neo4j.int;
   try {
     await driver.verifyConnectivity();
     return await fn(session, neo4j);
@@ -281,17 +283,26 @@ async function retrieves(session, query, targetId, topK) {
      RETURN e.id AS id
      ORDER BY (coalesce(e.relevanceScore, 0) * 0.6) + (ftScore * 0.4) + (decayedMatchCount * 0.1) DESC
      LIMIT $limit`,
-    { queryKeyword: query, halfLifeDays: 30, limit: neo4jInteger(topK) },
+    { queryKeyword: query, halfLifeDays: neo4jInteger(30), limit: neo4jInteger(topK) },
   );
   return res.records.some((r) => String(r.get('id') ?? '') === targetId);
 }
 
-// 小工具：避免把 neo4j 类型细节散落到调用点
+/** 小工具：避免把 neo4j 类型细节散落到调用点 */
 function str(v) { return v == null ? '' : String(v); }
 function num(v) { return typeof v === 'number' ? v : Number(v ?? 0) || 0; }
+
+/**
+ * 整数参数必须用 `neo4j.int()` 显式构造（Neo4j JS driver 最佳实践）。
+ *
+ * 为什么：只传普通 JS number 时，driver 在部分版本/编码路径下会把整数值
+ * 当作 FLOAT 发送（实测收到 `Invalid input. '200.0' is not a valid value.
+ * Must be a non-negative integer.`——Neo4j 对 LIMIT 等参数严格要求整数）。
+ * `neo4j.int()` 保证发送的是 Bolt 整数类型，不依赖 driver 的 number 推断。
+ */
+let _intFn = (n) => n; // withNeo4jRead 里注入 real neo4j.int；fixture/selftest 模式不查库，用恒等
 function neo4jInteger(n) {
-  // 传普通 number 也能被驱动接受；此处保持显式以声明意图
-  return Math.max(1, Math.trunc(n));
+  return _intFn(Math.max(1, Math.trunc(n)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -411,13 +422,21 @@ function parseArgs(argv) {
   const out = { limit: 200, topk: 5, sample: 'rand', embed: false, json: false, selftest: false, fixture: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--limit') out.limit = Number(argv[++i]) || 200;
+    // 支持 `--limit=300`（等号形式）与 `--limit 300`（空格形式）。
+    // 注意：`-- limit`（连字符与参数名之间多一个空格）不会被识别——那是错误的 CLI 写法，
+    // 会被当作两个独立 token 忽略，参数保持默认值。
+    if (a.startsWith('--limit=')) out.limit = Number(a.slice('--limit='.length)) || 200;
+    else if (a === '--limit') out.limit = Number(argv[++i]) || 200;
+    else if (a.startsWith('--topk=')) out.topk = Number(a.slice('--topk='.length)) || 5;
     else if (a === '--topk') out.topk = Number(argv[++i]) || 5;
+    else if (a.startsWith('--sample=')) out.sample = a.slice('--sample='.length) === 'recent' ? 'recent' : 'rand';
     else if (a === '--sample') out.sample = argv[++i] === 'recent' ? 'recent' : 'rand';
     else if (a === '--embed') out.embed = true;
     else if (a === '--json') out.json = true;
     else if (a === '--selftest') out.selftest = true;
+    else if (a.startsWith('--fixture=')) out.fixture = a.slice('--fixture='.length);
     else if (a === '--fixture') out.fixture = argv[++i];
+    // 其余 token（含误写的 `-- limit`）静默跳过，避免未知参数直接炸
   }
   return out;
 }
