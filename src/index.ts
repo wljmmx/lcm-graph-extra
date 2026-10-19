@@ -45,6 +45,12 @@ import { raceDeadline } from "./utils/deadline.js";
 import { compactEarlyExit } from "./utils/compact-result.js";
 import { beginMainTurn, endMainTurn, isMainTurnActive } from "./async/main-turn-gate.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
+// SDK 2026.10.4：转录能力只读适配（P0 探测 + P1 枚举，不做写盘）
+import {
+  probeTranscriptRewriteCapability,
+  readVisibleTranscriptEntries,
+  summarizeTranscriptEntries,
+} from "./adapters/transcript-rewrite.js";
 
 // ---------------------------------------------------------------------------
 // S-9': 关键词提取（轻量版）—— 实现已抽出到 src/plugin/keywords.ts
@@ -2080,7 +2086,36 @@ const pluginEntry: any = definePluginEntry({
             return { changed, bytesFreed, rewrittenEntries, reason: 'aborted' };
           }
 
-          // 2. Local: evict stale dedup via LRU cache
+          // 3. 转录能力只读诊断（SDK 2026.10.4，P0+P1）
+          //    `runtimeContext.rewriteTranscriptEntries` 仅在 maintain 注入，且要求 sessionKey 存在。
+          //    此处**只探测 + 枚举并记录**，不做任何写盘 —— 写能力待 observe-only 验证判定准确性后另行开启。
+          try {
+            const _cap = probeTranscriptRewriteCapability(
+              (params as any).runtimeContext,
+              (params as any).sessionKey,
+            );
+            if (_cap.available) {
+              const _entries = await readVisibleTranscriptEntries({
+                sessionKey: (params as any).sessionKey,
+                sessionId: params.sessionId ?? (params as any).session_id,
+                agentId: (params as any).sessionTarget?.agentId,
+                storePath: (params as any).sessionTarget?.storePath,
+              });
+              const _summary = summarizeTranscriptEntries(_entries);
+              logger?.debug?.('maintain: transcript rewrite capability available (read-only diagnostic)', {
+                messageEntryCount: _summary.total,
+                byRole: _summary.byRole,
+              });
+            } else {
+              logger?.debug?.('maintain: transcript rewrite capability unavailable', { reason: _cap.reason });
+            }
+          } catch (diagErr) {
+            logger?.debug?.('maintain: transcript diagnostic failed (non-fatal)', {
+              err: diagErr instanceof Error ? diagErr.message : String(diagErr),
+            });
+          }
+
+          // 4. Local: evict stale dedup via LRU cache
           try {
             evictStaleDedupPublic();
           } catch (e) {
