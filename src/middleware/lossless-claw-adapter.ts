@@ -1178,8 +1178,19 @@ export class LosslessClawAdapter {
       try {
         const state: Record<string, any> | undefined =
           (globalThis as any)[CONTEXT_ENGINE_REGISTRY_STATE];
-        if (state?.engines instanceof Map) {
-          const entry = state.engines.get('lossless-claw');
+        // SDK 2026.10.4 对齐：该全局单例的形状在版本间发生过迁移 ——
+        //   ≤2026.7.x：{ engines: Map }（注册项 entry 含 .factory）
+        //   ≥2026.10.x：注册项迁移到 requireActivePluginRegistry().contextEngines，
+        //               本全局单例仅保留 { quarantinedEngines }。
+        // 因此这里同时探测两种键名，任一命中即可；都不命中则按原有逻辑落到路径 2/3/4。
+        const enginesMap: Map<string, any> | undefined =
+          state?.engines instanceof Map
+            ? state.engines
+            : state?.contextEngines instanceof Map
+              ? state.contextEngines
+              : undefined;
+        if (enginesMap) {
+          const entry = enginesMap.get('lossless-claw');
           if (entry && typeof entry.factory === 'function') {
             this.logger.info("[lcm] _discoverCEFactory: path 1/4 SUCCESS (Symbol registry)");
             return entry.factory as (ctx: any) => Promise<LosslessClawEngine>;
@@ -1346,57 +1357,88 @@ export class LosslessClawAdapter {
     }
     this.logger.debug("[lcm] path 4/4: Fallback registry");
 
-    // ── Fallback: 文件系统 Registry 发现 ──
-
-    // Step 1: 解析 openclaw/plugin-sdk 的绝对路径
-    let sdkUrl: string;
+    // ── Fallback: 文件系统 Registry 发现（SDK 2026.10.4 对齐）──
+    // 该路径读取 SDK 打包产物，跨版本发生过多次变化，故整体做「多版本容忍 + 形状校验 + 失败软着陆」：
+    //   1) 入口子路径：≤2026.7.x 存在 `openclaw/plugin-sdk`；≥2026.8.1 已移除，
+    //      改用始终存在的 `openclaw/plugin-sdk/plugin-entry` 来定位 dist 目录。
+    //   2) registry 模块名：`registry-<hash>.js`（旧）→ `registry-<hash>.mjs`（≥2026.10.x）。
+    //   3) 取 factory 的导出：`getContextEngineFactory(id)`（旧）已被移除；
+    //      ≥2026.10.x 改为 `getContextEngineRegistration(id)` 返回注册项（含 .factory），
+    //      且该导出在产物中带构建期别名（如 `n`）。为避免别名漂移后误调其他导出，
+    //      仅调用「函数名在已知只读 getter 白名单内」的候选，并校验返回值形状。
     try {
-      sdkUrl = await import.meta.resolve('openclaw/plugin-sdk');
-    } catch {
-      throw new Error('Cannot resolve openclaw/plugin-sdk');
-    }
-    const sdkPath = fileURLToPath(sdkUrl);
+      // Step 1: 解析 SDK 入口（旧子路径优先，缺失则用 plugin-entry 定位 dist）
+      let sdkPath: string | null = null;
+      for (const spec of ['openclaw/plugin-sdk', 'openclaw/plugin-sdk/plugin-entry']) {
+        try {
+          sdkPath = fileURLToPath(await import.meta.resolve(spec));
+          break;
+        } catch {
+          // 该子路径在当前 SDK 版本不存在，尝试下一个
+        }
+      }
+      if (!sdkPath) {
+        this.logger.debug('[lcm] _discoverCEFactory: path 4/4 FAILED, cannot resolve any plugin-sdk entry');
+        return null;
+      }
+      const distDir = dirname(dirname(sdkPath));
 
-    // Step 2: 读取文件，发现 registry 模块的动态哈希文件名
-    const sdkContent = await readFile(sdkPath, 'utf-8');
-    const importMatch = sdkContent.match(/from\s+"\.\.\/(registry-\w+\.js)"/);
-    if (!importMatch) {
-      throw new Error('Cannot discover CE registry module: no matching import in plugin-sdk/index.js');
-    }
+      // Step 2: 定位 registry 模块 —— 先按旧版入口文件的 import 语句匹配，再做目录扫描兜底
+      let registryFile: string | null = null;
+      try {
+        const sdkContent = await readFile(sdkPath, 'utf-8');
+        const importMatch = sdkContent.match(/from\s+"\.\.\/(registry-\w+\.(?:js|mjs))"/);
+        registryFile = importMatch ? importMatch[1] : null;
+      } catch {
+        // 入口文件不可读时忽略，走目录扫描
+      }
+      if (!registryFile) {
+        const distEntries = await readdir(distDir);
+        registryFile = distEntries.find((f) => /^registry-\w+\.(?:js|mjs)$/.test(f)) ?? null;
+      }
+      if (!registryFile) {
+        this.logger.debug('[lcm] _discoverCEFactory: path 4/4 FAILED, registry module not found in dist');
+        return null;
+      }
 
-    // Step 3: 构建 registry 模块的完整路径
-    const distDir = dirname(dirname(sdkPath));
-    const registryPath = join(distDir, importMatch[1]);
+      // Step 3: 动态导入 registry 模块
+      const regModule: Record<string, any> = await import(pathToFileURL(join(distDir, registryFile)).href);
+      if (!regModule || typeof regModule !== 'object') {
+        this.logger.debug('[lcm] _discoverCEFactory: path 4/4 FAILED, invalid registry module');
+        return null;
+      }
 
-    // Step 4: 动态导入 registry 模块
-    const regModule: Record<string, any> = await import(pathToFileURL(registryPath).href);
-    if (!regModule || typeof regModule !== 'object') {
-      throw new Error('Invalid registry module: ' + importMatch[1]);
-    }
+      // Step 4: 取 lossless-claw 的 CE factory —— 候选函数经「名称白名单 + 返回值形状」双重校验
+      const SAFE_FACTORY_GETTERS = new Set(['getContextEngineFactory', 'getContextEngineRegistration']);
+      for (const candidate of Object.values(regModule)) {
+        if (typeof candidate !== 'function') continue;
+        if (!SAFE_FACTORY_GETTERS.has(candidate.name)) continue;
+        let out: any;
+        try {
+          out = candidate('lossless-claw');
+        } catch {
+          continue; // 候选签名不匹配，尝试下一个
+        }
+        // 旧版：直接返回 factory 函数
+        if (typeof out === 'function') {
+          this.logger.info('[lcm] _discoverCEFactory: path 4/4 SUCCESS (fallback registry factory)');
+          return out as (ctx: any) => Promise<LosslessClawEngine>;
+        }
+        // 新版：返回注册项对象，取其中的 .factory
+        if (out && typeof out.factory === 'function') {
+          this.logger.info('[lcm] _discoverCEFactory: path 4/4 SUCCESS (registration entry factory)');
+          return out.factory as (ctx: any) => Promise<LosslessClawEngine>;
+        }
+      }
 
-    // Step 5: 获取 getContextEngineFactory 函数
-    const getFactory: (id: string) => Function | undefined =
-      typeof regModule.getContextEngineFactory === 'function'
-        ? regModule.getContextEngineFactory
-        : typeof regModule.n === 'function'
-          ? regModule.n
-          : null;
-
-    if (!getFactory) {
-      throw new Error('getContextEngineFactory not found in registry module');
-    }
-
-    // Step 6: 获取 lossless-claw 的 CE factory
-    const factory = getFactory('lossless-claw');
-
-    if (typeof factory !== 'function') {
-      this.logger.debug("[lcm] _discoverCEFactory: path 4/4 FAILED, factory not a function");
-      this.logger.info("[lcm] _discoverCEFactory: all 4 discovery paths exhausted, lossless-claw not reachable (will retry if configured)");
+      this.logger.debug('[lcm] _discoverCEFactory: path 4/4 FAILED, no candidate returned a CE factory');
+      this.logger.info('[lcm] _discoverCEFactory: all 4 discovery paths exhausted, lossless-claw not reachable (will retry if configured)');
+      return null;
+    } catch (e) {
+      // 失败软着陆：不再抛错。原实现 throw 会让 _doConnect 走 catch 分支空耗重试并放大日志噪音。
+      this.logger.debug('[lcm] _discoverCEFactory: path 4/4 FAILED', { err: e instanceof Error ? e.message : String(e) });
       return null;
     }
-
-    this.logger.info("[lcm] _discoverCEFactory: path 4/4 SUCCESS, found factory via fallback registry");
-    return factory as (ctx: any) => Promise<LosslessClawEngine>;
   }
 }
 
