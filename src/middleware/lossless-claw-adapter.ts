@@ -61,6 +61,8 @@ interface LosslessClawEngine {
     sessionId: string;
     sessionKey?: string;
     sessionFile?: string;
+    /** SDK 2026.10.4：存储无关的会话身份，取代 sessionFile 作为会话定位来源 */
+    sessionTarget?: any; // SDK: ContextEngineSessionTarget
     tokenBudget?: number;
     force?: boolean;
     currentTokenCount?: number;
@@ -524,6 +526,8 @@ export class LosslessClawAdapter {
     sessionId: string;
     sessionKey?: string;
     sessionFile?: string;
+    /** SDK 2026.10.4：存储无关的会话身份，与 sessionFile 互补（新宿主用此，旧宿主用 sessionFile） */
+    sessionTarget?: any; // SDK: ContextEngineSessionTarget
     messages?: any[];
     runtimeSettings?: any;
   }): Promise<{ bootstrapped: boolean; importedMessages: number; reason?: string }> {
@@ -693,7 +697,15 @@ export class LosslessClawAdapter {
   async compact(params: {
     sessionId: string;
     sessionKey?: string;
-    sessionFile: string;
+    /**
+     * SDK 2026.10.4 对齐：宿主在 compact 契约中已**移除** `sessionFile`，
+     * 改为通过 `sessionTarget`（存储无关的会话身份）委派压缩。
+     * 因此这里把 `sessionFile` 降为可选，并新增 `sessionTarget`，两者都原样透传给下游引擎，
+     * 由 lossless-claw 按可用者解析会话（旧宿主给 sessionFile，新宿主给 sessionTarget）。
+     */
+    sessionFile?: string;
+    /** SDK 2026.10.4: 存储无关的会话目标（agentId/sessionId/sessionKey/storePath/threadId） */
+    sessionTarget?: any; // SDK: ContextEngineSessionTarget
     tokenBudget?: number;
     force?: boolean;
     currentTokenCount?: number;

@@ -232,9 +232,18 @@ export async function onCompaction(instance: PluginInstance): Promise<{ ok: bool
         : inst.context.sessionId;
       const sessionKey = inst.context.sessionKey;
       const sessionFile = inst.context.sessionFile;
+      // SDK 2026.10.4 对齐：compact 契约已移除 sessionFile，改用 sessionTarget（存储无关身份）。
+      // 因此这里不能再用 sessionFile 作为「必须存在」的前置条件 ——
+      // 否则新宿主下本 hook 会整体跳过，直接丢失压缩闭环（备份 + DAG compact + 摘要质量验证）。
+      const sessionTarget = (inst.context as any).sessionTarget;
 
-      if (!sessionId || !sessionFile) {
-        logger?.warn?.('compaction: missing sessionId or sessionFile in context, skipping');
+      if (!sessionId) {
+        logger?.warn?.('compaction: missing sessionId in context, skipping');
+        return { ok: false, compacted: false };
+      }
+      if (!sessionFile && !sessionTarget) {
+        // 两者都缺时才跳过：无法定位会话（旧宿主给 sessionFile，新宿主给 sessionTarget）。
+        logger?.warn?.('compaction: missing both sessionFile and sessionTarget in context, skipping');
         return { ok: false, compacted: false };
       }
 
@@ -242,6 +251,7 @@ export async function onCompaction(instance: PluginInstance): Promise<{ ok: bool
         sessionId,
         sessionKey,
         sessionFile,
+        sessionTarget,
         tokenBudget: (lcmMonitor as any)?.compactTokenBudget ?? (compConfig as any)?.compactTokenBudget ?? (compConfig as any)?.tokenBudget ?? Math.floor(((lcmMonitor as any)?.contextWindow ?? (compConfig as any)?.contextWindow ?? 262_144) * 0.59),
         force: (compConfig as any)?.force ?? true,
         currentTokenCount: undefined,

@@ -252,6 +252,12 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
   // SD-DEF-1: 新会话残留转录前缀防御需要替换消息源（裁剪旧前缀），因此用 let。
   let messages = Array.isArray(params.messages) ? [...params.messages] : [];
 
+  // SDK 2026.10.4 对齐：assemble 契约**不再提供 `sessionFile`**（仅 bootstrap/maintain/afterTurn 有），
+  // 转为经 `runtimeContext.sessionTarget` 提供存储无关的会话身份。
+  // 这里统一取出，随各条 compact 调用一并透传给下游（lossless-claw），
+  // 使新宿主能按身份解析会话；旧宿主仍可用 sessionFile，二者互补、不丢功能覆盖。
+  const sessionTarget = (params as any)?.runtimeContext?.sessionTarget;
+
   let estimatedTokens = 0;
   // O2: 缓存 finalMessages token 估算，避免在同一 assemble 内重复计算（节省 2 次 O(n) 遍历）
   let cachedMsgTokens = 0;
@@ -595,6 +601,8 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
                 sessionId: _lcSid,
                 sessionKey: preCompactSessionKey,
                 sessionFile: typeof params.sessionFile === 'string' ? params.sessionFile : '',
+                // 10.4：assemble 不再提供 sessionFile，补偿身份化目标供下游解析会话
+                sessionTarget,
                 // 预压缩是"预防性"动作，不应强制压缩：force:false 让 lossless-claw 自行判断
                 // DAG 是否真的达到压缩阈值（达到才压），避免低压区间（tokenRatio 刚过 0.55）
                 // 每次 assemble 都强制压缩一遍，打满本地 LLM pending 队列。
@@ -647,7 +655,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           // 避免与主生成在本地 Ollama 排队争抢。债务已在下文写入，调度器会处理。
           if (!isMainTurnActive()) {
             backgroundTasks.register('compact:medium-tier', ctx.losslessClawAdapter.compact({
-              sessionId: _lcSid, sessionKey, sessionFile, force: true,
+              sessionId: _lcSid, sessionKey, sessionFile, sessionTarget, force: true,
               tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
               compactionTarget: 'threshold',
             }).then((_r: any) => {
@@ -800,7 +808,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
               for (const _budget of _overflowBudgets) {
                 try {
                   const _r = await ctx.losslessClawAdapter.compact({
-                    sessionId: _asyncSid, sessionKey, sessionFile, force: true,
+                    sessionId: _asyncSid, sessionKey, sessionFile, sessionTarget, force: true,
                     tokenBudget: _budget, currentTokenCount: effectiveTokenCount,
                     compactionTarget: 'budget',
                   });
@@ -830,7 +838,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
 
               // 异步压缩（fire-and-forget；成功即清偿债务，避免调度器 60s 后重复 no-op）
               backgroundTasks.register('compact:high-tier-async', ctx.losslessClawAdapter.compact({
-                sessionId: _lcSid, sessionKey, sessionFile, force: true,
+                sessionId: _lcSid, sessionKey, sessionFile, sessionTarget, force: true,
                 tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
                 compactionTarget: 'threshold',
               }).then((_r: any) => {
@@ -906,7 +914,7 @@ export async function assemble(ctx: AssembleContext, params: any): Promise<Assem
           backgroundTasks.register('compact:low-tier', ctx.losslessClawAdapter.compact({
             sessionId: params.sessionId != null ? String(params.sessionId)
               : (params.session_id != null ? String(params.session_id) : String(conversationId)),
-            sessionKey, sessionFile, force: true,
+            sessionKey, sessionFile, sessionTarget, force: true,
             tokenBudget: resolvedCtx.compactTokenBudget, currentTokenCount: effectiveTokenCount,
             compactionTarget: 'threshold',
           }).then((r: any) => {

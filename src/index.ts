@@ -705,6 +705,11 @@ const pluginEntry: any = definePluginEntry({
         sessionId: string;
         sessionKey?: string;
         sessionFile: string;
+        /**
+         * SDK 2026.10.4：bootstrap 契约新增存储无关的会话身份（agentId/sessionId/sessionKey/storePath）。
+         * 与 sessionFile 互补 —— 新宿主用它定位会话，旧宿主仍给 sessionFile。
+         */
+        sessionTarget?: any; // SDK: ContextEngineSessionTarget
         messages?: any[];        // SDK 可能注入的当前消息（用于增量 bootstrap）
         runtimeSettings?: unknown;
       }): Promise<{ bootstrapped: boolean; importedMessages?: number; reason?: string }> {
@@ -724,6 +729,9 @@ const pluginEntry: any = definePluginEntry({
             sessionId: sid,
             sessionKey: params.sessionKey,
             sessionFile: params.sessionFile,
+            // SDK 2026.10.4：bootstrap 契约同时提供 sessionTarget（存储无关身份），
+            // 一并透传，让下游可在 sessionFile 不可用时按身份解析会话。
+            sessionTarget: params.sessionTarget,
           };
           if (Array.isArray(params.messages) && params.messages.length > 0) {
             bootstrapParams.messages = params.messages;
@@ -1133,6 +1141,22 @@ const pluginEntry: any = definePluginEntry({
             return compactEarlyExit('aborted', 'compact aborted: signal already aborted before compaction started');
           }
 
+          // ------------------------------------------------------------------
+          // SDK 2026.10.4 对齐：转录后端判定与身份化会话目标
+          //
+          // 10.4 的 compact 契约**已移除 `sessionFile`**，改为 `sessionTarget`（存储无关身份）；
+          // 同时 `runtimeContext.transcriptStorage.kind === "sqlite"` 明确声明权威转录后端是 SQLite。
+          // 宿主注释原文：仍可能传 legacy `sessionFile` 定位符，但引擎应据该字段判断
+          // 「该定位符是否仍是活动转录源」。
+          // ⇒ 后端为 sqlite 时，读写 sessionFile JSONL 对真实转录**没有任何影响**，
+          //   故下面所有文件级操作都必须按此闸门跳过（保留旧宿主行为，避免跨版本回归）。
+          // ------------------------------------------------------------------
+          const _transcriptKind = (params as any)?.runtimeContext?.transcriptStorage?.kind;
+          const _legacyFileTranscript = _transcriptKind !== 'sqlite';
+          // 身份化会话目标：优先顶层；10.4 亦可能只放在 runtimeContext 里
+          const _sessionTarget = (params as any)?.sessionTarget
+            ?? (params as any)?.runtimeContext?.sessionTarget;
+
           // FIX: ensure adapter + deps are initialized before compacting
           // SEC-4 H-10: ensureInitialized 现会 rethrow，此处捕获并返回 init failed，
           // 避免 compact 静默继续导致后续 _losslessClawAdapter 等空指针。
@@ -1306,12 +1330,16 @@ const pluginEntry: any = definePluginEntry({
           // 并调用 ingestBatch 把历史消息注入 DAG，使 compact 能看到完整上下文。
           // 同时保存 sessionFile 消息供后续 token 估算使用（SDK 不传 currentTokenCount 时）。
           let _sessionFileMsgs: any[] = [];
-          if (_adapterConnected && typeof (params as any).sessionFile === 'string' && (params as any).sessionFile) {
+          // SDK 2026.10.4 对齐：仅当后端**非** sqlite（sessionFile 仍是活动转录源）时，
+          // 才读文件回填；sqlite 后端下该文件不是活动源，读它是无意义且不合契约的。
+          if (_adapterConnected && _legacyFileTranscript && typeof (params as any).sessionFile === 'string' && (params as any).sessionFile) {
             try {
               const _backfill = await _losslessClawAdapter.bootstrap({
                 sessionId: _compactSessionId ?? '',
                 sessionKey: _compactSessionKey || undefined,
                 sessionFile: (params as any).sessionFile,
+                // 10.4：同时给身份化目标，下游可优先按身份解析会话
+                sessionTarget: _sessionTarget,
               });
               const _backfillReason = (_backfill as any)?.reason ?? '';
               const _backfillImported = (_backfill as any)?.importedMessages ?? 0;
@@ -1680,6 +1708,9 @@ const pluginEntry: any = definePluginEntry({
                   memoryDir: _memoryDir,
                   sessionKey: _sessionKey,
                   sessionFile: _sessionFile,
+                  // SDK 2026.10.4 对齐：compact 契约不再提供 sessionFile，
+                  // 把身份化目标一并交给 onCompaction，避免其中因缺 sessionFile 而跳过压缩闭环。
+                  sessionTarget: _sessionTarget,
                   // 修复：sessionId 可能是 number（SDK conversationId），强制 String 化
                   // 避免 lossless-claw 内部 sessionId.trim() 抛 TypeError
                   sessionId: params.sessionId != null
@@ -1879,7 +1910,13 @@ const pluginEntry: any = definePluginEntry({
           // 仍看到全量 token（210873），每次 compact 后 precheck 再次 overflow → 死循环。
           // 修复：追加 compaction entry 到 sessionFile JSONL，SDK 读取时遇到该条目
           // 会通过 firstKeptEntryId 跳过已压缩的消息，只计算保留部分的 token 数。
-          if (compacted && tokensBefore > tokensAfter && typeof params.sessionFile === 'string' && params.sessionFile) {
+          //
+          // SDK 2026.10.4 对齐：该做法仅在「JSONL 仍是活动转录源」（后端非 sqlite）时有效。
+          // 10.4 后端为 sqlite，且 compact 契约已不再提供 sessionFile —— 此路径不再执行；
+          // 同等的「避免 overflow precheck 死循环」语义由 `info.ownsCompaction: true` +
+          // `AssembleResult.promptAuthority` 承担（引擎自行管理 prompt 准入），无需改写转录文件。
+          if (compacted && tokensBefore > tokensAfter && _legacyFileTranscript
+              && typeof params.sessionFile === 'string' && params.sessionFile) {
             try {
               const { readFile, appendFile } = await import('node:fs/promises') as typeof import('node:fs/promises');
               const content = await readFile(params.sessionFile, 'utf-8');
@@ -1951,6 +1988,9 @@ const pluginEntry: any = definePluginEntry({
               summary: summaryContent,
               firstKeptEntryId: compactResultExtra.firstKeptEntryId,
               sessionId: compactResultExtra.sessionId ?? params.sessionId,
+              // SDK 2026.10.4 对齐：`result.sessionFile` 已标注 @deprecated（"Use `sessionTarget`."）。
+              // 两者都返回 —— sessionTarget 是新宿主读的字段，sessionFile 保留供旧契约使用。
+              sessionTarget: (compactResultExtra as any).sessionTarget ?? _sessionTarget,
               sessionFile: compactResultExtra.sessionFile ?? params.sessionFile,
             },
           };

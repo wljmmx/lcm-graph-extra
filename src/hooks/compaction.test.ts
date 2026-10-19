@@ -160,4 +160,52 @@ describe('compaction hook', () => {
     const entries = await fs.readdir(backupDir);
     expect(entries.length).toBeGreaterThanOrEqual(1);
   });
+
+  // ------------------------------------------------------------------
+  // SDK 2026.10.4 对齐：compact 契约已移除 sessionFile，改用 sessionTarget。
+  // 回归防线：若仍把 sessionFile 当作必须存在的前置条件，新宿主下本 hook 会整体跳过，
+  // 直接丢失压缩闭环（备份 + DAG compact + 摘要质量验证）。
+  // ------------------------------------------------------------------
+  it('SDK 2026.10.4: 仅有 sessionTarget（无 sessionFile）时不再跳过，且透传身份', async () => {
+    const dir = await createTestMemoryDir({ 'test.md': '# Test' });
+    const instance = buildPluginInstance(dir);
+    const calls: any[] = [];
+    (instance as any)._losslessClawAdapter = {
+      connected: true,
+      compact: async (p: any) => {
+        calls.push(p);
+        return { ok: true, compacted: false, reason: 'noop' };
+      },
+    };
+    const target = { agentId: 'a1', sessionId: 'sid-1', sessionKey: 'sk-1', storePath: '/store' };
+    (instance.context as any).sessionId = 'sid-1';
+    (instance.context as any).sessionTarget = target;
+    // 刻意不设置 sessionFile —— 10.4 的 compact 不再提供该定位符
+
+    await onCompaction(instance);
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].sessionTarget).toEqual(target);
+    expect(calls[0].sessionFile).toBeUndefined();
+  });
+
+  it('SDK 2026.10.4: sessionFile 与 sessionTarget 均缺失时才跳过压缩', async () => {
+    const dir = await createTestMemoryDir({ 'test.md': '# Test' });
+    const instance = buildPluginInstance(dir);
+    const calls: any[] = [];
+    (instance as any)._losslessClawAdapter = {
+      connected: true,
+      compact: async (p: any) => {
+        calls.push(p);
+        return { ok: true, compacted: false };
+      },
+    };
+    (instance.context as any).sessionId = 'sid-1';
+    // 两个定位来源都不提供 → 无法定位会话，必须跳过
+
+    const res = await onCompaction(instance);
+
+    expect(calls.length).toBe(0);
+    expect(res.compacted).toBe(false);
+  });
 });
