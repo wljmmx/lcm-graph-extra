@@ -1,9 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   probeTranscriptRewriteCapability,
   readVisibleTranscriptEntries,
   summarizeTranscriptEntries,
   detectReplayCheckpointEntries,
+  buildReplayStripReplacements,
+  isTranscriptRewriteEnforced,
+  TRANSCRIPT_REWRITE_MAX_ENTRIES,
   COMPACTION_REPLAY_TYPES,
   type VisibleTranscriptEntry,
 } from './transcript-rewrite';
@@ -136,5 +139,76 @@ describe('detectReplayCheckpointEntries（P2 观察项，纯函数）', () => {
       { entryId: 'b', message: { role: 'user' } },
     ]);
     expect(report).toEqual({ count: 0, entryIds: [], estimatedBytesFreed: 0 });
+  });
+});
+
+/**
+ * P4：受控写入（默认关闭）。
+ * 关键性质：① 默认不启用；② 替换内容 = 剥离 providerReplay 的副本；③ 有上限；
+ * ④ **天然幂等** —— 剥离后条目不再携带 providerReplay，再次检测必然为 0。
+ */
+describe('isTranscriptRewriteEnforced（P4 开关，默认关闭）', () => {
+  const original = process.env.LCMG_TRANSCRIPT_REWRITE;
+  afterEach(() => {
+    if (original === undefined) delete process.env.LCMG_TRANSCRIPT_REWRITE;
+    else process.env.LCMG_TRANSCRIPT_REWRITE = original;
+  });
+
+  it('未设置 / 非 enforce 值 → 关闭（默认 observe-only）', () => {
+    delete process.env.LCMG_TRANSCRIPT_REWRITE;
+    expect(isTranscriptRewriteEnforced()).toBe(false);
+    process.env.LCMG_TRANSCRIPT_REWRITE = 'observe';
+    expect(isTranscriptRewriteEnforced()).toBe(false);
+    process.env.LCMG_TRANSCRIPT_REWRITE = 'true';
+    expect(isTranscriptRewriteEnforced()).toBe(false);
+  });
+
+  it('仅显式 enforce（大小写/空白容忍）才开启', () => {
+    process.env.LCMG_TRANSCRIPT_REWRITE = 'enforce';
+    expect(isTranscriptRewriteEnforced()).toBe(true);
+    process.env.LCMG_TRANSCRIPT_REWRITE = '  ENFORCE  ';
+    expect(isTranscriptRewriteEnforced()).toBe(true);
+  });
+});
+
+describe('buildReplayStripReplacements（P4 构造，纯函数）', () => {
+  it('替换内容为剥离 providerReplay 的副本，且不修改原消息', () => {
+    const message = { role: 'assistant', providerReplay: { type: 'anthropic-compaction' }, text: 'hi' };
+    const plan = buildReplayStripReplacements([{ entryId: 'e1', message }]);
+    expect(plan.count).toBe(1);
+    expect(plan.replacements[0].entryId).toBe('e1');
+    expect(plan.replacements[0].message).toEqual({ role: 'assistant', text: 'hi' });
+    // 原对象不得被就地修改
+    expect((message as Record<string, unknown>).providerReplay).toEqual({ type: 'anthropic-compaction' });
+  });
+
+  it('仅纳入宿主判据命中的条目（assistant + 白名单 type）', () => {
+    const plan = buildReplayStripReplacements([
+      { entryId: 'hit', message: { role: 'assistant', providerReplay: { type: 'openai-responses-compaction' } } },
+      { entryId: 'user-role', message: { role: 'user', providerReplay: { type: 'openai-responses-compaction' } } },
+      { entryId: 'bad-type', message: { role: 'assistant', providerReplay: { type: 'nope' } } },
+      { entryId: 'no-replay', message: { role: 'assistant' } },
+    ]);
+    expect(plan.replacements.map((r) => r.entryId)).toEqual(['hit']);
+    expect(plan.truncated).toBe(0);
+  });
+
+  it('受上限截断，且如实报告 truncated（避免一次改动过多条目）', () => {
+    const many: VisibleTranscriptEntry[] = Array.from({ length: 5 }, (_, i) => ({
+      entryId: `e${i}`,
+      message: { role: 'assistant', providerReplay: { type: 'anthropic-compaction' } },
+    }));
+    const plan = buildReplayStripReplacements(many, 2);
+    expect(plan.count).toBe(2);
+    expect(plan.truncated).toBe(3);
+    expect(TRANSCRIPT_REWRITE_MAX_ENTRIES).toBeGreaterThan(0);
+  });
+
+  it('天然幂等：剥离后的消息再次检测不再命中', () => {
+    const message = { role: 'assistant', providerReplay: { type: 'anthropic-compaction' } };
+    const plan = buildReplayStripReplacements([{ entryId: 'e1', message }]);
+    // 用改写后的消息重建条目 → 第二次检测必须为 0，说明不会重复改写
+    const after: VisibleTranscriptEntry[] = [{ entryId: 'e1', message: plan.replacements[0].message }];
+    expect(detectReplayCheckpointEntries(after).count).toBe(0);
   });
 });

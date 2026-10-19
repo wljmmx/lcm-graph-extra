@@ -183,3 +183,66 @@ export function detectReplayCheckpointEntries(
 
   return { count: entryIds.length, entryIds, estimatedBytesFreed };
 }
+
+/**
+ * P4：写入开关（默认关闭 = observe-only）。
+ *
+ * 遵循「先观察后强执」：本能力会**改写活动转录**（破坏性），
+ * 因此在观察数据证明 `lcm_transcript_replay_checkpoint_entries` 确有内容之前，
+ * 默认只观察、不写盘；运维确认后才显式开启。
+ *
+ *   LCMG_TRANSCRIPT_REWRITE=enforce  → 执行剥离写入
+ *   其他 / 未设置                     → 仅观察（默认）
+ */
+export function isTranscriptRewriteEnforced(): boolean {
+  return (process.env.LCMG_TRANSCRIPT_REWRITE ?? '').trim().toLowerCase() === 'enforce';
+}
+
+/** P4：单次写入的条目数上限（保守，避免一次改动过多转录条目） */
+export const TRANSCRIPT_REWRITE_MAX_ENTRIES = 50;
+
+/** P4：构造 replacements 的结果 */
+export interface ReplayStripPlan {
+  replacements: Array<{ entryId: string; message: Record<string, unknown> }>;
+  /** 计划改写的条目数（受上限截断后） */
+  count: number;
+  /** 因上限被截断而未纳入的条目数 */
+  truncated: number;
+}
+
+/**
+ * P4（**纯函数**）：把命中回放检查点的条目构造为 `replacements`。
+ *
+ * 替换内容 = 剥离 `providerReplay` 后的消息副本，与宿主 `stripCompactionReplayCheckpoint` 同语义。
+ * 幂等性：剥离后该条目不再携带 `providerReplay`，下次 `detectReplayCheckpointEntries` 自然返回 0，
+ * 因此**无需额外幂等标记** —— 不会重复改写同一条目。
+ */
+export function buildReplayStripReplacements(
+  entries: readonly VisibleTranscriptEntry[],
+  maxEntries: number = TRANSCRIPT_REWRITE_MAX_ENTRIES,
+): ReplayStripPlan {
+  const replacements: Array<{ entryId: string; message: Record<string, unknown> }> = [];
+  let truncated = 0;
+
+  for (const e of entries) {
+    const message = e.message;
+    if (!message || typeof message !== 'object') continue;
+    if (message.role !== 'assistant') continue;
+    const replay = (message as Record<string, unknown>).providerReplay;
+    if (!replay || typeof replay !== 'object') continue;
+    if (!COMPACTION_REPLAY_TYPES.includes((replay as { type?: unknown }).type as string)) continue;
+
+    const replaySafe: Record<string, unknown> = { ...message };
+    delete replaySafe.providerReplay;
+    // 与宿主一致：无差异则不纳入（否则宿主 findTranscriptRewriteMatches 会判定 no-op）
+    if (JSON.stringify(message) === JSON.stringify(replaySafe)) continue;
+
+    if (replacements.length >= maxEntries) {
+      truncated++;
+      continue;
+    }
+    replacements.push({ entryId: e.entryId, message: replaySafe });
+  }
+
+  return { replacements, count: replacements.length, truncated };
+}

@@ -45,12 +45,14 @@ import { raceDeadline } from "./utils/deadline.js";
 import { compactEarlyExit } from "./utils/compact-result.js";
 import { beginMainTurn, endMainTurn, isMainTurnActive } from "./async/main-turn-gate.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
-// SDK 2026.10.4：转录能力只读适配（P0 探测 + P1 枚举 + P2 观察项，均不写盘）
+// SDK 2026.10.4：转录能力适配（P0 探测 + P1 枚举 + P2 量化 + P3 指标 + P4 受控写入）
 import {
   probeTranscriptRewriteCapability,
   readVisibleTranscriptEntries,
   summarizeTranscriptEntries,
   detectReplayCheckpointEntries,
+  buildReplayStripReplacements,
+  isTranscriptRewriteEnforced,
 } from "./adapters/transcript-rewrite.js";
 
 // ---------------------------------------------------------------------------
@@ -2119,6 +2121,32 @@ const pluginEntry: any = definePluginEntry({
                 replayCheckpointEntries: _replay.count,
                 estimatedBytesFreed: _replay.estimatedBytesFreed,
               });
+
+              // P4（默认关闭）：仅当显式 LCMG_TRANSCRIPT_REWRITE=enforce 且确有可剥离内容时才写盘。
+              // 写入由**运行时**执行（branch-and-reappend + 写锁 + 一致性校验），引擎只声明意图。
+              // 天然幂等：剥离 providerReplay 后下次枚举自然 count=0，无需额外幂等标记。
+              if (isTranscriptRewriteEnforced() && _replay.count > 0) {
+                const _plan = buildReplayStripReplacements(_entries);
+                if (_plan.count > 0) {
+                  const _rewrite = (params as any).runtimeContext?.rewriteTranscriptEntries;
+                  if (typeof _rewrite === 'function') {
+                    const _rr = await _rewrite({ replacements: _plan.replacements });
+                    if (_rr) {
+                      changed = changed || (_rr.changed ?? false);
+                      bytesFreed += _rr.bytesFreed ?? 0;
+                      rewrittenEntries += _rr.rewrittenEntries ?? 0;
+                    }
+                    logger?.info?.('maintain: transcript rewrite applied (provider replay checkpoints stripped)', {
+                      requested: _plan.count,
+                      truncated: _plan.truncated,
+                      changed: _rr?.changed,
+                      rewrittenEntries: _rr?.rewrittenEntries,
+                      bytesFreed: _rr?.bytesFreed,
+                      reason: _rr?.reason,
+                    });
+                  }
+                }
+              }
             } else {
               healthMetrics.recordTranscriptDiagnostic({ capability: _cap.reason ?? 'not_provided' });
               logger?.debug?.('maintain: transcript rewrite capability unavailable', { reason: _cap.reason });
