@@ -52,7 +52,7 @@ import {
   summarizeTranscriptEntries,
   detectReplayCheckpointEntries,
   buildReplayStripReplacements,
-  isTranscriptRewriteEnforced,
+  isTranscriptRewriteEnabled,
 } from "./adapters/transcript-rewrite.js";
 
 // ---------------------------------------------------------------------------
@@ -2115,17 +2115,20 @@ const pluginEntry: any = definePluginEntry({
                 replayCheckpointEntries: _replay.count,
                 replayEstimatedBytesFreed: _replay.estimatedBytesFreed,
               });
-              logger?.debug?.('maintain: transcript rewrite capability available (observe-only)', {
+              logger?.debug?.('maintain: transcript rewrite capability available', {
+                mode: isTranscriptRewriteEnabled() ? 'enabled' : 'observe-only',
                 messageEntryCount: _summary.total,
                 byRole: _summary.byRole,
                 replayCheckpointEntries: _replay.count,
                 estimatedBytesFreed: _replay.estimatedBytesFreed,
               });
 
-              // P4（默认关闭）：仅当显式 LCMG_TRANSCRIPT_REWRITE=enforce 且确有可剥离内容时才写盘。
-              // 写入由**运行时**执行（branch-and-reappend + 写锁 + 一致性校验），引擎只声明意图。
-              // 天然幂等：剥离 providerReplay 后下次枚举自然 count=0，无需额外幂等标记。
-              if (isTranscriptRewriteEnforced() && _replay.count > 0) {
+              // P4（默认开启 / opt-out）：剥离 provider 压缩回放检查点。
+              // 写入由**运行时**执行（写锁 + branch 一致性校验），引擎只声明意图；
+              // 宿主对任何 replacement 恒执行 stripStalePrefixReplay，故与本插件提交的剥离副本结果一致。
+              // 天然幂等：剥离后下次枚举 count=0，不会重复改写。
+              // 需退回只观察时设 LCMG_TRANSCRIPT_REWRITE=off。
+              if (isTranscriptRewriteEnabled() && _replay.count > 0) {
                 const _plan = buildReplayStripReplacements(_entries);
                 if (_plan.count > 0) {
                   const _rewrite = (params as any).runtimeContext?.rewriteTranscriptEntries;

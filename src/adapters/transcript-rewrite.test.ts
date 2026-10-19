@@ -5,7 +5,7 @@ import {
   summarizeTranscriptEntries,
   detectReplayCheckpointEntries,
   buildReplayStripReplacements,
-  isTranscriptRewriteEnforced,
+  isTranscriptRewriteEnabled,
   TRANSCRIPT_REWRITE_MAX_ENTRIES,
   COMPACTION_REPLAY_TYPES,
   type VisibleTranscriptEntry,
@@ -143,31 +143,38 @@ describe('detectReplayCheckpointEntries（P2 观察项，纯函数）', () => {
 });
 
 /**
- * P4：受控写入（默认关闭）。
- * 关键性质：① 默认不启用；② 替换内容 = 剥离 providerReplay 的副本；③ 有上限；
+ * P4：受控写入（opt-out：默认开启）。
+ * 关键性质：① 默认执行，仅 `LCMG_TRANSCRIPT_REWRITE=off` 关闭；② 替换内容 = 剥离 providerReplay 的副本；③ 有上限；
  * ④ **天然幂等** —— 剥离后条目不再携带 providerReplay，再次检测必然为 0。
  */
-describe('isTranscriptRewriteEnforced（P4 开关，默认关闭）', () => {
+describe('isTranscriptRewriteEnabled（P4 开关，opt-out：默认开启）', () => {
   const original = process.env.LCMG_TRANSCRIPT_REWRITE;
   afterEach(() => {
     if (original === undefined) delete process.env.LCMG_TRANSCRIPT_REWRITE;
     else process.env.LCMG_TRANSCRIPT_REWRITE = original;
   });
 
-  it('未设置 / 非 enforce 值 → 关闭（默认 observe-only）', () => {
+  it('未设置 → 开启（默认执行剥离写入）', () => {
     delete process.env.LCMG_TRANSCRIPT_REWRITE;
-    expect(isTranscriptRewriteEnforced()).toBe(false);
-    process.env.LCMG_TRANSCRIPT_REWRITE = 'observe';
-    expect(isTranscriptRewriteEnforced()).toBe(false);
-    process.env.LCMG_TRANSCRIPT_REWRITE = 'true';
-    expect(isTranscriptRewriteEnforced()).toBe(false);
+    expect(isTranscriptRewriteEnabled()).toBe(true);
   });
 
-  it('仅显式 enforce（大小写/空白容忍）才开启', () => {
+  it('仅显式 off 才关闭（大小写/空白容忍）', () => {
+    process.env.LCMG_TRANSCRIPT_REWRITE = 'off';
+    expect(isTranscriptRewriteEnabled()).toBe(false);
+    process.env.LCMG_TRANSCRIPT_REWRITE = '  OFF  ';
+    expect(isTranscriptRewriteEnabled()).toBe(false);
+  });
+
+  it('其他值/空串均视为开启（只认 off 为关闭）', () => {
+    process.env.LCMG_TRANSCRIPT_REWRITE = 'on';
+    expect(isTranscriptRewriteEnabled()).toBe(true);
+    process.env.LCMG_TRANSCRIPT_REWRITE = 'true';
+    expect(isTranscriptRewriteEnabled()).toBe(true);
     process.env.LCMG_TRANSCRIPT_REWRITE = 'enforce';
-    expect(isTranscriptRewriteEnforced()).toBe(true);
-    process.env.LCMG_TRANSCRIPT_REWRITE = '  ENFORCE  ';
-    expect(isTranscriptRewriteEnforced()).toBe(true);
+    expect(isTranscriptRewriteEnabled()).toBe(true);
+    process.env.LCMG_TRANSCRIPT_REWRITE = '';
+    expect(isTranscriptRewriteEnabled()).toBe(true);
   });
 });
 

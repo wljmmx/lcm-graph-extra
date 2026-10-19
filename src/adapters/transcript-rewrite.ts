@@ -185,17 +185,22 @@ export function detectReplayCheckpointEntries(
 }
 
 /**
- * P4：写入开关（默认关闭 = observe-only）。
+ * P4：写入开关（**默认开启** → opt-out）。
  *
- * 遵循「先观察后强执」：本能力会**改写活动转录**（破坏性），
- * 因此在观察数据证明 `lcm_transcript_replay_checkpoint_entries` 确有内容之前，
- * 默认只观察、不写盘；运维确认后才显式开启。
+ *   LCMG_TRANSCRIPT_REWRITE=off  → 关闭写入（退回只观察，仍上报指标）
+ *   其他值 / 未设置               → 执行剥离写入（默认）
  *
- *   LCMG_TRANSCRIPT_REWRITE=enforce  → 执行剥离写入
- *   其他 / 未设置                     → 仅观察（默认）
+ * 为何可默认开启（风险已核实可控）：
+ *  - 宿主运行时对提交的**任何** replacement 恒执行 `stripStalePrefixReplay`：
+ *    注入实现 `rewriteTranscriptEntriesInSessionManager({sessionManager, replacements})`
+ *    未传 `preserveReplacementCompactionReplay` ⇒ 恒 falsy ⇒ 恒剥离。
+ *    故本插件提交「已剥离副本」与宿主自身归一化结果**完全一致**，未引入额外语义。
+ *  - 改写由**运行时**执行（`withSessionManagerRewriteLock` + branch 一致性校验 + 活性检查），引擎只声明意图。
+ *  - **天然幂等**：剥离后条目不再携带 providerReplay ⇒ 下次枚举必然 count=0，不会重复改写。
+ *  - 单次条目数受 `TRANSCRIPT_REWRITE_MAX_ENTRIES` 限制。
  */
-export function isTranscriptRewriteEnforced(): boolean {
-  return (process.env.LCMG_TRANSCRIPT_REWRITE ?? '').trim().toLowerCase() === 'enforce';
+export function isTranscriptRewriteEnabled(): boolean {
+  return (process.env.LCMG_TRANSCRIPT_REWRITE ?? '').trim().toLowerCase() !== 'off';
 }
 
 /** P4：单次写入的条目数上限（保守，避免一次改动过多转录条目） */
