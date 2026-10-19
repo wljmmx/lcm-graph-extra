@@ -122,6 +122,31 @@ const TOKEN_ESTIMATE_CACHE_MAX = 100;
 const committedTurnKeys = new Set<string>();
 const COMMITTED_TURN_MAX = 2000;
 
+/**
+ * SDK 2026.10.4 对齐：无运行时（runtime）的注册模式。
+ *
+ * 为什么必须挡住（依据宿主源码，非推测）：
+ * ① 宿主 `createUnavailableRuntime()`（src/plugins/api-builder.ts）在这些模式下把 `api.runtime`
+ *    换成一个「访问即抛错」的 Proxy，其 get 陷阱对任何字符串属性都 throw
+ *    （"…runtime is intentionally unavailable during … registration"）。
+ *    可选链只保护 null/undefined，拦不住抛错的 getter —— 因此运行时重活必须移出 register()。
+ *    宿主错误消息自带的 remedy 即：`Defer runtime access out of register().`
+ * ② 这类模式是宿主为**收集 CLI 元数据**而调用 register() 的（api.on 等此时被替换为 noop）。
+ *    此时去连 Neo4j、建 schema、起 HTTP 服务、排定时器纯属浪费。
+ * ③ **正确性风险**：本插件的 snapshot server 启动前会探测 7423 端口并在识别为「自身残留实例」时
+ *    POST `/internal/shutdown` 将其关闭。若在 CLI 元数据收集（独立进程）时执行本段，
+ *    可能误杀**正在运行的 Gateway 实例**的 snapshot server。
+ *
+ * 注意：仅跳过「运行时重活」（DB 连接/HTTP 服务/定时器），工具与 hook 等元数据注册照常执行。
+ */
+const NON_RUNTIME_REGISTRATION_MODES = new Set(['cli-metadata', 'setup-only']);
+
+/** 返回命中的无运行时注册模式名；非该模式返回 null。 */
+function nonRuntimeRegistrationMode(api: unknown): string | null {
+  const mode = (api as { registrationMode?: unknown } | null)?.registrationMode;
+  return typeof mode === 'string' && NON_RUNTIME_REGISTRATION_MODES.has(mode) ? mode : null;
+}
+
 function cachedEstimateTokens(messages: any[]): number {
   if (!Array.isArray(messages) || messages.length === 0) return 0;
   // 用消息数 + 首尾消息内容 hash 作为 key
@@ -183,6 +208,17 @@ const pluginEntry: any = definePluginEntry({
     // 宿主 api.logger 通常是 pino 实例；用 adaptLogger 适配为统一 Logger 接口。
     // 若宿主未注入 logger，降级到 createLogger()（按 LOG_LEVEL 环境变量控制级别）。
     setGlobalLogger(logger ? adaptLogger(logger) : createLogger());
+
+    // SDK 2026.10.4 对齐：无运行时注册模式的守卫标记。
+    // 命中时跳过全部「运行时重活」（Neo4j 连接 / schema / snapshot HTTP 服务 / 定时器 / 债务调度），
+    // 但不影响工具、hook、compaction provider 等元数据注册 —— 这些正是该模式下宿主需要收集的内容。
+    const deferredRuntimeMode = nonRuntimeRegistrationMode(api);
+    if (deferredRuntimeMode) {
+      logger?.info?.(
+        `[lcm-graph-extra] registration mode "${deferredRuntimeMode}" has no runtime — ` +
+          'deferring runtime init (Neo4j / snapshot server / timers) to the gateway lifecycle',
+      );
+    }
 
     // G-MODEL-SYNC: 注入 plugin api 引用，供 lossless-claw adapter 的注入判定
     // 解析 distillationLlm 插件配置（远程主模型会话 → 配置模型与地址）。
@@ -2297,7 +2333,11 @@ const pluginEntry: any = definePluginEntry({
     try {
       const dashCfg = api.pluginConfig?.dashboardSnapshot;
       const enabled = dashCfg?.enabled !== false; // 默认启用，显式 false 关闭
-      if (enabled) {
+      // SDK 2026.10.4 对齐：无运行时注册模式下不启动 snapshot HTTP 服务
+      //（也跳过其随附的 lcm.db 计数器/画像/业务指标读取与 pre-init ensureInitialized）。
+      // 关键理由：本服务启动前会探测 7423 端口并对「自身残留实例」发送 /internal/shutdown，
+      // 若在 CLI 元数据收集进程里执行，可能误杀正在运行的 Gateway 实例。
+      if (enabled && !deferredRuntimeMode) {
         const port = dashCfg?.port ?? 7423;
         const host = dashCfg?.host ?? '127.0.0.1';
         const providers: SnapshotProviders = {
@@ -3396,7 +3436,9 @@ const pluginEntry: any = definePluginEntry({
     }
     
     // ── Start resident debt scheduler (fire-and-forget, picks up debts every 60s) ──
-    backgroundTasks.register('debt-scheduler-start', (async () => {
+    // SDK 2026.10.4 对齐：无运行时注册模式下不启动债务调度器（避免注册期占用 DB 与定时器）。
+    if (!deferredRuntimeMode) {
+      backgroundTasks.register('debt-scheduler-start', (async () => {
       try {
         const { startScheduler } = await import("./core/debt-manager.js");
         await startScheduler(
@@ -3415,15 +3457,21 @@ const pluginEntry: any = definePluginEntry({
         logger?.warn?.("debt-manager: failed to start scheduler", { err: String(schedErr) });
       }
     })().then(() => {}, () => {}));
+    }
 
     lastDistillationRun = Date.now();
 
     // Start heartbeat 60s after plugin init, then every 5 minutes
+    // SDK 2026.10.4 对齐：无运行时注册模式下不排定时器（该模式不产生运行时，定时器只会空转）。
+    if (deferredRuntimeMode) {
+      logger?.info?.("[lcm-graph-extra] heartbeat not scheduled (non-runtime registration mode)");
+    } else {
     logger?.info?.("[lcm-graph-extra] heartbeat scheduled (first run in 60s, then every " + String(HB_INTERVAL_MS / 60000) + "min)");
     hbTimer = setTimeout(function startHb() {
       runHeartbeat();
       hbTimer = setInterval(runHeartbeat, HB_INTERVAL_MS);
     }, 60_000);
+    }
     
     // Expose for manual trigger
     (api as any).__lcmHeartbeat = runHeartbeat;
