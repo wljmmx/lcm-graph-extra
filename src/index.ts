@@ -45,11 +45,12 @@ import { raceDeadline } from "./utils/deadline.js";
 import { compactEarlyExit } from "./utils/compact-result.js";
 import { beginMainTurn, endMainTurn, isMainTurnActive } from "./async/main-turn-gate.js";
 import { updateSdkOverhead } from "./plugin/overhead-cache.js";
-// SDK 2026.10.4：转录能力只读适配（P0 探测 + P1 枚举，不做写盘）
+// SDK 2026.10.4：转录能力只读适配（P0 探测 + P1 枚举 + P2 观察项，均不写盘）
 import {
   probeTranscriptRewriteCapability,
   readVisibleTranscriptEntries,
   summarizeTranscriptEntries,
+  detectReplayCheckpointEntries,
 } from "./adapters/transcript-rewrite.js";
 
 // ---------------------------------------------------------------------------
@@ -2086,9 +2087,9 @@ const pluginEntry: any = definePluginEntry({
             return { changed, bytesFreed, rewrittenEntries, reason: 'aborted' };
           }
 
-          // 3. 转录能力只读诊断（SDK 2026.10.4，P0+P1）
+          // 3. 转录能力只读诊断（SDK 2026.10.4，P0+P1+P2 observe-only）
           //    `runtimeContext.rewriteTranscriptEntries` 仅在 maintain 注入，且要求 sessionKey 存在。
-          //    此处**只探测 + 枚举并记录**，不做任何写盘 —— 写能力待 observe-only 验证判定准确性后另行开启。
+          //    此处**只探测 + 枚举 + 量化**，不做任何写盘 —— 写入能力待观察数据证明「确有可剥离内容」后另行开启。
           try {
             const _cap = probeTranscriptRewriteCapability(
               (params as any).runtimeContext,
@@ -2102,9 +2103,14 @@ const pluginEntry: any = definePluginEntry({
                 storePath: (params as any).sessionTarget?.storePath,
               });
               const _summary = summarizeTranscriptEntries(_entries);
-              logger?.debug?.('maintain: transcript rewrite capability available (read-only diagnostic)', {
+              // P2 observe-only：用宿主自身判据（provider 压缩回放检查点）量化「若改写能释放多少」。
+              // count 长期为 0 ⇒ 该宿主路径下无可剥离内容，写入能力无需启用。
+              const _replay = detectReplayCheckpointEntries(_entries);
+              logger?.debug?.('maintain: transcript rewrite capability available (observe-only)', {
                 messageEntryCount: _summary.total,
                 byRole: _summary.byRole,
+                replayCheckpointEntries: _replay.count,
+                estimatedBytesFreed: _replay.estimatedBytesFreed,
               });
             } else {
               logger?.debug?.('maintain: transcript rewrite capability unavailable', { reason: _cap.reason });

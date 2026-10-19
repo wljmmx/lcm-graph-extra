@@ -3,6 +3,8 @@ import {
   probeTranscriptRewriteCapability,
   readVisibleTranscriptEntries,
   summarizeTranscriptEntries,
+  detectReplayCheckpointEntries,
+  COMPACTION_REPLAY_TYPES,
   type VisibleTranscriptEntry,
 } from './transcript-rewrite';
 
@@ -84,5 +86,55 @@ describe('summarizeTranscriptEntries（P1，纯函数）', () => {
 
   it('空输入返回全零', () => {
     expect(summarizeTranscriptEntries([])).toEqual({ total: 0, byRole: {} });
+  });
+});
+
+/**
+ * P2 observe-only：量化「若调用 rewriteTranscriptEntries 剥离 providerReplay 能释放多少」。
+ * 判据与字节公式**均复刻宿主实现**（session-DitLEF2L.mjs / transcript-rewrite-BTqyiENC.mjs），
+ * 不自造标准 —— 否则会得出与实际改写不一致的收益估算。
+ */
+describe('detectReplayCheckpointEntries（P2 观察项，纯函数）', () => {
+  it('判据取自宿主：仅 assistant + 三类 provider 压缩回放 type', () => {
+    expect(COMPACTION_REPLAY_TYPES).toEqual([
+      'anthropic-compaction',
+      'openai-responses-compaction',
+      'openai-responses-retained-compaction',
+    ]);
+
+    const entries: VisibleTranscriptEntry[] = [
+      // 命中：assistant + 合法 type
+      { entryId: 'hit-1', message: { role: 'assistant', providerReplay: { type: 'anthropic-compaction', x: 1 } } },
+      // 不命中：user 角色（宿主第一道条件仅 assistant）
+      { entryId: 'miss-role', message: { role: 'user', providerReplay: { type: 'anthropic-compaction' } } },
+      // 不命中：type 不在宿主白名单
+      { entryId: 'miss-type', message: { role: 'assistant', providerReplay: { type: 'other' } } },
+      // 不命中：无 providerReplay
+      { entryId: 'miss-none', message: { role: 'assistant' } },
+    ];
+
+    const report = detectReplayCheckpointEntries(entries);
+    expect(report.count).toBe(1);
+    expect(report.entryIds).toEqual(['hit-1']);
+    expect(report.estimatedBytesFreed).toBeGreaterThan(0);
+  });
+
+  it('字节估算与宿主同款公式：byteLength(原 JSON) - byteLength(剥离后 JSON)', () => {
+    const message = { role: 'assistant', providerReplay: { type: 'openai-responses-compaction', blob: 'y'.repeat(64) } };
+    const stripped = { ...message } as Record<string, unknown>;
+    delete stripped.providerReplay;
+    const expected =
+      Buffer.byteLength(JSON.stringify(message)) - Buffer.byteLength(JSON.stringify(stripped));
+
+    const report = detectReplayCheckpointEntries([{ entryId: 'e1', message }]);
+    expect(report.estimatedBytesFreed).toBe(expected);
+  });
+
+  it('无命中时返回全零（长期为 0 即说明该宿主路径无需启用写入能力）', () => {
+    const report = detectReplayCheckpointEntries([
+      { entryId: 'a', message: { role: 'assistant' } },
+      { entryId: 'b', message: { role: 'user' } },
+    ]);
+    expect(report).toEqual({ count: 0, entryIds: [], estimatedBytesFreed: 0 });
   });
 });

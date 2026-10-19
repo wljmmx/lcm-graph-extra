@@ -114,3 +114,72 @@ export function summarizeTranscriptEntries(entries: readonly VisibleTranscriptEn
   }
   return { total: entries.length, byRole };
 }
+
+/**
+ * 宿主 `isCompactionReplayCheckpoint` 接受的 provider 压缩回放类型。
+ *
+ * 依据 openclaw 2026.10.4 `session-DitLEF2L.mjs`：
+ *   isCompactionReplayCheckpoint(replay) →
+ *     replay.type === "anthropic-compaction"
+ *     || "openai-responses-compaction"
+ *     || "openai-responses-retained-compaction"
+ * 这是宿主自身对「可剥离回放检查点」的唯一定义，故此处直接复用，不自造判据。
+ */
+export const COMPACTION_REPLAY_TYPES: readonly string[] = [
+  'anthropic-compaction',
+  'openai-responses-compaction',
+  'openai-responses-retained-compaction',
+];
+
+/** P2 观察项：若执行改写，潜在可剥离的回放检查点统计 */
+export interface ReplayCheckpointReport {
+  /** 携带 provider 压缩回放检查点的 assistant 条目数（宿主 stripStalePrefixReplay 的目标集合） */
+  count: number;
+  /** 命中的条目 id（供后续构造 replacements 使用） */
+  entryIds: string[];
+  /** 预计可释放字节数（宿主 findTranscriptRewriteMatches 同款公式：原 JSON - 剥离后 JSON） */
+  estimatedBytesFreed: number;
+}
+
+/**
+ * P2（**纯函数 / 只读**）：量化「若调用 rewriteTranscriptEntries 剥离 providerReplay 能释放多少」。
+ *
+ * 设计意图：在真正写盘之前，先用可观测数据回答「改写是否值得」。
+ * 若本函数长期返回 `count === 0`，说明该宿主路径下无可剥离内容，写入能力即可不启用。
+ *
+ * 字节估算与宿主 `findTranscriptRewriteMatches` 保持一致：
+ *   byteLength(originalJson) - byteLength(stripStalePrefixReplay 后的 JSON)
+ */
+export function detectReplayCheckpointEntries(
+  entries: readonly VisibleTranscriptEntry[],
+): ReplayCheckpointReport {
+  const entryIds: string[] = [];
+  let estimatedBytesFreed = 0;
+
+  for (const e of entries) {
+    const message = e.message;
+    if (!message || typeof message !== 'object') continue;
+    // 宿主 stripStalePrefixReplay 的第一道条件：仅 assistant 消息
+    if (message.role !== 'assistant') continue;
+    const replay = (message as Record<string, unknown>).providerReplay;
+    if (!replay || typeof replay !== 'object') continue;
+    if (!COMPACTION_REPLAY_TYPES.includes((replay as { type?: unknown }).type as string)) continue;
+
+    // 剥离 providerReplay 后的「回放安全」消息（与宿主 stripCompactionReplayCheckpoint 同语义）
+    const replaySafe: Record<string, unknown> = { ...message };
+    delete replaySafe.providerReplay;
+
+    const originalJson = JSON.stringify(message);
+    const safeJson = JSON.stringify(replaySafe);
+    // 仅统计确有差异的条目：与宿主「无差异则不计入 matchedIndices」一致
+    if (originalJson === safeJson) continue;
+
+    entryIds.push(e.entryId);
+    estimatedBytesFreed += Math.max(
+      0,
+      Buffer.byteLength(originalJson) - Buffer.byteLength(safeJson),
+    );
+  }
+
+  return { count: entryIds.length, entryIds, estimatedBytesFreed };
+}
