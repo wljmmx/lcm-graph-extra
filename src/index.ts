@@ -2087,9 +2087,10 @@ const pluginEntry: any = definePluginEntry({
             return { changed, bytesFreed, rewrittenEntries, reason: 'aborted' };
           }
 
-          // 3. 转录能力只读诊断（SDK 2026.10.4，P0+P1+P2 observe-only）
+          // 3. 转录能力只读诊断（SDK 2026.10.4，P0+P1+P2 observe-only，P3 指标暴露）
           //    `runtimeContext.rewriteTranscriptEntries` 仅在 maintain 注入，且要求 sessionKey 存在。
-          //    此处**只探测 + 枚举 + 量化**，不做任何写盘 —— 写入能力待观察数据证明「确有可剥离内容」后另行开启。
+          //    此处**只探测 + 枚举 + 量化 + 记录指标**，不做任何写盘 ——
+          //    写入能力是否启用，由观察数据（lcm_transcript_replay_checkpoint_entries）决定。
           try {
             const _cap = probeTranscriptRewriteCapability(
               (params as any).runtimeContext,
@@ -2106,6 +2107,12 @@ const pluginEntry: any = definePluginEntry({
               // P2 observe-only：用宿主自身判据（provider 压缩回放检查点）量化「若改写能释放多少」。
               // count 长期为 0 ⇒ 该宿主路径下无可剥离内容，写入能力无需启用。
               const _replay = detectReplayCheckpointEntries(_entries);
+              healthMetrics.recordTranscriptDiagnostic({
+                capability: 'available',
+                messageEntryCount: _summary.total,
+                replayCheckpointEntries: _replay.count,
+                replayEstimatedBytesFreed: _replay.estimatedBytesFreed,
+              });
               logger?.debug?.('maintain: transcript rewrite capability available (observe-only)', {
                 messageEntryCount: _summary.total,
                 byRole: _summary.byRole,
@@ -2113,6 +2120,7 @@ const pluginEntry: any = definePluginEntry({
                 estimatedBytesFreed: _replay.estimatedBytesFreed,
               });
             } else {
+              healthMetrics.recordTranscriptDiagnostic({ capability: _cap.reason ?? 'not_provided' });
               logger?.debug?.('maintain: transcript rewrite capability unavailable', { reason: _cap.reason });
             }
           } catch (diagErr) {

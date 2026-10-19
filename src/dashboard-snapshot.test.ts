@@ -12,7 +12,7 @@
  * - 端口被自身残留实例占用时识别为 self-stale
  */
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
-import { startDashboardSnapshotServer, type SnapshotProviders, type SnapshotServerHandle } from './dashboard-snapshot.js';
+import { startDashboardSnapshotServer, buildPrometheusMetrics, type SnapshotProviders, type SnapshotServerHandle } from './dashboard-snapshot.js';
 
 // mock tools.js 的 handler 注册表查询，避免引入完整插件依赖
 vi.mock('./tools.js', () => ({
@@ -813,5 +813,47 @@ describe('DashboardSnapshotServer', () => {
       const health = await fetch(`http://127.0.0.1:${port}/internal/health`);
       expect(health.status).toBe(200);
     });
+  });
+});
+
+/**
+ * SDK 2026.10.4 P3：转录改写能力观察项的 Prometheus 暴露契约。
+ * 目的：让「是否开启破坏性写能力」由观察指标决定，因此指标必须稳定可读。
+ */
+describe('buildPrometheusMetrics — 转录观察项（P3）', () => {
+  const makeProviders = (health: unknown): SnapshotProviders =>
+    ({
+      getHealthLatest: () => health,
+      getGraphAdapterState: () => ({ connected: true }),
+    }) as unknown as SnapshotProviders;
+
+  it('能力可用时按枚举标签暴露状态，并输出计数与字节估算', () => {
+    const out = buildPrometheusMetrics(
+      makeProviders({
+        transcriptCapability: 'available',
+        transcriptMessageEntryCount: 42,
+        transcriptReplayCheckpointEntries: 3,
+        transcriptReplayEstimatedBytesFreed: 2048,
+      }),
+    );
+    expect(out).toContain('lcm_transcript_capability{state="available"} 1');
+    expect(out).toContain('lcm_transcript_capability{state="not_provided"} 0');
+    expect(out).toContain('lcm_transcript_capability{state="missing_session_key"} 0');
+    expect(out).toContain('lcm_transcript_message_entries 42');
+    expect(out).toContain('lcm_transcript_replay_checkpoint_entries 3');
+    expect(out).toContain('lcm_transcript_replay_estimated_bytes_freed 2048');
+  });
+
+  it('health 为 null 时输出零值且默认 not_provided（不抛错）', () => {
+    const out = buildPrometheusMetrics(makeProviders(null));
+    expect(out).toContain('lcm_transcript_capability{state="not_provided"} 1');
+    expect(out).toContain('lcm_transcript_replay_checkpoint_entries 0');
+    expect(out).toContain('lcm_transcript_replay_estimated_bytes_freed 0');
+  });
+
+  it('缺 sessionKey 时状态标签切到 missing_session_key', () => {
+    const out = buildPrometheusMetrics(makeProviders({ transcriptCapability: 'missing_session_key' }));
+    expect(out).toContain('lcm_transcript_capability{state="missing_session_key"} 1');
+    expect(out).toContain('lcm_transcript_capability{state="available"} 0');
   });
 });

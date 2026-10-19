@@ -344,6 +344,11 @@ export interface HealthSnapshotLite {
   lastL2Ms: number;
   lastL3Ms: number;
   lastL4Ms: number;
+  /** SDK 2026.10.4 P3: 转录改写能力观察项（仅内存态，healthMetrics 提供） */
+  transcriptCapability?: 'available' | 'not_provided' | 'missing_session_key';
+  transcriptMessageEntryCount?: number;
+  transcriptReplayCheckpointEntries?: number;
+  transcriptReplayEstimatedBytesFreed?: number;
   pendingExperienceCount: number;
   distilledExperienceCount: number;
   tierLow: number;
@@ -584,6 +589,26 @@ export function buildPrometheusMetrics(providers: SnapshotProviders): string {
   lines.push('# HELP lcm_ux_assemble_total Total assemble count');
   lines.push('# TYPE lcm_ux_assemble_total counter');
   lines.push(`lcm_ux_assemble_total ${uxTotal} ${ts}`);
+
+  // SDK 2026.10.4 P3: 转录改写能力观察项（observe-only）
+  // 用途：以观察数据决定是否开启「按 entryId 改写活动转录」这一破坏性能力 ——
+  // lcm_transcript_replay_checkpoint_entries 长期为 0 ⇒ 无可剥离内容 ⇒ 无需启用写入。
+  // capability 用枚举标签暴露（1 表示当前探测到的状态）。
+  lines.push('# HELP lcm_transcript_capability Transcript rewrite capability state (1=current state)');
+  lines.push('# TYPE lcm_transcript_capability gauge');
+  const _capState = h.transcriptCapability ?? 'not_provided';
+  for (const st of ['available', 'not_provided', 'missing_session_key']) {
+    lines.push(`lcm_transcript_capability{state="${st}"} ${_capState === st ? 1 : 0} ${ts}`);
+  }
+  lines.push('# HELP lcm_transcript_message_entries Visible transcript message entries seen by maintain');
+  lines.push('# TYPE lcm_transcript_message_entries gauge');
+  lines.push(`lcm_transcript_message_entries ${h.transcriptMessageEntryCount ?? 0} ${ts}`);
+  lines.push('# HELP lcm_transcript_replay_checkpoint_entries Assistant entries carrying a provider compaction replay checkpoint');
+  lines.push('# TYPE lcm_transcript_replay_checkpoint_entries gauge');
+  lines.push(`lcm_transcript_replay_checkpoint_entries ${h.transcriptReplayCheckpointEntries ?? 0} ${ts}`);
+  lines.push('# HELP lcm_transcript_replay_estimated_bytes_freed Estimated bytes removable if rewrites were applied');
+  lines.push('# TYPE lcm_transcript_replay_estimated_bytes_freed gauge');
+  lines.push(`lcm_transcript_replay_estimated_bytes_freed ${h.transcriptReplayEstimatedBytesFreed ?? 0} ${ts}`);
 
   // v1.2.0-1: 延迟直方图（summary 类型，暴露 P50/P90/P95/P99 + avg + count）
   // Prometheus summary 适合百分位场景；histogram 类型需要 bucket 边界，我们用滑动窗口采样，

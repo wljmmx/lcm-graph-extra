@@ -39,6 +39,15 @@ export interface HealthSnapshot {
   // R-2 cascade judgeRecall（仅内存态，不持久化到 lcm.db 避免 ALTER TABLE 风险）
   cascadeTier1Confidence?: number;
   cascadeJudgeSource?: 'gm-pro' | 'local';
+  // SDK 2026.10.4 P3: 转录改写能力观察项（**仅内存态**，理由同 cascadeTier1Confidence —— 避免 ALTER TABLE 风险）
+  /** maintain 中对该能力的探测结果 */
+  transcriptCapability?: 'available' | 'not_provided' | 'missing_session_key';
+  /** 可见转录消息条目数（只读枚举结果） */
+  transcriptMessageEntryCount?: number;
+  /** 若执行改写，潜在可剥离的 provider 压缩回放检查点条目数 */
+  transcriptReplayCheckpointEntries?: number;
+  /** 对应的预计可释放字节数 */
+  transcriptReplayEstimatedBytesFreed?: number;
   // v1.1-6: UX 指标 —— 降级频率 / Token 节省率 / 经验命中率
   degradedCount: number;
   totalAssembleCount: number;
@@ -360,6 +369,31 @@ export class HealthMetricsCollector {
     }
     latest.cascadeTier1Confidence = confidence;
     latest.cascadeJudgeSource = source;
+    // 仅内存态字段，不触发 dirtySinceLastPersist（不持久化）
+  }
+
+  /**
+   * SDK 2026.10.4 P3: 记录 maintain 的转录改写能力观察项。
+   *
+   * 仅内存态（不持久化）：与 recordCascadeConfidence 同理，避免对 lcm.db 做 ALTER TABLE。
+   * 用途：让「是否值得开启写能力」由**观察数据**决定 ——
+   * 若 transcriptReplayCheckpointEntries 长期为 0，则无需引入破坏性写入。
+   */
+  recordTranscriptDiagnostic(opts: {
+    capability: 'available' | 'not_provided' | 'missing_session_key';
+    messageEntryCount?: number;
+    replayCheckpointEntries?: number;
+    replayEstimatedBytesFreed?: number;
+  }): void {
+    let latest = this.snapshots[this.snapshots.length - 1];
+    if (!latest) {
+      latest = this._createPlaceholderSnapshot();
+      this.snapshots.push(latest);
+    }
+    latest.transcriptCapability = opts.capability;
+    latest.transcriptMessageEntryCount = opts.messageEntryCount;
+    latest.transcriptReplayCheckpointEntries = opts.replayCheckpointEntries;
+    latest.transcriptReplayEstimatedBytesFreed = opts.replayEstimatedBytesFreed;
     // 仅内存态字段，不触发 dirtySinceLastPersist（不持久化）
   }
 
