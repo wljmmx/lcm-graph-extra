@@ -26,6 +26,7 @@ import { registerMoaRoutes } from './routes/moa';
 import { registerQmdTestRoutes } from './routes/qmd-test';
 import { registerBenchmarkRoutes } from './routes/benchmark';
 import { registerGmProRoutes } from './routes/gm-pro';
+import { registerHarnessingRoutes } from './routes/harnessing';
 import { closeNeo4j } from './lib/neo4j';
 import { requireAuth, isAuthEnabled } from './lib/auth';
 
@@ -226,6 +227,8 @@ async function main(): Promise<void> {
   await registerBenchmarkRoutes(app);
   // v2.1.13: graph-memory-pro HTTP API 代理路由（状态/统计/图谱数据）
   await registerGmProRoutes(app);
+  // Harnessing 演进历史路由（Harness² 吸收：live 快照 + 证据经验历史）
+  await registerHarnessingRoutes(app);
 
   // 优雅关闭
   const shutdown = async (signal: string) => {

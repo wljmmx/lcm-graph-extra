@@ -26,6 +26,10 @@ import { getRegisteredToolHandler, getRegisteredToolSchema } from './tools.js';
 import { Value } from 'typebox/value';
 // MoA 性能追踪
 import { getMoaPerformance } from './moa/perf-tracker.js';
+// Harnessing 自动观察回路（信号池 + 最近自动步快照，纯内存）
+import { peekHarnessSignals, getLastAutoStep } from './harnessing/signal-collector.js';
+import { isHarnessingEnabled } from './harnessing/budget.js';
+import { isHarnessingAutoEnabled } from './harnessing/auto.js';
 
 // v1.0.1-1/4: Basic Auth + IP 白名单配置（与 dashboard 共用 DASHBOARD_AUTH）
 interface SnapshotAuthConfig {
@@ -322,6 +326,24 @@ export interface DashboardSnapshot {
   health: {
     latest: HealthSnapshotLite | null; // healthMetrics.getLatest()
   };
+  /** Harnessing 自动观察回路实时状态（Harness² 吸收，纯内存态） */
+  harnessing: {
+    enabled: boolean;
+    autoEnabled: boolean;
+    signals: { count: number; totalOccurrences: number; byKind: Record<string, number>; bySource: Record<string, number> };
+    lastAutoStep: null | {
+      ts: number;
+      ran: boolean;
+      skipped?: string;
+      signalCount: number;
+      stepId?: string;
+      proposals?: number;
+      adopted?: number;
+      rejected?: number;
+      inconclusive?: number;
+      lessonsWritten?: number;
+    };
+  };
   capabilityProfile?: {
     current: { id: string; label: string; description: string; estimatedOverhead: number };
     available: Array<{ id: string; label: string; description: string; estimatedOverhead: number; apiCount: number }>;
@@ -461,6 +483,25 @@ export function buildSnapshot(providers: SnapshotProviders): DashboardSnapshot {
     getGlobalLogger()?.debug?.('[dashboard-snapshot] health snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
   }
 
+  // Harnessing 自动观察回路（模块级内存态，直读不走 provider；异常隔离同上）
+  let harnessing: DashboardSnapshot['harnessing'];
+  try {
+    harnessing = {
+      enabled: isHarnessingEnabled(),
+      autoEnabled: isHarnessingAutoEnabled(),
+      signals: peekHarnessSignals(),
+      lastAutoStep: getLastAutoStep(),
+    };
+  } catch (e) {
+    harnessing = {
+      enabled: false,
+      autoEnabled: false,
+      signals: { count: 0, totalOccurrences: 0, byKind: {}, bySource: {} },
+      lastAutoStep: null,
+    };
+    getGlobalLogger()?.debug?.('[dashboard-snapshot] harnessing snapshot failed, using fallback', { err: e instanceof Error ? e.message : String(e) });
+  }
+
   return {
     cascade,
     userProfile,
@@ -468,6 +509,7 @@ export function buildSnapshot(providers: SnapshotProviders): DashboardSnapshot {
     debt,
     retrieval,
     health,
+    harnessing,
     capabilityProfile,
     timestamp: Date.now(),
   };

@@ -25,6 +25,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/monitor/overview' },
   // 经验管理
   { path: '/experience', name: 'experience', component: () => import('./views/ExperienceView.vue') },
+  // Harnessing 演进（Harness² 吸收：观察回路 + 证据经验历史）
+  { path: '/harnessing', name: 'harnessing', component: () => import('./views/HarnessingView.vue') },
   // 记忆查询
   { path: '/memory', name: 'memory', component: () => import('./views/MemoryView.vue') },
   // 维护工具

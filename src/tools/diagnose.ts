@@ -150,8 +150,43 @@ export function registerDiagnoseTool(api: any): void {
         }
       } catch (e: any) { warn("Health metrics", "collection failed: " + e.message); warns++; }
 
-      // 6. Summary
-      sep(); p(H); p("6. Summary"); p(H);
+      // 6. Harnessing（Harness² 吸收：自动观察回路）
+      sep(); p(H); p("6. Harnessing (Auto-Observation Loop)"); p(H);
+      try {
+        const { peekHarnessSignals, getLastAutoStep } = await import('../harnessing/signal-collector.js');
+        const { isHarnessingEnabled } = await import('../harnessing/budget.js');
+        const { isHarnessingAutoEnabled } = await import('../harnessing/auto.js');
+        const enabled = isHarnessingEnabled();
+        const autoEnabled = isHarnessingAutoEnabled();
+        if (enabled) ok("Master switch", "enabled"); else warn("Master switch", "off (LCMG_HARNESSING=off)");
+        if (autoEnabled) ok("Auto observe step", "enabled (~6h cadence, observe-only)"); else warn("Auto observe step", "off (LCMG_HARNESSING_AUTO=off)");
+        const sig = peekHarnessSignals();
+        if (sig.count > 0) {
+          ok("Signal pool", sig.count + " signals / " + sig.totalOccurrences + " occurrences");
+          p("    byKind: " + Object.entries(sig.byKind).map(([k, v]) => k + ":" + v).join(", "));
+          const sources = Object.entries(sig.bySource).slice(0, 5).map(([k, v]) => k + ":" + v).join(", ");
+          if (sources) p("    bySource(top5): " + sources);
+        } else {
+          ok("Signal pool", "empty (no tool failures observed)");
+        }
+        const last = getLastAutoStep();
+        if (last) {
+          const ago = Math.round((Date.now() - last.ts) / 60000);
+          ok("Last auto step", ago + " min ago | ran=" + last.ran +
+            (last.skipped ? " skipped=" + last.skipped : "") +
+            " signals=" + last.signalCount +
+            " adopted=" + (last.adopted ?? 0) +
+            " rejected=" + (last.rejected ?? 0) +
+            " inconclusive=" + (last.inconclusive ?? 0) +
+            " (observe-only, writes=0; use lcmg_harness_step mode=apply to persist)");
+        } else {
+          warn("Last auto step", "not run yet in this process (first run ~6h after start)");
+        }
+        pass++;
+      } catch (e: any) { warn("Harnessing", "state unavailable: " + e.message); warns++; }
+
+      // 7. Summary
+      sep(); p(H); p("7. Summary"); p(H);
       p("  Pass: " + pass + "  Warnings: " + warns + "  Failures: " + fails);
       p(fails === 0 ? "  Status: OK" : "  Status: DEGRADED (" + fails + " issues)");
 
