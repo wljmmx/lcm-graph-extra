@@ -15,6 +15,14 @@ import { callLlm, isLocalLlm } from '../utils/llm-call.js';
 import { businessMetrics } from '../health-metrics.js';
 import { llmTimeout } from '../config/defaults.js';
 import { isMainTurnActive } from '../async/main-turn-gate.js';
+// Harnessing P4: 内容寻址缓存 —— 同内容+同模型跳过 LLM 重蒸馏
+import {
+  isDistillCacheEnabled,
+  computeDistillContentAddress,
+  getCachedDistill,
+  setCachedDistill,
+  buildDistillArtifactFromCache,
+} from './distill-cache.js';
 
 export function isOllamaModel(model: string): boolean {
   // 判断主会话模型是否为 Ollama 本地模型。
@@ -512,6 +520,19 @@ export async function distillOne(
     + ' severity (one of: critical|major|minor), freeTags (array of short strings),'
     + ' relatedConcepts (array of 2-5 short keywords/phrases representing closely related topics or concepts for cross-linking).'
     + ' Return ONLY JSON without any thinking process.';
+  // Harnessing P4: 内容寻址缓存命中 → 直接复用派生字段，跳过 LLM（身份字段仍按当前 raw 生成）
+  const _cacheKey = computeDistillContentAddress({
+    source: raw.source, context: raw.context, detail: raw.detail, model: llm.model,
+  });
+  if (isDistillCacheEnabled()) {
+    const _hit = getCachedDistill(_cacheKey);
+    if (_hit) {
+      log?.debug?.('distillOne: content-address cache hit', {
+        rawId: raw.id, key: _cacheKey.slice(0, 12), model: llm.model,
+      });
+      return buildDistillArtifactFromCache(_hit, raw.id, raw.detail, raw.context);
+    }
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), llmTimeout('distillMs'));
   try {
@@ -602,7 +623,19 @@ export async function distillOne(
     // 校验 relevanceScore 范围 [0,1]，越界回退 0.5
     let rs = typeof parsed.relevanceScore === 'number' ? parsed.relevanceScore : 0.5;
     if (!isFinite(rs) || rs < 0) rs = 0; else if (rs > 1) rs = 1;
-    return { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: rs, createdAt: new Date(), matchCount: 0, tags, relatedConcepts };
+    const artifact = { id: 'exp_dist_' + randomUUID(), rawIds: [raw.id], type: parsed.type || 'lesson', title: parsed.title || raw.source, summary: parsed.summary || '(no summary)', detail: (raw.detail || '').slice(0, 2000), context: raw.context || '', relevanceScore: rs, createdAt: new Date(), matchCount: 0, tags, relatedConcepts };
+    // Harnessing P4: 实时蒸馏成功 → 派生字段写入内容寻址缓存（下次同内容免 LLM）
+    if (isDistillCacheEnabled()) {
+      setCachedDistill(_cacheKey, {
+        type: artifact.type,
+        title: artifact.title,
+        summary: artifact.summary,
+        relevanceScore: artifact.relevanceScore,
+        tags: artifact.tags,
+        relatedConcepts: artifact.relatedConcepts,
+      });
+    }
+    return artifact;
   } catch (err) {
     clearTimeout(timer);
     const errName = err instanceof Error ? err.name : '';

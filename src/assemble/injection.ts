@@ -16,6 +16,8 @@ import { quickHash } from '../plugin/keywords.js';
 import { applyTotalControl } from '../plugin/token-control.js';
 import { estimateTokensFromMessages } from '../lcm-bridge.js';
 import { buildKnowledgeGuidance } from './guidance.js';
+// Harnessing P1: 经验作用域分层（invariant 常驻 / domain 场景命中才注入）
+import { applyScopeLayering } from '../experience/scope.js';
 // P1-1: 动态 import 提升为静态导入，避免每次 injectContext 的 await import 开销
 import { backgroundTasks } from '../async/task-registry.js';
 import { detectConflicts } from '../merger.js';
@@ -199,6 +201,29 @@ export async function injectContext(
   // Layer 4: Experience
   let finalExpResults = expResults;
   if (expResults.length > 0) {
+    // Harnessing P1: 经验作用域分层 —— domain 经验仅在场景标签命中时注入（反跨任务泄漏）。
+    // 存量数据无 scope → 按 invariant 处理 → 行为与历史完全一致；仅显式 domain 经验参与过滤。
+    // 分层失败按原样注入（non-fatal）。
+    let scopeFiltered = expResults;
+    try {
+      const _scopeTags: string[] = [];
+      if (scenario) _scopeTags.push(String(scenario));
+      try {
+        for (const s of (ctx.userProfile?.getTopScenario?.(2) ?? [])) {
+          if ((s as any)?.name) _scopeTags.push(String((s as any).name));
+        }
+      } catch { /* 用户画像不可用时仅用 scenario */ }
+      const _layered = applyScopeLayering(expResults, { scenarioTags: _scopeTags });
+      scopeFiltered = _layered.kept;
+      if (_layered.droppedDomain > 0) {
+        ctx.logger?.debug?.('[injection] Layer 4 scope-layering dropped domain experiences', {
+          dropped: _layered.droppedDomain,
+          kept: scopeFiltered.length,
+          scenarioTags: _scopeTags,
+        });
+      }
+    } catch { /* non-fatal */ }
+
     // S2: 经验不再按词法实体硬删——以 S-7 用户画像 boost 为主排序，实体分数弱化。
     // S2.5 (C-1): 经验同样消费 Phase 1 实体 _entityScore 做主题一致性软加权：
     //   高实体命中 → 权重 1.0，中 → 0.7，低 → 0.5，与 qmd 一致；低实体主题不符经验被降权。
@@ -208,12 +233,12 @@ export async function injectContext(
       return level === 'high' ? 1.0 : level === 'medium' ? 0.7 : 0.5;
     };
 
-    let personalizedResults = expResults;
+    let personalizedResults = scopeFiltered;
     try {
       const topTech = ctx.userProfile.getTopTechStack(3);
       const topScenario = ctx.userProfile.getTopScenario(2);
       if (topTech.length > 0 || topScenario.length > 0) {
-        personalizedResults = [...expResults]
+        personalizedResults = [...scopeFiltered]
           .map((e: any) => {
             const boost = ctx.userProfile.computeBoost(e.experience?.tags);
             return { ...e, score: (e.score ?? 0.5) * boost * expEntityWeight(expEsOf(e)), _personalizedBoost: boost };

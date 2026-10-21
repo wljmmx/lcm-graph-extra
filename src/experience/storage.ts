@@ -68,7 +68,9 @@ const SEARCH_RELEVANT = `
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
          e.tags_severity AS tags_severity,
-         e.tags_free AS tags_free
+         e.tags_free AS tags_free,
+         e.scope AS scope,
+         e.evidence AS evidence
   ORDER BY e.relevanceScore DESC, decayedMatchCount DESC
   LIMIT $limit
 `;
@@ -95,7 +97,9 @@ const SEARCH_BY_CONTEXT = `
          e.type AS type,
          e.tags_scenario AS tags_scenario,
          e.tags_techStack AS tags_techStack,
-         e.tags_severity AS tags_severity
+         e.tags_severity AS tags_severity,
+         e.scope AS scope,
+         e.evidence AS evidence
   ORDER BY e.relevanceScore DESC
   LIMIT $limit
 `;
@@ -146,6 +150,7 @@ const SEARCH_QUERY_TAIL = `
                e.tags_scenario AS tags_scenario,
                e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
                e.tags_free AS tags_free,
+               e.scope AS scope, e.evidence AS evidence,
                queryMatch AS queryMatch
         ORDER BY (e.relevanceScore * 0.6) + (queryMatch * 0.4) + (decayedMatchCount * 0.1) DESC
         LIMIT $limit
@@ -454,6 +459,15 @@ export class ExperienceStorage {
         props.tags_free = normalizeFreeTags(d.tags.freeTags).join(',') || '';
       }
     }
+    // Harnessing P1: 作用域 + 证据链（可审计）。不设 scope 的存量路径行为不变。
+    if (d.scope) {
+      props.scope = d.scope;
+    }
+    if (d.evidence) {
+      try {
+        props.evidence = JSON.stringify(d.evidence).slice(0, 2000);
+      } catch { /* 证据不可序列化时跳过，不阻塞主写入 */ }
+    }
     await this.adapter.query(UPSERT_DISTILLED, { id: d.id, props });
   }
 
@@ -534,6 +548,7 @@ export class ExperienceStorage {
                 e.tags_scenario AS tags_scenario,
                 e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
                 e.tags_free AS tags_free,
+                e.scope AS scope, e.evidence AS evidence,
                 (ftScore * 0.6) AS queryMatch
          ORDER BY (coalesce(e.relevanceScore, 0) * 0.4) + (ftScore * 0.6) + (decayedMatchCount * 0.1) DESC
          LIMIT $limit`,
@@ -607,6 +622,7 @@ export class ExperienceStorage {
                 e.tags_scenario AS tags_scenario,
                 e.tags_techStack AS tags_techStack, e.tags_severity AS tags_severity,
                 e.tags_free AS tags_free,
+                e.scope AS scope, e.evidence AS evidence,
                 (ftScore + tagMatch) AS queryMatch
          ORDER BY (e.relevanceScore * 0.6) + ((ftScore + tagMatch) * 0.4) + (decayedMatchCount * 0.1) DESC
          LIMIT $limit`;
@@ -1023,7 +1039,8 @@ export class ExperienceStorage {
              e.relevanceScore AS relevanceScore, e.createdAt AS createdAt,
              e.matchCount AS matchCount, e.rawIds AS rawIds, e.type AS type,
              e.tags_scenario AS tags_scenario, e.tags_techStack AS tags_techStack,
-             e.tags_severity AS tags_severity, e.tags_free AS tags_free
+             e.tags_severity AS tags_severity, e.tags_free AS tags_free,
+             e.scope AS scope, e.evidence AS evidence
       ORDER BY e.matchCount DESC, e.relevanceScore DESC
       LIMIT ${Math.trunc(limit)}
     `);
@@ -1142,6 +1159,10 @@ interface ExperienceSearchRow {
   tags_techStack?: string;
   tags_severity?: string;
   tags_free?: string;
+  /** Harnessing P1: 作用域（'invariant' | 'domain'，缺省按 invariant） */
+  scope?: string;
+  /** Harnessing P1: 证据链（JSON 字符串，解析失败安全降级为 undefined） */
+  evidence?: string;
 }
 
 interface PendingRow {
@@ -1203,7 +1224,21 @@ function rowToDistilled(r: ExperienceSearchRow): DistilledExperience {
     createdAt: new Date(r.createdAt),
     matchCount: r.matchCount ?? 0,
     tags: buildTagsFromRow(r) as any,
+    // Harnessing P1: 作用域 + 证据链读回（解析失败安全降级，绝不抛错干扰检索）
+    scope: r.scope === 'domain' ? 'domain' : 'invariant',
+    evidence: parseEvidenceRow(r.evidence),
   };
+}
+
+/** Harnessing P1: 安全解析 evidence JSON；损坏数据静默降级为 undefined */
+function parseEvidenceRow(raw: string | undefined): DistilledExperience['evidence'] {
+  if (!raw || typeof raw !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function buildTagsFromRow(r: ExperienceSearchRow) {
