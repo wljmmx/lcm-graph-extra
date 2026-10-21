@@ -804,6 +804,20 @@ export function createAuditWrapper(originalRegisterTool: any) {
         error = e instanceof Error ? e.message : String(e);
         throw e;
       } finally {
+        // Harnessing 自动介入（默认开启，纯内存观察）：工具失败自动记入信号池，
+        // 供 heartbeat 低频观察步消费。排除 abort（用户取消不是系统失败）。
+        // 本调用零 IO、零写盘——写入必须显式走 lcmg_harness_step mode=apply。
+        if (status === 'failure' && result?.details?.aborted !== true) {
+          try {
+            const { recordHarnessSignal } = await import('../harnessing/signal-collector.js');
+            const detail = error
+              ? String(error).slice(0, 200)
+              : result?.details?.error
+                ? String(result.details.error).slice(0, 200)
+                : '';
+            recordHarnessSignal(`工具 ${toolName} 调用失败${detail ? `：${detail}` : ''}`, toolName);
+          } catch { /* silent — 信号收集绝不影响工具调用 */ }
+        }
         try {
           let appendOperationLog: ((entry: any) => void) | null = null;
           for (const candidate of [

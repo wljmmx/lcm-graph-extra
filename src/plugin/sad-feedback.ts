@@ -234,6 +234,21 @@ export function clearSadWeights(sessionKey: string): void {
   _sadCache.delete(sessionKey);
 }
 
+/**
+ * Harnessing 自动观察步基线：跨会话最差有效权重。
+ * 反复失败/未被使用的工具会在部分会话被 SAD 压到命中线以下，
+ * 取最差值作为"该工具当前的真实可推荐性下界"（无观测时回退 DEFAULT_WEIGHT）。
+ * 仅低频路径（heartbeat / 工具）调用，避免遍历会话缓存的开销进入热路径。
+ */
+export function getWorstEffectiveWeight(tool: string): number {
+  let worst: number | null = null;
+  for (const sessionKey of _sadCache.keys()) {
+    const v = getEffectiveWeight(tool, sessionKey);
+    if (worst === null || v < worst) worst = v;
+  }
+  return worst ?? DEFAULT_WEIGHT;
+}
+
 /** 供 heartbeat 清理过期 SAD 缓存的公开入口 */
 export function evictStaleSadWeights(): void {
   evictStaleSad();

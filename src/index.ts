@@ -2660,6 +2660,13 @@ const pluginEntry: any = definePluginEntry({
     // RetrievalGateway 心跳恢复重试计数器（用于诊断恢复失败原因）
     let _retrievalGatewayRecoveryAttempts = 0;
     let _retrievalGatewayLastRecoveryError: string | null = null;
+    // Harnessing 自动观察步节流（Harness² 吸收）。默认 6h 一次，启动后先等一个间隔（避免冷启动噪音）。
+    // LCMG_HARNESSING_AUTO_INTERVAL_MS 可调（最小 10min）；LCMG_HARNESSING_AUTO=off 关闭自动步。
+    let lastHarnessingAutoRun = Date.now();
+    const HARNESSING_AUTO_INTERVAL_MS = (() => {
+      const raw = Number(process.env.LCMG_HARNESSING_AUTO_INTERVAL_MS);
+      return Number.isFinite(raw) && raw >= 600_000 ? Math.trunc(raw) : 6 * 60 * 60 * 1000;
+    })();
     // Distillation helpers 已抽出到 src/plugin/distillation.ts
     const { runDistillation, resolveDistillationLlm } = distillationModule;
 
@@ -3299,6 +3306,33 @@ const pluginEntry: any = definePluginEntry({
                 }
               } catch (reconcileErr) {
                 logger?.warn?.("heartbeat: debt reconcile failed (non-fatal)", { err: String(reconcileErr) });
+              }
+            })());
+          }
+        }
+
+        // --- 6. Harnessing 自动观察步（默认开启，observe-only；LCMG_HARNESSING_AUTO=off 关闭）---
+        // Harness² 吸收：自动收集的工具失败信号 → 低频跑一次 Propose–Probe–Compose 观察步。
+        // v1 硬约束：自动路径零写盘（expStore 恒 null），产出仅日志 + 诊断快照；
+        // 写入必须显式走 lcmg_harness_step mode=apply（与 P4 转录改写"先观察后强执"一致）。
+        {
+          const harnessingElapsed = Date.now() - lastHarnessingAutoRun;
+          if (harnessingElapsed >= HARNESSING_AUTO_INTERVAL_MS) {
+            lastHarnessingAutoRun = Date.now();
+            backgroundTasks.register('hb:harnessing-auto', (async () => {
+              try {
+                const { runAutoHarnessingStep } = await import("./harnessing/auto.js");
+                const s = await runAutoHarnessingStep({
+                  log: { debug: (m, meta) => logger?.debug?.(`harnessing ${m}`, meta), warn: (m, meta) => logger?.warn?.(`harnessing ${m}`, meta) },
+                });
+                if (s && (s.ran || s.signals > 0)) {
+                  logger?.info?.("heartbeat: harnessing auto step (observe-only)", {
+                    signals: s.signals, proposals: s.proposals, adopted: s.adopted,
+                    rejected: s.rejected, inconclusive: s.inconclusive, skipped: s.skipped,
+                  });
+                }
+              } catch (e) {
+                logger?.debug?.("heartbeat: harnessing auto step failed (non-fatal)", { err: e instanceof Error ? e.message : String(e) });
               }
             })());
           }
