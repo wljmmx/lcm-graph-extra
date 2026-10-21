@@ -23,13 +23,13 @@ import {
 /** Extract available tool names from assemble params. Hardcoded fallback for Tool Search mode. */
 export function extractAvailableTools(params: any): string[] {
   const tools = params.availableTools;
-  // 完整 21 个工具列表，与 openclaw.plugin.json contracts.tools 完全对齐
+  // 完整 22 个工具列表，与 openclaw.plugin.json contracts.tools 完全对齐
   if (!tools) return [
     "lcmg_search","lcmg_experience_report","lcmg_backup","lcmg_restore","lcmg_import",
     "lcmg_pin","lcmg_sync","lcmg_qmd_status","lcmg_get_document","lcmg_batch_get",
     "lcmg_maintain","lcmg_diagnose","lcmg_forget","lcmg_distill","lcmg_distill_retry",
     "lcmg_backfill","lcmg_compact","lcmg_reset_breaker",
-    "lcmg_config_get","lcmg_config_set","lcmg_moa_reply",
+    "lcmg_config_get","lcmg_config_set","lcmg_moa_reply","lcmg_harness_step",
   ];
   if (tools instanceof Set) return [...tools].map((t: string) => t.toLowerCase());
   if (Array.isArray(tools)) return tools.map((t: string) => t.toLowerCase());
@@ -47,6 +47,7 @@ export const SELF_REGISTERED_TOOLS = new Set([
   "lcmg_backfill", "lcmg_compact", "lcmg_reset_breaker",
   "lcmg_config_get", "lcmg_config_set",
   "lcmg_moa_reply",
+  "lcmg_harness_step",
 ]);
 
 /** Tool category to tool name mapping. */
@@ -165,6 +166,7 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   'lcmg_config_get': '读取配置',
   'lcmg_config_set': '修改配置',
   'lcmg_moa_reply': 'MoA 多模型聚合回复',
+  'lcmg_harness_step': 'Harness 演进步骤（Propose–Probe–Compose）',
 };
 
 /** 工具类别中文标签 —— 用于 low 层级分组展示 */

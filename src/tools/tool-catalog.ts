@@ -207,6 +207,16 @@ export const CE_TOOL_CATALOG: CeToolCatalogEntry[] = [
     scenarios: ["casual_conversation"],
     category: "experience",
   },
+
+  // ===== Harnessing 工具（Harness² 吸收：Propose–Probe–Compose） =====
+  {
+    name: "lcmg_harness_step",
+    label: "Harness 演进步骤",
+    tags: ["harness", "harnessing", "propose", "probe", "compose", "演进", "优化", "失败信号", "探针", "证据", "经验沉淀", "self-improve"],
+    description: "运行一次 harnessing 演进步骤：失败信号自动四分类 → 提出 harness 候选修改 → 探针集行为对比 → 仅采纳有证据的修改；observe 只演算，apply 写入经验库",
+    scenarios: ["maintenance", "knowledge_management"],
+    category: "experience",
+  },
 ];
 
 /**

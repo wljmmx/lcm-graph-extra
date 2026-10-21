@@ -25,6 +25,10 @@ import { estimateTokensFromText } from './lcm-bridge.js';
 import { resolveNeo4jConfig } from './config/neo4j-helper';
 import { registerSearchTool } from './tools/search.js';
 import { registerDiagnoseTool } from './tools/diagnose.js';
+// Harnessing：Propose–Probe–Compose 演进步骤（lcmg_harness_step 工具）
+import { runHarnessingStep } from './harnessing/index.js';
+import { getEffectiveWeight } from './plugin/sad-feedback.js';
+import { SELF_REGISTERED_TOOLS } from './plugin/tool-guidance.js';
 
 import {
   // state management
@@ -2811,6 +2815,106 @@ function _registerOperationalToolsImpl(api: any, dashboardContext: DashboardTool
         details: { ok: false, error: 'no_moa_result' },
         isError: true,
       };
+    },
+  }, { optional: true });
+
+  // ===================================================================
+  // 20. lcmg_harness_step —— Harnessing 演进步骤（Propose–Probe–Compose）
+  // Harness² 吸收：失败信号 → 候选修改 → 探针对比 → 证据采纳 → 经验沉淀。
+  // 默认 observe（只演算不落盘）；mode=apply 才写入经验库。
+  // ===================================================================
+  api.registerTool({
+    name: "lcmg_harness_step",
+    label: "Harness 演进步骤",
+    description: "Run one harnessing step (Propose-Probe-Compose): derive harness edit candidates from failure signals, probe them against a fixture set by contrasting baseline/candidate behavior, and adopt only evidence-backed edits. signals text is auto-classified (action-realization / environment-contract / trajectory-degeneration / residual-reasoning). mode=observe (default) simulates without writing; mode=apply writes adopted lessons (with evidence chain + scope) into the experience store.",
+    parameters: Type.Object({
+      signals: Type.Array(Type.Union([
+        Type.String({ description: "失败描述文本（自动四分类）" }),
+        Type.Object({
+          text: Type.String(),
+          kind: Type.Optional(Type.String({ description: "action-realization | environment-contract | trajectory-degeneration | residual-reasoning（缺省自动分类）" })),
+          source: Type.Optional(Type.String({ description: "源轨迹引用（如 工具名/diagnose/会话 ID，写入经验证据链）" })),
+          count: Type.Optional(Type.Number({ description: "出现次数（默认 1）" })),
+        }),
+      ]), { description: "失败信号列表", minItems: 1 }),
+      fixtures: Type.Array(Type.Object({
+        query: Type.String(),
+        expectedTools: Type.Array(Type.String(), { description: "期望命中的工具名", minItems: 1 }),
+      }), { description: "探针集：查询 + 期望命中工具；无探针集则整步跳过（证据纪律）", minItems: 1 }),
+      mode: Type.Optional(Type.String({ description: "'observe'（默认，只演算不落盘）或 'apply'（采纳项写入经验库）", default: "observe" })),
+      sessionKey: Type.Optional(Type.String({ description: "提供时以该会话的 SAD 工具权重作为探针基线；缺省用中性 0.5 基线" })),
+      stepId: Type.Optional(Type.String({ description: "步骤 ID（写入经验证据链 probeId；缺省自动生成）" })),
+    }),
+    async execute(toolCallId: string, params: any, signal?: AbortSignal) {
+      if (signal?.aborted) {
+        return { content: [{ type: "text", text: "Operation aborted" }], details: { ok: false, aborted: true }, isError: true };
+      }
+      try {
+        const mode = params?.mode === 'apply' ? 'apply' : 'observe';
+        const knownTools = [...SELF_REGISTERED_TOOLS];
+        // 基线权重表：提供 sessionKey 时用该会话的 SAD 有效权重，否则中性 0.5
+        const baseLookup = params?.sessionKey
+          ? (t: string) => getEffectiveWeight(t, String(params.sessionKey))
+          : undefined;
+        const result = await runHarnessingStep({
+          signals: Array.isArray(params?.signals) ? params.signals : [],
+          fixtures: Array.isArray(params?.fixtures) ? params.fixtures : [],
+          knownTools,
+          baseLookup,
+          // observe 模式不落盘（观察优先）；apply 模式写入经验库（expStore 缺失时软降级为观察）
+          expStore: mode === 'apply' ? ((dashboardContext?.expStore as any) ?? null) : null,
+          stepId: params?.stepId,
+          log: {
+            warn: (m: string, meta?: any) => { try { getGlobalLogger()?.warn?.(`[lcm-graph-extra] harnessing ${m}`, meta); } catch { /* ignore */ } },
+            debug: (m: string, meta?: any) => { try { getGlobalLogger()?.debug?.(`[lcm-graph-extra] harnessing ${m}`, meta); } catch { /* ignore */ } },
+          },
+        });
+
+        const lines: string[] = [];
+        lines.push(`# Harnessing Step: ${result.stepId}`);
+        if (!result.ran) {
+          lines.push(`Status: skipped (${result.skipped})`);
+        } else {
+          lines.push(`Mode: ${mode} | Signals: ${result.signals.length}（${[...new Set(result.signals.map((s) => s.kind))].join(', ')}）`);
+          if (result.proposals.length > 0) {
+            lines.push("");
+            lines.push(`Proposals: ${result.proposals.length}`);
+            for (const p of result.proposals) {
+              lines.push(`  - [${p.component}/${p.scope}] ${p.title}`);
+            }
+          }
+          if (result.outcomes.length > 0) {
+            lines.push("");
+            lines.push(`Probe (${result.outcomes[0].baseline.fixtures} fixtures):`);
+            for (const o of result.outcomes) {
+              const sign = o.contrast >= 0 ? '+' : '';
+              lines.push(`  - ${o.editId}: ${(o.baseline.score * 100).toFixed(0)}% → ${(o.candidate.score * 100).toFixed(0)}% (${sign}${(o.contrast * 100).toFixed(0)}%) → ${o.verdict}`);
+            }
+          }
+          lines.push("");
+          lines.push(`Adopted: ${result.adopted.length} | Rejected: ${result.rejected.length} | Inconclusive: ${result.inconclusive.length}`);
+          lines.push(`Lessons written: ${result.lessonsWritten}${mode === 'observe' ? '（observe 模式不落盘）' : ''}`);
+          for (const a of result.adopted) {
+            lines.push(`  ✅ ${a.title}`);
+          }
+        }
+        if (mode === 'observe') {
+          lines.push("");
+          lines.push("提示：本次为观察模式（不落盘）。确认行为对比符合预期后，用 mode='apply' 写入经验库。");
+        }
+
+        return {
+          content: [{ type: "text" as const, text: lines.join("\n") }],
+          details: { ok: true, mode, result },
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: "Harnessing step failed: " + msg }],
+          details: { ok: false, error: "Harnessing step failed: " + msg },
+          isError: true,
+        };
+      }
     },
   }, { optional: true });
 }

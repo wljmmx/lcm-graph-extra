@@ -32,7 +32,8 @@
       "lcmg_reset_breaker",
       "lcmg_config_get",
       "lcmg_config_set",
-      "lcmg_moa_reply"
+      "lcmg_moa_reply",
+      "lcmg_harness_step"
     ]
   },
   "configSchema": {
