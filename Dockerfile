@@ -2,7 +2,7 @@
 # 阶段 1：构建主插件 + dashboard 前端
 # 阶段 2：运行时镜像（仅含 dist 产物 + 运行时依赖）
 
-FROM node:20-alpine AS builder
+FROM node:26.12.1-alpine AS builder
 
 WORKDIR /workspace
 
@@ -26,7 +26,7 @@ RUN cd packages/dashboard && npm run build
 
 # ──────────────────────────────────────────────────────────────────────────
 # 运行时镜像
-FROM node:20-alpine AS runtime
+FROM node:26.12.1-alpine AS runtime
 
 LABEL org.opencontainers.image.title="lcm-graph-extra"
 LABEL org.opencontainers.image.description="OpenClaw Context Engine 插件 — 四层检索上下文注入引擎"

@@ -332,6 +332,12 @@
 | `fix_success` | 修复问题后成功 |
 | `explicit_save` | 用户显式保存 |
 
+> `failure` / `fix_success` 有两条采集路径：
+> - `afterTurn`：对已落盘消息做文本启发式（历史行为）；
+> - `after_tool_call`（OpenClaw SDK 2026.10.9）：工具返回瞬间按结构化结果判定 —— `error` 非空 / `result.isError` / `details.ok === false` 记为 `failure`；同一会话内「同工具 + 同参数签名」先失败后成功记为 `fix_success`（10 分钟内有效）。
+>
+> 为避免污染经验库，cron / heartbeat / system 会话不参与 `after_tool_call` 采集；`failure` 同签名 5 分钟内只记一次。
+
 ---
 
 ## 八、MoA 多模型协作

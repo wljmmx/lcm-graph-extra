@@ -16,7 +16,6 @@
  *   compact → delegated to lossless-claw (returns ok=true)
  */
 
-// @ts-ignore - plugin-sdk types only available at runtime
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import { registerOperationalToolsWithDashboard, closeNeo4jDriver, mergeEntriesNeo4jConfig, ensureNeo4jSchema, type DashboardToolContext } from './tools.js';
 import { startDashboardSnapshotServer, type SnapshotProviders } from './dashboard-snapshot.js';
@@ -64,6 +63,7 @@ import { UserProfileTracker } from './experience/user-profile.js';
 
 // Backfill: 经验回溯导入
 import { detectExperienceTrigger, extractRawExperience } from './experience/index.js';
+import { createToolExperienceObserver, DEFAULT_EXPERIENCE_TRIGGERS } from './experience/tool-observer.js';
 import { getAllConversations, getBackfillState, markConversationsBackfilled } from './lcm-bridge.js';
 
 // S-7': 用户画像轻量版 —— 全局单例，带时间衰减
@@ -2126,6 +2126,8 @@ const pluginEntry: any = definePluginEntry({
               // P4（默认开启 / opt-out）：剥离 provider 压缩回放检查点。
               // 写入由**运行时**执行（写锁 + branch 一致性校验），引擎只声明意图；
               // 宿主对任何 replacement 恒执行 stripStalePrefixReplay，故与本插件提交的剥离副本结果一致。
+              // SDK 2026.10.9 另提供 withSessionTranscriptWrite / composeSessionTranscriptWriteAssertion，
+              // 那是「直接以依赖库身份写转录」的通道；本插件已由宿主回调写入，无需自行持锁，故保持现状。
               // 天然幂等：剥离后下次枚举 count=0，不会重复改写。
               // 需退回只观察时设 LCMG_TRANSCRIPT_REWRITE=off。
               if (isTranscriptRewriteEnabled() && _replay.count > 0) {
@@ -3656,6 +3658,38 @@ const pluginEntry: any = definePluginEntry({
       }
     } else {
       logger?.warn?.("[lcm-graph-extra] api.on unavailable; /new session cache cleanup relies on bootstrap fallback only");
+    }
+
+    // -----------------------------------------------------------------------
+    // after_tool_call typed hook（OpenClaw SDK 2026.10.9 的 Observe 语义）
+    //
+    // 与 afterTurn 的文本启发式相比，这里能在工具返回瞬间拿到结构化结果：
+    //   failure      → error 非空 / result.isError / details.ok === false
+    //   fix_success  → 同一 session 内「同工具 + 同参数签名」先失败后成功
+    // 只观察、不改写工具结果；cron/heartbeat/system 会话不参与，避免污染经验库。
+    // 写入走 backgroundTasks（与 afterTurn 一致），不阻塞工具返回路径。
+    // -----------------------------------------------------------------------
+    if (typeof (api as any).on === 'function') {
+      try {
+        const toolObserver = createToolExperienceObserver({
+          getStore: () => expStore,
+          isEnabled: () => ((api as any).pluginConfig?.experience?.enabled ?? true) !== false,
+          getTriggers: () => {
+            const configured = (api as any).pluginConfig?.experience?.triggers;
+            return Array.isArray(configured) && configured.length > 0
+              ? configured
+              : (DEFAULT_CONFIG.experience?.triggers ?? DEFAULT_EXPERIENCE_TRIGGERS);
+          },
+          onSaved: () => l4QueryCache.clear(),
+          logger,
+        });
+        (api as any).on('after_tool_call', (event: unknown, ctx: unknown) => {
+          toolObserver.handle(event as any, ctx as any);
+        });
+        logger?.debug?.("[lcm-graph-extra] after_tool_call hook registered (experience observation)");
+      } catch (hookErr) {
+        logger?.warn?.("[lcm-graph-extra] after_tool_call hook registration failed", { err: String(hookErr) });
+      }
     }
 
     // -----------------------------------------------------------------------

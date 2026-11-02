@@ -9,7 +9,6 @@
  *   - Total Control 裁剪 + 优先级 trim
  */
 
-// @ts-ignore - plugin-sdk types only available at runtime
 import { buildMemorySystemPromptAddition } from "openclaw/plugin-sdk/core";
 import { getSessionDedup } from '../plugin/dedup-cache.js';
 import { quickHash } from '../plugin/keywords.js';
